@@ -17,7 +17,8 @@ import { useFavoritesStore } from '../stores/favorites.js';
 import { useNetworkPresetsStore } from '../stores/networkPresets.js';
 import { resetSocket } from './useSocket.js';
 import { resetPresence } from './usePresence.js';
-import { resetScrollState } from './useScrollState.js';
+import { resetAllScrollState } from './useScrollState.js';
+import { resetViewedBuffers } from './useViewedBuffer.js';
 import { resetOnboarding } from './useOnboarding.js';
 import { clearAppBadgeNow } from './useAppBadge.js';
 
@@ -54,7 +55,8 @@ export function resetSession(): void {
   // response fetched under someone else's session.
   useNetworkPresetsStore().$reset();
   resetPresence();
-  resetScrollState();
+  resetAllScrollState();
+  resetViewedBuffers();
   // Closing the first-run flow unmounts it, which is what drops the half-filled
   // form (nick, SASL password) with it — the next user re-evaluates from scratch.
   resetOnboarding();

@@ -141,11 +141,8 @@ import { useUploadsStore } from '../stores/uploads.js';
 import { useIgnoresStore } from '../stores/ignores.js';
 import { useAuthStore } from '../stores/auth.js';
 import { useNickColors } from '../composables/useNickColors.js';
-import {
-  useScrollState,
-  requestScrollToBottom,
-  requestScrollToUnread,
-} from '../composables/useScrollState.js';
+import { useScrollState } from '../composables/useScrollState.js';
+import { useBufferKey } from '../composables/useActiveBuffer.js';
 import { useComposing } from '../composables/useComposing.js';
 import { formatTimestamp } from '../utils/timestamp.js';
 import { isPeerOffline, isPeerAway } from '../utils/peerPresence.js';
@@ -239,10 +236,12 @@ const uploadLabel = computed(() => {
   }
   return '';
 });
-const { newBelow, stuckToBottom, unreadAnchor } = useScrollState();
+const { newBelow, stuckToBottom, unreadAnchor, requestScrollToBottom, requestScrollToUnread } =
+  useScrollState();
 
-const active = computed(() => networks.activeBuffer);
-const buffer = computed(() => (networks.activeKey ? buffers.byKey(networks.activeKey) : null));
+const paneKey = useBufferKey();
+const active = computed(() => networks.bufferFor(paneKey.value));
+const buffer = computed(() => (paneKey.value ? buffers.byKey(paneKey.value) : null));
 const isServerBuffer = computed(() => !!active.value?.target?.startsWith(':server:'));
 const sendable = computed(() => !!active.value && !isServerBuffer.value && !auth.isPaused);
 const showFormatButton = computed(() => settings.effective('input.show_format_button') === true);
