@@ -128,6 +128,29 @@ to go away; omit it to come back. Returns `{ ok: true, away }`.
 List the members currently in a joined channel, with their prefix modes
 (`o`/`h`/`v`/…) and away state. Returns `not-in-channel` if you aren't in it.
 
+### `whois` _(read-write)_
+
+Send a WHOIS for a nick. The reply arrives asynchronously as numeric lines in
+the network **server buffer** — read it afterward with `recent_messages`.
+
+### `connect_network` / `disconnect_network` _(read-write)_
+
+Connect (optionally `force` a fresh reconnect) or disconnect a configured
+network. Connection is asynchronous — watch the server buffer for registration.
+
+### `get_topic` _(read)_ / `set_topic` _(read-write)_
+
+Read or change a joined channel's topic. `set_topic` needs the usual channel
+privileges (+o or a -t channel); the server may reject it.
+
+### `send_dcc_file` _(read-write)_
+
+Offer a file to a peer over DCC SEND. **Sandboxed to your fserve archive**
+(`LURKER_FSERVE_DIR`): `path` is resolved relative to that root and rejected if
+it escapes (symlinks included), so an agent can't exfiltrate arbitrary server
+files. Requires DCC enabled and an fserve root configured. Returns
+`{ ok: true, transferId }` on success.
+
 ## Wire format
 
 Transport is MCP's Streamable HTTP profile: a single `POST /mcp` with a

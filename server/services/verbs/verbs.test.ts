@@ -620,3 +620,49 @@ describe('agent control verbs', () => {
     ).toEqual({ ok: false, error: 'not-connected' });
   });
 });
+
+// The second batch of agent-control verbs (whois, connect/disconnect, topic,
+// dcc). Again, no live connection in the harness — cover validation, scope,
+// ownership, and the not-connected paths.
+describe('agent control verbs — batch 2', () => {
+  it('whois: validates nick, not-connected otherwise', () => {
+    expect(callVerb('whois', rwCtx(owner.id), { networkId: net.id, nick: 'a b' })).toEqual({
+      ok: false,
+      error: 'nick-must-be-single-token',
+    });
+    expect(callVerb('whois', rwCtx(owner.id), { networkId: net.id, nick: 'bob' })).toMatchObject({
+      ok: false,
+      error: 'not-connected',
+    });
+  });
+
+  it('connect_network: read-write + ownership guards (no live start in tests)', () => {
+    // Only assert the registry guards, which throw before the handler runs —
+    // actually invoking startNetwork would spin up a real connection attempt.
+    expect(() => callVerb('connect_network', rCtx(owner.id), { networkId: net.id })).toThrow(
+      /scope insufficient/,
+    );
+    expect(() => callVerb('connect_network', rwCtx(owner.id), { networkId: otherNet.id })).toThrow(
+      /unknown network/,
+    );
+  });
+
+  it('disconnect_network: always ok (no-op when offline)', () => {
+    expect(callVerb('disconnect_network', rwCtx(owner.id), { networkId: net.id })).toEqual({
+      ok: true,
+    });
+  });
+
+  it('get_topic / set_topic: validation + not-connected', () => {
+    expect(callVerb('get_topic', rCtx(owner.id), { networkId: net.id, channel: '#x' })).toEqual({
+      ok: false,
+      error: 'not-connected',
+    });
+    expect(
+      callVerb('set_topic', rwCtx(owner.id), { networkId: net.id, channel: '#x', topic: 'a\nb' }),
+    ).toEqual({ ok: false, error: 'topic-must-be-single-line' });
+    expect(
+      callVerb('set_topic', rwCtx(owner.id), { networkId: net.id, channel: '#x', topic: 'hi' }),
+    ).toEqual({ ok: false, error: 'not-connected' });
+  });
+});

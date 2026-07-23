@@ -20,3 +20,8 @@ import './partChannel.js';
 import './setNick.js';
 import './setAway.js';
 import './listMembers.js';
+import './whois.js';
+import './connectNetwork.js';
+import './disconnectNetwork.js';
+import './getTopic.js';
+import './setTopic.js';
