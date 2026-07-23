@@ -557,3 +557,66 @@ describe('set_relay_bot', () => {
     ).toThrow(/scope insufficient/);
   });
 });
+
+// The agent-control verbs (send_raw, join/part, nick, away, members). With no
+// live IRC connection in the test harness, the connection-bound ones resolve to
+// not-connected — so these cover input validation, scope, ownership, and the
+// user-wide set_away path (which needs no connection).
+describe('agent control verbs', () => {
+  it('send_raw: validates line, checks scope + ownership, no-connection path', () => {
+    expect(callVerb('send_raw', rwCtx(owner.id), { networkId: net.id, line: '   ' })).toEqual({
+      ok: false,
+      error: 'empty-line',
+    });
+    expect(
+      callVerb('send_raw', rwCtx(owner.id), { networkId: net.id, line: 'FOO\r\nBAR' }),
+    ).toEqual({ ok: false, error: 'line-must-be-single-line' });
+    expect(callVerb('send_raw', rwCtx(owner.id), { networkId: net.id, line: 'WHOIS bob' })).toEqual(
+      { ok: false, error: 'not-connected' },
+    );
+    expect(() =>
+      callVerb('send_raw', rwCtx(owner.id), { networkId: otherNet.id, line: 'WHOIS bob' }),
+    ).toThrow(/unknown network/);
+    expect(() => callVerb('send_raw', rCtx(owner.id), { networkId: net.id, line: 'X' })).toThrow(
+      /scope insufficient/,
+    );
+  });
+
+  it('join_channel / part_channel: validate + not-connected', () => {
+    expect(callVerb('join_channel', rwCtx(owner.id), { networkId: net.id, channel: ' ' })).toEqual({
+      ok: false,
+      error: 'empty-channel',
+    });
+    expect(
+      callVerb('join_channel', rwCtx(owner.id), { networkId: net.id, channel: '#x', key: 'k' }),
+    ).toEqual({ ok: false, error: 'not-connected' });
+    expect(callVerb('part_channel', rwCtx(owner.id), { networkId: net.id, channel: '#x' })).toEqual(
+      { ok: false, error: 'not-connected' },
+    );
+  });
+
+  it('set_nick: rejects whitespace, not-connected otherwise', () => {
+    expect(callVerb('set_nick', rwCtx(owner.id), { networkId: net.id, nick: 'a b' })).toEqual({
+      ok: false,
+      error: 'nick-must-be-single-token',
+    });
+    expect(callVerb('set_nick', rwCtx(owner.id), { networkId: net.id, nick: 'newnick' })).toEqual({
+      ok: false,
+      error: 'not-connected',
+    });
+  });
+
+  it('set_away: user-wide, reports state, needs no connection', () => {
+    expect(callVerb('set_away', rwCtx(owner.id), { message: 'brb' })).toEqual({
+      ok: true,
+      away: true,
+    });
+    expect(callVerb('set_away', rwCtx(owner.id), {})).toEqual({ ok: true, away: false });
+  });
+
+  it('list_members: read scope, not-connected without a live channel', () => {
+    expect(
+      callVerb('list_members', rCtx(owner.id), { networkId: net.id, channel: '#chan' }),
+    ).toEqual({ ok: false, error: 'not-connected' });
+  });
+});

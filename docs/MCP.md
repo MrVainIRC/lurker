@@ -95,6 +95,39 @@ branch on the value instead of catching.
 Send a CTCP ACTION (`/me ...`). Same shape and error semantics as
 `send_message`.
 
+### `send_raw` _(read-write)_
+
+Send a raw IRC protocol line verbatim on a network — the escape hatch for any
+command without a dedicated verb: `MODE #chan +o nick`, `KICK #chan bob :spam`,
+`TOPIC #chan :new topic`, `WHOIS bob`, `INVITE bob #chan`, and so on. No
+parsing, no trailing CRLF. **Powerful and unguarded — it runs as you.** Server
+replies (WHOIS, LIST, …) arrive asynchronously; read them with `recent_messages`
+on the relevant buffer. Same `not-connected` semantics as `send_message`.
+
+### `join_channel` _(read-write)_
+
+Join a channel; optional `key` for +k channels. The channel buffer and its
+member list arrive asynchronously.
+
+### `part_channel` _(read-write)_
+
+Leave a channel, with an optional part `reason`.
+
+### `set_nick` _(read-write)_
+
+Change your nick on a network. Asynchronous and may be rejected (nick in use /
+invalid) — watch the server buffer for the outcome.
+
+### `set_away` _(read-write)_
+
+Set or clear your away status across every network (user-wide). Pass `message`
+to go away; omit it to come back. Returns `{ ok: true, away }`.
+
+### `list_members` _(read)_
+
+List the members currently in a joined channel, with their prefix modes
+(`o`/`h`/`v`/…) and away state. Returns `not-in-channel` if you aren't in it.
+
 ## Wire format
 
 Transport is MCP's Streamable HTTP profile: a single `POST /mcp` with a
