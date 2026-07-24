@@ -67,6 +67,45 @@ describe('auth store — stale-session guard', () => {
     expect(b).toEqual(USER);
   });
 
+  it('latches "logged out" only on a 401', async () => {
+    h.api.mockRejectedValue(Object.assign(new Error('unauthorized'), { status: 401 }));
+    const auth = useAuthStore();
+    await auth.fetchMe();
+    expect(auth.checked).toBe(true);
+  });
+
+  it.each([
+    ['a network blip', undefined],
+    ['a 500', 500],
+    ['a 429 from the auth limiter', 429],
+  ])(
+    'leaves the session unresolved on %s so a later navigation retries',
+    async (_label, status) => {
+      // This page load now gets exactly one /api/auth/me (guard + App.vue are
+      // coalesced), so latching here would strand a signed-in user at
+      // /login?next=/ for the whole document off a single blip.
+      h.api.mockRejectedValue(Object.assign(new Error('failed'), status ? { status } : {}));
+      const auth = useAuthStore();
+      await auth.fetchMe();
+      expect(auth.checked).toBe(false);
+
+      h.api.mockResolvedValue({ user: USER });
+      await auth.fetchMe();
+      expect(auth.user).toEqual(USER);
+      expect(auth.checked).toBe(true);
+    },
+  );
+
+  it('keeps a signed-in user signed in across a transient failure', async () => {
+    h.api.mockResolvedValue({ user: USER });
+    const auth = useAuthStore();
+    await auth.fetchMe();
+
+    h.api.mockRejectedValue(Object.assign(new Error('network error'), { status: 503 }));
+    await auth.fetchMe();
+    expect(auth.user).toEqual(USER);
+  });
+
   it('does not latch the in-flight promise after it settles', async () => {
     h.api.mockResolvedValue({ user: USER });
     const auth = useAuthStore();

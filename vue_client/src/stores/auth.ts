@@ -71,14 +71,23 @@ export const useAuthStore = defineStore('auth', {
         try {
           const { user } = await api('/api/auth/me');
           this.user = user;
+          this.checked = true;
           // A live session is the ONLY thing that re-arms api.ts's one-shot
           // stale-session bounce. Anything weaker (any 2xx) disarms it on a
           // logged-out page and loops the tab — see clearAuthRecoveryGuard.
           if (user) clearAuthRecoveryGuard();
-        } catch (_err) {
-          this.user = null;
-        } finally {
-          this.checked = true;
+        } catch (err: any) {
+          // Only a 401 proves "not signed in". A network blip, a 5xx, or a 429
+          // from the auth-surface limiter says nothing about the session — and
+          // since the guard and App.vue now share one coalesced call, a page
+          // load gets exactly one attempt. Latching `checked` on those would
+          // strand a signed-in user at /login?next=/ for the whole document off
+          // a single blip. Leave it false so a later navigation retries, the
+          // same self-heal the config store uses.
+          if (err?.status === 401) {
+            this.user = null;
+            this.checked = true;
+          }
         }
         return this.user;
       })();
