@@ -10,16 +10,19 @@ import { setActivePinia, createPinia } from 'pinia';
 const h = vi.hoisted(() => ({
   api: vi.fn<(url: string, opts?: unknown) => Promise<any>>(),
   clearAuthRecoveryGuard: vi.fn<() => void>(),
+  resetSession: vi.fn<() => void>(),
+  startRegistration: vi.fn<() => Promise<unknown>>(),
+  startAuthentication: vi.fn<() => Promise<unknown>>(),
 }));
 
 vi.mock('../api.js', () => ({
   api: h.api,
   clearAuthRecoveryGuard: h.clearAuthRecoveryGuard,
 }));
-vi.mock('../composables/useSessionReset.js', () => ({ resetSession: vi.fn<() => void>() }));
+vi.mock('../composables/useSessionReset.js', () => ({ resetSession: h.resetSession }));
 vi.mock('@simplewebauthn/browser', () => ({
-  startRegistration: vi.fn<() => Promise<unknown>>(),
-  startAuthentication: vi.fn<() => Promise<unknown>>(),
+  startRegistration: h.startRegistration,
+  startAuthentication: h.startAuthentication,
 }));
 
 const { useAuthStore } = await import('./auth.js');
@@ -31,6 +34,9 @@ describe('auth store — stale-session guard', () => {
     setActivePinia(createPinia());
     h.api.mockReset();
     h.clearAuthRecoveryGuard.mockReset();
+    h.resetSession.mockReset();
+    h.startRegistration.mockReset().mockResolvedValue({ id: 'cred' });
+    h.startAuthentication.mockReset().mockResolvedValue({ id: 'cred' });
   });
 
   it('re-arms the bounce only when /api/auth/me returns a user', async () => {
@@ -112,5 +118,77 @@ describe('auth store — stale-session guard', () => {
     await auth.fetchMe();
     await auth.fetchMe();
     expect(h.api).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Every path that establishes a session routes through adoptSession(), so each
+// one has to re-arm the bounce. A path that forgot would leave a user who
+// bounced once unable to recover from any LATER session loss in that tab —
+// silent, and invisible until the next stale session.
+describe('auth store — every session-establishing path re-arms', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    h.api.mockReset().mockResolvedValue({ user: USER, options: {} });
+    h.clearAuthRecoveryGuard.mockReset();
+    h.resetSession.mockReset();
+    h.startRegistration.mockReset().mockResolvedValue({ id: 'cred' });
+    h.startAuthentication.mockReset().mockResolvedValue({ id: 'cred' });
+  });
+
+  it.each([
+    ['loginWithPasskey', (a: any) => a.loginWithPasskey()],
+    ['loginWithPassword', (a: any) => a.loginWithPassword({ username: 'brad', password: 'pw' })],
+    ['setupFirstPasskey', (a: any) => a.setupFirstPasskey({ username: 'brad' })],
+    [
+      'setupFirstPassword',
+      (a: any) => a.setupFirstPassword({ username: 'brad', password: 'hunter22' }),
+    ],
+    ['acceptInvite', (a: any) => a.acceptInvite({ token: 't', username: 'brad' })],
+    [
+      'acceptInviteWithPassword',
+      (a: any) => a.acceptInviteWithPassword({ token: 't', username: 'brad', password: 'pw' }),
+    ],
+  ])('%s adopts the session and re-arms the bounce', async (_name, run) => {
+    const auth = useAuthStore();
+    await run(auth);
+    expect(auth.user).toEqual(USER);
+    expect(auth.checked).toBe(true);
+    expect(h.clearAuthRecoveryGuard).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['setupFirstPasskey', (a: any) => a.setupFirstPasskey({ username: 'brad' })],
+    [
+      'setupFirstPassword',
+      (a: any) => a.setupFirstPassword({ username: 'brad', password: 'hunter22' }),
+    ],
+  ])('%s clears the first-run prompt', async (_name, run) => {
+    const auth = useAuthStore();
+    await run(auth);
+    expect(auth.setupStatus).toEqual({ needsSetup: false });
+  });
+
+  it.each([
+    ['acceptInvite', (a: any) => a.acceptInvite({ token: 't', username: 'brad' })],
+    [
+      'acceptInviteWithPassword',
+      (a: any) => a.acceptInviteWithPassword({ token: 't', username: 'brad', password: 'pw' }),
+    ],
+  ])('%s wipes the prior user BEFORE adopting the new session', async (_name, run) => {
+    // Ordering is load-bearing: resetSession() must see a null user so the WS
+    // onclose handler skips its reconnect arm. adoptSession() moved the
+    // assignment, so pin the order down rather than trust the read.
+    const auth = useAuthStore();
+    auth.user = { id: 9, username: 'previous', role: 'user' };
+    let userAtReset: unknown = 'not called';
+    h.resetSession.mockImplementation(() => {
+      userAtReset = auth.user;
+    });
+
+    await run(auth);
+
+    expect(h.resetSession).toHaveBeenCalledTimes(1);
+    expect(userAtReset).toBeNull();
+    expect(auth.user).toEqual(USER);
   });
 });

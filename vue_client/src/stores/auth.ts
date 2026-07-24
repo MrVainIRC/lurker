@@ -29,11 +29,16 @@ export interface Passkey {
   createdAt: string;
 }
 
+// Shared in-flight fetch so concurrent callers — the router guard and App.vue's
+// boot — coalesce onto one GET /api/auth/me instead of each spending a request
+// against the auth-surface rate limiter. Module-scoped (not store state) so it
+// stays non-reactive, matching the config store.
+let inflight: Promise<AuthUser | null> | null = null;
+
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     user: null as AuthUser | null,
     checked: false,
-    inflight: null as Promise<AuthUser | null> | null,
     error: null as string | null,
     setupStatus: null as SetupStatus | null, // { needsSetup, mode?, username? }
   }),
@@ -63,11 +68,8 @@ export const useAuthStore = defineStore('auth', {
       if (this.user) this.user.is_paused = paused;
     },
     async fetchMe() {
-      // Coalesce concurrent callers. The router guard and App.vue's boot both
-      // call this on every fresh load, and a duplicate /api/auth/me doubles this
-      // tab's spend against the auth-surface rate limiter for nothing.
-      if (this.inflight) return this.inflight;
-      this.inflight = (async () => {
+      if (inflight) return inflight; // a fetch is in flight — share its result
+      inflight = (async () => {
         try {
           const { user } = await api('/api/auth/me');
           this.user = user;
@@ -92,9 +94,9 @@ export const useAuthStore = defineStore('auth', {
         return this.user;
       })();
       try {
-        return await this.inflight;
+        return await inflight;
       } finally {
-        this.inflight = null;
+        inflight = null;
       }
     },
     // On a hosted cell the account's real identity — its email — lives on the

@@ -60,10 +60,12 @@ function bounceToLoginOnAuthFailure(url: string, status: number): void {
   window.location.assign('/');
 }
 
-// Clear the one-shot marker so a LATER session loss can recover again. Only
-// `/api/auth/me` returning a user may call this — see the store. Clearing it on
-// any 2xx (which this used to do) silently disarmed the guard and turned the
-// bounce into an infinite full-page reload loop: on a logged-out load of `/`,
+// Clear the one-shot marker so a LATER session loss can recover again. The bar
+// is proof that a session exists, and only the auth store can supply it: either
+// `/api/auth/me` came back with a user (fetchMe) or one was just established by
+// a sign-in / setup / invite (adoptSession). Nothing else may call this.
+// Clearing it on any 2xx (which this used to do) silently disarmed the guard and
+// turned the bounce into an infinite full-page reload loop: on a logged-out `/`,
 // App.vue fires /api/config (public, 200 — cleared the flag) alongside
 // /api/settings/bootstrap (requireAuth, 401 — set it and bounced). config's 200
 // almost always won the race, so every reload re-armed the bounce and the tab
