@@ -29,7 +29,10 @@ const config = useConfigStore();
 useTheme();
 
 onMounted(() => {
-  auth.fetchMe();
+  // The router guard already fetches this on the first navigation; match the
+  // sibling boot fetches below so a mount after it resolved doesn't spend a
+  // second /api/auth/me against the auth-surface rate limiter.
+  if (!auth.checked) auth.fetchMe();
   if (!config.checked) config.fetch().catch(() => {});
   if (!settings.loaded) settings.fetchAll().catch(() => {});
 });

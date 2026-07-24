@@ -60,9 +60,15 @@ function bounceToLoginOnAuthFailure(url: string, status: number): void {
   window.location.assign('/');
 }
 
-function clearAuthRecoveryGuard(): void {
-  // A request succeeded → the session works; clear the marker so a later session
-  // loss can recover again.
+// Clear the one-shot marker so a LATER session loss can recover again. Only
+// `/api/auth/me` returning a user may call this — see the store. Clearing it on
+// any 2xx (which this used to do) silently disarmed the guard and turned the
+// bounce into an infinite full-page reload loop: on a logged-out load of `/`,
+// App.vue fires /api/config (public, 200 — cleared the flag) alongside
+// /api/settings/bootstrap (requireAuth, 401 — set it and bounced). config's 200
+// almost always won the race, so every reload re-armed the bounce and the tab
+// ping-ponged until the auth rate limiter answered 429.
+export function clearAuthRecoveryGuard(): void {
   try {
     sessionStorage.removeItem(AUTH_RECOVERY_FLAG);
   } catch {
@@ -103,7 +109,6 @@ export async function api<T = any>(
     err.data = data;
     throw err;
   }
-  clearAuthRecoveryGuard();
   return data as T;
 }
 
@@ -139,7 +144,6 @@ export function apiMultipart<T = any>(
         }
       }
       if (xhr.status >= 200 && xhr.status < 300) {
-        clearAuthRecoveryGuard();
         resolve(data as T);
       } else {
         bounceToLoginOnAuthFailure(url, xhr.status);
