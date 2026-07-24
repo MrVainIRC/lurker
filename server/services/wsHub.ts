@@ -2064,6 +2064,27 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
     // handed the client — otherwise a later re-snapshot on this socket would
     // re-gap-fill everything the shells deliberately skipped.
     ws.sinceId = Math.max(maxSentId, cursor);
+    // Terminal frame (#635). Everything above ships synchronously with nothing
+    // marking the end, so until now "no row for this buffer yet" and "no such
+    // buffer" were the same observation no matter how long a client waited.
+    // That wedges any client that navigates by KEY rather than by tapping an
+    // existing row — a native app restoring its last buffer, or opening one
+    // from a notification — on a permanent "Loading messages…".
+    //
+    // The absence has to be provable here rather than inferred: `snapshot`'s
+    // per-network `channels` is empty for every network with no live
+    // connection and is read before auto-rejoin JOINs land even for one that
+    // has it, so it is NOT authoritative for buffer existence; and probing with
+    // `open-buffer` is worse still, since handleOpenBuffer treats an unknown
+    // `#channel` as a request to JOIN it.
+    //
+    // Deliberately inside sendSnapshotInner, so a throw mid-burst suppresses
+    // it: a truncated snapshot has NOT proved anything about the buffers it
+    // never reached, and a client is better left on today's spinner than told
+    // a buffer it owns doesn't exist. Sent on every snapshot (connect, in-band
+    // resync, and the fresh-network re-emit) — it terminates whichever burst
+    // just went out, and carries no state of its own.
+    send(ws, { kind: 'backlog-complete' });
     return {
       bufferCount,
       fresh: isFreshConnect,
