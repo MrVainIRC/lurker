@@ -30,6 +30,7 @@ export default defineConfig({
         items: [
           { text: 'Client Protocol & API', link: '/CLIENT_PROTOCOL' },
           { text: 'MCP & HTTP API', link: '/MCP' },
+          { text: 'IRCv3 Support', link: '/IRCV3' },
         ],
       },
       { text: 'App', link: 'https://app.lurker.chat' },
@@ -61,6 +62,7 @@ export default defineConfig({
           items: [
             { text: 'Client Protocol & API', link: '/CLIENT_PROTOCOL' },
             { text: 'MCP & HTTP API', link: '/MCP' },
+            { text: 'IRCv3 Support', link: '/IRCV3' },
           ],
         },
       ],
