@@ -92,11 +92,14 @@ function collectBurst(send?: Frame): Promise<Frame[]> {
     let resent = false;
     // A missing terminal frame is the failure this suite is about, so time out
     // rather than hang — and report what DID arrive, since "which frames came
-    // before it gave up" is the whole diagnostic.
+    // before it gave up" is the whole diagnostic. Deliberately under vitest's
+    // 5000ms default testTimeout (vitest.config.ts sets none): at parity the
+    // two timers race, and vitest winning replaces this frame list with a bare
+    // "Test timed out" exactly when the list is worth having.
     const timer = setTimeout(() => {
       ws.close();
       reject(new Error(`no backlog-complete; got: ${frames.map((f) => f.kind).join(', ')}`));
-    }, 5000);
+    }, 3000);
     ws.on('message', (raw) => {
       const frame = JSON.parse(raw.toString()) as Frame;
       frames.push(frame);
@@ -133,12 +136,44 @@ describe('connect burst terminator (#635)', () => {
     expect(targets).toEqual(expect.arrayContaining(['#lurker', 'bob', `:server:${networkId}`]));
 
     // The claim a by-key client leans on: a buffer with no frame by the time
-    // the terminator arrives genuinely does not exist. Nothing else in the
-    // burst supports it — note that the snapshot reports this network's
-    // channels as empty even though #lurker is right there in the frames.
+    // the terminator arrives is not open (see the closed-buffer case below for
+    // why that's the honest phrasing). Nothing else in the burst supports it —
+    // note that the snapshot reports this network's channels as empty even
+    // though #lurker is right there in the frames.
     expect(targets).not.toContain('#never-joined');
     const snapshot = frames[0] as { networks: Array<{ channels: unknown[] }> };
     expect(snapshot.networks[0].channels).toEqual([]);
+  });
+
+  it('withholds a frame for a CLOSED buffer, whose history the server still holds', async () => {
+    // The sharp edge of "absence is proof": a closed buffer is dropped from the
+    // enumeration, so it looks identical to one that never existed — while its
+    // backlog sits intact server-side, one open-buffer away. A client that
+    // purged local history on a missing frame would be destroying a copy of
+    // something the server never forgot, so the doc says render-absent but
+    // don't destroy, and this pins the behavior that claim rests on.
+    const buffers = await import('../db/buffers.js');
+    const { insertMessage, hasMessageForTarget } = await import('../db/messages.js');
+    buffers.ensureExists(userId, networkId, '#closed');
+    insertMessage({
+      networkId,
+      target: '#closed',
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'bob',
+      text: 'still here',
+      self: false,
+    });
+    buffers.close(userId, networkId, '#closed');
+
+    const frames = await collectBurst();
+    expect(frames.filter((f) => f.kind === 'backlog').map((f) => f.target)).not.toContain(
+      '#closed',
+    );
+
+    // Same instant, same server: the history the burst declined to mention.
+    expect(buffers.isClosed(userId, networkId, '#closed')).toBe(true);
+    expect(hasMessageForTarget(networkId, '#closed')).toBe(true);
   });
 
   it('terminates an in-band snapshot resync too, not just the connect burst', async () => {

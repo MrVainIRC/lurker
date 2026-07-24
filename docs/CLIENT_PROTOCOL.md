@@ -215,12 +215,21 @@ Render progressively from frame 1; don't wait for the end.
 **What frame 8 is for.** Until it arrives, "I have no row for this buffer _yet_"
 and "there is no such buffer" are the same observation, and no amount of waiting
 separates them. After it arrives, **absence is proof**: a buffer key with no
-`backlog` frame does not exist on the server — for channels, DMs and `:server:`
-logs alike, on connected and disconnected networks alike. That matters if you
+`backlog` frame is **not open** — for channels, DMs and `:server:` logs alike,
+on connected and disconnected networks alike. That matters if you
 navigate by **key** rather than by tapping a row that already exists (restoring
 the last-read buffer at launch, opening one from a notification tap): without it
 those screens sit on a spinner forever, because nothing ever says the row isn't
 coming (#635).
+
+**"Not open" is not "never existed", and the burst can't tell you which.** A
+buffer the user closed from another client ships no frame either (it's dropped
+from the enumeration — `wsHub.ts:609`), yet it keeps its full persisted history
+and one `open-buffer` reopens it with that history intact. Both cases mean the
+same thing for what you _render_ — it isn't in the buffer list — which is why
+§9.1 models closed as absent. They differ for what you **destroy**: don't purge
+local history, drafts, or a saved read position on the strength of a missing
+frame, because the server hasn't forgotten any of it.
 
 Two things that look like they'd answer the same question and don't:
 
@@ -630,8 +639,10 @@ these signals:
 - **Navigating to a buffer by key** (launch restore, notification tap) is the
   one case where you need to ask "does this exist?" rather than mirror a
   signal. Wait for `backlog-complete`; if the key still has no `backlog` frame
-  after it, the buffer is gone and you can say so. Don't guess from `snapshot`
-  and don't probe with `open-buffer` — see §4.3 for why both are traps.
+  after it, that buffer isn't open — say so instead of spinning. It may be
+  closed rather than gone, so render it as absent but don't destroy anything
+  local over it. Don't guess from `snapshot` and don't probe with `open-buffer`
+  — see §4.3 for why both are traps.
 
 ### 9.2 Identity & case
 
