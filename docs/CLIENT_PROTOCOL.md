@@ -208,8 +208,46 @@ frames**, synchronously, in this order (`wsHub.ts:1828`):
 6. One `backlog` frame per open buffer on each connected network.
 7. Per **offline** network: a real backlog for its `:server:` log, shells for
    its channels/DMs.
+8. `{kind:'backlog-complete'}` — terminal marker, nothing else in it.
 
-There is no "end of burst" marker; after frame 1 you can render progressively.
+Render progressively from frame 1; don't wait for the end.
+
+**What frame 8 is for.** Until it arrives, "I have no row for this buffer _yet_"
+and "there is no such buffer" are the same observation, and no amount of waiting
+separates them. After it arrives, **absence is proof**: a buffer key with no
+`backlog` frame is **not open** — for channels, DMs and `:server:` logs alike,
+on connected and disconnected networks alike. That matters if you
+navigate by **key** rather than by tapping a row that already exists (restoring
+the last-read buffer at launch, opening one from a notification tap): without it
+those screens sit on a spinner forever, because nothing ever says the row isn't
+coming (#635).
+
+**"Not open" is not "never existed", and the burst can't tell you which.** A
+buffer the user closed from another client ships no frame either (it's dropped
+from the enumeration — `wsHub.ts:609`), yet it keeps its full persisted history
+and one `open-buffer` reopens it with that history intact. Both cases mean the
+same thing for what you _render_ — it isn't in the buffer list — which is why
+§9.1 models closed as absent. They differ for what you **destroy**: don't purge
+local history, drafts, or a saved read position on the strength of a missing
+frame, because the server hasn't forgotten any of it.
+
+Two things that look like they'd answer the same question and don't:
+
+- **`snapshot`'s per-network `channels` is not authoritative for buffer
+  existence.** It's empty outright for any network with no live connection
+  (paused account, manually disconnected, never autoconnected) even though
+  those networks still own persisted buffers, and even on a live connection
+  it's read at the `'connected'` instant — before auto-rejoin JOINs land. Judge
+  membership from it and you'll decide a user left channels they're still in.
+- **Don't probe with `open-buffer`.** For a `#channel` with no row the server
+  reads that as "join it" (§9.1), so a probe silently re-JOINs a channel the
+  user deliberately left from another client.
+
+An older server never sends frame 8 (it's additive, and `protocolVersion` does
+not move for it) — if you don't see one, keep whatever you do today rather than
+concluding anything. A truncated burst withholds it too: the server only sends
+it once the whole burst went out, so a snapshot that failed part-way through
+never claims a buffer is missing.
 
 **Shells vs. hydrated backlogs.** On a fresh connect (`since=0`) channel/DM
 buffers arrive as _shells_: `{kind:'backlog', …, events:[], hasMoreOlder:true}` —
@@ -454,6 +492,7 @@ a v1 client.
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
 | `snapshot`                                                                                                                                                               | `protocolVersion, networks[], globalIgnores[], cursor?`                                                                                                             | Connect burst / gap-fill                           |
 | `draft-snapshot` / `bookmark-ids-snapshot` / `contacts-snapshot`                                                                                                         | `drafts` / `ids[]` / `contacts[]`                                                                                                                                   | Connect burst                                      |
+| `backlog-complete`                                                                                                                                                       | —                                                                                                                                                                   | Last frame of the burst; absence is proof (§4.3)   |
 | `backlog`                                                                                                                                                                | `networkId, target, events[], reset?, hasMoreOlder, joined, lastReadId, unread, highlights, highlightsCapped, clearedBeforeId, clearedAt, speakers?, inputHistory?` | Burst, `open-buffer` reply, resume gap             |
 | `irc`                                                                                                                                                                    | A decorated `MessageEvent` (§5.3) with `kind` clobbered to `'irc'`                                                                                                  | Every live IRC-side event                          |
 | `history`                                                                                                                                                                | `networkId, target, mode, token, events[], speakers, hasMoreOlder, hasMoreNewer, hasMore, before/afterId/anchorId/anchorMissing` (per mode)                         | Reply to `history`                                 |
@@ -597,6 +636,13 @@ these signals:
 - NOTICEs never create or reopen a DM — a notice to a closed/absent DM arrives
   on `:server:` with `mirrored:true`. Already handled server-side; just don't
   special-case it.
+- **Navigating to a buffer by key** (launch restore, notification tap) is the
+  one case where you need to ask "does this exist?" rather than mirror a
+  signal. Wait for `backlog-complete`; if the key still has no `backlog` frame
+  after it, that buffer isn't open — say so instead of spinning. It may be
+  closed rather than gone, so render it as absent but don't destroy anything
+  local over it. Don't guess from `snapshot` and don't probe with `open-buffer`
+  — see §4.3 for why both are traps.
 
 ### 9.2 Identity & case
 
