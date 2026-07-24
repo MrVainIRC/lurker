@@ -3,7 +3,7 @@
 > **Audience:** anyone evaluating Lurker's protocol support, plus contributors
 > deciding what to build next. Last verified against `main` @ `9df7bb9`.
 > The server source is authoritative; `file:line` references point into this
-> repository.
+> repository unless otherwise noted (e.g. upstream deps like irc-framework).
 
 Most clients publish a bare list of IRCv3 capability names. That tells you almost
 nothing — "we support `multi-prefix`" is not a feature, it's an implementation
