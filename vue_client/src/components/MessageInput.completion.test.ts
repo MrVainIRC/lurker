@@ -28,8 +28,11 @@ vi.mock('../composables/useSocket.js', () => ({
   onSocketOpen: vi.fn<() => () => void>(() => () => {}),
 }));
 
-// The mocked socketSend, so the command-dispatch tests can assert the wire payload.
-import { socketSend } from '../composables/useSocket.js';
+// The mocked socket senders, so the command-dispatch tests can assert the wire
+// payload. Which one a command uses is not incidental: `sendOrToast` fires
+// socketSend, while anything that wants delivery confirmation (`ackedSend`, and
+// so every message-shaped command) goes through socketSendWithAck.
+import { socketSend, socketSendWithAck } from '../composables/useSocket.js';
 
 const CHANNELS = ['#apple', '#mango', '#zebra'];
 // `mallory` exists so the self-exclusion test has a positive control: without a
@@ -269,9 +272,13 @@ describe('MessageInput command dispatch', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     vi.mocked(socketSend).mockClear();
+    vi.mocked(socketSendWithAck).mockClear();
     // sendOrToast reads the return value to decide whether to toast a failure; a
     // real open socket returns true, so make the mock say the send landed.
     vi.mocked(socketSend).mockReturnValue(true as never);
+    // ackedSend treats a null return as "socket closed" and bails before the
+    // payload matters, so hand it a resolved ack.
+    vi.mocked(socketSendWithAck).mockReturnValue(Promise.resolve({ ok: true }) as never);
   });
 
   afterEach(() => {
@@ -328,5 +335,97 @@ describe('MessageInput command dispatch', () => {
       channel: '#zebra',
       reason: '',
     });
+  });
+
+  // #412. Worth real coverage rather than trusting the switch: an unknown command
+  // falls through to `default:`, which ships it as a RAW IRC line — so before this
+  // existed, `/p cya` didn't fail loudly, it sent the server a bogus `p cya`.
+  it('/p is an alias for /part, reason parsing and all', async () => {
+    seedStores('#zebra');
+    const { el } = await mountComposer();
+
+    await type(el, '/p heading out');
+    await enter(el);
+
+    expect(socketSend).toHaveBeenCalledWith({
+      type: 'part',
+      networkId: 1,
+      channel: '#zebra',
+      reason: 'heading out',
+    });
+  });
+
+  // The reason is sliced with `line.slice(1 + cmd.length)`, so a shorter alias
+  // would silently eat or keep the wrong characters if that were hardcoded.
+  it('/p <#chan> [reason] retargets like /part does', async () => {
+    seedStores('#zebra');
+    const { el } = await mountComposer();
+
+    await type(el, '/p #mango cya');
+    await enter(el);
+
+    expect(socketSend).toHaveBeenCalledWith({
+      type: 'part',
+      networkId: 1,
+      channel: '#mango',
+      reason: 'cya',
+    });
+  });
+
+  // A channel NOT in the seeded set: joinOrActivate short-circuits to a plain
+  // activate() for a buffer that's already open and joined, so asserting the
+  // JOIN went out needs a channel the user isn't in.
+  it('/j is an alias for /join', async () => {
+    seedStores('#zebra');
+    const { el } = await mountComposer();
+
+    await type(el, '/j #brandnew');
+    await enter(el);
+
+    expect(socketSend).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'join', networkId: 1, channel: '#brandnew' }),
+    );
+  });
+
+  it('/j applies the same #-prefix normalization as /join', async () => {
+    seedStores('#zebra');
+    const { el } = await mountComposer();
+
+    await type(el, '/j brandnew');
+    await enter(el);
+
+    expect(socketSend).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'join', channel: '#brandnew' }),
+    );
+  });
+
+  // #532. A plain message, not an ACTION — /shrug SAYS the kaomoji.
+  it('/shrug says the kaomoji after your text', async () => {
+    seedStores('#zebra');
+    const { el } = await mountComposer();
+
+    await type(el, '/shrug no idea');
+    await enter(el);
+
+    expect(socketSendWithAck).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'send',
+        networkId: 1,
+        target: '#zebra',
+        text: 'no idea ¯\\_(ツ)_/¯',
+      }),
+    );
+  });
+
+  it('a bare /shrug sends the kaomoji alone, with no leading space', async () => {
+    seedStores('#zebra');
+    const { el } = await mountComposer();
+
+    await type(el, '/shrug');
+    await enter(el);
+
+    expect(socketSendWithAck).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'send', text: '¯\\_(ツ)_/¯' }),
+    );
   });
 });

@@ -2092,12 +2092,13 @@ const COMMANDS_LINES = [
   'commands:',
   '  /me <text>             — emote in the current buffer',
   '  /slap <nick>           — slap someone around a bit with a large trout',
+  '  /shrug [text]          — say your text followed by ¯\\_(ツ)_/¯',
   '  /msg <nick> <text>     — open a DM and send (alias: /query)',
   '  /notice <tgt> <text>   — send a NOTICE to a channel or nick',
   '  /ns <text>             — message NickServ (e.g. identify <pass>)',
   '  /cs <text>             — message ChanServ',
-  '  /join <#chan>          — join a channel',
-  '  /part [#chan] [reason] — leave channel (keeps buffer; alias: /leave)',
+  '  /join <#chan>          — join a channel (alias: /j)',
+  '  /part [#chan] [reason] — leave channel (keeps buffer; aliases: /leave, /p)',
   '  /close                 — close current buffer (parts if channel)',
   '  /clear [off]           — hide buffer up to now (off = undo, show again)',
   '  /away [message]        — set away across every network (no arg clears)',
@@ -2814,6 +2815,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       return sendOrToast({ type: 'raw', networkId, line: `PRIVMSG ${service} :${argLine}` }, line);
     }
     case 'join':
+    case 'j':
       if (rest[0]) {
         const ch = ensureChannelPrefix(rest[0]);
         // A channel key is a single whitespace-free token — take just the next
@@ -2828,7 +2830,8 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       }
       return true;
     case 'part':
-    case 'leave': {
+    case 'leave':
+    case 'p': {
       // /part leaves the channel but KEEPS the buffer so the user can scroll
       // history and rejoin later. The buffer just renders dimmed in the
       // sidebar. Use /close to actually drop a buffer.
@@ -3183,6 +3186,19 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       }
       const slapText = `slaps ${who} around a bit with a large trout`;
       return ackedSend({ type: 'action', networkId, target, text: slapText }, slapText);
+    }
+    case 'shrug': {
+      // A plain message, not an ACTION: everywhere this convention comes from
+      // (Slack, Discord, mIRC scripts) /shrug SAYS the kaomoji, optionally after
+      // your own text — "/shrug no idea" reads as "no idea ¯\_(ツ)_/¯".
+      if (isServer.value) {
+        localInfo(networkId, target, 'usage: /shrug [text] — run inside a channel or DM');
+        return true;
+      }
+      // The backslash is literal: Lurker's inline formatting is IRC control
+      // codes (\x02, \x1D…), not markdown, so nothing eats the `\_`.
+      const shrugText = argLine ? `${argLine} ¯\\_(ツ)_/¯` : '¯\\_(ツ)_/¯';
+      return ackedSend({ type: 'send', networkId, target, text: shrugText }, shrugText);
     }
     // Info/query commands. These already function via the raw fallback now that
     // unhandled server numerics surface in the server buffer (#269) — listing
