@@ -100,6 +100,35 @@ export function outgoingAddr(): string | undefined {
 // etc.) pass their own reason and bypass this default.
 const DEFAULT_QUIT_MESSAGE = `Lurker ${APP_VERSION} (the truth is out there) https://lurker.chat`;
 
+/**
+ * The manager's policy check, asked before an auto-reconnect opens a socket (#616).
+ *
+ * Auto-reconnect used to call connect() directly, which walked straight past the
+ * two gates every OTHER connect path clears in ircManager.startNetwork: the
+ * paused-account check (the linchpin billing hooks into) and the instance network
+ * lockdown (#298). It wasn't actively exploitable — suspendUser happens to
+ * disconnect() first, which cancels the pending backoff — but that is a
+ * coincidence of ordering, not a guarantee, and any future pause path that
+ * forgot to disconnect a live connection would have let a transient drop
+ * resurrect a connection policy forbids.
+ *
+ * A callback rather than a manager back-reference: the connection needs to ASK
+ * the policy question, not gain the ability to start networks.
+ */
+export type ReconnectGate = () => { ok: true } | { ok: false; reason: string };
+
+// How long after a SASL rejection a socket close is still attributable to it
+// (#617). A server that refuses your credentials drops the link as part of the
+// registration handshake — immediately, not minutes later. Past this window the
+// connection demonstrably survived the rejection (the network's SASL is
+// optional), so a later close is an unrelated transient drop and must NOT
+// inherit the give-up flag. There is no wire signal that distinguishes the two,
+// so this is a heuristic; it is deliberately generous, because the cost of
+// guessing "terminal" wrongly is a connection that never comes back on its own,
+// while guessing "transient" wrongly costs one extra reconnect attempt that
+// fails the same way and re-arms the flag.
+const SASL_FAILURE_TERMINAL_WINDOW_MS = 15_000;
+
 const NON_PERSISTED_TYPES = new Set([
   'state',
   'names',
@@ -565,14 +594,30 @@ export class IrcConnection {
   // terminalDisconnect: a classified give-up reason (detected ban / hard SASL
   //   auth failure). Non-null = stop retrying and require a manual reconnect; the
   //   string is the human-readable cause shown in the "not reconnecting" notice.
+  // pendingSaslFailure: a SASL rejection that has NOT yet been proven fatal (#617).
+  //   See the 'sasl failed' handler for why it can't be terminal on sight.
+  // reconnectGate: the manager's policy check, consulted before each retry opens a
+  //   socket (#616). Absent = no gate (tests, and any caller that builds a
+  //   connection directly).
   private reconnectTimer: ReturnType<typeof setTimeout> | null;
   private reconnectAttempt: number;
   private intentionalDisconnect: boolean;
   private terminalDisconnect: string | null;
+  private pendingSaslFailure: { text: string; at: number } | null;
+  private readonly reconnectGate: ReconnectGate | undefined;
 
-  constructor({ network, onEvent }: { network: Network; onEvent: (event: EnrichedEvent) => void }) {
+  constructor({
+    network,
+    onEvent,
+    reconnectGate,
+  }: {
+    network: Network;
+    onEvent: (event: EnrichedEvent) => void;
+    reconnectGate?: ReconnectGate;
+  }) {
     this.network = network;
     this.onEvent = onEvent;
+    this.reconnectGate = reconnectGate;
     // ALL CTCP handling lives in our 'ctcp request' handler (VERSION/PING/TIME/
     // SOURCE/CLIENTINFO, rate-limited + surfaced), so irc-framework's built-in
     // VERSION auto-reply is disabled with `version: false`. That MUST go in the
@@ -656,6 +701,7 @@ export class IrcConnection {
     this.reconnectAttempt = 0;
     this.intentionalDisconnect = false;
     this.terminalDisconnect = null;
+    this.pendingSaslFailure = null;
     this.bind();
   }
 
@@ -967,9 +1013,19 @@ export class IrcConnection {
     c.on('sasl failed', (event: Record<string, unknown>) => {
       const reason = (event?.reason as string | undefined) || undefined;
       if (isTerminalSaslFailure(reason)) {
-        this.terminalDisconnect = `SASL authentication failed${
-          reason && reason !== 'fail' ? ` (${reason})` : ''
-        } — check the network's account credentials`;
+        // PENDING, not terminal on sight (#617). On a network where SASL is
+        // optional the server does not drop us for a failed auth, so the flag
+        // used to sit there until 'registered' cleared it — and if registration
+        // then stalled and the socket timed out FIRST, that unrelated transient
+        // drop inherited the flag and killed auto-reconnect permanently.
+        // Promoted to terminal at 'close' only while the rejection is still
+        // plausibly the cause; see maybePromoteSaslFailure.
+        this.pendingSaslFailure = {
+          text: `SASL authentication failed${
+            reason && reason !== 'fail' ? ` (${reason})` : ''
+          } — check the network's account credentials`,
+          at: Date.now(),
+        };
       }
     });
 
@@ -985,6 +1041,7 @@ export class IrcConnection {
       // us for it), it clearly wasn't fatal — a later transient drop must still
       // auto-reconnect rather than inherit a stale give-up flag.
       this.terminalDisconnect = null;
+      this.pendingSaslFailure = null;
       // Fresh registration means a new socket — forget per-connection send
       // state so speak permission is re-probed and stale attribution can't leak
       // across the reconnect (#283).
@@ -1138,6 +1195,9 @@ export class IrcConnection {
       // call is a no-op.
       this.markAllPeersOffline();
       this.setState('disconnected');
+      // Decide, now that we know WHEN the socket died, whether a SASL rejection
+      // earlier in this connection is what killed it (#617).
+      this.maybePromoteSaslFailure();
       // 'close' is now the single terminal socket-death event (irc-framework's
       // auto_reconnect is disabled, so it no longer retries internally): decide
       // here whether to schedule our own backoff retry. Runs after the state/
@@ -3115,6 +3175,7 @@ export class IrcConnection {
     this.clearReconnectTimer();
     this.intentionalDisconnect = false;
     this.terminalDisconnect = null;
+    this.pendingSaslFailure = null;
     const { sasl_password, sasl_account, nick } = this.network;
     const account = sasl_password
       ? { account: sasl_account || nick, password: sasl_password }
@@ -4619,6 +4680,47 @@ export class IrcConnection {
   // doesn't flood one host). Retries indefinitely for any transient drop; stops
   // only for a disposed connection, a user/system-requested disconnect, or a
   // classified-terminal reason (detected ban / hard SASL auth failure).
+  /**
+   * Consume a pending SASL rejection at socket-close time (#617).
+   *
+   * A server that requires SASL closes the link as part of the handshake, so a
+   * close within the window is that rejection and auto-reconnect must stop —
+   * retrying is a fast failed-login hammer. A close AFTER the window means the
+   * connection survived the rejection (optional SASL), so whatever killed it is
+   * unrelated and gets the ordinary backoff ladder.
+   *
+   * Either way the pending flag is consumed: a rejection that didn't kill this
+   * socket must not linger to be blamed for the next one.
+   */
+  private maybePromoteSaslFailure(): void {
+    const pending = this.pendingSaslFailure;
+    if (!pending) return;
+    this.pendingSaslFailure = null;
+    if (Date.now() - pending.at <= SASL_FAILURE_TERMINAL_WINDOW_MS) {
+      this.terminalDisconnect = pending.text;
+    }
+  }
+
+  /**
+   * Abandon the retry ladder because policy refuses this connection (#616).
+   *
+   * The state assertion is the load-bearing part. By the time the gate is asked,
+   * scheduleReconnectIfWarranted has already announced 'reconnecting' — so
+   * silently returning would leave the network pinned on "Reconnecting…" forever,
+   * which is exactly the stuck-state edge the auto-reconnect overhaul removed.
+   * Inlining the gate checks without this was rejected in review for that reason.
+   */
+  private stopReconnecting(reason: string): void {
+    this.clearReconnectTimer();
+    this.publish({
+      type: 'error',
+      target: this.serverTarget(),
+      text: `Not reconnecting automatically: ${reason}.`,
+    });
+    this.logNet(`Auto-reconnect blocked: ${reason}`, 'warn');
+    this.setState('disconnected');
+  }
+
   private scheduleReconnectIfWarranted(): void {
     if (this.disposed || this.intentionalDisconnect) return;
     if (this.reconnectTimer != null) return; // a retry is already pending
@@ -4660,6 +4762,16 @@ export class IrcConnection {
       // connections whose backoffs elapse together don't flood one IRC server.
       connectScheduler.schedule(this.network.host, () => {
         if (this.disposed || this.intentionalDisconnect) return;
+        // #616: clear the same policy gates every other connect path clears in
+        // ircManager.startNetwork. Asked HERE rather than before the backoff so
+        // the answer is current at the moment we would open the socket — a user
+        // paused mid-wait must not get a connection out of a decision made
+        // before they were paused.
+        const gate = this.reconnectGate?.() ?? { ok: true as const };
+        if (!gate.ok) {
+          this.stopReconnecting(gate.reason);
+          return;
+        }
         this.connect();
       });
     }, delay);

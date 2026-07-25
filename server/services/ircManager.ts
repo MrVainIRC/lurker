@@ -183,33 +183,53 @@ class IrcManager extends EventEmitter {
     for (const id of userIds) this.initForUser(id);
   }
 
+  /**
+   * May this user hold a live IRC connection to this network, right now?
+   *
+   * THE connect gate. Two checks, and every path that opens a socket clears
+   * them here rather than repeating them:
+   *
+   * - Paused accounts never hold a live IRC connection. This is the linchpin of
+   *   the pause feature — it covers boot-time autoconnect (initForUser →
+   *   initAll), the explicit connect/reconnect routes, restartNetwork, and
+   *   (since #616) the auto-reconnect controller's own retries. The boundary
+   *   guards (REST/WS) exist only to return a clean "account paused" instead of
+   *   a silent no-op.
+   * - The instance network lockdown (#298). Gating only the create route would
+   *   leave it trivially bypassable by anyone who already had the network — and
+   *   would do nothing at all on the next restart, when initAll reconnects it.
+   *
+   * The refusal reason is human-readable because auto-reconnect shows it to the
+   * user: a connection that stops retrying has to say why, or it reads as a bug.
+   */
+  connectGate(userId: number, networkId: number): { ok: true } | { ok: false; reason: string } {
+    if (findUserById(userId)?.is_paused) return { ok: false, reason: 'this account is paused' };
+    const network = getNetwork(networkId, userId);
+    if (!network) return { ok: false, reason: 'this network no longer exists' };
+    if (!isNetworkHostAllowed(network.host)) {
+      return { ok: false, reason: `${network.host} is not permitted by this instance` };
+    }
+    return { ok: true };
+  }
+
   startNetwork(
     userId: number,
     networkId: number,
     opts: { deferrable?: boolean } = {},
   ): IrcConnection | null {
-    // Paused accounts never hold a live IRC connection. This single gate is the
-    // linchpin of the pause feature: it covers boot-time autoconnect
-    // (initForUser → initAll), the explicit connect/reconnect routes, and
-    // restartNetwork — so a paused user can produce no IRC traffic no matter
-    // which path is taken. The boundary guards (REST/WS) exist only to return a
-    // clean "account paused" instead of a silent no-op.
-    if (findUserById(userId)?.is_paused) return null;
+    if (!this.connectGate(userId, networkId).ok) return null;
     const network = getNetwork(networkId, userId);
     if (!network) return null;
-    // The instance network lockdown (#298), gated in the same place and for the
-    // same reason as the pause check above: every connect path funnels through
-    // here, so one check covers boot-time autoconnect, the connect/reconnect
-    // routes and restartNetwork. Gating only the create route would leave the
-    // lockdown trivially bypassable by anyone who already had the network — and
-    // would do nothing at all on the next restart, when initAll reconnects it.
-    if (!isNetworkHostAllowed(network.host)) return null;
     let conn = this.getConnection(userId, networkId);
     if (conn) return conn;
 
     conn = new IrcConnection({
       network,
       onEvent: (event) => this.emit('event', event),
+      // #616: the retry controller asks this before each attempt opens a socket,
+      // so a reconnect re-clears the same gates the initial connect did. Read
+      // live (not captured), because pause/lockdown can change mid-backoff.
+      reconnectGate: () => this.connectGate(userId, networkId),
     });
     this.connectionsForUser(userId).set(networkId, conn);
     // Seed self-presence from the per-user truth before the IRC handshake. The

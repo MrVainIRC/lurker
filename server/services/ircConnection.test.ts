@@ -1375,6 +1375,104 @@ describe('auto-reconnect controller', () => {
     expect(conn.state).toBe('disconnected');
   });
 
+  // #616: auto-reconnect used to call connect() directly, walking past the
+  // paused-account and network-lockdown gates every other connect path clears.
+  describe('policy gate', () => {
+    function makeGatedConn(
+      name: string,
+      gate: () => { ok: true } | { ok: false; reason: string },
+    ): { conn: IrcConnection; events: Record<string, unknown>[] } {
+      const network = createNetwork(1, {
+        name,
+        host: 'irc.example.test',
+        port: 6697,
+        tls: 1,
+        trusted_certificates: 1,
+        nick: 'nick',
+        username: null,
+        realname: null,
+        server_password: null,
+        autoconnect: 0,
+        sasl_account: null,
+        sasl_password: null,
+        connect_commands: null,
+      })!;
+      const events: Record<string, unknown>[] = [];
+      const conn = new IrcConnection({
+        network,
+        onEvent: (e) => events.push(e as Record<string, unknown>),
+        reconnectGate: gate,
+      });
+      vi.spyOn(conn, 'connect').mockImplementation(() => {});
+      return { conn, events };
+    }
+
+    it('opens the socket when the gate allows it', () => {
+      vi.useFakeTimers();
+      const { conn } = makeGatedConn('rc-gate-ok', () => ({ ok: true }));
+      conn.client.emit('close', true);
+      vi.runAllTimers();
+      expect(conn.connect).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses to reconnect a paused account', () => {
+      vi.useFakeTimers();
+      const { conn, events } = makeGatedConn('rc-gate-paused', () => ({
+        ok: false,
+        reason: 'this account is paused',
+      }));
+      conn.client.emit('close', true);
+      vi.runAllTimers();
+      expect(conn.connect).not.toHaveBeenCalled();
+      expect(
+        events.some((e) => e.type === 'error' && /account is paused/i.test(String(e.text))),
+      ).toBe(true);
+    });
+
+    // The part review insisted on: scheduleReconnectIfWarranted has ALREADY
+    // announced 'reconnecting' by the time the gate is asked, so a silent refusal
+    // would pin the network on "Reconnecting…" forever — the exact stuck state
+    // the auto-reconnect overhaul removed.
+    it('settles to disconnected rather than hanging on "reconnecting"', () => {
+      vi.useFakeTimers();
+      const { conn } = makeGatedConn('rc-gate-state', () => ({
+        ok: false,
+        reason: 'this account is paused',
+      }));
+      conn.client.emit('close', true);
+      expect(conn.state).toBe('reconnecting');
+      vi.runAllTimers();
+      expect(conn.state).toBe('disconnected');
+    });
+
+    // Read live, not captured at construction: a user paused DURING the backoff
+    // wait must not get a socket out of a decision made before they were paused.
+    it('asks the gate at launch time, not when the retry was scheduled', () => {
+      vi.useFakeTimers();
+      let allowed = true;
+      const { conn } = makeGatedConn('rc-gate-live', () =>
+        allowed ? { ok: true } : { ok: false, reason: 'this account is paused' },
+      );
+      conn.client.emit('close', true);
+      expect(conn.state).toBe('reconnecting');
+      allowed = false; // paused mid-backoff
+      vi.runAllTimers();
+      expect(conn.connect).not.toHaveBeenCalled();
+    });
+
+    it('stops the ladder — a refusal does not schedule another attempt', () => {
+      vi.useFakeTimers();
+      const { conn } = makeGatedConn('rc-gate-stops', () => ({
+        ok: false,
+        reason: `irc.example.test is not permitted by this instance`,
+      }));
+      conn.client.emit('close', true);
+      vi.runAllTimers();
+      vi.advanceTimersByTime(10 * 60 * 1000);
+      expect(conn.connect).not.toHaveBeenCalled();
+    });
+  });
+
   it('stops (no reconnect) and surfaces a notice on a detected server ban', () => {
     vi.useFakeTimers();
     const { conn, events } = makeConn('rc-ban');
@@ -1400,6 +1498,54 @@ describe('auto-reconnect controller', () => {
     expect(
       events.some((e) => e.type === 'error' && /SASL authentication failed/i.test(String(e.text))),
     ).toBe(true);
+  });
+
+  // #617: the window that made the conservative policy wrong. On a network where
+  // SASL is OPTIONAL the server doesn't drop us for a failed auth — so a socket
+  // that dies much later died of something else (a stalled registration timing
+  // out, a network blip) and must get the ordinary backoff ladder. Before this,
+  // that unrelated drop inherited the SASL flag and killed reconnect forever.
+  it('does not blame a much-later socket close on an earlier SASL failure', () => {
+    vi.useFakeTimers();
+    const { conn } = makeConn('rc-sasl-stale');
+    conn.client.emit('sasl failed', { reason: 'fail' });
+    // The connection lived on well past the handshake — proof the server did not
+    // drop us for the rejection.
+    vi.advanceTimersByTime(60_000);
+    conn.client.emit('close', true);
+    vi.runAllTimers();
+    expect(conn.connect).toHaveBeenCalledTimes(1);
+  });
+
+  // The other half: a server that REQUIRES SASL drops the link as part of the
+  // handshake, and retrying that is a fast failed-login hammer. Still terminal.
+  it('still stops when the close follows the SASL failure immediately', () => {
+    vi.useFakeTimers();
+    const { conn } = makeConn('rc-sasl-prompt');
+    conn.client.emit('sasl failed', { reason: 'fail' });
+    vi.advanceTimersByTime(200);
+    conn.client.emit('close', true);
+    vi.runAllTimers();
+    expect(conn.connect).not.toHaveBeenCalled();
+  });
+
+  // A rejection that demonstrably did NOT kill its own socket must not sit around
+  // waiting to be blamed for the NEXT one.
+  it('consumes the pending SASL failure at the close it survived', () => {
+    vi.useFakeTimers();
+    const { conn } = makeConn('rc-sasl-consumed');
+    conn.client.emit('sasl failed', { reason: 'fail' });
+    vi.advanceTimersByTime(60_000);
+    conn.client.emit('close', true); // transient → reconnects
+    vi.runAllTimers();
+    expect(conn.connect).toHaveBeenCalledTimes(1);
+
+    // A second drop, immediately after: with the flag consumed this is transient
+    // too. If it had lingered, this close would land inside the window relative
+    // to nothing and stop reconnection dead.
+    conn.client.emit('close', true);
+    vi.runAllTimers();
+    expect(conn.connect).toHaveBeenCalledTimes(2);
   });
 
   // A clean SASL abort is transient (server hiccup), not a credential problem —
