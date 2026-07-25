@@ -417,6 +417,23 @@ describe('MessageInput command dispatch', () => {
     );
   });
 
+  // /shrug produces a real PRIVMSG body, so it has to face the same split gate a
+  // plain message does. Without teaching bodyForSplit about it, the estimator
+  // reported 0 chunks and the identical text went straight out unconfirmed just
+  // because it was typed behind a slash command.
+  it('gates a long /shrug behind the split confirmation, like plain text', async () => {
+    seedStores('#zebra');
+    const { el } = await mountComposer();
+
+    await type(el, `/shrug ${'x'.repeat(900)}`);
+    await enter(el);
+    expect(socketSendWithAck).not.toHaveBeenCalled();
+
+    // Send again to confirm — the gate is a confirmation, not a refusal.
+    await enter(el);
+    expect(socketSendWithAck).toHaveBeenCalledTimes(1);
+  });
+
   it('a bare /shrug sends the kaomoji alone, with no leading space', async () => {
     seedStores('#zebra');
     const { el } = await mountComposer();

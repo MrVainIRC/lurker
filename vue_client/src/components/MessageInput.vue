@@ -472,6 +472,17 @@ const longMessageChunks = ref(0);
 const longMessageMultiline = ref(false);
 const longMessageUploading = ref(false);
 
+// The /shrug payload (#532). The backslash is literal — Lurker's inline
+// formatting is IRC control codes (\x02, \x1D…), not markdown, so nothing tries
+// to read `\_` as an escape. Shared by the send path and the split estimator so
+// the "will split into N lines" count is measured against the exact bytes that
+// go on the wire.
+const SHRUG = '¯\\_(ツ)_/¯';
+function shrugBody(text: string): string {
+  const trimmed = text.trim();
+  return trimmed ? `${trimmed} ${SHRUG}` : SHRUG;
+}
+
 // Strip a leading slash command (/me, /msg <who>) so chunk counting reflects
 // what irc-framework actually has to encode. For /me the relevant bytes are
 // the action body, not the slash-command prefix. For /msg the body goes to
@@ -490,6 +501,11 @@ function bodyForSplit(raw: string): { body: string; isAction: boolean } {
   if (!m) return { body: '', isAction: false };
   const cmd = m[1].toLowerCase();
   if (cmd === 'me') return { body: m[2], isAction: true };
+  // /shrug produces a real PRIVMSG body, so it carries the same split/flood risk
+  // a plain message does — count the kaomoji too, since it's part of what goes on
+  // the wire. Built by the same helper the send path uses so the estimate and the
+  // payload can't drift.
+  if (cmd === 'shrug') return { body: shrugBody(m[2]), isAction: false };
   if (cmd === 'msg' || cmd === 'query') {
     // /msg <who> <body...> — drop the recipient nick from the body.
     const rest = m[2];
@@ -3195,9 +3211,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
         localInfo(networkId, target, 'usage: /shrug [text] — run inside a channel or DM');
         return true;
       }
-      // The backslash is literal: Lurker's inline formatting is IRC control
-      // codes (\x02, \x1D…), not markdown, so nothing eats the `\_`.
-      const shrugText = argLine ? `${argLine} ¯\\_(ツ)_/¯` : '¯\\_(ツ)_/¯';
+      const shrugText = shrugBody(argLine);
       return ackedSend({ type: 'send', networkId, target, text: shrugText }, shrugText);
     }
     // Info/query commands. These already function via the raw fallback now that
