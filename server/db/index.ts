@@ -923,6 +923,30 @@ ensureColumn('users', 'ident', 'TEXT');
 ensureColumn('users', 'role', `TEXT NOT NULL DEFAULT 'user'`);
 backfillFirstAdmin();
 
+// Case-insensitive uniqueness for usernames, enforced by the DB so it can't be
+// bypassed by a path that forgets to ask (the `username TEXT UNIQUE` above only
+// stops an EXACT repeat, which let 'Brad' and 'brad' coexist as two accounts).
+//
+// Deliberately guarded rather than a plain migration: on an instance that ALREADY
+// has such a pair, creating this index fails, and an unguarded CREATE at boot
+// would take the whole server down in a crash-loop over two legacy rows nobody
+// has complained about. Those accounts are grandfathered instead (see
+// listGrandfatheredUsernames + shared/username.ts), the route-level check still
+// refuses new collisions, and this retries every boot so it self-heals the
+// moment the operator renames or deletes one of the pair.
+try {
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_nocase
+       ON users(username COLLATE NOCASE)`,
+  );
+} catch (err) {
+  console.warn(
+    '[db] case-insensitive username index not created — two accounts differ only by case. ' +
+      'They keep working; rename or delete one to enforce it at the DB level. ' +
+      `(${(err as Error).message})`,
+  );
+}
+
 // Persist which rule matched each message so the highlights modal can read
 // from disk instead of scanning whatever happens to be loaded in client memory.
 // Partial index keeps it cheap — only matched rows live in the index.

@@ -6,13 +6,14 @@ import type { Request, Response } from 'express';
 import { requireNodeAuth } from '../middleware/nodeAuth.js';
 import { getEdition } from '../utils/edition.js';
 import { APP_VERSION } from '../utils/userAgent.js';
-import { isValidUsername } from '../utils/username.js';
+import { isValidUsername } from '../../shared/username.js';
 import {
   countUsers,
   createUser,
   deleteUser,
   findUserById,
   findUserByUsername,
+  usernameTaken,
   setUserPaused,
 } from '../db/users.js';
 import { markUploadRemovedById } from '../db/uploadHistory.js';
@@ -53,12 +54,17 @@ router.post('/users', (req: Request, res: Response) => {
     res.status(400).json({ error: 'invalid username' });
     return;
   }
-  const existing = findUserByUsername(username);
-  if (existing) {
+  // Case-insensitive: 'acct-5' and 'ACCT-5' are the same tenant, and the
+  // orchestrator retrying with different case must reconcile, not create a
+  // second row. usernameTaken answers even when two legacy rows fold together
+  // (findUserByUsername refuses to guess between them, so the id may be null).
+  const taken = usernameTaken(username);
+  const existing = taken ? (findUserByUsername(username) ?? null) : null;
+  if (taken) {
     // Surface the existing id so a retried provision can reconcile rather than
     // guess. Deliberately not an idempotent 200 — a real username clash should
     // be visible to the orchestrator.
-    res.status(409).json({ error: 'username already exists', id: existing.id });
+    res.status(409).json({ error: 'username already exists', id: existing?.id ?? null });
     return;
   }
   const user = createUser(username); // role defaults to 'user'
