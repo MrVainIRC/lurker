@@ -36,6 +36,22 @@
 // derivation stays stable and pure, the admin API refuses to CREATE a collision,
 // and the admin panel flags any that exist for the operator to settle with an
 // override (routes/admin.ts).
+//
+// SCOPE OF THE GUARANTEE — it covers the ident an identd ANSWERS, and nothing
+// else. The `USER` command still carries the account holder's own per-network
+// username (ircConnection.ts, `username: this.network.username || nick`), and on
+// a network that never completes an ident lookup — port 113 filtered, the query
+// timed out, or no ident mode enabled — the ircd falls back to that value with a
+// tilde: `~whatever-they-typed`. So a member CAN put a neighbour's ident in their
+// network username and appear as `alice!~bob@shared.host` there. The leading
+// tilde is IRC's standard "unverified, the client just claimed this" marker and
+// makes the two distinct both to an operator reading a mask and to any ban keyed
+// on one, which is why this is left as-is (operator's call, 2026-07-25): every
+// IRC client in existence sends a user-chosen USER value, and constraining it
+// would diverge from that for a string the network already labels untrusted. The
+// honest summary is narrower than "a member can't wear a neighbour's identity":
+// when an identd answers, the ident is assigned and trustworthy; when none does,
+// nothing on that connection is verified anyway.
 
 /** Max ident length. Longer values are truncated by most ircds anyway. */
 export const MAX_IDENT_LENGTH = 16;

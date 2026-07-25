@@ -65,7 +65,14 @@
         </span>
 
         <!-- Inline ident editor for this row. Empty input = clear the override
-             and go back to deriving it from the account name. -->
+             and go back to deriving it from the account name.
+
+             The placeholder is the DERIVED ident, not the username: the two
+             differ whenever the username isn't ident-legal ("bob smith" →
+             "bobsmith", a 20-char name → 16), so showing the username would
+             both misstate what clearing produces and hand the admin a string
+             that 400s if they retype it. effectiveIdent equals the derived
+             default whenever no override is set — exactly when it's visible. -->
         <form
           v-if="canAssignIdents && editingIdentFor === u.id"
           class="ident-edit"
@@ -75,7 +82,7 @@
             <span>ident</span>
             <input
               v-model="identDraft"
-              :placeholder="u.username"
+              :placeholder="u.effectiveIdent"
               :maxlength="MAX_IDENT_LENGTH"
               spellcheck="false"
               autocapitalize="off"

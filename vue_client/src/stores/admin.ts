@@ -128,8 +128,17 @@ export const useAdminStore = defineStore('admin', {
       }
       // identConflict is a property of the whole SET of accounts, not of the one
       // that changed: assigning an override can resolve a duplicate for the other
-      // side of the clash too. Only a refetch can know, so ask for one.
-      await this.fetchUsers();
+      // side of the clash too. Only a refetch can know, so ask for one — but
+      // SWALLOW its failure. The write already landed; letting a transient GET
+      // error propagate would report a successful save as a failed one and
+      // invite the admin to retry. The only casualty is a stale conflict badge
+      // until the next fetch, and the pane refetches on every mount.
+      await this.fetchUsers().catch(() => {
+        // fetchUsers sets the SHARED store error before throwing, and the other
+        // admin panes render that field — so leaving it set would surface
+        // "failed to load users" over whichever pane the admin opens next.
+        this.error = '';
+      });
       return res as { ident: string | null; effectiveIdent: string };
     },
     async fetchInvites() {
