@@ -76,7 +76,7 @@
         <span class="muted small">({{ formatBytes(chosenFile.size) }})</span>
       </div>
       <div class="actions">
-        <button class="link" :disabled="importing || !confirmed" @click="onImport">
+        <button class="link" :disabled="importing || !confirmed || tooLarge" @click="onImport">
           {{ importing ? `importing… ${progress}%` : 'import' }}
         </button>
         <button v-if="!importing" class="link danger" @click="onCancelFile">cancel</button>
@@ -99,6 +99,9 @@ import { useDataExportStore } from '../../stores/dataExport.js';
 interface ExportPreview {
   settingsOnly: Record<string, number>;
   withMessages: { messages: number };
+  // The largest archive this instance can actually receive — the 500 MB limit,
+  // lowered to whatever proxy sits in front of it (#649).
+  maxImportBytes?: number;
 }
 
 const router = useRouter();
@@ -143,6 +146,13 @@ const confirmed = ref(false);
 
 // `users` is always 1 (the row representing the caller); excluding it so a
 // brand-new account with no real activity reads as 0 small rows instead of 1.
+// An archive the instance can't receive. Blocks the button as well as showing the
+// error: the whole point is not starting an upload that cannot finish.
+const tooLarge = computed(() => {
+  const cap = preview.value?.maxImportBytes;
+  return Boolean(cap && chosenFile.value && chosenFile.value.size > cap);
+});
+
 const SMALL_ROW_EXCLUDE = new Set(['networks', 'messages', 'user_bookmarks', 'users']);
 const totalSmallRows = computed(() => {
   if (!preview.value) return 0;
@@ -188,6 +198,16 @@ function onFileChosen(e: Event) {
   importError.value = '';
   importNotice.value = '';
   confirmed.value = false;
+  // Say so BEFORE the upload rather than after it (#649). An over-limit archive
+  // on a CDN-fronted instance doesn't come back as a 413 — it dies at the edge
+  // as an opaque network error, minutes into uploading a file that never had a
+  // chance. The size is known the instant the file is picked.
+  const cap = preview.value?.maxImportBytes;
+  if (cap && f.size > cap) {
+    importError.value =
+      `This archive is ${formatBytes(f.size)}, but this instance can only accept ` +
+      `${formatBytes(cap)}. Uploading it would fail partway through.`;
+  }
 }
 
 function onCancelFile() {

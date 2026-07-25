@@ -26,6 +26,7 @@ import { computeExportPreview } from '../services/exportService.js';
 import { startExport, toClientJob, exportArtifactPath } from '../services/exportJobs.js';
 import { getLatestJobForUser, getExportJobForUser, markDownloaded } from '../db/dataExports.js';
 import { importFromZipFile, ImportError } from '../services/importService.js';
+import { clampToTransport, formatCapMb } from '../services/uploadLimits.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 
 const router = Router();
@@ -46,6 +47,10 @@ router.get('/preview', (req: Request, res: Response, next: NextFunction) => {
       settingsOnly,
       withMessages,
       username: req.user!.username,
+      // #649: the import pane already fetches this on mount, so it rides along
+      // rather than costing a second request. Distinct from the upload cap on the
+      // snapshot — an archive gets its own, much larger, limit.
+      maxImportBytes: clampToTransport(HARD_IMPORT_LIMIT),
     });
   } catch (err) {
     next(err);
@@ -127,19 +132,40 @@ const IMPORT_TMP_DIR = path.join(os.tmpdir(), 'lurker-imports');
 // passwords, so other local users on a shared host mustn't be able to read the
 // staged upload. Matches the 0700/0600 posture on the export side.
 fs.mkdirSync(IMPORT_TMP_DIR, { recursive: true, mode: 0o700 });
-const upload = multer({
-  dest: IMPORT_TMP_DIR,
-  // See routes/uploads.ts: busboy's default param charset is latin-1, which mangles
-  // any non-ASCII filename.
-  defParamCharset: 'utf8',
-  limits: { fileSize: HARD_IMPORT_LIMIT, files: 1 },
-});
+// Resolved per request, not once at module load, so the operator's declared
+// transport ceiling is read live (and so tests can drive it). #649: an archive
+// bigger than what the proxy in front of us will pass is rejected AT THE EDGE
+// with a connection reset — Express never sees the request, and the 500 MB limit
+// below is never consulted. Borrowing the ceiling turns that into a real 413
+// naming a size. Unlike an upload an archive can't be compressed to fit, so this
+// only makes the failure honest; #650 (chunked upload) is what makes a large
+// import possible on a CDN-fronted instance.
+const importUpload = (req: Request, res: Response, next: NextFunction): void => {
+  const limit = clampToTransport(HARD_IMPORT_LIMIT);
+  const handler = multer({
+    dest: IMPORT_TMP_DIR,
+    // See routes/uploads.ts: busboy's default param charset is latin-1, which mangles
+    // any non-ASCII filename.
+    defParamCharset: 'utf8',
+    limits: { fileSize: limit, files: 1 },
+  }).single('archive');
+  handler(req, res, (err: unknown) => {
+    if ((err as { code?: string })?.code === 'LIMIT_FILE_SIZE') {
+      res.status(413).json({
+        error: `archive exceeds ${formatCapMb(limit)} MB`,
+        code: 'archive_too_large',
+      });
+      return;
+    }
+    next(err as Error | undefined);
+  });
+};
 
 // POST /api/imports — upload an export zip and restore it into the
 // caller's account. Refuses if the account already has data.
 importRouter.post(
   '/',
-  upload.single('archive'),
+  importUpload,
   asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
     try {
       if (!req.file) {

@@ -17,10 +17,11 @@
 //   3. the per-user cap  the operator-baked uploader policy (hosted locked row),
 //                        else the user's own `uploads.image.max_upload_mb`.
 //
-// Every upload path that enforces or advertises a cap goes through here, so
+// Every path that enforces or advertises a size cap goes through here, so
 // multer's limit, the handler's 413, and the number we hand clients can never
-// disagree. (`POST /api/imports` has its own, much larger, body limit and is
-// deliberately not covered — it isn't something a client sizes media against.)
+// disagree. `POST /api/imports` keeps its own much larger limit (an archive isn't
+// something a client sizes media against) but borrows the transport ceiling via
+// clampToTransport — see #649.
 //
 // Bytes, not MB, is the canonical unit: it's what multer takes, what a client
 // compares a file size against, and the only unit in which the transport
@@ -68,10 +69,11 @@ export function userCapBytes(settings: Record<string, unknown>): number {
 let warnedBadTransportCap = false;
 
 /**
- * The instance's transport ceiling in bytes: the largest request body that can
- * actually reach this process, as declared by the operator. Unset (the
- * self-hoster with nothing in front of them) → MAX_CAP_BYTES, i.e. no extra
- * ceiling.
+ * What the operator DECLARED, in bytes, or null when they declared nothing —
+ * the self-hoster with no proxy in front of them. Not clamped to any upload
+ * ceiling: a caller with its own, larger limit (`POST /api/imports` allows
+ * 500 MB) needs the raw declaration, and would silently lose 300 MB of headroom
+ * if "unset" were reported as the upload path's 200 MB hard cap.
  *
  * Deliberately an env var rather than a tenant setting, for the same reason the
  * node-edition pipeline knobs are: it describes the deployment, not a preference,
@@ -83,9 +85,9 @@ let warnedBadTransportCap = false;
  * the safe one when the proxy's own unit is unknown. Erring 4.8% low costs a
  * self-hoster nothing; erring high is the edge reset again.
  */
-export function transportCapBytes(): number {
+export function declaredTransportCapBytes(): number | null {
   const raw = (process.env.LURKER_MAX_UPLOAD_MB || '').trim();
-  if (!raw) return MAX_CAP_BYTES;
+  if (!raw) return null;
   const mb = Math.floor(Number(raw));
   if (!Number.isFinite(mb) || mb <= 0) {
     // "100MB" / "100m" — the natural typo, given the var is named _MB — parses to
@@ -101,9 +103,25 @@ export function transportCapBytes(): number {
           'Use a bare integer, e.g. LURKER_MAX_UPLOAD_MB=100.',
       );
     }
-    return MAX_CAP_BYTES;
+    return null;
   }
-  return Math.min(mb * 1_000_000 - ENVELOPE_HEADROOM_BYTES, MAX_CAP_BYTES);
+  return mb * 1_000_000 - ENVELOPE_HEADROOM_BYTES;
+}
+
+/** The transport ceiling as the UPLOAD path sees it: the declaration, else no
+ *  extra ceiling beyond the hard cap. */
+export function transportCapBytes(): number {
+  return Math.min(declaredTransportCapBytes() ?? MAX_CAP_BYTES, MAX_CAP_BYTES);
+}
+
+/**
+ * Apply the transport ceiling to a caller that has its OWN limit — currently the
+ * import route's 500 MB. Nothing here involves the upload hard cap or a user's
+ * preference; it answers only "can a body this big reach us at all".
+ */
+export function clampToTransport(ownLimitBytes: number): number {
+  const declared = declaredTransportCapBytes();
+  return declared == null ? ownLimitBytes : Math.max(1, Math.min(ownLimitBytes, declared));
 }
 
 /** Clamp a candidate cap to the instance-wide ceilings. Floors at 1 byte so no
