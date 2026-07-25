@@ -1061,7 +1061,10 @@ class BouncerSession {
   }
 
   private verifyUser(username: string, secret: string): User | null {
-    const user = findUserByUsername(username) ?? findUserByUsername(username.toLowerCase());
+    // findUserByUsername folds case itself now, so the old explicit
+    // lowercase retry (IRC clients routinely lowercase the SASL username) is
+    // no longer needed.
+    const user = findUserByUsername(username);
     const storedHash = user ? getPasswordHash(user.id) : null;
     // Always run exactly one scrypt (against a dummy hash when the user is
     // unknown or has no password) so login latency can't reveal whether the

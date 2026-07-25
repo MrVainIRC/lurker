@@ -201,6 +201,24 @@ describe('PUT /api/admin/users/:id/ident', () => {
     await adminAgent.delete(`/api/admin/users/${b.id}`);
   });
 
+  it('flags a collision reachable from two names TODAY, not just legacy ones', async () => {
+    // '-bob' and 'bob' are both legal NEW usernames (shared/username.ts permits
+    // leading punctuation) that derive one ident, because idents may not start
+    // with '-'. Tightening usernames narrowed the collision sources but did not
+    // remove them, so the duplicate flag still has work to do.
+    const { createUser } = await import('../db/users.js');
+    const dashed = createUser('-collider');
+    const plain = createUser('collider');
+    const rows = (await adminAgent.get('/api/admin/users')).body.users;
+    const row = (id: number) => rows.find((u: { id: number }) => u.id === id);
+    expect(row(dashed.id).effectiveIdent).toBe('collider');
+    expect(row(plain.id).effectiveIdent).toBe('collider');
+    expect(row(dashed.id).identConflict).toBe(true);
+    expect(row(plain.id).identConflict).toBe(true);
+    await adminAgent.delete(`/api/admin/users/${dashed.id}`);
+    await adminAgent.delete(`/api/admin/users/${plain.id}`);
+  });
+
   it('404 for an unknown id, 400 for a non-integer id', async () => {
     expect(
       (await adminAgent.put('/api/admin/users/999999/ident').send({ ident: 'x' })).status,

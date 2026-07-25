@@ -17,6 +17,7 @@ import {
 import {
   findUserById,
   findUserByUsername,
+  usernameTaken,
   countUsers,
   createUser,
   deleteUser,
@@ -25,7 +26,7 @@ import {
   setPasswordHash,
 } from '../db/users.js';
 import { inviteStatus, consumeInvite } from '../db/invites.js';
-import { isValidUsername } from '../utils/username.js';
+import { isValidUsername, isValidLoginUsername } from '../../shared/username.js';
 import {
   listForUser as listCredentialsForUser,
   findByCredentialId,
@@ -122,7 +123,7 @@ router.post(
       res.status(400).json({ error: 'invalid username' });
       return;
     }
-    if (findUserByUsername(requested)) {
+    if (usernameTaken(requested)) {
       res.status(409).json({ error: 'username already taken' });
       return;
     }
@@ -232,7 +233,7 @@ router.post('/setup/password', (req: Request, res: Response) => {
     res.status(400).json({ error: passwordRequirementsMessage() });
     return;
   }
-  if (findUserByUsername(requested)) {
+  if (usernameTaken(requested)) {
     res.status(409).json({ error: 'username already taken' });
     return;
   }
@@ -273,7 +274,7 @@ router.post(
       res.status(400).json({ error: 'invalid username' });
       return;
     }
-    if (findUserByUsername(requested)) {
+    if (usernameTaken(requested)) {
       res.status(409).json({ error: 'username already taken' });
       return;
     }
@@ -398,7 +399,7 @@ router.post('/invite/:token/password', (req: Request<{ token: string }>, res: Re
     res.status(400).json({ error: passwordRequirementsMessage() });
     return;
   }
-  if (findUserByUsername(requested)) {
+  if (usernameTaken(requested)) {
     res.status(409).json({ error: 'username already taken' });
     return;
   }
@@ -523,7 +524,7 @@ router.post(
   (req: Request, res: Response) => {
     const username = (req.body?.username || '').trim();
     const password: unknown = req.body?.password;
-    if (!isValidUsername(username) || typeof password !== 'string' || password.length === 0) {
+    if (!isValidLoginUsername(username) || typeof password !== 'string' || password.length === 0) {
       res.status(400).json({ error: 'username and password required' });
       return;
     }
@@ -561,7 +562,7 @@ router.post(
   (req: Request, res: Response) => {
     const username = (req.body?.username || '').trim();
     const password: unknown = req.body?.password;
-    if (!isValidUsername(username) || typeof password !== 'string' || password.length === 0) {
+    if (!isValidLoginUsername(username) || typeof password !== 'string' || password.length === 0) {
       res.status(400).json({ error: 'username and password required' });
       return;
     }

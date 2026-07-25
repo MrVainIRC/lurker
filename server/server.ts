@@ -12,6 +12,7 @@ import { getNodeSecret } from './middleware/nodeAuth.js';
 import { nodeUploadConfigured } from './services/uploadProviders/nodeUpload.js';
 import * as systemLog from './services/systemLog.js';
 import { purgeExpiredSessions } from './db/sessions.js';
+import { listGrandfatheredUsernames } from './db/users.js';
 import { backfillEncryptColumns } from './db/secretBackfill.js';
 import { assertPushCredentials } from './services/push/credentials.js';
 import { resolveSessionSecret } from './utils/sessionSecret.js';
@@ -122,6 +123,20 @@ const wrapped = backfillEncryptColumns();
 if (wrapped.encrypted > 0) {
   console.log(`[lurker] encrypted ${wrapped.encrypted} secret column value(s) at rest`);
   systemLog.log({ scope: 'server', text: `Encrypted ${wrapped.encrypted} secret column value(s)` });
+}
+
+// Name any account whose username couldn't be created under today's rules — a
+// space, or a case-twin of another account. They keep working (grandfathered),
+// but the operator should learn about them here rather than from a user who
+// can't tell which of two lookalike accounts is theirs. Silent on the
+// overwhelmingly common instance where every name already conforms.
+const legacyNames = listGrandfatheredUsernames();
+if (legacyNames.length > 0) {
+  console.warn(
+    `[lurker] ${legacyNames.length} account name(s) predate the username rules and are ` +
+      'grandfathered (they keep logging in with them): ' +
+      legacyNames.map((u) => `#${u.id} "${u.username}" — ${u.why}`).join('; '),
+  );
 }
 
 ircManager.initAll();
