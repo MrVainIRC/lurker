@@ -55,7 +55,7 @@ describe('deriveIdent', () => {
   });
 
   it('strips a leading -, . or _ so the derived path can only emit typeable idents', () => {
-    // Usernames may legally start with these (server/utils/username.ts); idents
+    // Usernames may legally start with these (shared/username.ts); idents
     // may not, and an admin is blocked from typing one — the two paths have to
     // agree about what an ident is.
     expect(deriveIdent({ nodeMode: false, accountUsername: '-bob' })).toBe('bob');
@@ -78,7 +78,10 @@ describe('deriveIdent', () => {
 // The one property that ties the two halves together: whatever we ANSWER on the
 // wire is something an admin could also have typed.
 describe('deriveIdent output is always a legal override', () => {
-  it('holds for the usernames the account rules allow', () => {
+  it('holds for every username that exists or ever could have', () => {
+    // Includes shapes only a GRANDFATHERED account can have now ('bob smith'):
+    // those rows are still live and still connect, so the derivation has to keep
+    // producing a legal ident for them.
     for (const username of [
       'alice',
       '-bob',

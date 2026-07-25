@@ -26,11 +26,18 @@
 //     Admin-only by design: it's the operator's call who is called what.
 //
 // UNIQUENESS IS NOT GUARANTEED on the standalone derived path, and deliberately
-// isn't faked. Usernames are unique but far looser than idents (spaces allowed,
-// case-sensitive, up to 64 chars — server/utils/username.ts), so "bob smith" and
-// "bobsmith" both derive `bobsmith`, as do "Bob"/"bob" and any two usernames
-// sharing their first 16 characters. Resolving that HERE would mean mixing in
-// something like the row id when a clash appears, which makes an account's ident
+// isn't faked. Usernames are unique but still looser than idents (shared/
+// username.ts allows 64 characters and leading punctuation), so two legal,
+// distinct accounts can derive one ident:
+//   • any two usernames sharing their first 16 characters (idents truncate)
+//   • "-bob" and "bob", or ".x" and "x" (idents can't lead with punctuation)
+// and on an instance carrying accounts from before the username rules were
+// tightened, also "bob smith" vs "bobsmith" (spaces used to be legal) and
+// "Bob" vs "bob" (uniqueness used to be case-SENSITIVE — such a pair can still
+// exist, which is why the NOCASE index there is created defensively).
+//
+// Resolving that HERE would mean mixing in something like the row id when a
+// clash appears, which makes an account's ident
 // change when an unrelated account signs up — and an ident that moves is worse
 // than one that's ambiguous, because bans and ACLs are keyed on it. So the
 // derivation stays stable and pure, the admin API refuses to CREATE a collision,
@@ -57,7 +64,7 @@
 export const MAX_IDENT_LENGTH = 16;
 
 const NON_IDENT_CHARS = /[^A-Za-z0-9._-]/g;
-// Usernames may legally start with '-', '.' or '_' (see server/utils/username.ts),
+// Usernames may legally start with '-', '.' or '_' (see shared/username.ts),
 // so the derived path has to trim them too — a leading '-' reads as a flag to
 // downstream tooling and some ircds reject it. Without this, an account named
 // '-bob' would be ANSWERED an ident that isValidIdentOverride refuses to let an

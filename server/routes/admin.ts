@@ -77,8 +77,10 @@ function effectiveIdent(u: User): string {
 
 router.get('/users', (_req: Request, res: Response) => {
   const all = listUsers();
-  // Accounts are only unique as USERNAMES, which are looser than idents (spaces,
-  // case, 64 chars) — so two of them can legitimately derive one ident, and no
+  // Accounts are only unique as USERNAMES, which are still looser than idents
+  // (64 chars vs 16, and leading punctuation is legal in one but not the other),
+  // so two of them can legitimately derive one ident — see shared/ident.ts for
+  // the full list, which is longer on an instance with grandfathered names. No
   // signup path consults idents. The PUT below refuses to CREATE a collision,
   // but it can't prevent one arriving with a new account, and a silent duplicate
   // is precisely the ambiguity this feature exists to remove. Count them here so
