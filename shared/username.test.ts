@@ -100,4 +100,32 @@ describe('nonConformingReason', () => {
     expect(nonConformingReason('brad')).toBeNull();
     expect(nonConformingReason('Brad')).toBeNull(); // case alone isn't a SHAPE problem
   });
+
+  it('reports over-length as LENGTH, not as a bad character', () => {
+    // The boot warning tells the operator what to fix. An unvalidated legacy row
+    // can exceed the cap, and blaming the charset would send them hunting for a
+    // bad character that isn't there.
+    const reason = nonConformingReason('x'.repeat(MAX_USERNAME_LENGTH + 6))!;
+    expect(reason).toMatch(/longer than 64/);
+    expect(reason).not.toMatch(/characters no longer allowed/);
+  });
+
+  it('reports EVERY applicable reason, since the operator is picking a new name', () => {
+    const reason = nonConformingReason('a very long legacy name '.repeat(4))!;
+    expect(reason).toMatch(/longer than 64/);
+    expect(reason).toMatch(/space/);
+  });
+
+  it('distinguishes a space from other whitespace, and names a blank', () => {
+    expect(nonConformingReason('bo\tb')).toMatch(/whitespace/);
+    expect(nonConformingReason('   ')).toMatch(/blank/);
+  });
+
+  it('never returns an empty explanation for a name it rejects', () => {
+    // The boot line reads '#3 "x" — <reason>'; a null/empty reason there would
+    // list an account with no stated problem.
+    for (const name of ['björn', 'bo\0b', '日本語', '   ', 'x'.repeat(99), 'bob smith']) {
+      expect(nonConformingReason(name)).toBeTruthy();
+    }
+  });
 });

@@ -84,9 +84,25 @@ export function isValidLoginUsername(name: unknown): boolean {
  * operator finds out from a log line instead of from a confused user.
  */
 export function nonConformingReason(name: string): string | null {
-  if (!isValidUsername(name)) {
-    if (/\s/.test(name)) return 'contains a space';
-    return 'contains characters no longer allowed';
+  if (isValidUsername(name)) return null;
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  // Every applicable reason, not the first one found: the operator is deciding
+  // what to rename this account TO, and a name that's both over-length and
+  // spaced needs both facts. Length is checked explicitly because an unvalidated
+  // legacy row can exceed the cap (see MAX_SUBMITTED_USERNAME_LENGTH above) —
+  // folding that into the charset bucket would tell the operator to hunt for a
+  // bad character that isn't there.
+  const reasons: string[] = [];
+  if (trimmed.length < 1) reasons.push('is blank');
+  if (trimmed.length > MAX_USERNAME_LENGTH) {
+    reasons.push(`is longer than ${MAX_USERNAME_LENGTH} characters`);
   }
-  return null;
+  if (/ /.test(trimmed)) reasons.push('contains a space');
+  else if (/\s/.test(trimmed)) reasons.push('contains whitespace');
+  if (trimmed.replace(/\s/g, '') !== '' && !USERNAME_CHARS.test(trimmed.replace(/\s/g, ''))) {
+    reasons.push('contains characters no longer allowed');
+  }
+  // Belt: isValidUsername said no, so SOMETHING is wrong — never return a
+  // grandfathered account with no explanation attached.
+  return reasons.length > 0 ? reasons.join(' and ') : 'is not valid under the current rules';
 }
