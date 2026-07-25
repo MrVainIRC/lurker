@@ -15,15 +15,19 @@
       Everyone with an account on this instance. The last admin and your own account can't be
       deleted.
     </p>
-    <p v-if="!config.isNode" class="section-desc">
+    <p v-if="canAssignIdents" class="section-desc">
       Each account's <strong>ident</strong> is the name networks see in
       <code>nick!ident@host</code>. Everyone here shares this server's IP, so it's what lets an
       operator tell your members apart — assigned by you, not chosen by them. It defaults to the
       account name.
     </p>
-    <p v-if="adminStore.usersLoaded && !adminStore.identdEnabled" class="muted small">
-      No ident daemon is running on this server, so networks can't ask for these idents yet — set
-      <code>LURKER_IDENTD_ENABLED</code> (or <code>LURKER_OIDENTD_FILE</code>) to turn one on.
+    <!-- Nothing on this server answers ident lookups, so the idents would be
+         inert: one line saying how to turn one on, and the rest of the ident
+         surface stays out of the way (most self-hosts never enable it). -->
+    <p v-else-if="adminStore.usersLoaded && !config.isNode" class="muted small">
+      Networks can't ask this server who its users are — set
+      <code>LURKER_IDENTD_ENABLED</code> (or <code>LURKER_OIDENTD_FILE</code>) to run an ident
+      daemon, and each account gets an ident you can assign here.
     </p>
     <p v-if="adminError" class="error inline">{{ adminError }}</p>
 
@@ -34,7 +38,7 @@
           <span v-if="u.role === 'admin'" class="role-tag">admin</span>
           <span v-if="u.isPaused" class="paused-tag">paused</span>
           <span
-            v-if="u.effectiveIdent"
+            v-if="adminStore.identdEnabled && u.effectiveIdent"
             class="ident-tag"
             :title="
               u.ident
@@ -55,7 +59,11 @@
 
         <!-- Inline ident editor for this row. Empty input = clear the override
              and go back to deriving it from the account name. -->
-        <form v-if="editingIdentFor === u.id" class="ident-edit" @submit.prevent="onSaveIdent(u)">
+        <form
+          v-if="canAssignIdents && editingIdentFor === u.id"
+          class="ident-edit"
+          @submit.prevent="onSaveIdent(u)"
+        >
           <label>
             <span>ident</span>
             <input
@@ -77,7 +85,7 @@
 
         <div class="row-actions">
           <button
-            v-if="!config.isNode"
+            v-if="canAssignIdents"
             class="link"
             :disabled="adminBusy"
             title="set the ident networks see for this account"
@@ -131,6 +139,14 @@ const adminStore = useAdminStore();
 const config = useConfigStore();
 
 const users = computed(() => adminStore.users);
+
+// Two separate questions, deliberately not collapsed into one flag:
+//   • does anything answer ident lookups? — if not, the idents are inert and the
+//     whole surface (per-row tag included) stays hidden.
+//   • may they be ASSIGNED here? — standalone only; a hosted cell answers with
+//     `lu<accountId>` from the control plane, so the tag is worth showing there
+//     but the editor isn't (its route 409s).
+const canAssignIdents = computed(() => adminStore.identdEnabled && !config.isNode);
 
 const adminError = ref('');
 const adminBusy = ref(false);
