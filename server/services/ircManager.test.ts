@@ -89,9 +89,15 @@ describe('ircManager.connectGate', () => {
     return { userId: user.id, networkId: net.id };
   }
 
-  it('allows an ordinary account and network', () => {
+  // Hands back the row it read. startNetwork consumes it instead of issuing a
+  // second getNetwork — a duplicate synchronous read on every connect, on the
+  // boot-time fan-out path #460 showed can starve the event loop.
+  it('allows an ordinary account and network, returning the row it read', () => {
     const { userId, networkId } = gateUserNet();
-    expect(ircManager.connectGate(userId, networkId)).toEqual({ ok: true });
+    const gate = ircManager.connectGate(userId, networkId);
+    expect(gate.ok).toBe(true);
+    expect(gate.ok === true && gate.network.id).toBe(networkId);
+    expect(gate.ok === true && gate.network.host).toBe('irc.example.invalid');
   });
 
   // The refusal reason is user-facing: auto-reconnect publishes it when it stops,

@@ -6,6 +6,7 @@ import { IrcConnection } from './ircConnection.js';
 import * as systemLog from './systemLog.js';
 import connectScheduler from './connectScheduler.js';
 import { listNetworksForUser, getNetwork } from '../db/networks.js';
+import type { Network } from '../db/networks.js';
 import {
   ensureOpen as ensureOpenBuffer,
   setAutojoin as setBufferAutojoin,
@@ -186,9 +187,11 @@ class IrcManager extends EventEmitter {
   /**
    * May this user hold a live IRC connection to this network, right now?
    *
-   * THE connect gate. Two checks, and every path that opens a socket clears
-   * them here rather than repeating them:
+   * THE connect gate. Every path that opens a socket clears it here rather than
+   * repeating the checks:
    *
+   * - The network still exists and belongs to this user. (A retry's backoff can
+   *   outlive the row it was scheduled for.)
    * - Paused accounts never hold a live IRC connection. This is the linchpin of
    *   the pause feature — it covers boot-time autoconnect (initForUser →
    *   initAll), the explicit connect/reconnect routes, restartNetwork, and
@@ -201,15 +204,24 @@ class IrcManager extends EventEmitter {
    *
    * The refusal reason is human-readable because auto-reconnect shows it to the
    * user: a connection that stops retrying has to say why, or it reads as a bug.
+   *
+   * Hands back the network row it had to read anyway. startNetwork needs the same
+   * row immediately afterwards, and re-reading would double the synchronous
+   * SQLite work on every connect and autoconnect — the boot-time fan-out across
+   * every network of every user is exactly the path #460 showed can starve the
+   * event loop.
    */
-  connectGate(userId: number, networkId: number): { ok: true } | { ok: false; reason: string } {
+  connectGate(
+    userId: number,
+    networkId: number,
+  ): { ok: true; network: Network } | { ok: false; reason: string } {
     if (findUserById(userId)?.is_paused) return { ok: false, reason: 'this account is paused' };
     const network = getNetwork(networkId, userId);
     if (!network) return { ok: false, reason: 'this network no longer exists' };
     if (!isNetworkHostAllowed(network.host)) {
       return { ok: false, reason: `${network.host} is not permitted by this instance` };
     }
-    return { ok: true };
+    return { ok: true, network };
   }
 
   /**
@@ -236,7 +248,9 @@ class IrcManager extends EventEmitter {
   ): { ok: true } | { ok: false; reason: string } {
     const gate = this.connectGate(userId, networkId);
     if (!gate.ok) this.connectionsForUser(userId).delete(networkId);
-    return gate;
+    // The network row goes no further: the retry reconnects the IrcConnection it
+    // already has, rather than building one from a fresh row.
+    return gate.ok ? { ok: true } : gate;
   }
 
   startNetwork(
@@ -244,9 +258,9 @@ class IrcManager extends EventEmitter {
     networkId: number,
     opts: { deferrable?: boolean } = {},
   ): IrcConnection | null {
-    if (!this.connectGate(userId, networkId).ok) return null;
-    const network = getNetwork(networkId, userId);
-    if (!network) return null;
+    const gate = this.connectGate(userId, networkId);
+    if (!gate.ok) return null;
+    const network = gate.network;
     let conn = this.getConnection(userId, networkId);
     if (conn) return conn;
 
