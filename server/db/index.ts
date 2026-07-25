@@ -911,7 +911,7 @@ ensureColumn('users', 'last_seen_at', 'TEXT');
 ensureColumn('users', 'is_paused', 'INTEGER NOT NULL DEFAULT 0');
 
 // Admin-set ident override for the built-in identd (#643). NULL — the norm —
-// means "derive it from the account username"; see utils/ident.ts. Deliberately
+// means "derive it from the account username"; see shared/ident.ts. Deliberately
 // not user-writable: the ident is how a network operator tells one member of a
 // shared IP from another, so letting members pick it defeats the identd.
 ensureColumn('users', 'ident', 'TEXT');

@@ -145,6 +145,62 @@ describe('PUT /api/admin/users/:id/ident', () => {
     expect(res.body.error).toMatch(/already in use by admin-regular/);
   });
 
+  it('always allows clearing back to the default, even once the default collides', async () => {
+    // Reaching the trap takes three steps, and the API allows every one of them:
+    // move `target` off its default, let another account TAKE that default (now
+    // free), then clear. The cleared value is the account's own username-derived
+    // ident — never chosen by the admin and not editable — so refusing it would
+    // strand the override permanently. The duplicate that results is reported by
+    // identConflict rather than made unfixable here.
+    const { createUser } = await import('../db/users.js');
+    const squatter = createUser('squatter');
+    await adminAgent.put(`/api/admin/users/${target.id}/ident`).send({ ident: 'tgtx' });
+    expect(
+      (
+        await adminAgent
+          .put(`/api/admin/users/${squatter.id}/ident`)
+          .send({ ident: 'ident-target' })
+      ).status,
+    ).toBe(200);
+
+    const res = await adminAgent.put(`/api/admin/users/${target.id}/ident`).send({ ident: '' });
+    expect(res.status).toBe(200);
+    expect(await identOf(target.id)).toMatchObject({
+      ident: null,
+      effectiveIdent: 'ident-target',
+    });
+    // ...and the collision it creates is visible rather than silent.
+    const rows = (await adminAgent.get('/api/admin/users')).body.users;
+    for (const id of [target.id, squatter.id]) {
+      expect(rows.find((u: { id: number }) => u.id === id).identConflict).toBe(true);
+    }
+    await adminAgent.delete(`/api/admin/users/${squatter.id}`);
+  });
+
+  it('flags accounts that answer the same ident (usernames are looser than idents)', async () => {
+    // 'bob smith' and 'bobsmith' are two legal, distinct usernames that derive
+    // ONE ident. No signup path consults idents, so the panel has to surface it.
+    const { createUser } = await import('../db/users.js');
+    const a = createUser('bob smith');
+    const b = createUser('bobsmith');
+    const rows = (await adminAgent.get('/api/admin/users')).body.users;
+    const row = (id: number) => rows.find((u: { id: number }) => u.id === id);
+    expect(row(a.id).effectiveIdent).toBe('bobsmith');
+    expect(row(b.id).effectiveIdent).toBe('bobsmith');
+    expect(row(a.id).identConflict).toBe(true);
+    expect(row(b.id).identConflict).toBe(true);
+    // An unrelated account isn't dragged into it.
+    expect(row(target.id).identConflict).toBe(false);
+
+    // Giving one of them its own ident settles it for BOTH rows.
+    await adminAgent.put(`/api/admin/users/${a.id}/ident`).send({ ident: 'bobs' });
+    const after = (await adminAgent.get('/api/admin/users')).body.users;
+    expect(after.find((u: { id: number }) => u.id === a.id).identConflict).toBe(false);
+    expect(after.find((u: { id: number }) => u.id === b.id).identConflict).toBe(false);
+    await adminAgent.delete(`/api/admin/users/${a.id}`);
+    await adminAgent.delete(`/api/admin/users/${b.id}`);
+  });
+
   it('404 for an unknown id, 400 for a non-integer id', async () => {
     expect(
       (await adminAgent.put('/api/admin/users/999999/ident').send({ ident: 'x' })).status,

@@ -17,7 +17,7 @@ export interface User {
   // reconnecting/sending, but retain read-only access to their history.
   is_paused: number;
   // Admin-set identd override (#643), NULL for "derive from the username".
-  // Never writable by the account it belongs to — see utils/ident.ts.
+  // Never writable by the account it belongs to — see shared/ident.ts.
   ident: string | null;
 }
 

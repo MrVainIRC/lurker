@@ -49,6 +49,13 @@
             ident {{ u.effectiveIdent }}
           </span>
           <span
+            v-if="adminStore.identdEnabled && u.identConflict"
+            class="conflict-tag"
+            title="another account answers this same ident — until one of them is given its own, a network can't tell these two apart"
+          >
+            duplicate
+          </span>
+          <span
             class="last-seen"
             :title="`joined ${u.createdAt}${u.lastSeenAt ? ` · last seen ${u.lastSeenAt}` : ''}`"
           >
@@ -69,7 +76,7 @@
             <input
               v-model="identDraft"
               :placeholder="u.username"
-              maxlength="16"
+              :maxlength="MAX_IDENT_LENGTH"
               spellcheck="false"
               autocapitalize="off"
             />
@@ -130,6 +137,9 @@ import { useAdminStore } from '../../stores/admin.js';
 import { useConfigStore } from '../../stores/config.js';
 import type { AdminUser } from '../../stores/admin.js';
 import { formatRelative } from '../../utils/timestamp.js';
+// Same module the server derives and validates idents with, so the input's cap
+// can't drift from what the route accepts.
+import { MAX_IDENT_LENGTH } from '../../../../shared/ident.js';
 
 const auth = useAuthStore();
 const adminStore = useAdminStore();
@@ -233,15 +243,6 @@ async function onResumeUser(user: AdminUser) {
 
 <style src="../settings-panes/panes.css"></style>
 <style scoped>
-/* Vue's whitespace: 'condense' drops the whitespace-only text nodes between
-   these spans, so the gap has to come from flex — same workaround as
-   ApiTokensPane's .ua. */
-.user-row .ua {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-3);
-}
 .user-row .ident-tag {
   color: var(--fg-muted);
   border: 1px solid var(--border);
@@ -264,6 +265,12 @@ async function onResumeUser(user: AdminUser) {
 .user-row .role-tag {
   color: var(--accent);
   border: 1px solid var(--accent);
+  padding: 0 var(--space-2);
+  text-transform: uppercase;
+}
+.user-row .conflict-tag {
+  color: var(--bad);
+  border: 1px solid currentcolor;
   padding: 0 var(--space-2);
   text-transform: uppercase;
 }

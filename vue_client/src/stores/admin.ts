@@ -16,6 +16,8 @@ export interface AdminUser {
   ident?: string | null;
   /** What the identd actually answers for this account (#643). */
   effectiveIdent?: string;
+  /** Another account answers this same ident — neither one attributes anything. */
+  identConflict?: boolean;
 }
 
 export interface AdminInvite {
@@ -114,8 +116,8 @@ export const useAdminStore = defineStore('admin', {
       if (u) u.isPaused = false;
     },
     // Pass null (or '') to fall back to deriving the ident from the username.
-    // Patched locally rather than refetched: the response carries the resolved
-    // pair, and a refetch here would race the pane's own mount fetch.
+    // Patches the changed row from the response so the edit lands immediately,
+    // then refetches for the conflict flags (see below).
     async setUserIdent(id: number, ident: string | null) {
       const res = await api(`/api/admin/users/${id}/ident`, { method: 'PUT', body: { ident } });
       this.usersFetchSeq++;
@@ -124,6 +126,10 @@ export const useAdminStore = defineStore('admin', {
         u.ident = res.ident ?? null;
         u.effectiveIdent = res.effectiveIdent;
       }
+      // identConflict is a property of the whole SET of accounts, not of the one
+      // that changed: assigning an override can resolve a duplicate for the other
+      // side of the clash too. Only a refetch can know, so ask for one.
+      await this.fetchUsers();
       return res as { ident: string | null; effectiveIdent: string };
     },
     async fetchInvites() {

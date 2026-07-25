@@ -54,6 +54,17 @@ describe('deriveIdent', () => {
     expect(deriveIdent({ nodeMode: false, accountUsername: 'a b@c!' })).toBe('abc');
   });
 
+  it('strips a leading -, . or _ so the derived path can only emit typeable idents', () => {
+    // Usernames may legally start with these (server/utils/username.ts); idents
+    // may not, and an admin is blocked from typing one — the two paths have to
+    // agree about what an ident is.
+    expect(deriveIdent({ nodeMode: false, accountUsername: '-bob' })).toBe('bob');
+    expect(deriveIdent({ nodeMode: false, accountUsername: '._x' })).toBe('x');
+    expect(isValidIdentOverride(deriveIdent({ nodeMode: false, accountUsername: '-bob' }))).toBe(
+      true,
+    );
+  });
+
   it('truncates to 16 characters', () => {
     expect(deriveIdent({ nodeMode: false, accountUsername: 'a'.repeat(30) })).toBe('a'.repeat(16));
   });
@@ -61,6 +72,28 @@ describe('deriveIdent', () => {
   it('never returns empty — an unusable name still identifies as "user"', () => {
     expect(deriveIdent({ nodeMode: false, accountUsername: '!!!' })).toBe('user');
     expect(deriveIdent({ nodeMode: false, accountUsername: '' })).toBe('user');
+  });
+});
+
+// The one property that ties the two halves together: whatever we ANSWER on the
+// wire is something an admin could also have typed.
+describe('deriveIdent output is always a legal override', () => {
+  it('holds for the usernames the account rules allow', () => {
+    for (const username of [
+      'alice',
+      '-bob',
+      '.hidden',
+      '_x',
+      'bob smith',
+      'a'.repeat(30),
+      '!!!',
+      '',
+      'Mixed.Case-99',
+    ]) {
+      expect(
+        isValidIdentOverride(deriveIdent({ nodeMode: false, accountUsername: username })),
+      ).toBe(true);
+    }
   });
 });
 

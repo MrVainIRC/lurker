@@ -18,7 +18,7 @@ import ircManager from '../services/ircManager.js';
 import { presenceDiagnostics } from '../services/wsHub.js';
 import { isIdentdEnabled, isOidentdFileEnabled } from '../services/identd.js';
 import { isNodeMode } from '../utils/edition.js';
-import { deriveIdent, isValidIdentOverride, MAX_IDENT_LENGTH } from '../utils/ident.js';
+import { deriveIdent, isValidIdentOverride, MAX_IDENT_LENGTH } from '../../shared/ident.js';
 import adminUploadersRouter from './adminUploaders.js';
 import adminNetworksRouter from './adminNetworks.js';
 
@@ -76,8 +76,20 @@ function effectiveIdent(u: User): string {
 }
 
 router.get('/users', (_req: Request, res: Response) => {
+  const all = listUsers();
+  // Accounts are only unique as USERNAMES, which are looser than idents (spaces,
+  // case, 64 chars) — so two of them can legitimately derive one ident, and no
+  // signup path consults idents. The PUT below refuses to CREATE a collision,
+  // but it can't prevent one arriving with a new account, and a silent duplicate
+  // is precisely the ambiguity this feature exists to remove. Count them here so
+  // the panel can show the operator which rows to settle with an override.
+  const identCounts = new Map<string, number>();
+  for (const u of all) {
+    const key = effectiveIdent(u).toLowerCase();
+    identCounts.set(key, (identCounts.get(key) ?? 0) + 1);
+  }
   res.json({
-    users: listUsers().map((u) => ({
+    users: all.map((u) => ({
       id: u.id,
       username: u.username,
       role: u.role,
@@ -89,6 +101,9 @@ router.get('/users', (_req: Request, res: Response) => {
       // re-deriving the rule in the client.
       ident: u.ident,
       effectiveIdent: effectiveIdent(u),
+      // Another account answers this same ident — neither is attributable until
+      // the operator assigns one of them something else.
+      identConflict: (identCounts.get(effectiveIdent(u).toLowerCase()) ?? 0) > 1,
     })),
     // Whether either ident mode is running. When neither is, the idents above
     // are inert — the UI says so rather than implying networks see them. (The
@@ -134,21 +149,29 @@ router.put('/users/:id/ident', (req: Request, res: Response) => {
   }
   const next = value || null;
   // Two members answering the same ident is the exact ambiguity the identd
-  // exists to remove, so refuse the collision. Compared case-insensitively
-  // (an operator reading a ban list won't distinguish Bob from bob) and
-  // against every other account's EFFECTIVE ident, not just the stored
-  // overrides — most accounts derive theirs from the username.
-  const candidate = deriveIdent({
-    nodeMode: false,
-    accountUsername: target.username,
-    accountIdent: next,
-  }).toLowerCase();
-  const clash = listUsers().find(
-    (u) => u.id !== id && effectiveIdent(u).toLowerCase() === candidate,
-  );
-  if (clash) {
-    res.status(409).json({ error: `that ident is already in use by ${clash.username}` });
-    return;
+  // exists to remove, so refuse to CREATE one. Compared case-insensitively (an
+  // operator reading a ban list won't distinguish Bob from bob) and against
+  // every other account's EFFECTIVE ident, not just the stored overrides —
+  // most accounts derive theirs from the username.
+  //
+  // Clearing is exempt. The cleared value is the account's own default, which
+  // the admin never chose and can't edit, so refusing it would trap the
+  // override permanently — there'd be no way back to the default once some
+  // other account's ident happened to match it. A duplicate that arises this
+  // way is reported by identConflict above rather than made unfixable here.
+  if (next) {
+    const candidate = deriveIdent({
+      nodeMode: false,
+      accountUsername: target.username,
+      accountIdent: next,
+    }).toLowerCase();
+    const clash = listUsers().find(
+      (u) => u.id !== id && effectiveIdent(u).toLowerCase() === candidate,
+    );
+    if (clash) {
+      res.status(409).json({ error: `that ident is already in use by ${clash.username}` });
+      return;
+    }
   }
   setUserIdent(id, next);
   const updated = findUserById(id)!;
