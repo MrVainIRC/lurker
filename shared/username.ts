@@ -18,24 +18,40 @@
 //     identd ident (shared/ident.ts), which allows neither spaces nor a case
 //     distinction — so a space in a username was already being silently dropped
 //     somewhere downstream.
-//   isValidLoginUsername — the rule for a name being SUBMITTED at login. Accepts
-//     anything that could ever have been created, spaces included, because
-//     accounts predating the tightening are grandfathered: they keep their name
-//     and keep logging in with it. Rejecting them here would lock a real user
-//     out of their own instance with no recourse but SQL, which is a far worse
-//     outcome than an inelegant legacy username.
+//   isValidLoginUsername — the rule for a name being SUBMITTED at login. A pure
+//     shape guard: non-empty, not absurdly long, no charset rule at all. It
+//     cannot assume any charset, because the DB may hold names no validator ever
+//     saw (see the note on it below). Accounts predating the tightening are
+//     grandfathered — they keep their name and keep logging in with it — and
+//     rejecting one here would lock a real user out of their own instance with
+//     no recourse but SQL, which is far worse than an inelegant legacy username.
 
 export const MAX_USERNAME_LENGTH = 64;
 
 // Tightened rule for new accounts: letters, digits, and . _ - (no spaces).
-// The body is exported as a string too, for the signup forms' `pattern`
-// attribute — so the browser hint and the server's 400 can't drift apart.
-export const USERNAME_PATTERN = '[A-Za-z0-9_.\\-]+';
-const USERNAME_CHARS = new RegExp(`^${USERNAME_PATTERN}$`);
+const USERNAME_CHARS_SOURCE = '[A-Za-z0-9_.\\-]+';
+const USERNAME_CHARS = new RegExp(`^${USERNAME_CHARS_SOURCE}$`);
 
-// The pre-tightening charset — the same set plus the space. Anything already in
-// the DB matches this, so it's exactly what login has to keep accepting.
-const LEGACY_USERNAME_CHARS = /^[A-Za-z0-9_.\- ]+$/;
+// The same rule as a string, for the signup forms' `pattern` attribute, so the
+// browser hint and the server's 400 can't drift apart. It tolerates OUTER
+// whitespace because the two are tested against different things: the server
+// trims before validating, while the browser tests `pattern` against the raw
+// field value — without the `\s*` a pasted " brad " would be blocked in the
+// browser with "please match the requested format" even though the server
+// accepts it. Inner whitespace is still refused by both.
+export const USERNAME_PATTERN = `\\s*${USERNAME_CHARS_SOURCE}\\s*`;
+
+// A login prompt only needs a SHAPE guard: the SQL is parameterized, so its
+// only job is to reject junk before a pointless lookup. It deliberately applies
+// NO charset or length rule, because it cannot know what's in the DB. Accounts
+// seeded before 2026-05-09 (d834475) came in through INITIAL_USERNAME with no
+// validation whatsoever, so an early self-host may hold 'björn', an email
+// address, or a 70-character name — and a login guard that enforced today's
+// charset would 400 those users at their own login prompt, which is the exact
+// lockout the grandfathering exists to prevent. There is no rename route, so
+// the only recourse would be SQL. The cap here is a payload sanity bound, NOT a
+// username rule.
+const MAX_SUBMITTED_USERNAME_LENGTH = 512;
 
 function inBounds(name: unknown): string | null {
   if (typeof name !== 'string') return null;
@@ -51,14 +67,15 @@ export function isValidUsername(name: unknown): boolean {
 }
 
 /**
- * May this name be submitted at a login prompt? Looser than isValidUsername on
- * purpose — grandfathered accounts must still be able to authenticate. This is
- * only an input-shape guard (the SQL is parameterized either way), so being
- * permissive here costs nothing.
+ * May this name be submitted at a login prompt? Deliberately far looser than
+ * isValidUsername — see MAX_SUBMITTED_USERNAME_LENGTH above for why it can't
+ * enforce a charset. Rejects only what could never identify any account: a
+ * non-string, nothing but whitespace, or an absurdly long payload.
  */
 export function isValidLoginUsername(name: unknown): boolean {
-  const trimmed = inBounds(name);
-  return trimmed !== null && LEGACY_USERNAME_CHARS.test(trimmed);
+  if (typeof name !== 'string') return false;
+  const trimmed = name.trim();
+  return trimmed.length >= 1 && trimmed.length <= MAX_SUBMITTED_USERNAME_LENGTH;
 }
 
 /**

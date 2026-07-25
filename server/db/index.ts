@@ -940,6 +940,15 @@ try {
        ON users(username COLLATE NOCASE)`,
   );
 } catch (err) {
+  // ONLY the duplicate-pair case is survivable. A blanket catch would also
+  // swallow a transient SQLITE_BUSY / SQLITE_BUSY_SNAPSHOT — the exact boot
+  // failure a Litestream-backed cell has hit before (fix #603) — silently
+  // leaving the DB-level backstop absent for the life of the process while
+  // sending the operator hunting for a case-twin pair that doesn't exist.
+  // Anything else rethrows and fails the boot like every other statement in
+  // this file, so a restart retries it.
+  const code = (err as { code?: string }).code;
+  if (code !== 'SQLITE_CONSTRAINT_UNIQUE' && code !== 'SQLITE_CONSTRAINT_PRIMARYKEY') throw err;
   console.warn(
     '[db] case-insensitive username index not created — two accounts differ only by case. ' +
       'They keep working; rename or delete one to enforce it at the DB level. ' +
