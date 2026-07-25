@@ -183,4 +183,19 @@ describe('connect burst terminator (#635)', () => {
     expect(frames.filter((f) => f.kind === 'backlog-complete')).toHaveLength(2);
     expect(frames.at(-1)!.kind).toBe('backlog-complete');
   });
+
+  // #627: the cap has to arrive on the socket every client already opens. A
+  // client that has to make a REST call to learn it will hardcode a guess
+  // instead — which is exactly what lurker-ios did.
+  it('carries the effective upload cap on the snapshot frame', async () => {
+    const { setUserSetting } = await import('../db/settings.js');
+    setUserSetting(userId, 'uploads.image.max_upload_mb', 42);
+    try {
+      const [snapshot] = (await collectBurst()) as unknown as [{ maxUploadBytes?: number }];
+      expect(snapshot.maxUploadBytes).toBe(42 * 1024 * 1024);
+    } finally {
+      const { deleteUserSetting } = await import('../db/settings.js');
+      deleteUserSetting(userId, 'uploads.image.max_upload_mb');
+    }
+  });
 });

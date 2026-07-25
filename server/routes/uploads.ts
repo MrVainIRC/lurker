@@ -10,8 +10,13 @@ import { requireAuth } from '../middleware/auth.js';
 import { resolveDataDir } from '../utils/dataDir.js';
 import { randomId } from '../services/uploadProviders/objectKey.js';
 import { bufferSource, fileSource, type UploadSource } from '../services/uploadProviders/source.js';
-import { getUserSettings } from '../db/settings.js';
-import { defaultsAsObject } from '../services/settingsRegistry.js';
+import {
+  effectiveSettings,
+  userCapMb,
+  clampUploadCapMb,
+  effectiveUploadCapMb,
+  effectiveUploadCapBytes,
+} from '../services/uploadLimits.js';
 import * as imagePipeline from '../services/imagePipeline.js';
 import { thumbnailFormat } from '../services/thumbnailFormat.js';
 import { makeUploadProgress } from '../services/uploadProgress.js';
@@ -44,14 +49,6 @@ import { reportUploadSoon } from '../services/moderationReport.js';
 
 const router = Router();
 router.use(requireAuth);
-
-// Resolve effective settings with registry defaults filled in. The per-user
-// image-pipeline settings (size cap, max dimension, JPEG quality) are the
-// fallback used when the resolved uploader carries no operator-baked policy caps
-// — i.e. every self-host uploader. Untyped (JS module) → Record<string, unknown>.
-function effectiveSettings(userId: number): Record<string, unknown> {
-  return { ...defaultsAsObject(), ...getUserSettings(userId) };
-}
 
 // The absolute origin (scheme + host) a `local` upload's relative URL is prefixed
 // with so the pasted link works from IRC. PUBLIC_BASE_URL wins (explicit,
@@ -123,41 +120,10 @@ function providerErrorStatus(e: { code?: string }): number {
 const TMP_DIR = path.join(resolveDataDir(), 'tmp', 'uploads');
 fs.mkdirSync(TMP_DIR, { recursive: true, mode: 0o700 });
 
-// The registry's own ceiling; a per-user cap can't exceed it, so neither can multer.
-const MAX_CAP_MB = 200;
-
-/** The user's size cap. effectiveSettings() has already merged the registry default
- *  in, so this reads it from ONE place — a second hardcoded default here would be a
- *  duplicate that quietly disagrees the next time the registry's changes. */
-function userCapMb(settings: Record<string, unknown>): number {
-  const n = Number(settings['uploads.image.max_upload_mb']);
-  return Number.isFinite(n) && n > 0 ? n : MAX_CAP_MB;
-}
-
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, TMP_DIR),
   filename: (_req, _file, cb) => cb(null, `up-${randomId()}`),
 });
-
-/** The cap to hand multer, resolved BEFORE a byte is read (requireAuth already
- *  ran, so we know who's asking). The old code gave multer a flat 200 MB and let
- *  the handler reject afterwards — which meant a user capped at 25 MB could still
- *  make the server ingest 200 MB before being told no. The per-upload `uploaderId`
- *  override lives in the multipart body, which isn't parsed yet, so this resolves
- *  the DEFAULT uploader's cap; the handler re-checks against the actually-resolved
- *  uploader, which is what catches an override with a tighter policy cap. */
-function capMbFor(userId: number, isAdmin: boolean): number {
-  const settings = effectiveSettings(userId);
-  const userCap = userCapMb(settings);
-  let cap = userCap;
-  try {
-    cap = resolveUploader({ userId, isAdmin, requestedId: null }).policy.maxMb ?? userCap;
-  } catch {
-    // No usable uploader → the handler will produce the real error. Fall back to
-    // the user's own cap so we still bound what we're willing to read.
-  }
-  return Math.max(1, Math.min(cap, MAX_CAP_MB));
-}
 
 /** Best-effort removal of an upload's temp file. Tolerates ENOENT: the `local`
  *  driver RENAMES the temp file into its storage dir (zero copies), so by the time
@@ -199,8 +165,15 @@ export async function sweepTempUploads(maxAgeMs = 60 * 60 * 1000): Promise<numbe
   return removed;
 }
 
+// The cap handed to multer is resolved BEFORE a byte is read (requireAuth already
+// ran, so we know who's asking). The old code gave multer a flat 200 MB and let the
+// handler reject afterwards — which meant a user capped at 25 MB could still make
+// the server ingest 200 MB before being told no. The per-upload `uploaderId`
+// override lives in the multipart body, which isn't parsed yet, so this resolves the
+// DEFAULT uploader's cap; the handler re-checks against the actually-resolved
+// uploader, which is what catches an override with a tighter policy cap.
 const uploadToDisk = (req: Request, res: Response, next: NextFunction): void => {
-  const capMb = capMbFor(req.user!.id, req.user!.role === 'admin');
+  const capMb = effectiveUploadCapMb(req.user!.id, req.user!.role === 'admin');
   const handler = multer({
     storage,
     limits: { fileSize: capMb * 1024 * 1024, files: 1 },
@@ -281,8 +254,11 @@ router.post(
       const settings = effectiveSettings(req.user!.id);
       // Size cap: operator-baked policy (hosted locked uploader) wins; otherwise
       // the user's own setting. A tenant can't lift a policy cap because the
-      // policy is on the instance row, not their settings.
-      const maxMb = resolved.policy.maxMb ?? userCapMb(settings);
+      // policy is on the instance row, not their settings. Clamped to the
+      // instance's transport ceiling last (#627), so a body the proxy in front of
+      // us would have rejected anyway is refused with a real 413 rather than an
+      // edge-level connection reset.
+      const maxMb = clampUploadCapMb(resolved.policy.maxMb ?? userCapMb(settings));
       if (req.file.size > maxMb * 1024 * 1024) {
         res.status(413).json({ error: `file exceeds ${maxMb} MB` });
         return;
@@ -557,6 +533,10 @@ router.get('/', (req: Request, res: Response) => {
       return { ...rest, can_delete, ...(thumb ? { thumbnail_url: thumb } : {}) };
     }),
     providers: driverIds,
+    // The same number the snapshot advertises (#627), repeated here so a
+    // REST-only client browsing its uploads doesn't need the WebSocket to learn
+    // what it may send. Single source of truth, so the two can't drift.
+    maxUploadBytes: effectiveUploadCapBytes(req.user!.id, req.user!.role === 'admin'),
   });
 });
 

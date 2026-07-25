@@ -195,11 +195,12 @@ Authorization: Bearer <token>        (native; browsers ride the cookie)
 On every successful connect the server immediately sends a **burst of separate
 frames**, synchronously, in this order (`wsHub.ts:1828`):
 
-1. `{kind:'snapshot', protocolVersion, networks:[…], globalIgnores:[…], cursor?}`
+1. `{kind:'snapshot', protocolVersion, maxUploadBytes, networks, globalIgnores, cursor?}`
    — full live state for every network (see §5.1). `cursor` (present only on a
    fresh connect) is the current global max message id: **seed your resume
    cursor from it**, because the shell backlogs that follow carry no rows and
-   would otherwise leave your cursor at 0.
+   would otherwise leave your cursor at 0. `maxUploadBytes` is the largest
+   upload this account may send right now — see §Uploads.
 2. `{kind:'draft-snapshot', drafts}` — saved per-buffer input drafts.
 3. `{kind:'bookmark-ids-snapshot', ids:[…]}` — bookmarked message ids.
 4. A `backlog` frame for the app-scoped **system buffer** (`networkId:null`,
@@ -490,7 +491,7 @@ a v1 client.
 
 | `kind`                                                                                                                                                                   | Payload                                                                                                                                                             | When                                               |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `snapshot`                                                                                                                                                               | `protocolVersion, networks[], globalIgnores[], cursor?`                                                                                                             | Connect burst / gap-fill                           |
+| `snapshot`                                                                                                                                                               | `protocolVersion, maxUploadBytes, networks[], globalIgnores[], cursor?`                                                                                             | Connect burst / gap-fill                           |
 | `draft-snapshot` / `bookmark-ids-snapshot` / `contacts-snapshot`                                                                                                         | `drafts` / `ids[]` / `contacts[]`                                                                                                                                   | Connect burst                                      |
 | `backlog-complete`                                                                                                                                                       | —                                                                                                                                                                   | Last frame of the burst; absence is proof (§4.3)   |
 | `backlog`                                                                                                                                                                | `networkId, target, events[], reset?, hasMoreOlder, joined, lastReadId, unread, highlights, highlightsCapped, clearedBeforeId, clearedAt, speakers?, inputHistory?` | Burst, `open-buffer` reply, resume gap             |
@@ -733,7 +734,7 @@ form.
 | Endpoint         | Notes                                                                                                                                                                                                                                                                       |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `POST /`         | `multipart/form-data`, file field **`image`**; optional `uploaderId`, `progressToken` (≤64 chars — progress arrives as `upload-progress` WS frames). → `{id, url, mime, can_delete, thumbnail_url?}`. `413` over cap, `415` rejected type, `502` provider error (never 401) |
-| `GET /`          | `?before, limit, q, kind` → `{items, providers}`                                                                                                                                                                                                                            |
+| `GET /`          | `?before, limit, q, kind` → `{items, providers, maxUploadBytes}`                                                                                                                                                                                                            |
 | `GET /:id/thumb` | Binary thumbnail                                                                                                                                                                                                                                                            |
 | `DELETE /:id`    | `409` if not deletable                                                                                                                                                                                                                                                      |
 
@@ -741,6 +742,19 @@ form.
 secrets write-only). Standalone serves local files publicly at
 `GET /uploads/:key` (no auth, sandboxed CSP). Paste the returned `url` into a
 message — the server does the rest.
+
+**Size cap.** `maxUploadBytes` — on the `snapshot` frame and on `GET /api/uploads`
+— is the largest body this account may send, and the number to compress media
+against. **Do not hardcode a cap.** It is the smallest of three ceilings: the
+200 MB hard limit, the instance's declared transport limit (`LURKER_MAX_UPLOAD_MB`
+— what a CDN or reverse proxy in front of Lurker will pass), and the per-user or
+operator-baked uploader cap. Only the first is universal, so a self-hosted
+instance and a CDN-fronted one legitimately differ by a lot.
+
+Treat it as advisory, not a contract: it is resolved for the account's **default**
+uploader at connect time, so a per-upload `uploaderId` override with a tighter
+policy cap, or an operator changing the limit mid-session, is still settled by a
+`413` carrying the real number. Reconnecting re-reads it.
 
 ### DCC — `/api/dcc` (403 unless enabled for the account)
 
