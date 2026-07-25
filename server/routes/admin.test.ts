@@ -78,6 +78,81 @@ describe('GET /api/admin/users', () => {
     expect(usernames).toContain('admin-root');
     expect(usernames).toContain('admin-regular');
   });
+
+  it('reports each account’s ident, derived from the username by default (#643)', async () => {
+    const res = await adminAgent.get('/api/admin/users');
+    const row = res.body.users.find((u: User) => u.username === 'admin-regular');
+    expect(row.ident).toBeNull();
+    expect(row.effectiveIdent).toBe('admin-regular');
+    // Whether an ident daemon is actually running, so the pane can say the
+    // idents are inert rather than implying networks see them.
+    expect(res.body.identdEnabled).toBe(false);
+  });
+});
+
+// The ident is an attribution handle for a shared IP, so it's assigned by the
+// admin and never chosen by the account it belongs to (#643).
+describe('PUT /api/admin/users/:id/ident', () => {
+  let target: User;
+
+  beforeAll(async () => {
+    target = (await import('../db/users.js')).createUser('ident-target');
+  });
+
+  async function identOf(id: number): Promise<{ ident: string | null; effectiveIdent: string }> {
+    const res = await adminAgent.get('/api/admin/users');
+    return res.body.users.find((u: { id: number }) => u.id === id);
+  }
+
+  it('403 for a non-admin — a user cannot set their own ident', async () => {
+    const res = await userAgent.put(`/api/admin/users/${user.id}/ident`).send({ ident: 'chosen' });
+    expect(res.status).toBe(403);
+    expect((await identOf(user.id)).effectiveIdent).toBe('admin-regular');
+  });
+
+  it('assigns an ident', async () => {
+    const res = await adminAgent.put(`/api/admin/users/${target.id}/ident`).send({ ident: 'itgt' });
+    expect(res.status).toBe(200);
+    expect(res.body.effectiveIdent).toBe('itgt');
+    expect(await identOf(target.id)).toMatchObject({ ident: 'itgt', effectiveIdent: 'itgt' });
+  });
+
+  it('clears back to the account-derived default on a blank value', async () => {
+    await adminAgent.put(`/api/admin/users/${target.id}/ident`).send({ ident: 'itgt' });
+    const res = await adminAgent.put(`/api/admin/users/${target.id}/ident`).send({ ident: '' });
+    expect(res.status).toBe(200);
+    expect(await identOf(target.id)).toMatchObject({
+      ident: null,
+      effectiveIdent: 'ident-target',
+    });
+  });
+
+  it('rejects an ident an ircd would choke on, rather than reshaping it', async () => {
+    for (const ident of ['bob smith', 'bob@host', '-bob', 'a'.repeat(17)]) {
+      const res = await adminAgent.put(`/api/admin/users/${target.id}/ident`).send({ ident });
+      expect(res.status).toBe(400);
+    }
+    expect((await identOf(target.id)).ident).toBeNull();
+  });
+
+  it('409 on a collision with another account — two members must not share one ident', async () => {
+    // 'admin-regular' is another account's DERIVED ident, not a stored override:
+    // the check has to compare effective idents or most collisions slip through.
+    const res = await adminAgent
+      .put(`/api/admin/users/${target.id}/ident`)
+      .send({ ident: 'admin-regular' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/already in use by admin-regular/);
+  });
+
+  it('404 for an unknown id, 400 for a non-integer id', async () => {
+    expect(
+      (await adminAgent.put('/api/admin/users/999999/ident').send({ ident: 'x' })).status,
+    ).toBe(404);
+    expect((await adminAgent.put('/api/admin/users/abc/ident').send({ ident: 'x' })).status).toBe(
+      400,
+    );
+  });
 });
 
 describe('GET /api/admin/presence', () => {

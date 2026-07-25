@@ -4,11 +4,21 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
-import { listUsers, findUserById, deleteUser, countAdmins, setUserPaused } from '../db/users.js';
+import {
+  listUsers,
+  findUserById,
+  deleteUser,
+  countAdmins,
+  setUserPaused,
+  setUserIdent,
+} from '../db/users.js';
+import type { User } from '../db/users.js';
 import { createInvite, listInvites, deleteInvite, getInvite } from '../db/invites.js';
 import ircManager from '../services/ircManager.js';
 import { presenceDiagnostics } from '../services/wsHub.js';
+import { isIdentdEnabled, isOidentdFileEnabled } from '../services/identd.js';
 import { isNodeMode } from '../utils/edition.js';
+import { deriveIdent, isValidIdentOverride, MAX_IDENT_LENGTH } from '../utils/ident.js';
 import adminUploadersRouter from './adminUploaders.js';
 import adminNetworksRouter from './adminNetworks.js';
 
@@ -57,6 +67,14 @@ function originFromRequest(req: Request): string {
   return `${req.protocol}://${req.get('host')}`;
 }
 
+function effectiveIdent(u: User): string {
+  return deriveIdent({
+    nodeMode: isNodeMode(),
+    accountUsername: u.username,
+    accountIdent: u.ident,
+  });
+}
+
 router.get('/users', (_req: Request, res: Response) => {
   res.json({
     users: listUsers().map((u) => ({
@@ -66,7 +84,82 @@ router.get('/users', (_req: Request, res: Response) => {
       createdAt: u.created_at,
       lastSeenAt: u.last_seen_at,
       isPaused: !!u.is_paused,
+      // The stored override (null = derived from the username) alongside what
+      // the identd would actually answer, so the admin can see both without
+      // re-deriving the rule in the client.
+      ident: u.ident,
+      effectiveIdent: effectiveIdent(u),
     })),
+    // Whether either ident mode is running. When neither is, the idents above
+    // are inert — the UI says so rather than implying networks see them. (The
+    // other half of the story, "may these be edited at all", is node edition,
+    // which the client already knows from /api/config.)
+    identdEnabled: isIdentdEnabled() || isOidentdFileEnabled(),
+  });
+});
+
+// Assign (or clear, with null/'') an account's ident — the name a network sees
+// in nick!ident@host for that member (#643). Admin-only on purpose: on a
+// multi-user instance the ident is what lets an operator ban or blame ONE
+// member of a shared IP, so a member who could pick their own could wear a
+// neighbour's identity or churn away from a ban.
+router.put('/users/:id/ident', (req: Request, res: Response) => {
+  if (isNodeMode()) {
+    // Hosted idents are `lu<controlPlaneAccountId>` — fleet-unique and stable
+    // across cell moves. A cell-local override would break both.
+    res.status(409).json({ error: 'the ident is managed by the control plane in node edition' });
+    return;
+  }
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: 'invalid id' });
+    return;
+  }
+  const target = findUserById(id);
+  if (!target) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  const raw = req.body?.ident;
+  if (raw != null && typeof raw !== 'string') {
+    res.status(400).json({ error: 'ident must be a string' });
+    return;
+  }
+  const value = (raw ?? '').trim();
+  if (value && !isValidIdentOverride(value)) {
+    res.status(400).json({
+      error: `ident must start with a letter or number and use only letters, numbers, . _ - (max ${MAX_IDENT_LENGTH})`,
+    });
+    return;
+  }
+  const next = value || null;
+  // Two members answering the same ident is the exact ambiguity the identd
+  // exists to remove, so refuse the collision. Compared case-insensitively
+  // (an operator reading a ban list won't distinguish Bob from bob) and
+  // against every other account's EFFECTIVE ident, not just the stored
+  // overrides — most accounts derive theirs from the username.
+  const candidate = deriveIdent({
+    nodeMode: false,
+    accountUsername: target.username,
+    accountIdent: next,
+  }).toLowerCase();
+  const clash = listUsers().find(
+    (u) => u.id !== id && effectiveIdent(u).toLowerCase() === candidate,
+  );
+  if (clash) {
+    res.status(409).json({ error: `that ident is already in use by ${clash.username}` });
+    return;
+  }
+  setUserIdent(id, next);
+  const updated = findUserById(id)!;
+  // Deliberately no reconnect: the ircd asks for the ident once, during
+  // registration, so live connections keep the one they registered with until
+  // they next connect. Saying so beats silently doing nothing.
+  res.json({
+    ok: true,
+    ident: updated.ident,
+    effectiveIdent: effectiveIdent(updated),
+    appliesOnNextConnect: true,
   });
 });
 

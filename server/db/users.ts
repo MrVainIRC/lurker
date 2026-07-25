@@ -16,30 +16,26 @@ export interface User {
   // 0 | 1. Paused accounts are disconnected from IRC and barred from
   // reconnecting/sending, but retain read-only access to their history.
   is_paused: number;
+  // Admin-set identd override (#643), NULL for "derive from the username".
+  // Never writable by the account it belongs to — see utils/ident.ts.
+  ident: string | null;
 }
 
+// One list, so a column added to `User` can't reach one lookup and miss another.
+const USER_COLUMNS = 'id, username, role, created_at, last_seen_at, is_paused, ident';
+
 export function findUserByUsername(username: string): User | undefined {
-  return db
-    .prepare(
-      'SELECT id, username, role, created_at, last_seen_at, is_paused FROM users WHERE username = ?',
-    )
-    .get(username) as User | undefined;
+  return db.prepare(`SELECT ${USER_COLUMNS} FROM users WHERE username = ?`).get(username) as
+    | User
+    | undefined;
 }
 
 export function findUserById(id: number | bigint): User | undefined {
-  return db
-    .prepare(
-      'SELECT id, username, role, created_at, last_seen_at, is_paused FROM users WHERE id = ?',
-    )
-    .get(id) as User | undefined;
+  return db.prepare(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`).get(id) as User | undefined;
 }
 
 export function listUsers(): User[] {
-  return db
-    .prepare(
-      'SELECT id, username, role, created_at, last_seen_at, is_paused FROM users ORDER BY id',
-    )
-    .all() as User[];
+  return db.prepare(`SELECT ${USER_COLUMNS} FROM users ORDER BY id`).all() as User[];
 }
 
 // Throttled to once per minute via the WHERE clause so a busy client (many
@@ -96,6 +92,15 @@ export function setUserPaused(userId: number, paused: boolean): boolean {
   const info = db
     .prepare('UPDATE users SET is_paused = ? WHERE id = ?')
     .run(paused ? 1 : 0, userId);
+  return info.changes > 0;
+}
+
+// Set (or clear, with null) the admin-assigned identd override. Takes effect on
+// the account's next IRC connect: the ident is answered once, during the ircd's
+// registration handshake, so rewriting the live identd map would change nothing
+// the servers have already recorded. Returns false only when no row matched.
+export function setUserIdent(userId: number, ident: string | null): boolean {
+  const info = db.prepare('UPDATE users SET ident = ? WHERE id = ?').run(ident, userId);
   return info.changes > 0;
 }
 

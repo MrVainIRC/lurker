@@ -15,45 +15,100 @@
       Everyone with an account on this instance. The last admin and your own account can't be
       deleted.
     </p>
+    <p v-if="!config.isNode" class="section-desc">
+      Each account's <strong>ident</strong> is the name networks see in
+      <code>nick!ident@host</code>. Everyone here shares this server's IP, so it's what lets an
+      operator tell your members apart — assigned by you, not chosen by them. It defaults to the
+      account name.
+    </p>
+    <p v-if="adminStore.usersLoaded && !adminStore.identdEnabled" class="muted small">
+      No ident daemon is running on this server, so networks can't ask for these idents yet — set
+      <code>LURKER_IDENTD_ENABLED</code> (or <code>LURKER_OIDENTD_FILE</code>) to turn one on.
+    </p>
     <p v-if="adminError" class="error inline">{{ adminError }}</p>
 
     <ul v-if="users.length" class="device-list">
-      <li v-for="u in users" :key="u.id" class="device user-row">
+      <li v-for="u in users" :key="u.id" class="device stacked user-row">
         <span class="ua">
           {{ u.username }}
           <span v-if="u.role === 'admin'" class="role-tag">admin</span>
           <span v-if="u.isPaused" class="paused-tag">paused</span>
+          <span
+            v-if="u.effectiveIdent"
+            class="ident-tag"
+            :title="
+              u.ident
+                ? 'ident assigned by an admin'
+                : 'ident derived from the account name — networks see this in nick!ident@host'
+            "
+          >
+            ident {{ u.effectiveIdent }}
+          </span>
+          <span
+            class="last-seen"
+            :title="`joined ${u.createdAt}${u.lastSeenAt ? ` · last seen ${u.lastSeenAt}` : ''}`"
+          >
+            <template v-if="u.lastSeenAt">last seen {{ formatRelative(u.lastSeenAt) }}</template>
+            <template v-else>joined {{ formatRelative(u.createdAt) }}</template>
+          </span>
         </span>
-        <span
-          class="last-seen"
-          :title="`joined ${u.createdAt}${u.lastSeenAt ? ` · last seen ${u.lastSeenAt}` : ''}`"
-        >
-          <template v-if="u.lastSeenAt">last seen {{ formatRelative(u.lastSeenAt) }}</template>
-          <template v-else>joined {{ formatRelative(u.createdAt) }}</template>
-        </span>
-        <button
-          v-if="!config.isNode"
-          class="link"
-          :disabled="u.id === auth.user?.id || adminBusy"
-          :title="
-            u.id === auth.user?.id
-              ? 'cannot pause yourself'
-              : u.isPaused
-                ? 'resume — reconnect to IRC'
-                : 'pause — disconnect from IRC and make read-only'
-          "
-          @click="u.isPaused ? onResumeUser(u) : onPauseUser(u)"
-        >
-          {{ u.isPaused ? 'resume' : 'pause' }}
-        </button>
-        <button
-          class="link danger"
-          :disabled="u.id === auth.user?.id || adminBusy"
-          :title="u.id === auth.user?.id ? 'cannot delete yourself' : 'delete user'"
-          @click="onDeleteUser(u)"
-        >
-          delete
-        </button>
+
+        <!-- Inline ident editor for this row. Empty input = clear the override
+             and go back to deriving it from the account name. -->
+        <form v-if="editingIdentFor === u.id" class="ident-edit" @submit.prevent="onSaveIdent(u)">
+          <label>
+            <span>ident</span>
+            <input
+              v-model="identDraft"
+              :placeholder="u.username"
+              maxlength="16"
+              spellcheck="false"
+              autocapitalize="off"
+            />
+          </label>
+          <button type="submit" class="link" :disabled="adminBusy">save</button>
+          <button type="button" class="link" :disabled="adminBusy" @click="editingIdentFor = null">
+            cancel
+          </button>
+          <small class="muted">
+            Leave blank to use the account name. Applies the next time they connect.
+          </small>
+        </form>
+
+        <div class="row-actions">
+          <button
+            v-if="!config.isNode"
+            class="link"
+            :disabled="adminBusy"
+            title="set the ident networks see for this account"
+            @click="onEditIdent(u)"
+          >
+            ident
+          </button>
+          <button
+            v-if="!config.isNode"
+            class="link"
+            :disabled="u.id === auth.user?.id || adminBusy"
+            :title="
+              u.id === auth.user?.id
+                ? 'cannot pause yourself'
+                : u.isPaused
+                  ? 'resume — reconnect to IRC'
+                  : 'pause — disconnect from IRC and make read-only'
+            "
+            @click="u.isPaused ? onResumeUser(u) : onPauseUser(u)"
+          >
+            {{ u.isPaused ? 'resume' : 'pause' }}
+          </button>
+          <button
+            class="link danger"
+            :disabled="u.id === auth.user?.id || adminBusy"
+            :title="u.id === auth.user?.id ? 'cannot delete yourself' : 'delete user'"
+            @click="onDeleteUser(u)"
+          >
+            delete
+          </button>
+        </div>
       </li>
     </ul>
     <p v-else-if="adminStore.usersLoaded" class="muted small">No users.</p>
@@ -70,14 +125,40 @@ import { formatRelative } from '../../utils/timestamp.js';
 
 const auth = useAuthStore();
 const adminStore = useAdminStore();
-// Pause/resume is a self-hosted control only — in node edition the control plane
-// owns account state, so the buttons are hidden.
+// Pause/resume and the ident are self-hosted controls only — in node edition the
+// control plane owns account state and derives idents from the hosted account id,
+// so those buttons are hidden (their routes 409 there anyway).
 const config = useConfigStore();
 
 const users = computed(() => adminStore.users);
 
 const adminError = ref('');
 const adminBusy = ref(false);
+
+// id of the row whose ident is being edited (one at a time), plus its draft.
+const editingIdentFor = ref<number | null>(null);
+const identDraft = ref('');
+
+function onEditIdent(user: AdminUser) {
+  adminError.value = '';
+  // Seed with the override only — showing the derived value would make "save"
+  // silently pin an ident that's currently just tracking the account name.
+  identDraft.value = user.ident || '';
+  editingIdentFor.value = editingIdentFor.value === user.id ? null : user.id;
+}
+
+async function onSaveIdent(user: AdminUser) {
+  adminError.value = '';
+  adminBusy.value = true;
+  try {
+    await adminStore.setUserIdent(user.id, identDraft.value.trim() || null);
+    editingIdentFor.value = null;
+  } catch (e: any) {
+    adminError.value = e.message || 'failed to set ident';
+  } finally {
+    adminBusy.value = false;
+  }
+}
 
 onMounted(() => {
   // Refetch on every pane activation. The store cache stays correct for THIS
@@ -136,18 +217,44 @@ async function onResumeUser(user: AdminUser) {
 
 <style src="../settings-panes/panes.css"></style>
 <style scoped>
+/* Vue's whitespace: 'condense' drops the whitespace-only text nodes between
+   these spans, so the gap has to come from flex — same workaround as
+   ApiTokensPane's .ua. */
+.user-row .ua {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+.user-row .ident-tag {
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  padding: 0 var(--space-2);
+}
+.user-row .ident-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+.user-row .ident-edit label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+.user-row .ident-edit input {
+  width: 12ch;
+}
 .user-row .role-tag {
   color: var(--accent);
   border: 1px solid var(--accent);
   padding: 0 var(--space-2);
-  margin-left: var(--space-3);
   text-transform: uppercase;
 }
 .user-row .paused-tag {
   color: var(--warn);
   border: 1px solid var(--warn);
   padding: 0 var(--space-2);
-  margin-left: var(--space-3);
   text-transform: uppercase;
 }
 </style>

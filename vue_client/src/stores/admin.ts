@@ -12,6 +12,10 @@ export interface AdminUser {
   createdAt: string;
   lastSeenAt?: string | null;
   isPaused?: boolean;
+  /** Admin-assigned identd override; null means "derived from the username". */
+  ident?: string | null;
+  /** What the identd actually answers for this account (#643). */
+  effectiveIdent?: string;
 }
 
 export interface AdminInvite {
@@ -43,6 +47,9 @@ export type AdminNetworkPresetInput = Omit<AdminNetworkPreset, 'id' | 'position'
 export const useAdminStore = defineStore('admin', {
   state: () => ({
     users: [] as AdminUser[],
+    // Whether an ident daemon is actually running (built-in identd or the
+    // oidentd file). False makes the per-user idents inert — the pane says so.
+    identdEnabled: false,
     invites: [] as AdminInvite[],
     uploaders: [] as AdminUploader[],
     uploaderDrivers: [] as UploaderDriver[],
@@ -74,12 +81,13 @@ export const useAdminStore = defineStore('admin', {
       const seq = ++this.usersFetchSeq;
       this.error = '';
       try {
-        const { users } = await api('/api/admin/users');
+        const { users, identdEnabled } = await api('/api/admin/users');
         // A newer fetch or a local mutation superseded this GET while it was in
         // flight — its payload is stale, so drop it rather than clobber the
         // fresher state.
         if (seq !== this.usersFetchSeq) return;
         this.users = users || [];
+        this.identdEnabled = !!identdEnabled;
         this.usersLoaded = true;
       } catch (e: any) {
         if (seq !== this.usersFetchSeq) return;
@@ -104,6 +112,19 @@ export const useAdminStore = defineStore('admin', {
       this.usersFetchSeq++;
       const u = this.users.find((x) => x.id === id);
       if (u) u.isPaused = false;
+    },
+    // Pass null (or '') to fall back to deriving the ident from the username.
+    // Patched locally rather than refetched: the response carries the resolved
+    // pair, and a refetch here would race the pane's own mount fetch.
+    async setUserIdent(id: number, ident: string | null) {
+      const res = await api(`/api/admin/users/${id}/ident`, { method: 'PUT', body: { ident } });
+      this.usersFetchSeq++;
+      const u = this.users.find((x) => x.id === id);
+      if (u) {
+        u.ident = res.ident ?? null;
+        u.effectiveIdent = res.effectiveIdent;
+      }
+      return res as { ident: string | null; effectiveIdent: string };
     },
     async fetchInvites() {
       const seq = ++this.invitesFetchSeq;
