@@ -212,6 +212,33 @@ class IrcManager extends EventEmitter {
     return { ok: true };
   }
 
+  /**
+   * connectGate for the auto-reconnect path, plus the bookkeeping a refusal
+   * implies (#616).
+   *
+   * Dropping the connection from the map is the load-bearing half. A refused
+   * retry leaves an IrcConnection that is disconnected and will never retry
+   * again — and startNetwork is a documented no-op when a connection object
+   * already exists, "even if it's in a disconnected state" (see restartNetwork).
+   * Leaving it there would mean the network never comes back after the condition
+   * clears: resumeUser → initForUser → startNetwork would find the corpse and
+   * return it, and the /connect route would answer `ok: true` having done
+   * nothing. That would trade #616's "reconnect resurrects a forbidden
+   * connection" for a worse "connection never returns after unpause".
+   *
+   * Deleting here (before the connection publishes its refusal) is safe: the
+   * event path is the onEvent closure, not a map lookup, so the client still
+   * receives the error and the terminal 'disconnected' state.
+   */
+  private gateReconnect(
+    userId: number,
+    networkId: number,
+  ): { ok: true } | { ok: false; reason: string } {
+    const gate = this.connectGate(userId, networkId);
+    if (!gate.ok) this.connectionsForUser(userId).delete(networkId);
+    return gate;
+  }
+
   startNetwork(
     userId: number,
     networkId: number,
@@ -229,7 +256,7 @@ class IrcManager extends EventEmitter {
       // #616: the retry controller asks this before each attempt opens a socket,
       // so a reconnect re-clears the same gates the initial connect did. Read
       // live (not captured), because pause/lockdown can change mid-backoff.
-      reconnectGate: () => this.connectGate(userId, networkId),
+      reconnectGate: () => this.gateReconnect(userId, networkId),
     });
     this.connectionsForUser(userId).set(networkId, conn);
     // Seed self-presence from the per-user truth before the IRC handshake. The

@@ -1460,6 +1460,30 @@ describe('auto-reconnect controller', () => {
       expect(conn.connect).not.toHaveBeenCalled();
     });
 
+    // A gate that THROWS is not a gate that refuses. It reads the DB, so
+    // SQLITE_BUSY or a closed handle can take it out — and connectScheduler only
+    // console.errors a throwing task, with the backoff timer already spent. If
+    // this escaped, the network would sit on "Reconnecting…" with nothing left
+    // to fire it.
+    it('re-arms rather than stranding the network when the gate throws', () => {
+      vi.useFakeTimers();
+      let throws = true;
+      const { conn } = makeGatedConn('rc-gate-throws', () => {
+        if (throws) throw new Error('SQLITE_BUSY: database is locked');
+        return { ok: true };
+      });
+      conn.client.emit('close', true);
+      // Bounded advance, not runAllTimers: a re-arming ladder never drains.
+      vi.advanceTimersByTime(5 * 60 * 1000);
+      // The failed reads cost attempts, not the ladder itself.
+      expect(conn.connect).not.toHaveBeenCalled();
+      expect(conn.state).toBe('reconnecting');
+
+      throws = false;
+      vi.advanceTimersByTime(5 * 60 * 1000);
+      expect(conn.connect).toHaveBeenCalledTimes(1);
+    });
+
     it('stops the ladder — a refusal does not schedule another attempt', () => {
       vi.useFakeTimers();
       const { conn } = makeGatedConn('rc-gate-stops', () => ({
@@ -1488,64 +1512,80 @@ describe('auto-reconnect controller', () => {
     ).toBe(true);
   });
 
-  it('stops (no reconnect) on a hard SASL authentication failure', () => {
+  // Was "stops on a hard SASL authentication failure" — stopping on the FIRST
+  // one is the behavior #617 changed, because a rejection the server didn't drop
+  // us for would kill an unrelated later drop's reconnect. The intent it was
+  // written for (bad credentials must not retry forever) is unchanged and still
+  // asserted here; only the count moved.
+  it('stops after a hard SASL authentication failure repeats', () => {
     vi.useFakeTimers();
     const { conn, events } = makeConn('rc-sasl');
-    conn.client.emit('sasl failed', { reason: 'fail' });
-    conn.client.emit('close', true);
-    vi.runAllTimers();
-    expect(conn.connect).not.toHaveBeenCalled();
+    for (let i = 0; i < 3; i += 1) {
+      conn.client.emit('sasl failed', { reason: 'fail' });
+      conn.client.emit('close', true);
+      vi.runAllTimers();
+    }
+    // Two retries, then the ladder ends — bounded, not a failed-login hammer.
+    expect(conn.connect).toHaveBeenCalledTimes(2);
     expect(
       events.some((e) => e.type === 'error' && /SASL authentication failed/i.test(String(e.text))),
     ).toBe(true);
   });
 
-  // #617: the window that made the conservative policy wrong. On a network where
-  // SASL is OPTIONAL the server doesn't drop us for a failed auth — so a socket
-  // that dies much later died of something else (a stalled registration timing
-  // out, a network blip) and must get the ordinary backoff ladder. Before this,
-  // that unrelated drop inherited the SASL flag and killed reconnect forever.
-  it('does not blame a much-later socket close on an earlier SASL failure', () => {
+  // #617: a single rejection is not proof the credentials killed THIS socket. On
+  // a network where SASL is optional the server keeps us, so a later drop (a
+  // stalled registration timing out, a blip) is unrelated and must still retry —
+  // before this, that drop inherited the flag and killed reconnect forever.
+  it('does not give up on the first SASL failure', () => {
     vi.useFakeTimers();
-    const { conn } = makeConn('rc-sasl-stale');
+    const { conn } = makeConn('rc-sasl-first');
     conn.client.emit('sasl failed', { reason: 'fail' });
-    // The connection lived on well past the handshake — proof the server did not
-    // drop us for the rejection.
-    vi.advanceTimersByTime(60_000);
     conn.client.emit('close', true);
     vi.runAllTimers();
     expect(conn.connect).toHaveBeenCalledTimes(1);
   });
 
-  // The other half: a server that REQUIRES SASL drops the link as part of the
-  // handshake, and retrying that is a fast failed-login hammer. Still terminal.
-  it('still stops when the close follows the SASL failure immediately', () => {
+  // The optional-SASL recovery path the streak exists to protect: registering
+  // unauthenticated proves the credentials aren't fatal here, so the count starts
+  // over and a much later drop is still just a drop.
+  it('resets the streak when registration succeeds despite repeated SASL failures', () => {
     vi.useFakeTimers();
-    const { conn } = makeConn('rc-sasl-prompt');
+    const { conn } = makeConn('rc-sasl-reset');
+    (conn.client as unknown as { options: unknown }).options = {
+      ping_interval: 0,
+      ping_timeout: 0,
+    };
+    for (let i = 0; i < 2; i += 1) {
+      conn.client.emit('sasl failed', { reason: 'fail' });
+      conn.client.emit('close', true);
+      vi.runAllTimers();
+    }
+    conn.client.emit('registered', { nick: 'nick' });
+
+    // A third failure now starts a fresh streak rather than tipping the old one.
     conn.client.emit('sasl failed', { reason: 'fail' });
-    vi.advanceTimersByTime(200);
     conn.client.emit('close', true);
     vi.runAllTimers();
-    expect(conn.connect).not.toHaveBeenCalled();
+    expect(conn.connect).toHaveBeenCalledTimes(3);
   });
 
-  // A rejection that demonstrably did NOT kill its own socket must not sit around
-  // waiting to be blamed for the NEXT one.
+  // A rejection that didn't kill its own socket must not linger to be blamed for
+  // a later one.
   it('consumes the pending SASL failure at the close it survived', () => {
     vi.useFakeTimers();
     const { conn } = makeConn('rc-sasl-consumed');
     conn.client.emit('sasl failed', { reason: 'fail' });
-    vi.advanceTimersByTime(60_000);
-    conn.client.emit('close', true); // transient → reconnects
+    conn.client.emit('close', true);
     vi.runAllTimers();
     expect(conn.connect).toHaveBeenCalledTimes(1);
 
-    // A second drop, immediately after: with the flag consumed this is transient
-    // too. If it had lingered, this close would land inside the window relative
-    // to nothing and stop reconnection dead.
+    // Two further drops with no new SASL failure: nothing pending to promote, so
+    // both are ordinary transients even though the streak sits at 1.
     conn.client.emit('close', true);
     vi.runAllTimers();
-    expect(conn.connect).toHaveBeenCalledTimes(2);
+    conn.client.emit('close', true);
+    vi.runAllTimers();
+    expect(conn.connect).toHaveBeenCalledTimes(3);
   });
 
   // A clean SASL abort is transient (server hiccup), not a credential problem —

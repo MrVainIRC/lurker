@@ -117,17 +117,25 @@ const DEFAULT_QUIT_MESSAGE = `Lurker ${APP_VERSION} (the truth is out there) htt
  */
 export type ReconnectGate = () => { ok: true } | { ok: false; reason: string };
 
-// How long after a SASL rejection a socket close is still attributable to it
-// (#617). A server that refuses your credentials drops the link as part of the
-// registration handshake — immediately, not minutes later. Past this window the
-// connection demonstrably survived the rejection (the network's SASL is
-// optional), so a later close is an unrelated transient drop and must NOT
-// inherit the give-up flag. There is no wire signal that distinguishes the two,
-// so this is a heuristic; it is deliberately generous, because the cost of
-// guessing "terminal" wrongly is a connection that never comes back on its own,
-// while guessing "transient" wrongly costs one extra reconnect attempt that
-// fails the same way and re-arms the flag.
-const SASL_FAILURE_TERMINAL_WINDOW_MS = 15_000;
+// How many SASL rejections in a row, with no successful registration in
+// between, before auto-reconnect gives up (#617).
+//
+// A COUNT rather than a timer. The obvious discriminator — "did the socket die
+// right after the rejection?" — can't actually separate the two cases it needs
+// to: #617's scenario (optional SASL, registration stalls, socket times out
+// minutes later) and a required-SASL server that holds the socket open and lets
+// it time out are the same shape on the wire, so any wall-clock window
+// misclassifies one of them. Worse, a window that decides "transient" reproduces
+// its own timing on the next attempt, so it re-decides "transient" forever —
+// an unbounded failed-login ladder, which is precisely what the give-up flag
+// exists to prevent.
+//
+// A streak has no such failure mode. On an optional-SASL network the retry
+// registers unauthenticated and 'registered' resets the count, so #617's
+// transient drop recovers; on a network that genuinely refuses the credentials
+// nothing ever registers and the count runs out. Worst case is a bounded 3
+// attempts spread over the backoff ladder, which is not a hammer.
+const MAX_CONSECUTIVE_SASL_FAILURES = 3;
 
 const NON_PERSISTED_TYPES = new Set([
   'state',
@@ -603,7 +611,11 @@ export class IrcConnection {
   private reconnectAttempt: number;
   private intentionalDisconnect: boolean;
   private terminalDisconnect: string | null;
-  private pendingSaslFailure: { text: string; at: number } | null;
+  private pendingSaslFailure: string | null;
+  // Consecutive SASL rejections with no successful registration between them.
+  // Deliberately NOT reset by connect(): it has to survive the retry ladder, or
+  // it could never run out. Only 'registered' clears it.
+  private saslFailureStreak: number;
   private readonly reconnectGate: ReconnectGate | undefined;
 
   constructor({
@@ -702,6 +714,7 @@ export class IrcConnection {
     this.intentionalDisconnect = false;
     this.terminalDisconnect = null;
     this.pendingSaslFailure = null;
+    this.saslFailureStreak = 0;
     this.bind();
   }
 
@@ -1018,14 +1031,12 @@ export class IrcConnection {
         // used to sit there until 'registered' cleared it — and if registration
         // then stalled and the socket timed out FIRST, that unrelated transient
         // drop inherited the flag and killed auto-reconnect permanently.
-        // Promoted to terminal at 'close' only while the rejection is still
-        // plausibly the cause; see maybePromoteSaslFailure.
-        this.pendingSaslFailure = {
-          text: `SASL authentication failed${
-            reason && reason !== 'fail' ? ` (${reason})` : ''
-          } — check the network's account credentials`,
-          at: Date.now(),
-        };
+        // Promoted to terminal at 'close' once the streak runs out; see
+        // maybePromoteSaslFailure.
+        this.saslFailureStreak += 1;
+        this.pendingSaslFailure = `SASL authentication failed${
+          reason && reason !== 'fail' ? ` (${reason})` : ''
+        } — check the network's account credentials`;
       }
     });
 
@@ -1042,6 +1053,9 @@ export class IrcConnection {
       // auto-reconnect rather than inherit a stale give-up flag.
       this.terminalDisconnect = null;
       this.pendingSaslFailure = null;
+      // Registering is the proof the credentials aren't fatal here (the network's
+      // SASL is optional, or they started working) — so the streak starts over.
+      this.saslFailureStreak = 0;
       // Fresh registration means a new socket — forget per-connection send
       // state so speak permission is re-probed and stale attribution can't leak
       // across the reconnect (#283).
@@ -2582,8 +2596,16 @@ export class IrcConnection {
       // Classify an oper/server ban (K/G/Z/D-line) so the auto-reconnect
       // controller stops instead of hammering a server that's actively refusing
       // us. Only server-scoped bans qualify: a channel-scoped ban (474) carries a
-      // channel param and is routed inline below, so gate on its absence. The flag
-      // is consumed at 'close'; setting it here is harmless if the socket lives.
+      // channel param and is routed inline below, so gate on its absence.
+      //
+      // ⚠ Unlike the SASL flag (which is pending until 'close' proves it fatal,
+      // #617), this one is terminal the moment it's set and is cleared ONLY by
+      // 'registered' or a fresh connect(). So a ban-shaped error on a live,
+      // already-registered connection lingers, and the next unrelated transient
+      // drop inherits it and stops auto-reconnect for good — the same staleness
+      // #617 fixed for SASL. In practice a "Closing Link" ERROR does close the
+      // link, so the window is narrow; giving this the same pending/promote
+      // treatment is tracked separately rather than widened into #616/#617.
       const banChannel = event?.channel as string | undefined;
       if (!banChannel) {
         const banned = classifyServerBan(reason);
@@ -4683,21 +4705,22 @@ export class IrcConnection {
   /**
    * Consume a pending SASL rejection at socket-close time (#617).
    *
-   * A server that requires SASL closes the link as part of the handshake, so a
-   * close within the window is that rejection and auto-reconnect must stop —
-   * retrying is a fast failed-login hammer. A close AFTER the window means the
-   * connection survived the rejection (optional SASL), so whatever killed it is
-   * unrelated and gets the ordinary backoff ladder.
+   * Give up only once the streak runs out. A single rejection is not proof the
+   * credentials are the reason THIS socket died — on a network where SASL is
+   * optional the server keeps you, and a later drop is unrelated. Retrying
+   * settles it far better than any guess at the wire could: if the network
+   * really does let us in unauthenticated we register and the streak resets, and
+   * if it doesn't we're back here with a higher count.
    *
-   * Either way the pending flag is consumed: a rejection that didn't kill this
-   * socket must not linger to be blamed for the next one.
+   * The pending flag is consumed either way — a rejection must not linger to be
+   * blamed for a socket death it had nothing to do with.
    */
   private maybePromoteSaslFailure(): void {
     const pending = this.pendingSaslFailure;
     if (!pending) return;
     this.pendingSaslFailure = null;
-    if (Date.now() - pending.at <= SASL_FAILURE_TERMINAL_WINDOW_MS) {
-      this.terminalDisconnect = pending.text;
+    if (this.saslFailureStreak >= MAX_CONSECUTIVE_SASL_FAILURES) {
+      this.terminalDisconnect = pending;
     }
   }
 
@@ -4767,7 +4790,23 @@ export class IrcConnection {
         // the answer is current at the moment we would open the socket — a user
         // paused mid-wait must not get a connection out of a decision made
         // before they were paused.
-        const gate = this.reconnectGate?.() ?? { ok: true as const };
+        let gate: { ok: true } | { ok: false; reason: string };
+        try {
+          gate = this.reconnectGate?.() ?? { ok: true as const };
+        } catch (err) {
+          // The gate reads the DB, so it can throw where a bare connect() never
+          // could (SQLITE_BUSY, a closed handle during shutdown). connectScheduler
+          // only console.errors a throwing task — and by now the backoff timer is
+          // already spent — so letting this escape would strand the network on
+          // "Reconnecting…" with nothing left to fire. A failed POLICY READ is not
+          // a policy refusal: re-arm and ask again next tick.
+          this.logNet(
+            `Reconnect gate check failed (${err instanceof Error ? err.message : String(err)}); retrying`,
+            'warn',
+          );
+          this.scheduleReconnectIfWarranted();
+          return;
+        }
         if (!gate.ok) {
           this.stopReconnecting(gate.reason);
           return;
