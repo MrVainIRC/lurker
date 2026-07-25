@@ -146,6 +146,11 @@ describe('declaredTransportCapBytes', () => {
   });
 
   it('is null for a value that will not parse', () => {
+    // Stub console.warn: this trips the warn-once path, and whether it actually
+    // prints depends on whether an earlier test already latched it. Stubbing
+    // makes the output the same either way, so reordering this file can't start
+    // spraying warnings through an unrelated suite run.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     process.env.LURKER_MAX_UPLOAD_MB = '100m';
     expect(limits.declaredTransportCapBytes()).toBeNull();
   });

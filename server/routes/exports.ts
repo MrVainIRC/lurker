@@ -145,14 +145,34 @@ fs.mkdirSync(IMPORT_TMP_DIR, { recursive: true, mode: 0o700 });
  * decrypted network passwords. Recreate it ourselves first, and chmod so a dir
  * that already exists with the wrong mode self-heals rather than staying wrong
  * for the life of the process.
+ *
+ * THROWS rather than proceeding if the mode can't be enforced. A chmod that
+ * fails on POSIX means the directory isn't ours to secure (EPERM — someone else
+ * owns it), and staging an archive of decrypted network passwords somewhere
+ * other local users can read it is worse than refusing the import. Refusing is
+ * loud, recoverable, and tells the operator something real; proceeding is a
+ * silent credential leak.
  */
 function ensureImportTmpDir(): void {
   fs.mkdirSync(IMPORT_TMP_DIR, { recursive: true, mode: 0o700 });
   try {
     fs.chmodSync(IMPORT_TMP_DIR, 0o700);
-  } catch {
-    // Best-effort: a platform without POSIX modes (or a dir we don't own) must
-    // not take the import path down. The mkdir above is the load-bearing half.
+  } catch (err) {
+    // Windows has no POSIX modes — chmod there is a no-op at best and its
+    // st_mode is meaningless, so there is nothing to verify and nothing to
+    // refuse over.
+    if (process.platform === 'win32') return;
+    // chmod can also fail somewhere the mode is already fine (an exotic mount).
+    // Verify before refusing, so we fail on the actual exposure rather than on
+    // the syscall.
+    const mode = fs.statSync(IMPORT_TMP_DIR).mode & 0o777;
+    if ((mode & 0o077) === 0) return;
+    throw new Error(
+      `import staging dir ${IMPORT_TMP_DIR} is mode ${mode.toString(8)} and could not be ` +
+        `secured to 0700 (${err instanceof Error ? err.message : String(err)}); refusing to ` +
+        'stage an archive containing decrypted network credentials where other local users ' +
+        'can read it',
+    );
   }
 }
 
@@ -165,7 +185,17 @@ function ensureImportTmpDir(): void {
 // only makes the failure honest; #650 (chunked upload) is what makes a large
 // import possible on a CDN-fronted instance.
 const importUpload = (req: Request, res: Response, next: NextFunction): void => {
-  ensureImportTmpDir();
+  try {
+    ensureImportTmpDir();
+  } catch (err) {
+    // Operator-actionable, so say what's wrong rather than emitting a bare 500.
+    console.error('[lurker] import staging dir is not secure:', err);
+    res.status(500).json({
+      error: 'the server could not prepare a private staging directory for the import',
+      code: 'staging_dir_insecure',
+    });
+    return;
+  }
   const limit = clampToTransport(HARD_IMPORT_LIMIT);
   const handler = multer({
     dest: IMPORT_TMP_DIR,
