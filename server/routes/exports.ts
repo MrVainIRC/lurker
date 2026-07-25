@@ -132,6 +132,30 @@ const IMPORT_TMP_DIR = path.join(os.tmpdir(), 'lurker-imports');
 // passwords, so other local users on a shared host mustn't be able to read the
 // staged upload. Matches the 0700/0600 posture on the export side.
 fs.mkdirSync(IMPORT_TMP_DIR, { recursive: true, mode: 0o700 });
+
+/**
+ * Re-assert the staging dir and its mode before each import.
+ *
+ * Multer's DiskStorage constructor runs `fs.mkdirSync(dest, {recursive:true})`
+ * with NO mode (multer/storage/disk.js). While multer was built once at module
+ * load that was a harmless no-op — the 0700 mkdir above had just run. Building
+ * it per request means a tmp reaper (systemd-tmpfiles, macOS's /var/folders
+ * cleaner) that removes the dir while the process is up would have multer
+ * recreate it at 0777 & ~umask, i.e. world-readable, holding archives full of
+ * decrypted network passwords. Recreate it ourselves first, and chmod so a dir
+ * that already exists with the wrong mode self-heals rather than staying wrong
+ * for the life of the process.
+ */
+function ensureImportTmpDir(): void {
+  fs.mkdirSync(IMPORT_TMP_DIR, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(IMPORT_TMP_DIR, 0o700);
+  } catch {
+    // Best-effort: a platform without POSIX modes (or a dir we don't own) must
+    // not take the import path down. The mkdir above is the load-bearing half.
+  }
+}
+
 // Resolved per request, not once at module load, so the operator's declared
 // transport ceiling is read live (and so tests can drive it). #649: an archive
 // bigger than what the proxy in front of us will pass is rejected AT THE EDGE
@@ -141,6 +165,7 @@ fs.mkdirSync(IMPORT_TMP_DIR, { recursive: true, mode: 0o700 });
 // only makes the failure honest; #650 (chunked upload) is what makes a large
 // import possible on a CDN-fronted instance.
 const importUpload = (req: Request, res: Response, next: NextFunction): void => {
+  ensureImportTmpDir();
   const limit = clampToTransport(HARD_IMPORT_LIMIT);
   const handler = multer({
     dest: IMPORT_TMP_DIR,
