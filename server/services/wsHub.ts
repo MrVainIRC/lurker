@@ -24,6 +24,7 @@ import ignoreRulesService from './ignoreRulesService.js';
 import { parseIgnoreInput, maskToRuleInput } from './ignoreRuleInput.js';
 import { findSession } from '../db/sessions.js';
 import { findUserById, touchUserLastSeen } from '../db/users.js';
+import { effectiveUploadCapBytes } from './uploadLimits.js';
 import {
   listMessages,
   listMessagesAround,
@@ -1649,7 +1650,21 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
   });
 
   settingsService.on('event', ({ userId, changes }) => {
-    fanOut(userId, { kind: 'settings', changes: changes || {} });
+    // #627: the raw setting isn't the effective cap — it still has to clear the
+    // transport ceiling and any operator-baked policy cap. The user's OWN change
+    // already has a delivery path right here, so recompute rather than leaving
+    // them compressing against a stale number until they next reconnect (lower it
+    // and every upload 413s; raise it and they over-compress for nothing).
+    const touchedCap = changes && 'uploads.image.max_upload_mb' in changes;
+    fanOut(userId, {
+      kind: 'settings',
+      changes: changes || {},
+      ...(touchedCap
+        ? {
+            maxUploadBytes: effectiveUploadCapBytes(userId, findUserById(userId)?.role === 'admin'),
+          }
+        : {}),
+    });
     // If the user toggled / shortened auto-away while disconnected, re-evaluate
     // the pending timer with the new value.
     const touchedAway =
@@ -1893,6 +1908,12 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
     // full gap-fill path untouched.
     const isFreshConnect = (ws.sinceId || 0) === 0;
     const cursor = isFreshConnect ? maxMessageId() : 0;
+    // #627: the effective upload cap rides the snapshot so a client can size media
+    // to fit BEFORE it starts an upload — lurker-ios compresses video against this
+    // number, and hardcoded a Cloudflare-safe guess until it existed. Advisory: it
+    // is resolved for the user's DEFAULT uploader at connect time, so a per-upload
+    // override or an operator change mid-session is still settled by the 413.
+    const maxUploadBytes = effectiveUploadCapBytes(userId, findUserById(userId)?.role === 'admin');
     // Global ignore rules (network_id NULL) aren't tied to any one network blob,
     // so they ride alongside the per-network snapshot as their own field (#350).
     send(ws, {
@@ -1901,6 +1922,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
       // connected without pre-checking GET /api/config still learns what the
       // server speaks and can degrade knowingly.
       protocolVersion: PROTOCOL_VERSION,
+      maxUploadBytes,
       networks,
       globalIgnores: ircManager.listGlobalIgnoresFor(userId),
       ...(isFreshConnect ? { cursor } : {}),
