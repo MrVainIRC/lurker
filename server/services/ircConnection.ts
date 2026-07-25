@@ -32,7 +32,7 @@ import { effectiveSetting, effectiveSettings } from './settingsService.js';
 import { APP_NAME, APP_VERSION } from '../utils/userAgent.js';
 import { findUserById } from '../db/users.js';
 import { isNodeMode } from '../utils/edition.js';
-import { deriveIdent } from '../utils/ident.js';
+import { deriveIdent } from '../../shared/ident.js';
 import { registerIdent, unregisterIdent, isIdentdEnabled, isOidentdFileEnabled } from './identd.js';
 import { MESSAGE_MAX_BYTES, partitionMultiline, reassembleMultiline } from './messageSplit.js';
 import type { MultilineLimits } from './messageSplit.js';
@@ -1378,6 +1378,10 @@ export class IrcConnection {
         const localPort = socket?.localPort;
         const remotePort = socket?.remotePort;
         if (!localPort || !remotePort) return;
+        // The ident comes from the ACCOUNT, not from this network's username or
+        // nick — those are the user's to retype at will, and an ident a user can
+        // choose can't attribute anything (#643). See shared/ident.ts.
+        const account = findUserById(this.network.user_id);
         this.identdId = registerIdent({
           localAddress: socket.localAddress || '',
           localPort,
@@ -1385,9 +1389,8 @@ export class IrcConnection {
           remotePort,
           ident: deriveIdent({
             nodeMode: isNodeMode(),
-            accountUsername: findUserById(this.network.user_id)?.username || '',
-            networkUsername: this.network.username,
-            nick: this.network.nick,
+            accountUsername: account?.username || '',
+            accountIdent: account?.ident || null,
           }),
         });
       },

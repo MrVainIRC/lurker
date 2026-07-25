@@ -910,6 +910,12 @@ ensureColumn('users', 'last_seen_at', 'TEXT');
 // canceled; the cell stays billing-blind and only mirrors this one verdict.
 ensureColumn('users', 'is_paused', 'INTEGER NOT NULL DEFAULT 0');
 
+// Admin-set ident override for the built-in identd (#643). NULL — the norm —
+// means "derive it from the account username"; see shared/ident.ts. Deliberately
+// not user-writable: the ident is how a network operator tells one member of a
+// shared IP from another, so letting members pick it defeats the identd.
+ensureColumn('users', 'ident', 'TEXT');
+
 // Roles: 'admin' can manage invites and other users; 'user' is everyone else.
 // On a fresh install the first user (created via /api/auth/setup) is promoted
 // to admin by routes/auth.js. On an existing single-user install pre-dating
