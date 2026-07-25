@@ -504,7 +504,7 @@ a v1 client.
 | `pins-changed`                                                                                                                                                           | `networkId, pinned[]`                                                                                                                                               | Authoritative pin order                            |
 | `nicklist-collapsed-changed` / `channel-notify-changed`                                                                                                                  | `networkId, target, …`                                                                                                                                              | View-state sync                                    |
 | `draft-updated` / `input-history-added` / `bookmark-updated` / `nick-note-updated` / `relay-bot-updated` / `contact-updated` / `contact-deleted` / `ignore-list-updated` | various                                                                                                                                                             | Multi-device view-state fan-out                    |
-| `settings`                                                                                                                                                               | `changes`                                                                                                                                                           | Server-side settings changed                       |
+| `settings`                                                                                                                                                               | `changes`, `maxUploadBytes?` (only when the upload cap was touched)                                                                                                 | Server-side settings changed                       |
 | `highlight-rules-changed`                                                                                                                                                | —                                                                                                                                                                   | Re-fetch highlight rules                           |
 | `account-state`                                                                                                                                                          | `paused: bool`                                                                                                                                                      | Hosted pause/resume                                |
 | `chanlist-state` / `chanlist-result`                                                                                                                                     | `/LIST` cache meta / result page                                                                                                                                    | Channel browser                                    |
@@ -744,17 +744,24 @@ secrets write-only). Standalone serves local files publicly at
 message — the server does the rest.
 
 **Size cap.** `maxUploadBytes` — on the `snapshot` frame and on `GET /api/uploads`
-— is the largest body this account may send, and the number to compress media
+— is the largest **file** this account may send, and the number to compress media
 against. **Do not hardcode a cap.** It is the smallest of three ceilings: the
 200 MB hard limit, the instance's declared transport limit (`LURKER_MAX_UPLOAD_MB`
 — what a CDN or reverse proxy in front of Lurker will pass), and the per-user or
 operator-baked uploader cap. Only the first is universal, so a self-hosted
 instance and a CDN-fronted one legitimately differ by a lot.
 
+It already has the multipart envelope subtracted, so a file at exactly
+`maxUploadBytes` still fits inside the request body once the boundaries, part
+headers, and `uploaderId` / `progressToken` fields are added. Size the **file**
+to it; don't budget for the envelope yourself.
+
 Treat it as advisory, not a contract: it is resolved for the account's **default**
-uploader at connect time, so a per-upload `uploaderId` override with a tighter
-policy cap, or an operator changing the limit mid-session, is still settled by a
-`413` carrying the real number. Reconnecting re-reads it.
+uploader, so a per-upload `uploaderId` override with a tighter policy cap, or an
+operator changing the limit mid-session, is still settled by a `413` carrying the
+real number. It is refreshed on reconnect, and re-sent on the `settings` frame
+whenever the user changes their own cap — so a client that reads it from both
+frames never compresses against a stale number.
 
 ### DCC — `/api/dcc` (403 unless enabled for the account)
 

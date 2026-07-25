@@ -12,10 +12,10 @@ import { randomId } from '../services/uploadProviders/objectKey.js';
 import { bufferSource, fileSource, type UploadSource } from '../services/uploadProviders/source.js';
 import {
   effectiveSettings,
-  userCapMb,
-  clampUploadCapMb,
-  effectiveUploadCapMb,
+  userCapBytes,
+  clampUploadCapBytes,
   effectiveUploadCapBytes,
+  formatCapMb,
 } from '../services/uploadLimits.js';
 import * as imagePipeline from '../services/imagePipeline.js';
 import { thumbnailFormat } from '../services/thumbnailFormat.js';
@@ -173,10 +173,10 @@ export async function sweepTempUploads(maxAgeMs = 60 * 60 * 1000): Promise<numbe
 // DEFAULT uploader's cap; the handler re-checks against the actually-resolved
 // uploader, which is what catches an override with a tighter policy cap.
 const uploadToDisk = (req: Request, res: Response, next: NextFunction): void => {
-  const capMb = effectiveUploadCapMb(req.user!.id, req.user!.role === 'admin');
+  const capBytes = effectiveUploadCapBytes(req.user!.id, req.user!.role === 'admin');
   const handler = multer({
     storage,
-    limits: { fileSize: capMb * 1024 * 1024, files: 1 },
+    limits: { fileSize: capBytes, files: 1 },
     // busboy decodes multipart params as LATIN-1 unless told otherwise, so any
     // non-ASCII filename arrives mangled — a macOS screen recording is named with a
     // narrow no-break space (U+202F) before AM/PM, whose UTF-8 bytes (E2 80 AF) then
@@ -187,7 +187,7 @@ const uploadToDisk = (req: Request, res: Response, next: NextFunction): void => 
     // multer aborts the stream and unlinks its partial file once the cap is hit,
     // so an oversized upload is refused mid-flight instead of after we've eaten it.
     if ((err as { code?: string })?.code === 'LIMIT_FILE_SIZE') {
-      res.status(413).json({ error: `file exceeds ${capMb} MB` });
+      res.status(413).json({ error: `file exceeds ${formatCapMb(capBytes)} MB` });
       return;
     }
     next(err as Error | undefined);
@@ -258,9 +258,12 @@ router.post(
       // instance's transport ceiling last (#627), so a body the proxy in front of
       // us would have rejected anyway is refused with a real 413 rather than an
       // edge-level connection reset.
-      const maxMb = clampUploadCapMb(resolved.policy.maxMb ?? userCapMb(settings));
-      if (req.file.size > maxMb * 1024 * 1024) {
-        res.status(413).json({ error: `file exceeds ${maxMb} MB` });
+      const policyMb = resolved.policy.maxMb;
+      const maxBytes = clampUploadCapBytes(
+        policyMb == null ? userCapBytes(settings) : policyMb * 1024 * 1024,
+      );
+      if (req.file.size > maxBytes) {
+        res.status(413).json({ error: `file exceeds ${formatCapMb(maxBytes)} MB` });
         return;
       }
 

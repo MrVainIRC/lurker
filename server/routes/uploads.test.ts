@@ -478,10 +478,13 @@ describe('GET /api/uploads — search params', () => {
 // #627: clients hardcoded a cap because nothing advertised one — lurker-ios shipped
 // a Cloudflare-safe 90 MiB guess that is simply wrong for a self-hoster.
 describe('GET /api/uploads — advertised size cap', () => {
+  // DELETE rather than restore-to-a-number: this user had no row for the key
+  // before, so the registry default applied for the rest of the file. Writing a
+  // value here would silently re-cap every later test in the file.
   afterEach(async () => {
     delete process.env.LURKER_MAX_UPLOAD_MB;
-    const { setUserSetting } = await import('../db/settings.js');
-    setUserSetting(user.id, 'uploads.image.max_upload_mb', 25);
+    const { deleteUserSetting } = await import('../db/settings.js');
+    deleteUserSetting(user.id, 'uploads.image.max_upload_mb');
   });
 
   it("advertises the user's effective cap in bytes", async () => {
@@ -493,21 +496,25 @@ describe('GET /api/uploads — advertised size cap', () => {
   });
 
   // The whole point of the feature: what the client is told has to account for the
-  // proxy in front of us, not just the cap this process knows how to enforce.
+  // proxy in front of us, not just the cap this process knows how to enforce. Note
+  // the number is NOT 100 MiB — decimal MB, minus the multipart envelope, because
+  // the proxy's limit is on the whole body while this describes the file part.
   it('reports the transport ceiling when it is lower than the user cap', async () => {
     const { setUserSetting } = await import('../db/settings.js');
     setUserSetting(user.id, 'uploads.image.max_upload_mb', 200);
     process.env.LURKER_MAX_UPLOAD_MB = '100';
     const res = await agent.get('/api/uploads');
-    expect(res.body.maxUploadBytes).toBe(100 * 1024 * 1024);
+    expect(res.body.maxUploadBytes).toBe(100 * 1_000_000 - 64 * 1024);
+    // A client that compressed to exactly this and added an envelope still fits.
+    expect(res.body.maxUploadBytes).toBeLessThan(100 * 1_000_000);
   });
 });
 
 describe('POST /api/uploads — transport ceiling (#627)', () => {
   afterEach(async () => {
     delete process.env.LURKER_MAX_UPLOAD_MB;
-    const { setUserSetting } = await import('../db/settings.js');
-    setUserSetting(user.id, 'uploads.image.max_upload_mb', 25);
+    const { deleteUserSetting } = await import('../db/settings.js');
+    deleteUserSetting(user.id, 'uploads.image.max_upload_mb');
   });
 
   // An over-ceiling body would be killed at the edge with a connection reset the
@@ -516,13 +523,15 @@ describe('POST /api/uploads — transport ceiling (#627)', () => {
   it('refuses a body over the declared proxy limit with a 413, even under the user cap', async () => {
     const { setUserSetting } = await import('../db/settings.js');
     setUserSetting(user.id, 'uploads.image.max_upload_mb', 200);
-    process.env.LURKER_MAX_UPLOAD_MB = '1';
-    const big = Buffer.alloc(2 * 1024 * 1024, 0x7a);
+    process.env.LURKER_MAX_UPLOAD_MB = '5';
+    const big = Buffer.alloc(6 * 1024 * 1024, 0x7a);
     const res = await agent
       .post('/api/uploads')
       .attach('image', big, { filename: 'big.bin', contentType: 'text/plain' });
     expect(res.status).toBe(413);
-    expect(res.body.error).toContain('1 MB');
+    // 4.7, not 5: the 413 has to name the number the user can actually hit, or
+    // they come back with another file that fails the same way.
+    expect(res.body.error).toBe('file exceeds 4.7 MB');
   });
 });
 

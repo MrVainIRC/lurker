@@ -1650,7 +1650,21 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
   });
 
   settingsService.on('event', ({ userId, changes }) => {
-    fanOut(userId, { kind: 'settings', changes: changes || {} });
+    // #627: the raw setting isn't the effective cap — it still has to clear the
+    // transport ceiling and any operator-baked policy cap. The user's OWN change
+    // already has a delivery path right here, so recompute rather than leaving
+    // them compressing against a stale number until they next reconnect (lower it
+    // and every upload 413s; raise it and they over-compress for nothing).
+    const touchedCap = changes && 'uploads.image.max_upload_mb' in changes;
+    fanOut(userId, {
+      kind: 'settings',
+      changes: changes || {},
+      ...(touchedCap
+        ? {
+            maxUploadBytes: effectiveUploadCapBytes(userId, findUserById(userId)?.role === 'admin'),
+          }
+        : {}),
+    });
     // If the user toggled / shortened auto-away while disconnected, re-evaluate
     // the pending timer with the new value.
     const touchedAway =
