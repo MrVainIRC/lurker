@@ -193,7 +193,7 @@ Authorization: Bearer <token>        (native; browsers ride the cookie)
 ### 4.3 Connect: the snapshot burst
 
 On every successful connect the server immediately sends a **burst of separate
-frames**, synchronously, in this order (`wsHub.ts:1828`):
+frames**, synchronously, in this order (`wsHub.ts` `sendSnapshotInner`, 1893):
 
 1. `{kind:'snapshot', protocolVersion, maxUploadBytes, networks, globalIgnores, cursor?}`
    — full live state for every network (see §5.1). `cursor` (present only on a
