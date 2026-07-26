@@ -259,11 +259,16 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     type: 'string-list',
     // 16 entries, one per mIRC color code 0..15. The chromatic slots default
     // to the closest hue from look.nick.colors so coloured chat text harmonises
-    // with the rest of the theme; the four mono-ish slots (white, black, gray,
-    // light gray) use theme variables so they stay legible on any background.
+    // with the rest of the theme.
+    //
+    // All literal colours — the mono-ish slots used to be theme variables, meant
+    // to "stay legible on any background", which backfired: var(--bg) IS the
+    // background, so black text rendered in exactly the colour behind it and
+    // disappeared. Keep this list in sync with MIRC_PALETTE_FALLBACK in
+    // vue_client/src/utils/nickColor.ts.
     default: [
-      'var(--fg)', //                                       0  white
-      'var(--bg)', //                                       1  black
+      '#fcfcfa', //                                         0  white
+      '#000000', //                                         1  black
       '#6799f3', //                                         2  navy
       '#a9dc76', //                                         3  green
       '#ff6188', //                                         4  red
@@ -276,8 +281,8 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
       '#a0f1ff', //                                         11 cyan
       '#7ba4ff', //                                         12 blue
       '#ff7494', //                                         13 magenta
-      'var(--fg-muted)', //                                 14 gray
-      'color-mix(in srgb, var(--fg) 70%, transparent)', //  15 light gray
+      '#939293', //                                         14 gray
+      '#babab9', //                                         15 light gray
     ],
     description:
       'How the 16 mIRC color codes (0-15) render in chat. One CSS color per line, ' +

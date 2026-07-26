@@ -275,9 +275,15 @@ function colorNicksInText(
 // Indices 16-98 (extended) and the \x04 hex variant aren't widely used and
 // clash badly with custom themes, so we don't render those — we just consume
 // the escape so the digits don't leak into the output.
+// Every slot is a literal colour. The four mono-ish slots used to be theme
+// variables, on the theory that they'd "stay legible on any background" — which
+// is exactly backwards for slot 1: var(--bg) IS the background, so black text
+// rendered in precisely the colour behind it and vanished. A palette entry has
+// to be a colour in its own right; deferring it to the surface it's drawn on
+// can only ever produce invisible text.
 export const MIRC_PALETTE_FALLBACK: readonly string[] = [
-  'var(--fg)', //                                       0  white
-  'var(--bg)', //                                       1  black
+  '#fcfcfa', //                                         0  white
+  '#000000', //                                         1  black
   '#6799f3', //                                         2  navy
   '#a9dc76', //                                         3  green
   '#ff6188', //                                         4  red
@@ -290,8 +296,8 @@ export const MIRC_PALETTE_FALLBACK: readonly string[] = [
   '#a0f1ff', //                                         11 cyan
   '#7ba4ff', //                                         12 blue
   '#ff7494', //                                         13 magenta
-  'var(--fg-muted)', //                                 14 gray
-  'color-mix(in srgb, var(--fg) 70%, transparent)', //  15 light gray
+  '#939293', //                                         14 gray
+  '#babab9', //                                         15 light gray
 ];
 
 // Look up a mIRC colour slot in a caller-supplied palette, falling back to
