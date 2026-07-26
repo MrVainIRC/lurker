@@ -70,6 +70,54 @@ describe('ircManager pause linchpin', () => {
   });
 });
 
+// #616: the gate the auto-reconnect controller now asks before each retry. Same
+// implementation startNetwork uses, so the two can't drift apart — which is the
+// whole point, since the reconnect path used to skip both checks entirely.
+describe('ircManager.connectGate', () => {
+  let seq = 0;
+  function gateUserNet(host = 'irc.example.invalid') {
+    const user = createUser(`gate-${(seq += 1)}`);
+    const net = createNetwork(user.id, {
+      name: 'n',
+      host,
+      port: 6697,
+      tls: true,
+      nick: 'x',
+      autoconnect: false,
+    });
+    if (!net) throw new Error('createNetwork returned undefined');
+    return { userId: user.id, networkId: net.id };
+  }
+
+  // Hands back the row it read. startNetwork consumes it instead of issuing a
+  // second getNetwork — a duplicate synchronous read on every connect, on the
+  // boot-time fan-out path #460 showed can starve the event loop.
+  it('allows an ordinary account and network, returning the row it read', () => {
+    const { userId, networkId } = gateUserNet();
+    const gate = ircManager.connectGate(userId, networkId);
+    expect(gate.ok).toBe(true);
+    expect(gate.ok === true && gate.network.id).toBe(networkId);
+    expect(gate.ok === true && gate.network.host).toBe('irc.example.invalid');
+  });
+
+  // The refusal reason is user-facing: auto-reconnect publishes it when it stops,
+  // and a connection that quits retrying without saying why reads as a bug.
+  it('refuses a paused account with a reason', () => {
+    const { userId, networkId } = gateUserNet();
+    setUserPaused(userId, true);
+    const gate = ircManager.connectGate(userId, networkId);
+    expect(gate.ok).toBe(false);
+    expect(gate.ok === false && gate.reason).toMatch(/paused/i);
+  });
+
+  it('refuses a network that has been deleted out from under a pending retry', () => {
+    const { userId, networkId } = gateUserNet();
+    const gate = ircManager.connectGate(userId, networkId + 100000);
+    expect(gate.ok).toBe(false);
+    expect(gate.ok === false && gate.reason).toMatch(/no longer exists/i);
+  });
+});
+
 describe('ircManager.acceptDccTransfer result codes', () => {
   let seq = 0;
   function dccUserNet() {
