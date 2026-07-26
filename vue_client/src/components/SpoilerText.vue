@@ -33,10 +33,13 @@ import { useMircPalette } from '../composables/useNickColors.js';
 // invisible) as a Discord-style blacked-out box. The content is kept out of
 // the accessible name (aria-hidden) until revealed so a screen reader doesn't
 // read the secret aloud. Reveal is one-way: once a user deliberately opens a
-// spoiler, re-hiding it isn't a behaviour anyone expects. The colour the
-// sender picked rides through on seg.fg (== seg.bg by construction) — we use
-// it to paint the unrevealed box and the revealed text/tint so the chatter's
-// colour intent is preserved instead of being flattened to gray.
+// spoiler, re-hiding it isn't a behaviour anyone expects.
+//
+// A DELIBERATE colour rides through on seg.fg (== seg.bg by construction) and
+// paints the unrevealed box and the revealed text/tint, so a chatter who picked
+// red gets a red spoiler rather than a generic gray one. The canonical `01,01`
+// pair is excluded — see SPOILER_CONVENTION_COLOR: it encodes "hidden", not a
+// colour, and treating it as one made revealed text invisible.
 const props = defineProps<{ seg: RenderSegment }>();
 
 const mircPalette = useMircPalette();
@@ -52,12 +55,22 @@ function reveal(e: Event): void {
   revealed.value = true;
 }
 
-// Resolve the sender's chosen mIRC colour to a CSS value. Null when fg is
-// absent (older snapshots without the field) — we then fall back to the old
-// neutral gray.
+// mIRC 01 is the canonical spoiler pair (`\x0301,01`) — it's what Lurker's own
+// applySpoilerMarkup emits, and what most clients/scripts use. It means "hide
+// this", not "paint this black", so it is NOT a colour intent to preserve.
+//
+// Honouring it is actively broken rather than merely ugly: index 1 resolves to
+// `var(--bg)`, the app's own background. That paints the unrevealed box the
+// exact colour of the page (no box at all), and then `bodyStyle` sets the
+// REVEALED text to var(--bg) too — so clicking a spoiler showed nothing.
+const SPOILER_CONVENTION_COLOR = 1;
+
+// Resolve the sender's chosen mIRC colour to a CSS value. Null when there's no
+// colour to honour — an absent fg (older snapshots without the field) or the
+// convention colour above — and we fall back to the neutral gray box.
 const color = computed(() => {
   const fg = props.seg.fg;
-  if (fg == null) return null;
+  if (fg == null || fg === SPOILER_CONVENTION_COLOR) return null;
   return mircColor(fg, mircPalette.value);
 });
 
