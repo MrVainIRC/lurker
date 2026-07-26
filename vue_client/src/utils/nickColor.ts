@@ -275,9 +275,18 @@ function colorNicksInText(
 // Indices 16-98 (extended) and the \x04 hex variant aren't widely used and
 // clash badly with custom themes, so we don't render those — we just consume
 // the escape so the digits don't leak into the output.
+// The mono-ish slots track the theme so they stay legible when the user changes
+// look.color.bg / look.color.fg — a slot pinned to a literal near-white would
+// vanish the moment someone sets a light background.
+//
+// ⚠ With ONE exception, and it is the whole rule: a slot must never resolve to
+// the SURFACE it is drawn on. Slot 1 was var(--bg), which is the background by
+// definition — black text rendered in precisely the colour behind it and
+// disappeared. var(--fg) and things derived from it are safe (they can never
+// equal the background); var(--bg) can never be anything else.
 export const MIRC_PALETTE_FALLBACK: readonly string[] = [
   'var(--fg)', //                                       0  white
-  'var(--bg)', //                                       1  black
+  '#000000', //                                         1  black — NOT var(--bg)
   '#6799f3', //                                         2  navy
   '#a9dc76', //                                         3  green
   '#ff6188', //                                         4  red
