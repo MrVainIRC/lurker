@@ -259,16 +259,17 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     type: 'string-list',
     // 16 entries, one per mIRC color code 0..15. The chromatic slots default
     // to the closest hue from look.nick.colors so coloured chat text harmonises
-    // with the rest of the theme.
+    // with the rest of the theme; the mono-ish slots track the theme so they
+    // stay legible when the user changes look.color.bg / look.color.fg.
     //
-    // All literal colours — the mono-ish slots used to be theme variables, meant
-    // to "stay legible on any background", which backfired: var(--bg) IS the
-    // background, so black text rendered in exactly the colour behind it and
-    // disappeared. Keep this list in sync with MIRC_PALETTE_FALLBACK in
-    // vue_client/src/utils/nickColor.ts.
+    // ⚠ A slot must never resolve to the SURFACE it's drawn on. Slot 1 was
+    // var(--bg) — the background by definition — so black text rendered in
+    // exactly the colour behind it and disappeared. Anything derived from
+    // var(--fg) is safe; var(--bg) never is. Keep in sync with
+    // MIRC_PALETTE_FALLBACK in vue_client/src/utils/nickColor.ts.
     default: [
-      '#fcfcfa', //                                         0  white
-      '#000000', //                                         1  black
+      'var(--fg)', //                                       0  white
+      '#000000', //                                         1  black — NOT var(--bg)
       '#6799f3', //                                         2  navy
       '#a9dc76', //                                         3  green
       '#ff6188', //                                         4  red
@@ -281,15 +282,17 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
       '#a0f1ff', //                                         11 cyan
       '#7ba4ff', //                                         12 blue
       '#ff7494', //                                         13 magenta
-      '#939293', //                                         14 gray
-      '#babab9', //                                         15 light gray
+      'var(--fg-muted)', //                                 14 gray
+      'color-mix(in srgb, var(--fg) 70%, transparent)', //  15 light gray
     ],
     description:
       'How the 16 mIRC color codes (0-15) render in chat. One CSS color per line, ' +
       'in order: white, black, navy, green, red, maroon, purple, orange, yellow, ' +
       'lime, teal, cyan, blue, magenta, gray, light gray. Defaults pick the ' +
       'closest hue from your nick palette so coloured text matches the rest of ' +
-      'the theme. Any CSS color value works (hex, rgb(), var(--name), color-mix()).',
+      'the theme. Any CSS color value works (hex, rgb(), var(--name), color-mix()) — ' +
+      'except var(--bg), which is the chat background itself, so text set to it is ' +
+      'invisible.',
   },
 
   // ─── Alternating message rows ─────────────────────────────────────────

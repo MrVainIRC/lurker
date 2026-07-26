@@ -275,15 +275,18 @@ function colorNicksInText(
 // Indices 16-98 (extended) and the \x04 hex variant aren't widely used and
 // clash badly with custom themes, so we don't render those — we just consume
 // the escape so the digits don't leak into the output.
-// Every slot is a literal colour. The four mono-ish slots used to be theme
-// variables, on the theory that they'd "stay legible on any background" — which
-// is exactly backwards for slot 1: var(--bg) IS the background, so black text
-// rendered in precisely the colour behind it and vanished. A palette entry has
-// to be a colour in its own right; deferring it to the surface it's drawn on
-// can only ever produce invisible text.
+// The mono-ish slots track the theme so they stay legible when the user changes
+// look.color.bg / look.color.fg — a slot pinned to a literal near-white would
+// vanish the moment someone sets a light background.
+//
+// ⚠ With ONE exception, and it is the whole rule: a slot must never resolve to
+// the SURFACE it is drawn on. Slot 1 was var(--bg), which is the background by
+// definition — black text rendered in precisely the colour behind it and
+// disappeared. var(--fg) and things derived from it are safe (they can never
+// equal the background); var(--bg) can never be anything else.
 export const MIRC_PALETTE_FALLBACK: readonly string[] = [
-  '#fcfcfa', //                                         0  white
-  '#000000', //                                         1  black
+  'var(--fg)', //                                       0  white
+  '#000000', //                                         1  black — NOT var(--bg)
   '#6799f3', //                                         2  navy
   '#a9dc76', //                                         3  green
   '#ff6188', //                                         4  red
@@ -296,8 +299,8 @@ export const MIRC_PALETTE_FALLBACK: readonly string[] = [
   '#a0f1ff', //                                         11 cyan
   '#7ba4ff', //                                         12 blue
   '#ff7494', //                                         13 magenta
-  '#939293', //                                         14 gray
-  '#babab9', //                                         15 light gray
+  'var(--fg-muted)', //                                 14 gray
+  'color-mix(in srgb, var(--fg) 70%, transparent)', //  15 light gray
 ];
 
 // Look up a mIRC colour slot in a caller-supplied palette, falling back to

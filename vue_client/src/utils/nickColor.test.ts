@@ -21,16 +21,18 @@ function parse(text: string) {
 }
 
 describe('MIRC_PALETTE_FALLBACK', () => {
-  // The bug that prompted this: slots 0/1/14/15 were CSS variables, on the
-  // theory they'd "stay legible on any background". var(--bg) IS the background,
-  // so black text rendered in precisely the colour behind it and vanished.
+  // The bug that prompted this: slot 1 ("black") was var(--bg), which IS the
+  // surface the text is drawn on — so black text rendered in precisely the
+  // colour behind it and vanished.
   //
-  // A palette entry has to be a colour in its own right. Deferring it to the
-  // surface it's drawn on can only ever produce invisible text, so this bans the
-  // whole shape rather than just the one slot that happened to bite.
-  it('is all self-contained colours — no theme variables', () => {
+  // The rule is narrow on purpose. Theme variables are RIGHT for the mono-ish
+  // slots: look.color.bg and look.color.fg are user-settable, so a slot pinned
+  // to a literal near-white would vanish the moment someone sets a light
+  // background — the same bug mirrored. What can never appear is the background
+  // itself, which is the one value guaranteed to match its own surface.
+  it('never paints a slot in the background colour', () => {
     for (const [i, entry] of MIRC_PALETTE_FALLBACK.entries()) {
-      expect(entry, `slot ${i}`).not.toMatch(/var\(|color-mix\(/);
+      expect(entry, `slot ${i}`).not.toMatch(/var\(\s*--bg\b/);
     }
   });
 

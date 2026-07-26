@@ -57,12 +57,15 @@ function reveal(e: Event): void {
 
 // mIRC 01 is the canonical spoiler pair (`\x0301,01`) — it's what Lurker's own
 // applySpoilerMarkup emits, and what most clients/scripts use. It means "hide
-// this", not "paint this black", so it is NOT a colour intent to preserve.
+// this", not "paint this black", so it is NOT a colour intent to preserve: a
+// black box and black revealed text is nobody's styling choice, it's an artifact
+// of the invisibility convention.
 //
-// Honouring it is actively broken rather than merely ugly: index 1 resolves to
-// `var(--bg)`, the app's own background. That paints the unrevealed box the
-// exact colour of the page (no box at all), and then `bodyStyle` sets the
-// REVEALED text to var(--bg) too — so clicking a spoiler showed nothing.
+// This guard was introduced when slot 1 resolved to var(--bg), which made the
+// box the exact colour of the page and the REVEALED text invisible too. The
+// palette no longer does that (slot 1 is a literal #000000), so removing this
+// would now produce a merely ugly black spoiler rather than an unreadable one —
+// still wrong, just less dramatically.
 const SPOILER_CONVENTION_COLOR = 1;
 
 // Resolve the sender's chosen mIRC colour to a CSS value. Null when there's no
