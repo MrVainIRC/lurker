@@ -113,6 +113,49 @@ describe('effectiveUploadCapBytes', () => {
   });
 });
 
+// #649: a caller with its own, larger limit (imports allow 500 MB) needs the raw
+// declaration. transportCapBytes() reports "unset" as the upload path's 200 MB
+// hard cap, so reusing it would have silently cost imports 300 MB of headroom.
+describe('clampToTransport', () => {
+  const IMPORT_LIMIT = 500 * 1024 * 1024;
+
+  it('leaves a larger own-limit ALONE when no ceiling is declared', () => {
+    expect(limits.clampToTransport(IMPORT_LIMIT)).toBe(IMPORT_LIMIT);
+    expect(limits.transportCapBytes()).toBe(limits.MAX_CAP_BYTES); // the trap
+  });
+
+  it('lowers it to the declared ceiling', () => {
+    process.env.LURKER_MAX_UPLOAD_MB = '100';
+    expect(limits.clampToTransport(IMPORT_LIMIT)).toBe(100 * 1_000_000 - ENVELOPE);
+  });
+
+  it('never RAISES an own-limit that is already lower than the ceiling', () => {
+    process.env.LURKER_MAX_UPLOAD_MB = '400';
+    expect(limits.clampToTransport(10 * 1024 * 1024)).toBe(10 * 1024 * 1024);
+  });
+
+  it('is not bounded by the upload hard cap — that is an upload-path rule', () => {
+    process.env.LURKER_MAX_UPLOAD_MB = '400';
+    expect(limits.clampToTransport(IMPORT_LIMIT)).toBeGreaterThan(limits.MAX_CAP_BYTES);
+  });
+});
+
+describe('declaredTransportCapBytes', () => {
+  it('is null when unset, distinguishing "no ceiling" from "200 MB"', () => {
+    expect(limits.declaredTransportCapBytes()).toBeNull();
+  });
+
+  it('is null for a value that will not parse', () => {
+    // Stub console.warn: this trips the warn-once path, and whether it actually
+    // prints depends on whether an earlier test already latched it. Stubbing
+    // makes the output the same either way, so reordering this file can't start
+    // spraying warnings through an unrelated suite run.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    process.env.LURKER_MAX_UPLOAD_MB = '100m';
+    expect(limits.declaredTransportCapBytes()).toBeNull();
+  });
+});
+
 describe('clampUploadCapBytes', () => {
   it('never resolves to a zero or negative cap', () => {
     expect(limits.clampUploadCapBytes(0)).toBe(1);

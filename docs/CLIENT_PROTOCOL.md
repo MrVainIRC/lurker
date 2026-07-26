@@ -763,6 +763,15 @@ real number. It is refreshed on reconnect, and re-sent on the `settings` frame
 whenever the user changes their own cap — so a client that reads it from both
 frames never compresses against a stale number.
 
+**Imports are capped separately.** `POST /api/imports` has its own, much larger
+limit (500 MB) and is **not** bound by the 200 MB upload ceiling — so
+`maxUploadBytes` is the wrong number to check an archive against. Read
+`maxImportBytes` from `GET /api/exports/preview` instead. Only the instance's
+transport limit is shared between the two, which does mean lowering
+`LURKER_MAX_UPLOAD_MB` lowers both. Over-limit archives get a `413` with
+`code: "archive_too_large"`; there is no way to compress an archive to fit, so
+check before uploading.
+
 ### DCC — `/api/dcc` (403 unless enabled for the account)
 
 `GET /?limit` list · `POST /:id/accept|reject|cancel`. Live updates via
