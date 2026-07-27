@@ -24,9 +24,12 @@ import MessageInput from './MessageInput.vue';
 
 // The composer sends typing state / drafts over the socket as you type. There's
 // no socket in a test, and none of it is what we're exercising.
+// socketSendWithAck carries the real signature rather than `() => null`: it
+// returns a promise when the socket is open, and the tests that need a send to
+// look like it landed have to be able to say so without cast-fighting the mock.
 vi.mock('../composables/useSocket.js', () => ({
   socketSend: vi.fn<() => void>(),
-  socketSendWithAck: vi.fn<() => null>(() => null),
+  socketSendWithAck: vi.fn<() => Promise<AckResult> | null>(() => null),
   onSocketOpen: vi.fn<() => () => void>(() => () => {}),
 }));
 
@@ -34,7 +37,7 @@ vi.mock('../composables/useSocket.js', () => ({
 // payload. Which one a command uses is not incidental: `sendOrToast` fires
 // socketSend, while anything that wants delivery confirmation (`ackedSend`, and
 // so every message-shaped command) goes through socketSendWithAck.
-import { socketSend, socketSendWithAck } from '../composables/useSocket.js';
+import { socketSend, socketSendWithAck, type AckResult } from '../composables/useSocket.js';
 
 const CHANNELS = ['#apple', '#mango', '#zebra'];
 // `mallory` exists so the self-exclusion test has a positive control: without a
@@ -481,7 +484,7 @@ describe('scroll position on send (#628)', () => {
   // socket, and the shared mock returns null. Every message-shaped case needs
   // delivery to look like it happened.
   function allowSend() {
-    vi.mocked(socketSendWithAck).mockReturnValue(Promise.resolve({ ok: true }) as unknown as null);
+    vi.mocked(socketSendWithAck).mockReturnValue(Promise.resolve({ ok: true }));
   }
 
   const token = () => useScrollState().scrollToBottomToken.value;

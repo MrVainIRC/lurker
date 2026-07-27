@@ -2292,8 +2292,9 @@ function sendOrToast(payload: Record<string, unknown>, body: string): boolean {
 // rather than by re-reading the verb: /me, /slap, /shrug, /jitsi, /talk, /msg
 // and /query all say something, and a list of them maintained anywhere else is
 // a list that goes stale the first time somebody adds the eighth. A counter
-// rather than a flag because submit() awaits handleCommand, so a second Enter
-// arriving mid-await would clobber a flag but can only inflate a counter.
+// rather than a flag so the reader owns the whole question — take a reading,
+// run the command, compare — with no reset for a future call site to forget or
+// to sequence wrongly against the read.
 let chatMessagesSent = 0;
 
 function ackedSend(payload: Record<string, unknown>, body: string): boolean {
