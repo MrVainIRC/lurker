@@ -1178,8 +1178,50 @@ export function handleOpenBuffer(
 // addSocket/removeSocket); the registry just reads through it.
 const socketsByUser = new Map<number, Set<LurkerWebSocket>>();
 
+// How many bytes of un-drained outbound frames a socket may accumulate on the
+// LIVE fan-out path before we give up on it.
+//
+// The heartbeat reaps DEAD sockets (no pong within a sweep, ~60s). It does not
+// reap SLOW ones, and those are a different failure: a phone on a degraded link
+// is genuinely OPEN and may still pong while its TCP window is closed. `ws`
+// queues everything we hand it in the Node heap with no bound, so every live
+// event fanned out to such a socket is memory we never get back — a leak whose
+// only symptom is RSS climbing on a busy cell.
+//
+// Live events are small (a few hundred bytes), so this is roughly "tens of
+// thousands of frames behind". Nothing healthy gets there; anything that does
+// is not coming back on this socket.
+const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+
 function send(ws: LurkerWebSocket, payload: WsPayload): void {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload));
+}
+
+// Drop a socket that has stopped draining. Closing with 1013 (Try Again Later)
+// rather than terminating means the client reconnects through its normal path
+// and resumes from `?since` — the gap it missed is refetched, so this costs the
+// user a reconnect, not history.
+//
+// Deliberately NOT applied to `send`, which is what the snapshot burst uses.
+// The burst is synchronous: it writes every frame in one tick, and no socket I/O
+// happens until the event loop turns, so `bufferedAmount` there measures the
+// SIZE OF THE BURST, not the health of the client. A large account would trip
+// any threshold worth having and get disconnected on connect, forever. Live
+// fan-out is where slowness actually accumulates over time, so that's where the
+// check belongs.
+// Exported (and pure over its argument, like sweepWsHeartbeat) so the
+// drop/keep decision is unit-testable without a live WSS.
+export function dropIfBackpressured(ws: LurkerWebSocket): boolean {
+  if (ws.bufferedAmount <= MAX_BUFFERED_BYTES) return false;
+  console.warn(
+    `[wsHub] socket ${ws.bufferedAmount} bytes behind on fan-out; closing (client resumes via ?since)`,
+  );
+  try {
+    ws.close(1013, 'backpressure');
+  } catch (_err) {
+    // Already tearing down; the close handler prunes it either way.
+  }
+  return true;
 }
 
 function fanOut(userId: number, payload: WsPayload, opts: FanOutOpts = {}): void {
@@ -1190,6 +1232,11 @@ function fanOut(userId: number, payload: WsPayload, opts: FanOutOpts = {}): void
   for (const ws of set) {
     if (opts.exceptWs && ws === opts.exceptWs) continue;
     if (ws.readyState === ws.OPEN) {
+      // Checked BEFORE the send: once we're over the line, adding to the queue
+      // is exactly what we're trying to stop. The cursor is deliberately not
+      // advanced either — this socket never received the event, and claiming it
+      // did would make the resume skip it.
+      if (dropIfBackpressured(ws)) continue;
       ws.send(json);
       // Advance the per-socket cursor so a subsequent sendSnapshot ships
       // only the gap newer than what this socket has already received.

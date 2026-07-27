@@ -27,6 +27,7 @@ let buildOfflineBacklogFrames: typeof import('./wsHub.js').buildOfflineBacklogFr
 let maxMessageId: typeof import('../db/messages.js').maxMessageId;
 let handleOpenBuffer: typeof import('./wsHub.js').handleOpenBuffer;
 let sweepWsHeartbeat: typeof import('./wsHub.js').sweepWsHeartbeat;
+let dropIfBackpressured: typeof import('./wsHub.js').dropIfBackpressured;
 let buildSystemBacklog: typeof import('./wsHub.js').buildSystemBacklog;
 let systemLineToEvent: typeof import('./wsHub.js').systemLineToEvent;
 let buildSystemHistoryReply: typeof import('./wsHub.js').buildSystemHistoryReply;
@@ -56,6 +57,7 @@ beforeAll(async () => {
     buildOfflineBacklogFrames,
     handleOpenBuffer,
     sweepWsHeartbeat,
+    dropIfBackpressured,
     buildSystemBacklog,
     systemLineToEvent,
     buildSystemHistoryReply,
@@ -552,6 +554,59 @@ describe('sweepWsHeartbeat', () => {
     expect(live.calls.ping).toBe(1);
     expect(dead1.calls.terminate).toBe(1);
     expect(dead2.calls.terminate).toBe(1);
+  });
+});
+
+// A ws stand-in carrying only what the backpressure check reads/calls.
+function bpWs(bufferedAmount: number) {
+  const calls: { close: Array<{ code: number; reason: string }> } = { close: [] };
+  const ws = {
+    bufferedAmount,
+    close(code: number, reason: string) {
+      calls.close.push({ code, reason });
+    },
+  };
+  return { ws, calls };
+}
+
+function drop(ws: ReturnType<typeof bpWs>['ws']): boolean {
+  return dropIfBackpressured(ws as unknown as Parameters<typeof dropIfBackpressured>[0]);
+}
+
+describe('dropIfBackpressured', () => {
+  const CAP = 8 * 1024 * 1024; // mirrors MAX_BUFFERED_BYTES
+
+  it('keeps a socket that is draining', () => {
+    const { ws, calls } = bpWs(0);
+    expect(drop(ws)).toBe(false);
+    expect(calls.close.length).toBe(0);
+  });
+
+  it('keeps a socket sitting exactly at the cap', () => {
+    // The heartbeat reaps dead sockets; this only fires for one that is provably
+    // NOT keeping up, so the boundary is deliberately inclusive.
+    const { ws, calls } = bpWs(CAP);
+    expect(drop(ws)).toBe(false);
+    expect(calls.close.length).toBe(0);
+  });
+
+  it('closes a wedged socket with 1013 so it reconnects and resumes', () => {
+    // 1013 Try Again Later, not terminate: the client comes back through its
+    // normal reconnect and refetches the gap via ?since, so this costs a
+    // reconnect rather than history.
+    const { ws, calls } = bpWs(CAP + 1);
+    expect(drop(ws)).toBe(true);
+    expect(calls.close).toEqual([{ code: 1013, reason: 'backpressure' }]);
+  });
+
+  it('reports the drop even when close throws on an already-dying socket', () => {
+    const ws = {
+      bufferedAmount: CAP + 1,
+      close() {
+        throw new Error('already closing');
+      },
+    };
+    expect(drop(ws as unknown as ReturnType<typeof bpWs>['ws'])).toBe(true);
   });
 });
 

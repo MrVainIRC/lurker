@@ -52,6 +52,25 @@ let socketListeners: AbortController | null = null;
 // calling useSocket() (which would re-register the connect lifecycle).
 export const connected = ref(false);
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+// Consecutive failed reconnect attempts, driving the backoff below. Reset the
+// moment a socket opens.
+let reconnectAttempts = 0;
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 30_000;
+// How long to wait before the next reconnect: exponential 1s→30s with ±25%
+// jitter, matching the iOS client's policy.
+//
+// The jitter is the load-bearing half. A flat interval (this was a hard 2s)
+// means every tab the user has open — and on a hosted cell, every tab of every
+// user on it — reconnects inside the same window after a restart, and each
+// reconnect costs the server a full synchronous snapshot burst. That's a
+// thundering herd aimed at a process that has just started and is least able to
+// absorb it. Spreading the retries is what stops a routine deploy from looking
+// like an outage.
+function nextReconnectDelay(): number {
+  const capped = Math.min(RECONNECT_BASE_MS * 2 ** reconnectAttempts, RECONNECT_MAX_MS);
+  return Math.round(capped * (0.75 + Math.random() * 0.5));
+}
 const openHandlers = new Set<() => void>();
 // Outstanding send/action ACKs keyed by clientId. Resolver is called with
 // { ok, error } when the server returns a send-result, on socket close, or on
@@ -102,8 +121,9 @@ let lastMessageAt = 0;
 // Arm (or re-arm) the probe against the CURRENT socket. The callback captures
 // the socket instance it measured and re-checks identity before acting: a
 // probe armed against socket A must never close A's healthy replacement B
-// when A dies mid-window and the 2s reconnect brings B up before the timer
-// fires (B can be OPEN with its first snapshot frame still in flight). The
+// when A dies mid-window and the reconnect brings B up before the timer fires
+// (B can be OPEN with its first snapshot frame still in flight — and with
+// backoff the first retry can land in well under a second). The
 // close handler also clears the timer outright, so identity is a second
 // fence, not the only one.
 function armLivenessProbe(): void {
@@ -791,6 +811,11 @@ function open() {
     'open',
     () => {
       connected.value = true;
+      // A socket that opened is a successful attempt — the next drop starts its
+      // backoff from 1s again rather than inheriting the previous outage's
+      // ceiling. (A refused upgrade never reaches this handler, so a 401/426
+      // loop keeps backing off, which is what we want.)
+      reconnectAttempts = 0;
       // Detached buffers won't survive a reconnect cleanly — the incoming
       // snapshot/backlog would otherwise be short-circuited by replaceBacklog's
       // detached guard, leaving the slice stale and the buffer cut off from
@@ -854,7 +879,8 @@ function open() {
       }
       const auth = useAuthStore();
       if (auth.user) {
-        reconnectTimer = setTimeout(open, 2000);
+        reconnectTimer = setTimeout(open, nextReconnectDelay());
+        reconnectAttempts += 1;
       }
     },
     opts,
@@ -942,6 +968,10 @@ export function resetSocket(): void {
     socket = null;
   }
   connected.value = false;
+  // A teardown ends the session (sign-out, or an explicit reset) — whatever
+  // backoff the last outage had built up shouldn't be inherited by the next
+  // sign-in's first reconnect.
+  reconnectAttempts = 0;
   hiddenSince = null;
   lastSeenEventId = 0;
   failAllPendingAcks('disconnected');
@@ -955,9 +985,13 @@ function refreshSnapshot() {
     armLivenessProbe();
     return;
   }
-  // Socket isn't open — pull the reconnect forward instead of waiting on the
-  // 2s backoff timer. The fresh connection will trigger the server-side
-  // sendSnapshot path on its own.
+  // Socket isn't open — pull the reconnect forward instead of waiting out the
+  // backoff timer. The user is looking at the tab right now, so the wait that
+  // protects a restarting server from a herd is the wrong trade here. The
+  // attempt counter is deliberately NOT reset: if the server really is down,
+  // the retries that follow this one should resume backing off rather than
+  // restart at 1s. The fresh connection triggers the server-side sendSnapshot
+  // path on its own.
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
