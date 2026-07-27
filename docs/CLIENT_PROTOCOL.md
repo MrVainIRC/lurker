@@ -632,11 +632,15 @@ slice (track them separately or refetch); `latest` reattaches.
    server stating how it built the slice — the only field you need to decide
    _how to merge_ (but not the only one you must record; see rule 4):
 
-   | `mode`    | Meaning                                      | Action                                       |
-   | --------- | -------------------------------------------- | -------------------------------------------- |
-   | `replace` | This slice stands alone                      | Take `events` as the buffer's contents       |
-   | `append`  | A contiguous gap-fill                        | Splice onto your existing tail               |
-   | `shell`   | Buffer exists, nothing shipped (`events:[]`) | Leave existing contents alone; fetch on open |
+   | `mode`    | Meaning                                                | Action                                                      |
+   | --------- | ------------------------------------------------------ | ----------------------------------------------------------- |
+   | `replace` | Authoritative slice, **not** contiguous with your tail | Take `events`; **may** keep overlapping older rows — rule 5 |
+   | `append`  | A contiguous gap-fill                                  | Splice onto your existing tail                              |
+   | `shell`   | Buffer exists, nothing shipped (`events:[]`)           | Leave existing contents alone; fetch on open                |
+
+   > Taking `events` wholesale is always **safe** on `replace`, and is the right
+   > first implementation. Rule 5 is the refinement that stops it costing the
+   > user their scrollback — read it before you ship.
 
 2. **Ignore `reset`.** It predates `mode` and is not decodable on its own:
    `reset:false` means _append_ on a resume gap but _replace_ on a fresh

@@ -257,17 +257,27 @@ type WsPayload = Record<string, unknown>;
 // right from the wire alone. The server always knew which slice it built; it
 // just never said so.
 //
-//   'replace' — this slice stands alone; drop what you hold for this buffer and
-//               take these events. (Resume-gap overflow, fresh connect, an
-//               open-buffer/reopen hydrate, the system buffer.)
+//   'replace' — this slice stands alone; it is authoritative for the range it
+//               covers and is NOT contiguous with your tail. (Resume-gap
+//               overflow, fresh connect, an open-buffer/reopen hydrate, the
+//               system buffer.) The invariant is "don't create a hole", not
+//               "destroy everything": a client MAY keep older rows it already
+//               holds when the incoming slice OVERLAPS them, and must replace
+//               wholesale when it doesn't. That distinction matters because the
+//               system buffer and offline :server: buffers ship a replace frame
+//               on EVERY snapshot — reading this as unconditional truncation
+//               throws away the user's paged-in scrollback each resync. See
+//               CLIENT_PROTOCOL.md §8 rule 5.
 //   'append'  — a contiguous gap-fill; splice onto your existing tail.
 //   'shell'   — buffer EXISTS but no events are shipped (`events: []`). Do NOT
 //               treat this as replace-with-empty: a shell for a buffer you have
 //               already hydrated must leave its contents alone (the "never
 //               un-hydrate" rule). Fetch content when the user opens it.
 //
-// `reset` is still sent, unchanged, for clients that predate this field. New
-// clients should read `mode` and ignore `reset` entirely.
+// `reset` is still sent wherever it was sent before, unchanged, for clients that
+// predate this field — note that's only the resume/system frames; shells and
+// open-buffer replies have never carried it. New clients should read `mode` and
+// ignore `reset` entirely.
 export type BacklogMode = 'replace' | 'append' | 'shell';
 
 // Inbound message types that mutate IRC state or produce outbound IRC traffic.
