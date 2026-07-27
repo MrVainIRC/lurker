@@ -251,11 +251,29 @@ it once the whole burst went out, so a snapshot that failed part-way through
 never claims a buffer is missing.
 
 **Shells vs. hydrated backlogs.** On a fresh connect (`since=0`) channel/DM
-buffers arrive as _shells_: `{kind:'backlog', …, events:[], hasMoreOlder:true}` —
-"this buffer exists; fetch content when the user opens it." Hydrate a shell with
-either `{type:'open-buffer'}` (server replies with a populated `backlog` — the
-iOS approach) or `{type:'history', mode:'latest'}` (the web-client approach).
-Both are valid; pick one.
+buffers arrive as _shells_: `{kind:'backlog', …, events:[], mode:'shell',
+hasMoreOlder:true}` — "this buffer exists; fetch content when the user opens it."
+
+Hydrate a shell with **`{type:'history', mode:'latest'}`**. It is a pure read.
+
+> ⚠ `{type:'open-buffer'}` also returns a populated `backlog`, and the iOS app
+> currently hydrates with it — but it is a **write verb**, not a read: for a
+> closed buffer with history it _reopens_ the buffer (a persisted state flip),
+> and for an unjoined `#channel` it JOINs. Using it to hydrate means a user
+> merely _opening a screen_ mutates persisted state. Reserve it for explicit
+> user intent ("open this DM", "join this channel"). Same hazard as the "don't
+> probe with `open-buffer`" warning above, reached from a different direction.
+>
+> **And the write is silent to the user's other devices.** All three branches
+> of `handleOpenBuffer` reply with `send(ws, …)` to the requesting socket only —
+> there is no fan-out (`wsHub.ts:1138-1163`). So a reopen triggered here reaches
+> the other clients **only on their next snapshot**, leaving them showing the
+> buffer as closed until then. Don't write a `buffer-opened` handler expecting
+> to be notified of another device's open: that frame is an ack to the socket
+> that asked, not a broadcast. Of the three lifecycle frames only
+> `buffer-closed` (`wsHub.ts:2452`) and `buffer-reopened` (`wsHub.ts:1618`,
+> emitted when an incoming _event_ outranks the closed flag — not by this verb)
+> are fanned out.
 
 ### 4.4 Reconnect and resume (`?since`)
 
@@ -410,6 +428,27 @@ network you don't own gets `{kind:'error', text:'unknown network'}`. Unknown
 verbs are non-fatal (§2). Verbs marked ⏸ are rejected when the account is
 paused. Dispatch: `handleClientMessage`, `wsHub.ts:2031`.
 
+**Request/reply correlation.** There is no envelope-level request id. The verbs
+that answer you carry a per-verb correlation field instead, which you generate
+and the server echoes back (verbatim, with one length caveat noted below):
+
+| Verb(s)                      | Field           | Echoed on                   | Discipline                                                           |
+| ---------------------------- | --------------- | --------------------------- | -------------------------------------------------------------------- |
+| `send` / `action` / `notice` | `clientId`      | `send-result`               | Optional. Omit it and you get no ack (the `irc` echo still arrives)  |
+| `history` / `search`         | `token`         | `history` / `search-result` | Keep it monotonic and **drop replies whose token you've superseded** |
+| `POST /api/uploads` (REST)   | `progressToken` | `upload-progress`           | **Must be ≤64 chars** — see below; the only cross-transport one      |
+
+> ⚠ `progressToken` is **truncated, not rejected**, at 64 characters
+> (`routes/uploads.ts:250`). Send a longer one and the upload succeeds while
+> every `upload-progress` frame carries the truncated token, matching nothing
+> you're waiting on — so progress silently never appears and no error is raised
+> anywhere. Keep yours short (a UUID is 36).
+
+Three names for one concept is a historical accident, not a pattern to extend.
+Nothing else is correlated: every other verb either replies with a frame whose
+`(networkId, target)` identifies it unambiguously, or doesn't reply at all.
+Match on those keys rather than inventing your own correlation.
+
 ### Sending ⏸
 
 | `type`   | Fields                                             | Notes                                                                            |
@@ -489,30 +528,30 @@ a v1 client.
 
 ### 7.1 Frame kinds
 
-| `kind`                                                                                                                                                                   | Payload                                                                                                                                                             | When                                               |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `snapshot`                                                                                                                                                               | `protocolVersion, maxUploadBytes, networks[], globalIgnores[], cursor?`                                                                                             | Connect burst / gap-fill                           |
-| `draft-snapshot` / `bookmark-ids-snapshot` / `contacts-snapshot`                                                                                                         | `drafts` / `ids[]` / `contacts[]`                                                                                                                                   | Connect burst                                      |
-| `backlog-complete`                                                                                                                                                       | —                                                                                                                                                                   | Last frame of the burst; absence is proof (§4.3)   |
-| `backlog`                                                                                                                                                                | `networkId, target, events[], reset?, hasMoreOlder, joined, lastReadId, unread, highlights, highlightsCapped, clearedBeforeId, clearedAt, speakers?, inputHistory?` | Burst, `open-buffer` reply, resume gap             |
-| `irc`                                                                                                                                                                    | A decorated `MessageEvent` (§5.3) with `kind` clobbered to `'irc'`                                                                                                  | Every live IRC-side event                          |
-| `history`                                                                                                                                                                | `networkId, target, mode, token, events[], speakers, hasMoreOlder, hasMoreNewer, hasMore, before/afterId/anchorId/anchorMissing` (per mode)                         | Reply to `history`                                 |
-| `read-state`                                                                                                                                                             | see §5.4                                                                                                                                                            | After every countable event / mark-read            |
-| `send-result`                                                                                                                                                            | `clientId, ok, error?`                                                                                                                                              | Ack for `send`/`action`/`notice`                   |
-| `buffer-opened` / `buffer-closed` / `buffer-reopened`                                                                                                                    | `networkId, target`                                                                                                                                                 | Buffer lifecycle (§9.1)                            |
-| `buffer-cleared`                                                                                                                                                         | `networkId, target, clearedBeforeId, clearedAt`                                                                                                                     | `/clear` marker                                    |
-| `pins-changed`                                                                                                                                                           | `networkId, pinned[]`                                                                                                                                               | Authoritative pin order                            |
-| `nicklist-collapsed-changed` / `channel-notify-changed`                                                                                                                  | `networkId, target, …`                                                                                                                                              | View-state sync                                    |
-| `draft-updated` / `input-history-added` / `bookmark-updated` / `nick-note-updated` / `relay-bot-updated` / `contact-updated` / `contact-deleted` / `ignore-list-updated` | various                                                                                                                                                             | Multi-device view-state fan-out                    |
-| `settings`                                                                                                                                                               | `changes`, `maxUploadBytes?` (only when the upload cap was touched)                                                                                                 | Server-side settings changed                       |
-| `highlight-rules-changed`                                                                                                                                                | —                                                                                                                                                                   | Re-fetch highlight rules                           |
-| `account-state`                                                                                                                                                          | `paused: bool`                                                                                                                                                      | Hosted pause/resume                                |
-| `chanlist-state` / `chanlist-result`                                                                                                                                     | `/LIST` cache meta / result page                                                                                                                                    | Channel browser                                    |
-| `e2eExport` / `e2eImport`                                                                                                                                                | E2E key material / import result                                                                                                                                    | Replies, this socket only                          |
-| `dcc-transfer`                                                                                                                                                           | full transfer row (snake_case)                                                                                                                                      | DCC state changes                                  |
-| `upload-progress`                                                                                                                                                        | `token, phase, destination, percent`                                                                                                                                | During REST upload (correlate via `progressToken`) |
-| `export`                                                                                                                                                                 | `job`                                                                                                                                                               | Export job progress                                |
-| `error`                                                                                                                                                                  | `text`                                                                                                                                                              | Non-fatal; also the reply to unknown verbs         |
+| `kind`                                                                                                                                                                   | Payload                                                                                                                                                                                                                                                     | When                                               |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `snapshot`                                                                                                                                                               | `protocolVersion, maxUploadBytes, networks[], globalIgnores[], cursor?`                                                                                                                                                                                     | Connect burst / gap-fill                           |
+| `draft-snapshot` / `bookmark-ids-snapshot` / `contacts-snapshot`                                                                                                         | `drafts` / `ids[]` / `contacts[]`                                                                                                                                                                                                                           | Connect burst                                      |
+| `backlog-complete`                                                                                                                                                       | —                                                                                                                                                                                                                                                           | Last frame of the burst; absence is proof (§4.3)   |
+| `backlog`                                                                                                                                                                | `networkId, target, events[], mode, reset?, hasMoreOlder, joined, lastReadId, unread, highlights, highlightsCapped, clearedBeforeId, clearedAt, speakers?, inputHistory?` — **`mode ∈ replace\|append\|shell` is how you merge it (§8); `reset` is legacy** | Burst, `open-buffer` reply, resume gap             |
+| `irc`                                                                                                                                                                    | A decorated `MessageEvent` (§5.3) with `kind` clobbered to `'irc'`                                                                                                                                                                                          | Every live IRC-side event                          |
+| `history`                                                                                                                                                                | `networkId, target, mode, token, events[], speakers, hasMoreOlder, hasMoreNewer, hasMore, before/afterId/anchorId/anchorMissing` (per mode)                                                                                                                 | Reply to `history`                                 |
+| `read-state`                                                                                                                                                             | see §5.4                                                                                                                                                                                                                                                    | After every countable event / mark-read            |
+| `send-result`                                                                                                                                                            | `clientId, ok, error?`                                                                                                                                                                                                                                      | Ack for `send`/`action`/`notice`                   |
+| `buffer-opened` / `buffer-closed` / `buffer-reopened`                                                                                                                    | `networkId, target`                                                                                                                                                                                                                                         | Buffer lifecycle (§9.1)                            |
+| `buffer-cleared`                                                                                                                                                         | `networkId, target, clearedBeforeId, clearedAt`                                                                                                                                                                                                             | `/clear` marker                                    |
+| `pins-changed`                                                                                                                                                           | `networkId, pinned[]`                                                                                                                                                                                                                                       | Authoritative pin order                            |
+| `nicklist-collapsed-changed` / `channel-notify-changed`                                                                                                                  | `networkId, target, …`                                                                                                                                                                                                                                      | View-state sync                                    |
+| `draft-updated` / `input-history-added` / `bookmark-updated` / `nick-note-updated` / `relay-bot-updated` / `contact-updated` / `contact-deleted` / `ignore-list-updated` | various                                                                                                                                                                                                                                                     | Multi-device view-state fan-out                    |
+| `settings`                                                                                                                                                               | `changes`, `maxUploadBytes?` (only when the upload cap was touched)                                                                                                                                                                                         | Server-side settings changed                       |
+| `highlight-rules-changed`                                                                                                                                                | —                                                                                                                                                                                                                                                           | Re-fetch highlight rules                           |
+| `account-state`                                                                                                                                                          | `paused: bool`                                                                                                                                                                                                                                              | Hosted pause/resume                                |
+| `chanlist-state` / `chanlist-result`                                                                                                                                     | `/LIST` cache meta / result page                                                                                                                                                                                                                            | Channel browser                                    |
+| `e2eExport` / `e2eImport`                                                                                                                                                | E2E key material / import result                                                                                                                                                                                                                            | Replies, this socket only                          |
+| `dcc-transfer`                                                                                                                                                           | full transfer row (snake_case)                                                                                                                                                                                                                              | DCC state changes                                  |
+| `upload-progress`                                                                                                                                                        | `token, phase, destination, percent`                                                                                                                                                                                                                        | During REST upload (correlate via `progressToken`) |
+| `export`                                                                                                                                                                 | `job`                                                                                                                                                                                                                                                       | Export job progress                                |
+| `error`                                                                                                                                                                  | `text`                                                                                                                                                                                                                                                      | Non-fatal; also the reply to unknown verbs         |
 
 ### 7.2 `irc` event types (the inner `type` field)
 
@@ -589,19 +628,58 @@ slice (track them separately or refetch); `latest` reattaches.
 
 **Merge rules that protect you from data loss:**
 
-1. `backlog` with `reset:true` → replace the buffer's contents wholesale
-   (resume gap overflowed; splicing leaves a hole).
-2. `backlog` without a `reset` field, or the system buffer's backlog (which
-   hardcodes `reset:false` but means "replace") → replace. Only
-   `networkId != null` **and** `reset === false` means gap-append. (iOS
-   `FrameParser.swift:104-111`; web detects the non-overlap case instead.)
-3. **Never un-hydrate:** a later shell (`events:[]`) for a buffer you already
-   populated must not wipe it.
-4. On any replace, **keep held live events newer than the slice tail** — a
+1. **Read `mode` on every `backlog` frame and do what it says.** It is the
+   server stating how it built the slice — the only field you need to decide
+   _how to merge_ (but not the only one you must record; see rule 4):
+
+   | `mode`    | Meaning                                                | Action                                                      |
+   | --------- | ------------------------------------------------------ | ----------------------------------------------------------- |
+   | `replace` | Authoritative slice, **not** contiguous with your tail | Take `events`; **may** keep overlapping older rows — rule 5 |
+   | `append`  | A contiguous gap-fill                                  | Splice onto your existing tail                              |
+   | `shell`   | Buffer exists, nothing shipped (`events:[]`)           | Leave existing contents alone; fetch on open                |
+
+   > Taking `events` wholesale is always **safe** on `replace`, and is the right
+   > first implementation. Rule 5 is the refinement that stops it costing the
+   > user their scrollback — read it before you ship.
+
+2. **Ignore `reset`.** It predates `mode` and is not decodable on its own:
+   `reset:false` means _append_ on a resume gap but _replace_ on a fresh
+   connect and on the system buffer — three meanings, two values. Old clients
+   derived it by also reading `networkId` and by knowing out-of-band whether
+   they'd sent `?since` (iOS `FrameParser.swift:104-111`; web inferred from id
+   non-overlap). It is still sent wherever it was sent before, unchanged — note
+   that's only two of the four backlog shapes: shells and `open-buffer` replies
+   have never carried it at all. Don't build on it.
+
+   > A server predating `mode` omits the field entirely. If you must support
+   > one: treat `events:[] && hasMoreOlder` as a shell **first** (absent `reset`
+   > would otherwise fall into replace and un-hydrate it — rule 3), then append
+   > only when `networkId != null && reset === false`, else replace.
+
+3. **Never un-hydrate:** a `shell` for a buffer you already populated must not
+   wipe it. This is why shells are their own `mode` rather than
+   `replace`-with-empty.
+4. **`mode` tells you how to merge; `hasMoreOlder` tells you whether the pager
+   is still armed — record it on every frame, including `append` and `shell`.**
+   It's the flag your open-time lazy fetch and scroll-up pager gate on, so
+   dropping it on a gap-fill strands the buffer at whatever it happens to hold
+   (`wsHub.ts:870-876`).
+5. **`replace` permits preserving contiguous older history you already hold.**
+   The rule it must never break is _don't create a hole_. So: if the incoming
+   slice **overlaps** what you hold (its oldest id ≤ your newest id), you may
+   dedupe-merge and keep older rows the user paged in — this is what the web
+   client does (`vue_client/src/stores/buffers.ts:504-525`), and it matters
+   because `:system:` and offline `:server:` buffers get a full `replace` frame
+   on **every** snapshot, including the in-band `{type:'snapshot'}` resync a
+   client may fire on visibility return. Dropping everything there would throw
+   away the user's scrollback each time they tab back. If the slice is
+   **disjoint** (its oldest id > your newest id), rows went missing in between —
+   you must replace wholesale and let `hasMoreOlder` page the rest.
+6. On any replace, **keep held live events newer than the slice tail** — a
    message can land mid-hydrate.
-5. Dedupe everything by id against what you hold; drop legacy `away`/`back`
+7. Dedupe everything by id against what you hold; drop legacy `away`/`back`
    rows if you encounter them in old history.
-6. The web client caps its in-memory ring at 500 events/buffer and pages the
+8. The web client caps its in-memory ring at 500 events/buffer and pages the
    rest — policy, not protocol, but a sane default.
 
 ---
@@ -634,9 +712,28 @@ these signals:
   `read-state` for unknown buffers must resolve-or-drop. (`mark-all-read` fans
   out `read-state` for _closed_ buffers too — resurrecting them in the sidebar
   was bug #319; typing-tag DM creation was #292.)
-- NOTICEs never create or reopen a DM — a notice to a closed/absent DM arrives
-  on `:server:` with `mirrored:true`. Already handled server-side; just don't
-  special-case it.
+- **NOTICEs may create a DM buffer, but never reopen a closed one.** Both
+  outcomes are decided server-side and arrive as ordinary frames — don't
+  special-case either. What the server actually does with an incoming
+  DM-targeted event (`server/db/buffers.ts:21-29`):
+
+  | Trigger              | Buffer has no row | Buffer row is closed                      |
+  | -------------------- | ----------------- | ----------------------------------------- |
+  | `message` / `action` | creates it, open  | **reopens** it                            |
+  | `notice`             | creates it, open  | **stays closed** → mirrored to `:server:` |
+
+  So a NOTICE from a nick you've never talked to does open a buffer for that
+  nick — that's how services (NickServ, ChanServ, oper notices) get their own
+  buffer instead of dumping into `:server:`. Only the **closed-row** case
+  routes elsewhere: the real copy is persisted in the closed DM buffer (waiting
+  for a reopen) and a second, durable copy lands in `:server:` carrying
+  `mirrored:true`. Render the mirror like any other `:server:` line; it's
+  excluded from search so it can't double up results.
+
+  A notice-only buffer is deliberately **not** a "conversation": the server
+  won't start presence-tracking its nick (no MONITOR slot, no presence dot)
+  until a real PRIVMSG/ACTION arrives (`db/messages.ts:440`).
+
 - **Navigating to a buffer by key** (launch restore, notification tap) is the
   one case where you need to ask "does this exist?" rather than mirror a
   signal. Wait for `backlog-complete`; if the key still has no `backlog` frame

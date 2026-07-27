@@ -132,6 +132,8 @@ describe('buildBufferBacklog', () => {
     expect(frame.networkId).toBe(networkId);
     expect(frame.target).toBe('#bl');
     expect((frame.events as unknown[]).length).toBe(3);
+    // A one-off hydrate always ships a standalone recent slice, never a gap.
+    expect(frame.mode).toBe('replace');
     // No live IRC connection in the test → the channel reads as parted.
     expect(frame.joined).toBe(false);
     expect(frame.unread).toBe(3);
@@ -210,6 +212,7 @@ describe('buildResumeSlice', () => {
     for (let i = 1; i <= 5; i++) ids.push(seed('#resumeSmall', `m${i}`));
     const slice = buildResumeSlice(userId, networkId, '#resumeSmall', since);
     expect(slice.reset).toBe(false);
+    expect(slice.mode).toBe('append');
     expect(slice.events.length).toBe(5);
     // The gap, oldest-first — exactly the rows after the cursor.
     expect((slice.events[0] as { id: number }).id).toBe(ids[0]);
@@ -234,6 +237,8 @@ describe('buildResumeSlice', () => {
     const slice = buildResumeSlice(userId, networkId, '#resumeEmptyGap', tail);
     expect(slice.events.length).toBe(0);
     expect(slice.reset).toBe(false);
+    // An empty gap is still a gap: appending nothing must not wipe the tail.
+    expect(slice.mode).toBe('append');
     expect(slice.hasMoreOlder).toBe(true);
   });
 
@@ -244,6 +249,7 @@ describe('buildResumeSlice', () => {
     for (let i = 1; i <= RESUME_GAP_CAP + 10; i++) lastId = seed('#resumeBig', `m${i}`);
     const slice = buildResumeSlice(userId, networkId, '#resumeBig', since);
     expect(slice.reset).toBe(true);
+    expect(slice.mode).toBe('replace');
     // Latest contiguous slice, NOT the oldest-after-cursor rows.
     expect(slice.events.length).toBe(RESUME_LATEST_LIMIT);
     expect((slice.events.at(-1) as { id: number }).id).toBe(lastId);
@@ -257,6 +263,21 @@ describe('buildResumeSlice', () => {
     const slice = buildResumeSlice(userId, networkId, '#resumeFresh', 0);
     expect(slice.reset).toBe(false);
     expect(slice.events.length).toBe(2);
+  });
+
+  it('says replace on a fresh connect even though reset is false (#668)', () => {
+    // THE regression this field exists to prevent. Both this slice and the
+    // gap-fill slice above report `reset:false`, but they mean opposite things:
+    // this one is a standalone latest slice (replace), that one is a contiguous
+    // gap (append). Nothing on the wire distinguished them — a client had to
+    // know out-of-band whether it had sent ?since. `mode` says it outright.
+    const since = seed('#resumeAmbiguous', 'm0');
+    seed('#resumeAmbiguous', 'm1');
+    const fresh = buildResumeSlice(userId, networkId, '#resumeAmbiguous', 0);
+    const gap = buildResumeSlice(userId, networkId, '#resumeAmbiguous', since);
+    expect(fresh.reset).toBe(gap.reset); // indistinguishable on the old field...
+    expect(fresh.mode).toBe('replace'); // ...and unambiguous on the new one.
+    expect(gap.mode).toBe('append');
   });
 });
 
@@ -276,6 +297,10 @@ describe('buildBufferShell', () => {
     expect(shell.speakers).toBeUndefined();
     // hasMoreOlder gates the client's open-time lazy fetch — must be true.
     expect(shell.hasMoreOlder).toBe(true);
+    // 'shell', NOT 'replace': events:[] means "nothing shipped", not "this
+    // buffer is empty". A client that replaced on this would un-hydrate a
+    // buffer it had already filled.
+    expect(shell.mode).toBe('shell');
     expect(shell.unread).toBe(2);
     // joined is caller-supplied (online membership vs offline parted).
     expect(shell.joined).toBe(true);
@@ -577,6 +602,11 @@ describe('system buffer delivery (#355)', () => {
     expect(frame.networkId).toBeNull();
     expect(frame.target).toBe(':system:');
     expect(frame.joined).toBe(true);
+    // The system buffer has always shipped `reset:false` while MEANING replace
+    // (it ignores ?since — its own id sequence makes the cursor meaningless).
+    // That mismatch is the other half of what #668 fixes.
+    expect(frame.reset).toBe(false);
+    expect(frame.mode).toBe('replace');
     const evIds = (frame.events as Array<{ id: number }>).map((e) => e.id);
     expect(evIds.slice(-3)).toEqual(ids); // our three, oldest-first
     expect(frame).toHaveProperty('lastReadId');
