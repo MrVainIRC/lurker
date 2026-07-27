@@ -796,6 +796,23 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
       'this client from sending typing/paused/done notifications while you compose ' +
       "a message. Doesn't affect seeing other people's typing indicators.",
   },
+  {
+    key: 'chat.keep_position_on_send',
+    label: 'Stay where you are when you send',
+    category: 'chat',
+    group: 'composing',
+    type: 'bool',
+    default: false,
+    description:
+      'Keep your scroll position when you send a message, instead of jumping to ' +
+      'the newest message. For reading back through a busy channel while still ' +
+      'replying — your own line lands at the bottom and the "Return ↓" button ' +
+      'counts it, so you can drop back down when you are ready. Off (the default) ' +
+      'jumps to the bottom on every send. Sending while you are viewing a ' +
+      'jumped-to point in history returns you to the live conversation either ' +
+      'way, since that view holds live messages back and there is nowhere in it ' +
+      'for your own message to appear.',
+  },
 
   // ─── Smart filter (join/part/quit/nick noise) ─────────────────────────
   {

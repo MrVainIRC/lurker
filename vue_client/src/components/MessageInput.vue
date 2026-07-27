@@ -177,6 +177,7 @@ import {
   splitGateFor,
   type MultilineLimits,
 } from '../utils/messageSplit.js';
+import { shouldRepinOnSend } from '../utils/sendScroll.js';
 import { applySpoilerMarkup } from '../utils/spoilerMarkup.js';
 import { buildNickCandidates } from '../utils/nickCompletion.js';
 import { buildChannelCandidates } from '../utils/channelCompletion.js';
@@ -1878,7 +1879,12 @@ function toastSendFailure(error: string, body: string): void {
 // Optimistically clear, but only AFTER we've confirmed the send actually
 // hit the wire. Anything we'd otherwise have lost (the typed text, the
 // history slot) is still recoverable via up-arrow if delivery later fails.
-function commitInput(raw: string, networkId: number, target: string): void {
+function commitInput(
+  raw: string,
+  networkId: number,
+  target: string,
+  opts: { isChatMessage: boolean },
+): void {
   inputHistory.add(networkId, target, raw);
   socketSend({ type: 'input-history-add', networkId, target, text: raw });
   // Clear the draft for the buffer the send came FROM, addressed explicitly
@@ -1894,10 +1900,54 @@ function commitInput(raw: string, networkId: number, target: string): void {
   pendingSplitConfirm = false;
   setComposingState({ chunks: 0, isAction: false });
   resetHistoryNav();
+  // A command always re-pins, whatever the setting says, and never reattaches.
+  // Its output lands in this buffer through localInfo — /commands, /ignore
+  // list, every usage and error line — and those rows are deliberately id-less,
+  // which is precisely what maybeBumpNewBelow skips. So keeping your place
+  // would drop the answer below the fold with no "Return (N new) ↓" to say it
+  // exists, and the command would look like it did nothing. That's the same
+  // reasoning the system buffer applies to everything it prints. Sends wearing
+  // a command's clothes (/me, /slap, /shrug, /jitsi, …) are messages, not
+  // commands; the caller tells them apart by whether the command actually put
+  // something on the wire, not by the verb.
+  if (!opts.isChatMessage) {
+    requestScrollToBottom();
+    return;
+  }
+
   // Re-pin to the bottom so a user who was scrolled up reading history sees
   // their own send land — and the live-append watcher in MessageList keeps
-  // following once stickToBottom flips back on.
-  requestScrollToBottom();
+  // following once stickToBottom flips back on. chat.keep_position_on_send
+  // opts out of the yank (#628); see shouldRepinOnSend for why a detached
+  // buffer overrides it.
+  //
+  // The buffer tested is the ACTIVE one, not the one the send was addressed to:
+  // this decides what happens to the list on screen, and a `/msg nick text` has
+  // already activated the DM by the time we get here. That new buffer is never
+  // detached, so switching to it still lands at the bottom.
+  const onScreen = networks.activeKey ? buffers.byKey(networks.activeKey) : null;
+  const detached = !!onScreen?.detached;
+  if (detached) {
+    // Sending from a detached slice returns to live, the same way the status
+    // bar's "Return ↓" does. The message went to the live tail, and a detached
+    // buffer holds that tail out of the log — so a plain scroll would land at
+    // the end of a stretch of history the message can never appear in, which
+    // reads as a failed send. Fetching the tail is the only way to show it.
+    const rejoined =
+      onScreen?.networkId != null && buffers.reattachToLive(onScreen.networkId, onScreen.target);
+    // The request doesn't go out while another history page is already in
+    // flight (the downward pager, mid-slice). The buffer is then still
+    // detached and the message still isn't loaded, so scrolling would claim an
+    // arrival that hasn't happened. Leaving the reader where they are keeps
+    // "Return ↓" and its count in front of them — one tap fetches the tail,
+    // this message included.
+    if (!rejoined) return;
+  }
+  const repin = shouldRepinOnSend({
+    keepPosition: settings.effective('chat.keep_position_on_send') === true,
+    detached,
+  });
+  if (repin) requestScrollToBottom();
 }
 
 async function submit() {
@@ -1926,6 +1976,10 @@ async function submit() {
     }
     systemText.value = '';
     resetHistoryNav();
+    // Unconditional, unlike the chat path above: chat.keep_position_on_send is
+    // for reading a conversation while replying to it, and this buffer isn't a
+    // conversation — you type a command to read what it prints back, so keeping
+    // your place would hide the only thing the send produced.
     requestScrollToBottom();
     return;
   }
@@ -1996,9 +2050,10 @@ async function submit() {
     // as a chat message; the rest stay best-effort but at least bail out
     // synchronously if the socket is closed so we don't silently swallow
     // them either.
+    const said = chatMessagesSent;
     const handled = await handleCommand(raw, networkId, target);
     if (!handled) return;
-    commitInput(raw, networkId, target);
+    commitInput(raw, networkId, target, { isChatMessage: chatMessagesSent > said });
     return;
   }
 
@@ -2018,7 +2073,7 @@ async function submit() {
   typingState = null;
   typingTarget = null;
   clearInactivityTimer();
-  commitInput(raw, networkId, target);
+  commitInput(raw, networkId, target, { isChatMessage: true });
   const result = await pending;
   if (!result.ok) toastSendFailure(result.error ?? 'unknown', raw);
 }
@@ -2228,12 +2283,28 @@ function sendOrToast(payload: Record<string, unknown>, body: string): boolean {
 // channel/DM (/me, /msg <body>, /jitsi). Same shape as the main submit path:
 // returns false synchronously if the socket is closed; otherwise kicks off
 // the await and toasts asynchronously on a non-ok ACK.
+// How many chat messages slash commands have put on the wire this session.
+// Read as a before/after pair around handleCommand (see submit) to answer "did
+// that command actually say something?", which decides whether the scroll rule
+// treats it as a send or as a command (#628).
+//
+// Counted here, at the one seam every message-shaped command goes through,
+// rather than by re-reading the verb: /me, /slap, /shrug, /jitsi, /talk, /msg
+// and /query all say something, and a list of them maintained anywhere else is
+// a list that goes stale the first time somebody adds the eighth. A counter
+// rather than a flag because submit() awaits handleCommand, so a second Enter
+// arriving mid-await would clobber a flag but can only inflate a counter.
+let chatMessagesSent = 0;
+
 function ackedSend(payload: Record<string, unknown>, body: string): boolean {
   const pending = socketSendWithAck(payload);
   if (!pending) {
     toastSendFailure('disconnected', body);
     return false;
   }
+  // 'notice' is deliberately not counted: it's addressed to someone else and
+  // puts nothing in the buffer the command was run from.
+  if (payload.type === 'send' || payload.type === 'action') chatMessagesSent += 1;
   pending.then((result) => {
     if (!result.ok) toastSendFailure(result.error ?? 'unknown', body);
     return result;

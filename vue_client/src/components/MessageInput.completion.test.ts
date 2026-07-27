@@ -18,6 +18,8 @@ import { createPinia, setActivePinia } from 'pinia';
 import { useNetworksStore } from '../stores/networks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { useRecentBuffersStore } from '../stores/recentBuffers.js';
+import { useSettingsStore } from '../stores/settings.js';
+import { useScrollState } from '../composables/useScrollState.js';
 import MessageInput from './MessageInput.vue';
 
 // The composer sends typing state / drafts over the socket as you type. There's
@@ -444,5 +446,166 @@ describe('MessageInput command dispatch', () => {
     expect(socketSendWithAck).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'send', text: '¯\\_(ツ)_/¯' }),
     );
+  });
+});
+
+// Where the composer leaves the viewport after a send (#628). Driven through
+// real keystrokes for the same reason the completion tests are: the rule reads
+// three sources — the setting, whether the draft is a message or a command, and
+// whether the buffer is detached — and only submit() assembles all three.
+//
+// The observable is useScrollState's token rather than a spy on the composable:
+// it's the same thing MessageList watches, so a test that passes here is
+// asserting the signal the list actually acts on.
+describe('scroll position on send (#628)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  afterEach(() => {
+    for (const wrapper of mounted) wrapper.unmount();
+    mounted = [];
+    vi.mocked(socketSendWithAck).mockReturnValue(null);
+  });
+
+  async function enter(el: HTMLTextAreaElement) {
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await flush();
+  }
+
+  function keepPosition(on: boolean) {
+    useSettingsStore().values['chat.keep_position_on_send'] = on;
+  }
+
+  // submit() bails before commitInput when the ack send reports a closed
+  // socket, and the shared mock returns null. Every message-shaped case needs
+  // delivery to look like it happened.
+  function allowSend() {
+    vi.mocked(socketSendWithAck).mockReturnValue(Promise.resolve({ ok: true }) as unknown as null);
+  }
+
+  const token = () => useScrollState().scrollToBottomToken.value;
+
+  it('re-pins to the bottom by default', async () => {
+    seedStores('#zebra');
+    allowSend();
+    const { el } = await mountComposer();
+
+    await type(el, 'hello');
+    const before = token();
+    await enter(el);
+
+    expect(token()).toBeGreaterThan(before);
+  });
+
+  it('leaves the viewport alone when the setting is on', async () => {
+    seedStores('#zebra');
+    keepPosition(true);
+    allowSend();
+    const { el } = await mountComposer();
+
+    await type(el, 'hello');
+    const before = token();
+    await enter(el);
+
+    expect(token()).toBe(before);
+    // The send itself is unaffected — this is a scroll rule, not a send gate.
+    expect(socketSendWithAck).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'send', text: 'hello' }),
+    );
+  });
+
+  it('re-pins for a command even with the setting on', async () => {
+    // /commands answers with 40-odd localInfo lines, and those rows are id-less
+    // so the "N new ↓" badge never counts them. Keeping your place would put
+    // the answer below the fold with nothing to say it arrived.
+    seedStores('#zebra');
+    keepPosition(true);
+    const { el } = await mountComposer();
+
+    await type(el, '/commands');
+    const before = token();
+    await enter(el);
+
+    expect(token()).toBeGreaterThan(before);
+  });
+
+  // One case per shape of message-producing command, because the first cut of
+  // this classified by parsing the verb and only knew the four that bodyForSplit
+  // knows for split-gating — so /slap and /jitsi jumped to the bottom while /me
+  // and /shrug stayed put. Now it's whether the command actually put something
+  // on the wire, and these are the three ways that happens.
+  it.each([
+    ['/me waves', 'action'],
+    ['/slap bob', 'action'],
+    ['/jitsi', 'send'],
+  ])('treats %s as the send it is, not a command', async (draft, wireType) => {
+    seedStores('#zebra');
+    keepPosition(true);
+    allowSend();
+    const { el } = await mountComposer();
+
+    await type(el, draft);
+    const before = token();
+    await enter(el);
+
+    expect(token()).toBe(before);
+    // Positive control: without this, a command that never reached commitInput
+    // would produce the same unchanged token and pass for the wrong reason.
+    expect(socketSendWithAck).toHaveBeenCalledWith(expect.objectContaining({ type: wireType }));
+  });
+
+  it('rejoins live when the send came from a detached slice', async () => {
+    // The message goes to the live tail, which a detached buffer holds out of
+    // the log — so staying put, setting or no setting, would show a stretch of
+    // history the message can never appear in.
+    const { buffers } = seedStores('#zebra');
+    buffers.buffers['1::#zebra'].detached = true;
+    keepPosition(true);
+    allowSend();
+    const reattach = vi.spyOn(buffers, 'reattachToLive').mockReturnValue(true);
+    const { el } = await mountComposer();
+
+    await type(el, 'hello');
+    const before = token();
+    await enter(el);
+
+    expect(reattach).toHaveBeenCalledWith(1, '#zebra');
+    expect(token()).toBeGreaterThan(before);
+  });
+
+  it('does not rejoin live for a command run from a detached slice', async () => {
+    // A command isn't a send: nothing of the user's went to the live tail, so
+    // throwing away the history slice they deliberately jumped to would be a
+    // change they never asked for — and this path is on by default.
+    const { buffers } = seedStores('#zebra');
+    buffers.buffers['1::#zebra'].detached = true;
+    const reattach = vi.spyOn(buffers, 'reattachToLive').mockReturnValue(true);
+    const { el } = await mountComposer();
+
+    await type(el, '/commands');
+    await enter(el);
+
+    expect(reattach).not.toHaveBeenCalled();
+  });
+
+  it('stays put when the rejoin request could not go out', async () => {
+    // reattachToLive returns false while another history page is in flight. The
+    // buffer is still detached and the message still isn't loaded, so scrolling
+    // would claim an arrival that hasn't happened; "Return ↓" stays the way back.
+    const { buffers } = seedStores('#zebra');
+    buffers.buffers['1::#zebra'].detached = true;
+    allowSend();
+    const reattach = vi.spyOn(buffers, 'reattachToLive').mockReturnValue(false);
+    const { el } = await mountComposer();
+
+    await type(el, 'hello');
+    const before = token();
+    await enter(el);
+
+    expect(token()).toBe(before);
+    // Positive control, as above: proves the send got as far as the detached
+    // branch rather than falling out of submit() somewhere earlier.
+    expect(reattach).toHaveBeenCalled();
   });
 });
