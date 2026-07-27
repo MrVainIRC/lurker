@@ -558,55 +558,91 @@ describe('sweepWsHeartbeat', () => {
 });
 
 // A ws stand-in carrying only what the backpressure check reads/calls.
+// bufferedAmount is writable so a test can drain it between observations.
 function bpWs(bufferedAmount: number) {
-  const calls: { close: Array<{ code: number; reason: string }> } = { close: [] };
+  const calls = { terminate: 0 };
   const ws = {
     bufferedAmount,
-    close(code: number, reason: string) {
-      calls.close.push({ code, reason });
+    backpressureSince: undefined as number | undefined,
+    terminate() {
+      calls.terminate += 1;
     },
   };
   return { ws, calls };
 }
 
-function drop(ws: ReturnType<typeof bpWs>['ws']): boolean {
-  return dropIfBackpressured(ws as unknown as Parameters<typeof dropIfBackpressured>[0]);
+function drop(ws: ReturnType<typeof bpWs>['ws'], now: number): boolean {
+  return dropIfBackpressured(ws as unknown as Parameters<typeof dropIfBackpressured>[0], now);
 }
 
 describe('dropIfBackpressured', () => {
   const CAP = 8 * 1024 * 1024; // mirrors MAX_BUFFERED_BYTES
+  const GRACE = 30_000; // mirrors BACKPRESSURE_GRACE_MS
 
   it('keeps a socket that is draining', () => {
     const { ws, calls } = bpWs(0);
-    expect(drop(ws)).toBe(false);
-    expect(calls.close.length).toBe(0);
+    expect(drop(ws, 1000)).toBe(false);
+    expect(calls.terminate).toBe(0);
+    expect(ws.backpressureSince).toBeUndefined();
   });
 
   it('keeps a socket sitting exactly at the cap', () => {
-    // The heartbeat reaps dead sockets; this only fires for one that is provably
-    // NOT keeping up, so the boundary is deliberately inclusive.
-    const { ws, calls } = bpWs(CAP);
-    expect(drop(ws)).toBe(false);
-    expect(calls.close.length).toBe(0);
+    const { ws } = bpWs(CAP);
+    expect(drop(ws, 1000)).toBe(false);
+    expect(ws.backpressureSince).toBeUndefined();
   });
 
-  it('closes a wedged socket with 1013 so it reconnects and resumes', () => {
-    // 1013 Try Again Later, not terminate: the client comes back through its
-    // normal reconnect and refetches the gap via ?since, so this costs a
-    // reconnect rather than history.
+  it('only starts the clock on the first over-cap sighting, never drops on it', () => {
+    // THE case this whole design exists for: a large synchronous snapshot burst
+    // legitimately puts megabytes on the socket, and the first live event lands
+    // while it's still draining. Dropping there would disconnect big accounts on
+    // connect, forever — they'd reconnect into the same burst.
     const { ws, calls } = bpWs(CAP + 1);
-    expect(drop(ws)).toBe(true);
-    expect(calls.close).toEqual([{ code: 1013, reason: 'backpressure' }]);
+    expect(drop(ws, 1000)).toBe(false);
+    expect(calls.terminate).toBe(0);
+    expect(ws.backpressureSince).toBe(1000);
   });
 
-  it('reports the drop even when close throws on an already-dying socket', () => {
+  it('spares a socket that drains back under the cap, and forgets the clock', () => {
+    const { ws, calls } = bpWs(CAP + 1);
+    drop(ws, 1000); // clock starts
+    ws.bufferedAmount = 1024; // the burst flushed
+    expect(drop(ws, 5000)).toBe(false);
+    expect(ws.backpressureSince).toBeUndefined();
+    // Re-filling later starts a FRESH clock rather than inheriting the old one,
+    // so a socket that hiccups repeatedly is never condemned by accumulation.
+    ws.bufferedAmount = CAP + 1;
+    expect(drop(ws, 6000)).toBe(false);
+    expect(ws.backpressureSince).toBe(6000);
+    expect(calls.terminate).toBe(0);
+  });
+
+  it('holds on while still inside the grace period', () => {
+    const { ws, calls } = bpWs(CAP + 1);
+    drop(ws, 1000);
+    expect(drop(ws, 1000 + GRACE - 1)).toBe(false);
+    expect(calls.terminate).toBe(0);
+  });
+
+  it('terminates a socket still wedged after the full grace period', () => {
+    // terminate, not close(1013): a close frame would queue BEHIND the stuck
+    // bytes and ws would hold the connection for its 30s closeTimeout, so the
+    // memory this exists to reclaim would linger. The client resumes via ?since.
+    const { ws, calls } = bpWs(CAP + 1);
+    drop(ws, 1000);
+    expect(drop(ws, 1000 + GRACE)).toBe(true);
+    expect(calls.terminate).toBe(1);
+  });
+
+  it('reports the drop even when terminate throws on an already-dying socket', () => {
     const ws = {
       bufferedAmount: CAP + 1,
-      close() {
+      backpressureSince: 1000 as number | undefined,
+      terminate() {
         throw new Error('already closing');
       },
     };
-    expect(drop(ws as unknown as ReturnType<typeof bpWs>['ws'])).toBe(true);
+    expect(drop(ws as unknown as ReturnType<typeof bpWs>['ws'], 1000 + GRACE)).toBe(true);
   });
 });
 

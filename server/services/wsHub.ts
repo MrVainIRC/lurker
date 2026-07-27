@@ -110,6 +110,11 @@ interface LurkerWebSocket extends WebSocket {
   // visible=true) and userHasVisibleClient() stays true forever, permanently
   // suppressing auto-away.
   isAlive?: boolean;
+  // When this socket's outbound queue first went over MAX_BUFFERED_BYTES and
+  // stayed there, or undefined when it's draining normally. Cleared the moment
+  // it drops back under, so only sustained backpressure accumulates time. See
+  // dropIfBackpressured.
+  backpressureSince?: number;
   // Mirrors the account's is_paused at connect time, then flipped live by the
   // user-suspended / user-resumed handlers so the read-only write guard never
   // needs a per-message DB read. (Named accountPaused, not isPaused, to avoid
@@ -1178,8 +1183,9 @@ export function handleOpenBuffer(
 // addSocket/removeSocket); the registry just reads through it.
 const socketsByUser = new Map<number, Set<LurkerWebSocket>>();
 
-// How many bytes of un-drained outbound frames a socket may accumulate on the
-// LIVE fan-out path before we give up on it.
+// How many bytes of un-drained outbound frames a socket may hold before it
+// counts as backpressured, and how long it must STAY that way before we give up
+// on it.
 //
 // The heartbeat reaps DEAD sockets (no pong within a sweep, ~60s). It does not
 // reap SLOW ones, and those are a different failure: a phone on a degraded link
@@ -1188,36 +1194,63 @@ const socketsByUser = new Map<number, Set<LurkerWebSocket>>();
 // event fanned out to such a socket is memory we never get back — a leak whose
 // only symptom is RSS climbing on a busy cell.
 //
-// Live events are small (a few hundred bytes), so this is roughly "tens of
-// thousands of frames behind". Nothing healthy gets there; anything that does
-// is not coming back on this socket.
+// The duration is the load-bearing half, and the reason this isn't a simple
+// size check. `bufferedAmount` is ONE number covering everything queued on the
+// socket, including the synchronous snapshot burst — which can legitimately be
+// megabytes on a large account (up to RESUME_GAP_CAP rows per buffer, across
+// every buffer) and takes real seconds to flush on a real link. A bare size
+// check would therefore fire on the first live event that lands mid-drain,
+// close the socket, and have the client reconnect straight into the same large
+// burst: a permanent disconnect loop for exactly the accounts the cap is
+// supposed to protect. Requiring the condition to PERSIST tells "a big burst,
+// draining" apart from "this socket has stopped moving", which is the thing we
+// actually want to act on.
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+const BACKPRESSURE_GRACE_MS = 30_000;
 
 function send(ws: LurkerWebSocket, payload: WsPayload): void {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload));
 }
 
-// Drop a socket that has stopped draining. Closing with 1013 (Try Again Later)
-// rather than terminating means the client reconnects through its normal path
-// and resumes from `?since` — the gap it missed is refetched, so this costs the
-// user a reconnect, not history.
+// Drop a socket that has been unable to drain for a full grace period. Called
+// per fan-out; the first over-cap observation only starts the clock.
 //
-// Deliberately NOT applied to `send`, which is what the snapshot burst uses.
-// The burst is synchronous: it writes every frame in one tick, and no socket I/O
-// happens until the event loop turns, so `bufferedAmount` there measures the
-// SIZE OF THE BURST, not the health of the client. A large account would trip
-// any threshold worth having and get disconnected on connect, forever. Live
-// fan-out is where slowness actually accumulates over time, so that's where the
-// check belongs.
-// Exported (and pure over its argument, like sweepWsHeartbeat) so the
-// drop/keep decision is unit-testable without a live WSS.
-export function dropIfBackpressured(ws: LurkerWebSocket): boolean {
-  if (ws.bufferedAmount <= MAX_BUFFERED_BYTES) return false;
+// `terminate()`, NOT `close(1013)`. A courteous close queues the close frame
+// BEHIND the megabytes already stuck — on a socket that by definition isn't
+// moving, the handshake can't complete, and `ws` only destroys the connection
+// after its 30s closeTimeout (`ws/lib/websocket.js` setCloseTimer). The bytes
+// this exists to reclaim would sit in the heap for another 30 seconds, and the
+// socket would linger in socketsByUser, which inverts the whole point.
+// Terminating frees both now. The client sees an abnormal close, reconnects
+// through its normal path, and resumes from `?since` — so this costs a
+// reconnect, not history, and the close code it doesn't get is one it could
+// never have received anyway.
+//
+// Deliberately NOT applied to `send`, which is what the snapshot burst uses:
+// judging a socket by the size of a burst the server itself just queued is what
+// the grace period above exists to avoid, and inside the burst there hasn't even
+// been an event-loop turn in which to drain.
+//
+// Exported (and pure over its arguments, like sweepWsHeartbeat) so the
+// drop/keep decision is unit-testable without a live WSS. `now` is injectable
+// for the same reason.
+export function dropIfBackpressured(ws: LurkerWebSocket, now: number = Date.now()): boolean {
+  if (ws.bufferedAmount <= MAX_BUFFERED_BYTES) {
+    // Drained back under the line — it was a burst, not a wedge.
+    ws.backpressureSince = undefined;
+    return false;
+  }
+  if (ws.backpressureSince === undefined) {
+    // First sighting. Start the clock; a healthy socket clears it by draining.
+    ws.backpressureSince = now;
+    return false;
+  }
+  if (now - ws.backpressureSince < BACKPRESSURE_GRACE_MS) return false;
   console.warn(
-    `[wsHub] socket ${ws.bufferedAmount} bytes behind on fan-out; closing (client resumes via ?since)`,
+    `[wsHub] socket stuck at ${ws.bufferedAmount} bytes for ${now - ws.backpressureSince}ms; terminating (client resumes via ?since)`,
   );
   try {
-    ws.close(1013, 'backpressure');
+    ws.terminate();
   } catch (_err) {
     // Already tearing down; the close handler prunes it either way.
   }
@@ -1232,10 +1265,10 @@ function fanOut(userId: number, payload: WsPayload, opts: FanOutOpts = {}): void
   for (const ws of set) {
     if (opts.exceptWs && ws === opts.exceptWs) continue;
     if (ws.readyState === ws.OPEN) {
-      // Checked BEFORE the send: once we're over the line, adding to the queue
-      // is exactly what we're trying to stop. The cursor is deliberately not
-      // advanced either — this socket never received the event, and claiming it
-      // did would make the resume skip it.
+      // Checked BEFORE the send: once a socket is provably wedged, adding to
+      // its queue is exactly what we're trying to stop. The cursor is
+      // deliberately not advanced for a dropped socket either — it never
+      // received the event, and claiming it did would make the resume skip it.
       if (dropIfBackpressured(ws)) continue;
       ws.send(json);
       // Advance the per-socket cursor so a subsequent sendSnapshot ships

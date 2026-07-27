@@ -55,8 +55,23 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 // Consecutive failed reconnect attempts, driving the backoff below. Reset the
 // moment a socket opens.
 let reconnectAttempts = 0;
+// When the current socket opened, or null when there isn't one. Used to decide
+// whether a connection lasted long enough to count as healthy.
+let socketOpenedAt: number | null = null;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
+// How long a socket must stay open before we treat it as a *successful*
+// connection and reset the backoff.
+//
+// Resetting on `open` instead is the obvious version and it's wrong: it clears
+// the backoff the instant the upgrade succeeds, before the connection has
+// proved it can survive. Any accept-then-close pattern then retries forever at
+// the base delay with no backoff at all — and the server-side backpressure
+// reaper is exactly such a pattern (accept → snapshot → drop → repeat), where
+// each iteration costs the server a full synchronous snapshot. Requiring the
+// socket to live a while first means a genuine one-off drop still reconnects
+// in ~1s, while a connect-and-die loop backs off like any other failure.
+const RECONNECT_STABLE_MS = 10_000;
 // How long to wait before the next reconnect: exponential 1s→30s with ±25%
 // jitter, matching the iOS client's policy.
 //
@@ -811,11 +826,9 @@ function open() {
     'open',
     () => {
       connected.value = true;
-      // A socket that opened is a successful attempt — the next drop starts its
-      // backoff from 1s again rather than inheriting the previous outage's
-      // ceiling. (A refused upgrade never reaches this handler, so a 401/426
-      // loop keeps backing off, which is what we want.)
-      reconnectAttempts = 0;
+      // Stamped, not reset — the backoff clears on a connection that PROVED
+      // itself, which is decided in the close handler. See RECONNECT_STABLE_MS.
+      socketOpenedAt = Date.now();
       // Detached buffers won't survive a reconnect cleanly — the incoming
       // snapshot/backlog would otherwise be short-circuited by replaceBacklog's
       // detached guard, leaving the slice stale and the buffer cut off from
@@ -879,8 +892,14 @@ function open() {
       }
       const auth = useAuthStore();
       if (auth.user) {
+        // A socket that lived a while proves the server is healthy and this was
+        // an ordinary drop — start over at the base delay. One that died young
+        // counts as a failed attempt and escalates. Decided BEFORE scheduling,
+        // since the delay is computed from the count.
+        const livedMs = socketOpenedAt === null ? 0 : Date.now() - socketOpenedAt;
+        socketOpenedAt = null;
+        reconnectAttempts = livedMs >= RECONNECT_STABLE_MS ? 0 : reconnectAttempts + 1;
         reconnectTimer = setTimeout(open, nextReconnectDelay());
-        reconnectAttempts += 1;
       }
     },
     opts,
@@ -972,6 +991,7 @@ export function resetSocket(): void {
   // backoff the last outage had built up shouldn't be inherited by the next
   // sign-in's first reconnect.
   reconnectAttempts = 0;
+  socketOpenedAt = null;
   hiddenSince = null;
   lastSeenEventId = 0;
   failAllPendingAcks('disconnected');
