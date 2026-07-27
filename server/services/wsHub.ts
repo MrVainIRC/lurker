@@ -110,11 +110,11 @@ interface LurkerWebSocket extends WebSocket {
   // visible=true) and userHasVisibleClient() stays true forever, permanently
   // suppressing auto-away.
   isAlive?: boolean;
-  // When this socket's outbound queue first went over MAX_BUFFERED_BYTES and
-  // stayed there, or undefined when it's draining normally. Cleared the moment
-  // it drops back under, so only sustained backpressure accumulates time. See
-  // dropIfBackpressured.
-  backpressureSince?: number;
+  // The current no-progress streak on this socket's outbound queue, or undefined
+  // when it isn't over MAX_BUFFERED_BYTES. `since` is when the streak began,
+  // `at` when we last looked, `floor` the lowest bufferedAmount seen during it.
+  // See dropIfBackpressured for why all three are needed.
+  backpressure?: { since: number; at: number; floor: number };
   // Mirrors the account's is_paused at connect time, then flipped live by the
   // user-suspended / user-resumed handlers so the read-only write guard never
   // needs a per-message DB read. (Named accountPaused, not isPaused, to avoid
@@ -1194,17 +1194,19 @@ const socketsByUser = new Map<number, Set<LurkerWebSocket>>();
 // event fanned out to such a socket is memory we never get back — a leak whose
 // only symptom is RSS climbing on a busy cell.
 //
-// The duration is the load-bearing half, and the reason this isn't a simple
-// size check. `bufferedAmount` is ONE number covering everything queued on the
-// socket, including the synchronous snapshot burst — which can legitimately be
-// megabytes on a large account (up to RESUME_GAP_CAP rows per buffer, across
-// every buffer) and takes real seconds to flush on a real link. A bare size
-// check would therefore fire on the first live event that lands mid-drain,
-// close the socket, and have the client reconnect straight into the same large
-// burst: a permanent disconnect loop for exactly the accounts the cap is
-// supposed to protect. Requiring the condition to PERSIST tells "a big burst,
-// draining" apart from "this socket has stopped moving", which is the thing we
-// actually want to act on.
+// Size alone is NOT the signal, and that's the whole subtlety here.
+// `bufferedAmount` is one number covering everything queued on the socket,
+// including the synchronous snapshot burst — legitimately megabytes on a large
+// account (up to RESUME_GAP_CAP rows per buffer, across every buffer), taking
+// real seconds to flush on a real link. A bare size check fires on the first
+// live event that lands mid-drain, kills the socket, and the client reconnects
+// into an identical burst: a permanent disconnect loop for exactly the accounts
+// the cap is meant to protect.
+//
+// So the cap only decides when to START WATCHING. What condemns a socket is
+// making no downward progress for the grace period — see dropIfBackpressured.
+// A slow client drains steadily and is never touched; one whose window has
+// closed goes flat and is dropped.
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 const BACKPRESSURE_GRACE_MS = 30_000;
 
@@ -1235,19 +1237,43 @@ function send(ws: LurkerWebSocket, payload: WsPayload): void {
 // drop/keep decision is unit-testable without a live WSS. `now` is injectable
 // for the same reason.
 export function dropIfBackpressured(ws: LurkerWebSocket, now: number = Date.now()): boolean {
-  if (ws.bufferedAmount <= MAX_BUFFERED_BYTES) {
-    // Drained back under the line — it was a burst, not a wedge.
-    ws.backpressureSince = undefined;
+  const queued = ws.bufferedAmount;
+  if (queued <= MAX_BUFFERED_BYTES) {
+    // Under the line — it was a burst, not a wedge.
+    ws.backpressure = undefined;
     return false;
   }
-  if (ws.backpressureSince === undefined) {
-    // First sighting. Start the clock; a healthy socket clears it by draining.
-    ws.backpressureSince = now;
+  const streak = ws.backpressure;
+  // Restart the streak on a first sighting, OR when the last observation is
+  // older than the grace period. We only look during fan-out, so a quiet
+  // account can go minutes between calls — and a streak we weren't watching is
+  // no evidence of anything. Without this, a socket that went over the cap
+  // once, drained unobserved, and went over again on a later burst would be
+  // judged against a timestamp from minutes ago and killed on the FIRST
+  // sighting of the new burst, which is exactly what the grace exists to
+  // prevent.
+  if (streak === undefined || now - streak.at > BACKPRESSURE_GRACE_MS) {
+    ws.backpressure = { since: now, at: now, floor: queued };
     return false;
   }
-  if (now - ws.backpressureSince < BACKPRESSURE_GRACE_MS) return false;
+  // Did anything actually leave the machine? We only ever ADD on this path, so
+  // a new low can only come from the socket flushing. That — not absolute size
+  // — is what separates "slow but working" from "stopped".
+  //
+  // This is the difference between a big snapshot to a phone on a weak link
+  // (megabytes queued, grinding steadily down, never dropped) and a socket
+  // whose window has closed (queue flat or climbing, dropped after the grace).
+  // Judging by size alone would kill the first case while it was behaving
+  // correctly, and it would reconnect into an identical burst — a permanent
+  // loop for exactly the clients least able to afford one.
+  if (queued < streak.floor) {
+    ws.backpressure = { since: now, at: now, floor: queued };
+    return false;
+  }
+  streak.at = now;
+  if (now - streak.since < BACKPRESSURE_GRACE_MS) return false;
   console.warn(
-    `[wsHub] socket stuck at ${ws.bufferedAmount} bytes for ${now - ws.backpressureSince}ms; terminating (client resumes via ?since)`,
+    `[wsHub] socket made no progress on ${queued} queued bytes for ${now - streak.since}ms; terminating (client resumes via ?since)`,
   );
   try {
     ws.terminate();

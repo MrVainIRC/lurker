@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import type { Ref } from 'vue';
-import { ref, onMounted, onBeforeUnmount } from 'vue';
+import { ref, onMounted } from 'vue';
 import { useNetworksStore } from '../stores/networks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { useAuthStore } from '../stores/auth.js';
@@ -66,12 +66,18 @@ const RECONNECT_MAX_MS = 30_000;
 // Resetting on `open` instead is the obvious version and it's wrong: it clears
 // the backoff the instant the upgrade succeeds, before the connection has
 // proved it can survive. Any accept-then-close pattern then retries forever at
-// the base delay with no backoff at all — and the server-side backpressure
-// reaper is exactly such a pattern (accept → snapshot → drop → repeat), where
-// each iteration costs the server a full synchronous snapshot. Requiring the
-// socket to live a while first means a genuine one-off drop still reconnects
-// in ~1s, while a connect-and-die loop backs off like any other failure.
-const RECONNECT_STABLE_MS = 10_000;
+// the base delay with no backoff at all — and the server's backpressure reaper
+// is exactly such a pattern (accept → snapshot → drop → repeat), where each
+// iteration costs the server a full synchronous snapshot.
+//
+// **This must exceed the server's `BACKPRESSURE_GRACE_MS` (30s), or it doesn't
+// defend against the case it's named for.** That reaper can only fire after a
+// full grace period of no progress, i.e. at least 30s after the socket opened —
+// so a threshold below 30s classifies every backpressure drop as a healthy
+// connection, resets the counter, and retries in ~1s. Which is the unthrottled
+// loop. 60s keeps a comfortable margin; a normal session lasts hours, so the
+// only connections this denies a fast retry to are ones that died young.
+const RECONNECT_STABLE_MS = 60_000;
 // How long to wait before the next reconnect: exponential 1s→30s with ±25%
 // jitter, matching the iOS client's policy.
 //
@@ -1038,9 +1044,14 @@ export function useSocket(): SocketAPI {
     wireVisibility();
     open();
   });
-  onBeforeUnmount(() => {
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-  });
+  // Deliberately no teardown. The socket, and the reconnect timer that revives
+  // it, are module-level singletons shared by every view that calls this
+  // (DesktopChat, MobileChat, Settings, Admin) — so cancelling the timer when
+  // any ONE of them unmounts kills a reconnect the others still depend on. It
+  // only ever looked harmless because the incoming route's onMounted → open()
+  // papered over it, which also meant every route change during an outage fired
+  // an immediate un-backed-off connect, defeating the backoff above. The
+  // lifecycle that matters is the session's, and resetSocket() owns that.
   return { connected, send, reconnect: open };
 }
 

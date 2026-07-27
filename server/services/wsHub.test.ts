@@ -563,7 +563,7 @@ function bpWs(bufferedAmount: number) {
   const calls = { terminate: 0 };
   const ws = {
     bufferedAmount,
-    backpressureSince: undefined as number | undefined,
+    backpressure: undefined as { since: number; at: number; floor: number } | undefined,
     terminate() {
       calls.terminate += 1;
     },
@@ -583,37 +583,45 @@ describe('dropIfBackpressured', () => {
     const { ws, calls } = bpWs(0);
     expect(drop(ws, 1000)).toBe(false);
     expect(calls.terminate).toBe(0);
-    expect(ws.backpressureSince).toBeUndefined();
+    expect(ws.backpressure).toBeUndefined();
   });
 
   it('keeps a socket sitting exactly at the cap', () => {
     const { ws } = bpWs(CAP);
     expect(drop(ws, 1000)).toBe(false);
-    expect(ws.backpressureSince).toBeUndefined();
+    expect(ws.backpressure).toBeUndefined();
   });
 
-  it('only starts the clock on the first over-cap sighting, never drops on it', () => {
-    // THE case this whole design exists for: a large synchronous snapshot burst
-    // legitimately puts megabytes on the socket, and the first live event lands
-    // while it's still draining. Dropping there would disconnect big accounts on
-    // connect, forever — they'd reconnect into the same burst.
+  it('only starts watching on the first over-cap sighting, never drops on it', () => {
+    // A large synchronous snapshot burst legitimately puts megabytes on the
+    // socket, and the first live event lands while it's still draining.
     const { ws, calls } = bpWs(CAP + 1);
     expect(drop(ws, 1000)).toBe(false);
     expect(calls.terminate).toBe(0);
-    expect(ws.backpressureSince).toBe(1000);
+    expect(ws.backpressure).toEqual({ since: 1000, at: 1000, floor: CAP + 1 });
   });
 
-  it('spares a socket that drains back under the cap, and forgets the clock', () => {
+  it('spares a socket that drains back under the cap, and forgets the streak', () => {
     const { ws, calls } = bpWs(CAP + 1);
-    drop(ws, 1000); // clock starts
+    drop(ws, 1000);
     ws.bufferedAmount = 1024; // the burst flushed
     expect(drop(ws, 5000)).toBe(false);
-    expect(ws.backpressureSince).toBeUndefined();
-    // Re-filling later starts a FRESH clock rather than inheriting the old one,
-    // so a socket that hiccups repeatedly is never condemned by accumulation.
-    ws.bufferedAmount = CAP + 1;
-    expect(drop(ws, 6000)).toBe(false);
-    expect(ws.backpressureSince).toBe(6000);
+    expect(ws.backpressure).toBeUndefined();
+    expect(calls.terminate).toBe(0);
+  });
+
+  it('spares a big-but-draining socket indefinitely (a slow link, not a wedge)', () => {
+    // The regression that a size-over-time rule gets wrong: a 12 MiB snapshot to
+    // a phone on a weak link stays over the cap for far longer than the grace
+    // while behaving perfectly. Every new low restarts the clock, so it is never
+    // dropped — otherwise it reconnects into an identical burst, forever.
+    const { ws, calls } = bpWs(12 * 1024 * 1024);
+    let t = 1000;
+    for (let queued = 12 * 1024 * 1024; queued > CAP; queued -= 256 * 1024) {
+      ws.bufferedAmount = queued;
+      expect(drop(ws, t)).toBe(false);
+      t += 10_000; // 10s per observation — three times the grace, cumulatively
+    }
     expect(calls.terminate).toBe(0);
   });
 
@@ -624,7 +632,7 @@ describe('dropIfBackpressured', () => {
     expect(calls.terminate).toBe(0);
   });
 
-  it('terminates a socket still wedged after the full grace period', () => {
+  it('terminates a socket that made no progress for the full grace period', () => {
     // terminate, not close(1013): a close frame would queue BEHIND the stuck
     // bytes and ws would hold the connection for its 30s closeTimeout, so the
     // memory this exists to reclaim would linger. The client resumes via ?since.
@@ -634,10 +642,33 @@ describe('dropIfBackpressured', () => {
     expect(calls.terminate).toBe(1);
   });
 
+  it('terminates a socket whose queue is still GROWING after the grace', () => {
+    const { ws, calls } = bpWs(CAP + 1);
+    drop(ws, 1000);
+    ws.bufferedAmount = CAP * 2; // no flush; we kept adding
+    expect(drop(ws, 1000 + GRACE)).toBe(true);
+    expect(calls.terminate).toBe(1);
+  });
+
+  it('restarts the streak when the last observation is older than the grace', () => {
+    // We only look during fan-out, so a quiet account can go minutes between
+    // calls. A socket that went over once, drained unobserved, and went over
+    // again on a later burst must not be judged against the stale timestamp —
+    // that would drop it on the FIRST sighting of the new burst.
+    const { ws, calls } = bpWs(CAP + 1);
+    drop(ws, 1000);
+    const muchLater = 1000 + GRACE * 3;
+    expect(drop(ws, muchLater)).toBe(false);
+    expect(calls.terminate).toBe(0);
+    expect(ws.backpressure).toEqual({ since: muchLater, at: muchLater, floor: CAP + 1 });
+  });
+
   it('reports the drop even when terminate throws on an already-dying socket', () => {
     const ws = {
       bufferedAmount: CAP + 1,
-      backpressureSince: 1000 as number | undefined,
+      backpressure: { since: 1000, at: 1000, floor: CAP + 1 } as
+        | { since: number; at: number; floor: number }
+        | undefined,
       terminate() {
         throw new Error('already closing');
       },
