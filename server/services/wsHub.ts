@@ -244,6 +244,32 @@ export function parseProtocolParam(rawUrl: string): number | null {
 // Generic payload for outgoing WS messages.
 type WsPayload = Record<string, unknown>;
 
+// How a client must fold a `backlog` frame's `events` into what it already
+// holds for that buffer. Shipped on EVERY backlog frame as of #668.
+//
+// Why this exists: the frame used to carry only `reset`, a boolean that wasn't
+// one. `reset:false` meant "append this gap" on a resume, but "replace with
+// this slice" on a fresh connect and on the system buffer — three meanings, two
+// values, disambiguated by reading a DIFFERENT field (`networkId`) and by
+// out-of-band knowledge of whether the socket sent `?since`. Both first-party
+// clients derived it differently (iOS branched on networkId; the web client
+// inferred from id non-overlap), and a third-party author had no way to get it
+// right from the wire alone. The server always knew which slice it built; it
+// just never said so.
+//
+//   'replace' — this slice stands alone; drop what you hold for this buffer and
+//               take these events. (Resume-gap overflow, fresh connect, an
+//               open-buffer/reopen hydrate, the system buffer.)
+//   'append'  — a contiguous gap-fill; splice onto your existing tail.
+//   'shell'   — buffer EXISTS but no events are shipped (`events: []`). Do NOT
+//               treat this as replace-with-empty: a shell for a buffer you have
+//               already hydrated must leave its contents alone (the "never
+//               un-hydrate" rule). Fetch content when the user opens it.
+//
+// `reset` is still sent, unchanged, for clients that predate this field. New
+// clients should read `mode` and ignore `reset` entirely.
+export type BacklogMode = 'replace' | 'append' | 'shell';
+
 // Inbound message types that mutate IRC state or produce outbound IRC traffic.
 // A paused account is read-only, so these are rejected while reads (snapshot,
 // history, search, chanlist-search) and local view state (read markers, pins,
@@ -704,6 +730,8 @@ export function buildBufferBacklog(userId: number, networkId: number, target: st
     networkId,
     target,
     events,
+    // Always the recent slice, never a gap — see the header comment.
+    mode: 'replace' satisfies BacklogMode,
     speakers: listSpeakers(networkId, target),
     joined: channelJoined(target, conn),
     ...bufferStateFields(userId, networkId, target),
@@ -752,6 +780,10 @@ export function buildBufferShell(
     // Shell marker: no messages loaded yet, but there IS history to fetch on
     // open. The client's empty-seed branch honors this flag (see replaceBacklog).
     hasMoreOlder: true,
+    // The empty `events` above is "nothing shipped", NOT "this buffer is empty".
+    // 'shell' says so on the wire so a client can't read it as replace-with-
+    // empty and wipe a buffer it already hydrated.
+    mode: 'shell' satisfies BacklogMode,
     ...bufferStateFields(userId, networkId, target, precomputed),
   };
 }
@@ -829,7 +861,7 @@ export function buildResumeSlice(
   networkId: number,
   target: string,
   sinceId: number,
-): { events: DecoratedEvent[]; reset: boolean; hasMoreOlder: boolean } {
+): { events: DecoratedEvent[]; reset: boolean; mode: BacklogMode; hasMoreOlder: boolean } {
   if (sinceId > 0) {
     const gap = listMessages(networkId, target, { afterId: sinceId, limit: RESUME_GAP_CAP });
     const lastGapId = gap.length ? (gap[gap.length - 1].id ?? sinceId) : sinceId;
@@ -846,6 +878,7 @@ export function buildResumeSlice(
       return {
         events: gap.map((e) => decorateMessage(userId, e)),
         reset: false,
+        mode: 'append',
         hasMoreOlder: hasOlderRow(networkId, target, anchor),
       };
     }
@@ -859,6 +892,12 @@ export function buildResumeSlice(
     // on the client's empty-buffer seed path, which already replaces — flagging
     // reset there is harmless but needlessly noisy.
     reset: sinceId > 0,
+    // ...but `mode` says what the frame MEANS, not what's noisy, and both
+    // branches here mean the same thing: this slice stands alone, replace with
+    // it. That divergence is exactly why `reset` alone was never decodable —
+    // `reset:false` reads as "append" for the gap branch above and as "replace"
+    // here, and only the out-of-band `sinceId` told them apart.
+    mode: 'replace',
     hasMoreOlder: oldestId > 0 && hasOlderRow(networkId, target, oldestId),
   };
 }
@@ -921,7 +960,12 @@ export function buildSystemBacklog(userId: number): WsPayload {
     clearedBeforeId: cleared.clearedBeforeId,
     clearedAt: cleared.clearedAt,
     inputHistory: [],
+    // `reset:false` here has ALWAYS meant "replace" — the system buffer ships a
+    // standalone latest slice and never a gap (it ignores the socket's ?since
+    // cursor, having its own id sequence). Kept as-is for old clients; `mode`
+    // states the real contract.
     reset: false,
+    mode: 'replace' satisfies BacklogMode,
     hasMoreOlder: oldestId > 0 && hasOlderSystem(userId, oldestId),
   };
 }
@@ -2053,6 +2097,9 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         // a fresh latest slice — the client must replace its buffer, not
         // append, or it splices a permanent hole (issue #205).
         reset: slice.reset,
+        // The same decision, stated so a client doesn't have to re-derive it
+        // from `reset` + `networkId` + whether it sent ?since.
+        mode: slice.mode,
         hasMoreOlder: slice.hasMoreOlder,
         joined: channelJoined(target, conn),
         ...stateFields,
