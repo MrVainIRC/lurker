@@ -42,6 +42,20 @@ function joinKey(networkId: number | string, channel: string) {
   return `${networkId}::${channel.toLowerCase()}`;
 }
 
+// Targets THIS tab has asked the server to open.
+//
+// `buffer-opened` carries two meanings now that the server fans it out. To the
+// tab that asked it's a reply — "here's the canonical casing, focus it". To the
+// user's other devices it's a state signal — "this buffer is open now" — and
+// acting on that by activating would yank someone to a buffer they opened on
+// their phone. The frame looks identical either way, so the only thing that can
+// tell them apart is whether we asked.
+//
+// Claimed once (a reply answers one request), and cleared when the socket drops,
+// so a request whose reply never arrived can't leave a latch that hijacks focus
+// on some unrelated open days later.
+const pendingOpens = new Set<string>();
+
 // Monotonic token tagged onto each loadAround / reattachToLive request. The
 // response handler drops slices whose token has been superseded (e.g. user
 // clicked a second jump while the first was in flight, or reattached before
@@ -780,6 +794,38 @@ export const useBuffersStore = defineStore('buffers', {
           buf.pendingHistoryToken = null;
         }
       }
+      // Same reasoning, different latch: a reply that can no longer arrive must
+      // not leave us primed to treat someone else's open as ours. See pendingOpens.
+      pendingOpens.clear();
+    },
+    // Ask the server to OPEN a buffer. This is a WRITE — it reopens a closed
+    // row, mints a DM row for a bare nick, or JOINs an unjoined channel — so it
+    // belongs to deliberate user intent ("open this DM", a clicked channel
+    // name), never to filling in a shell. Hydration goes through
+    // ensureHydrated/reattachToLive, which read and change nothing.
+    //
+    // The send lives here rather than at the call site so the pendingOpens
+    // bookkeeping can't be forgotten by the next caller that needs this verb —
+    // forgetting it doesn't fail loudly, it just makes another device's open
+    // steal this tab's focus.
+    openBuffer(networkId: number | string, target: string): boolean {
+      const key = joinKey(networkId, target);
+      pendingOpens.add(key);
+      const sent = socketSend({
+        type: 'open-buffer',
+        networkId,
+        target,
+        // The reply re-seeds history for a since-closed buffer, so it's a first
+        // screenful like any other hydrate (§8).
+        countBy: historyCountBy(),
+      });
+      if (!sent) pendingOpens.delete(key);
+      return sent;
+    },
+    // Did THIS tab ask for `target` to be opened? Consumes the record, so the
+    // reply focuses exactly once.
+    claimPendingOpen(networkId: number | string, target: string): boolean {
+      return pendingOpens.delete(joinKey(networkId, target));
     },
     applyLatestReplace(networkId: number | string, target: string, payload: any) {
       const buf = ensureBuffer(this, networkId, target);

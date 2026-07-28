@@ -61,8 +61,6 @@ import { useBuffersStore } from '../stores/buffers.js';
 import { useSettingsStore } from '../stores/settings.js';
 import { useMircPalette } from '../composables/useNickColors.js';
 import { useMediaViewer } from '../composables/useMediaViewer.js';
-import { socketSend } from '../composables/useSocket.js';
-import { historyCountBy } from '../lib/historyPaging.js';
 import { mediaKindForUrl } from '../utils/uploadHostMatch.js';
 import SpoilerText from './SpoilerText.vue';
 
@@ -150,14 +148,6 @@ function openChannel(channel: string): void {
     buffers.activate(nid, existing.target);
     return;
   }
-  // The reply re-seeds history for a since-closed buffer, making this frame the
-  // first screenful for a channel we don't hold — so it gets sized in the unit
-  // we render in, same as any other hydrate (§8).
-  socketSend({
-    type: 'open-buffer',
-    networkId: nid,
-    target: channel,
-    countBy: historyCountBy(),
-  });
+  buffers.openBuffer(nid, channel);
 }
 </script>

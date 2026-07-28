@@ -784,13 +784,21 @@ function handleMessage(raw: string): void {
     return;
   }
   if (payload.kind === 'buffer-opened') {
-    // Reply to our own `open-buffer` request: the server resolved the
-    // canonical target — reopened a since-closed buffer, or joined a new
-    // channel. Focus it now. For a reopen the `backlog` frame sent just
-    // before this already recreated the buffer; for a join the channel-joined
-    // flow will. activate() ensures the buffer exists either way.
     const buffers = useBuffersStore();
-    buffers.activate(payload.networkId, payload.target);
+    // Two meanings, one frame — tell them apart by whether WE asked.
+    //
+    // Our own reply: the server resolved the canonical target — reopened a
+    // since-closed buffer, or joined a new channel. Focus it. For a reopen the
+    // `backlog` frame sent just before already recreated the buffer; for a join
+    // the channel-joined flow will. activate() ensures it exists either way.
+    //
+    // Otherwise it's a fan-out: another of the user's devices opened this
+    // buffer. The shell that travelled with this frame has already put the row
+    // in the sidebar, and that's the whole job — activating here would drag this
+    // tab to a buffer someone opened on their phone.
+    if (buffers.claimPendingOpen(payload.networkId, payload.target)) {
+      buffers.activate(payload.networkId, payload.target);
+    }
     return;
   }
   if (payload.kind === 'buffer-reopened') {

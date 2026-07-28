@@ -1205,6 +1205,7 @@ export function handleOpenBuffer(
     reopenBufferRow(userId, networkId, row.target);
     send(ws, buildBufferBacklog(userId, networkId, row.target, countBy));
     send(ws, { kind: 'buffer-opened', networkId, target: row.target });
+    announceOpen(ws, userId, networkId, row.target, conn);
   } else if (requested.startsWith('#')) {
     ircManager.joinChannel(userId, networkId, requested);
     send(ws, { kind: 'buffer-opened', networkId, target: requested });
@@ -1217,7 +1218,44 @@ export function handleOpenBuffer(
     const { record } = ensureBufferOpen(userId, networkId, requested);
     send(ws, buildBufferBacklog(userId, networkId, record.target, countBy));
     send(ws, { kind: 'buffer-opened', networkId, target: record.target });
+    announceOpen(ws, userId, networkId, record.target, conn);
   }
+}
+
+// Tell the user's OTHER devices that a buffer is now open.
+//
+// Until this existed, an open was invisible to them until their next snapshot —
+// a reconnect, or the in-band resync a hidden tab fires — so a user's devices
+// quietly disagreed about whether a buffer existed. That was tolerable only
+// while every hydration was accidentally an open; now that opening is deliberate
+// (`hydrate` carries the reads), it's worth announcing.
+//
+// **The shell is what makes this safe, and it isn't optional.** `buffer-opened`
+// is a reply first: the requesting client reads it as "here's the canonical
+// target — focus it" (`useSocket.ts:787`). Fanned out on its own it would yank
+// every other tab to a buffer the user opened somewhere else. Sending a shell
+// alongside means the other devices already have the row when it lands, so the
+// frame is a state signal there rather than an instruction — and it matches how
+// every other buffer-materializing frame travels (§9.1: `buffer-opened` rides
+// with a `backlog`).
+//
+// A shell rather than the full backlog on purpose: those devices may never look
+// at this buffer, and a shell is precisely "it exists, fetch on open" — the same
+// thing a fresh connect ships. They hydrate through `hydrate` if the user goes
+// there.
+function announceOpen(
+  requester: LurkerWebSocket,
+  userId: number,
+  networkId: number,
+  target: string,
+  conn: { channels: { has(name: string): boolean } } | null | undefined,
+): void {
+  // Pass the live connection: `channelJoined` folds a #channel to parted without
+  // one, which would land the other devices' rows dimmed for a channel we're
+  // sitting in, until some later frame corrected them.
+  const shell = buildBufferShell(userId, networkId, target, channelJoined(target, conn));
+  fanOut(userId, shell, { exceptWs: requester });
+  fanOut(userId, { kind: 'buffer-opened', networkId, target }, { exceptWs: requester });
 }
 
 // Per-user socket bookkeeping lives at module scope so the verb registry can
@@ -2555,6 +2593,9 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         break;
       case 'open-buffer':
         // A clicked channel name — handleOpenBuffer resolves reopen-vs-join.
+        // A WRITE: it reopens a closed row, mints a DM row, or JOINs, and now
+        // announces that to the user's other devices. Filling in a shell is
+        // `{type:'history', mode:'latest'}`, which reads and changes nothing.
         handleOpenBuffer(
           ws,
           userId,

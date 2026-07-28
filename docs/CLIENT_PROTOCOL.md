@@ -242,7 +242,9 @@ Two things that look like they'd answer the same question and don't:
   membership from it and you'll decide a user left channels they're still in.
 - **Don't probe with `open-buffer`.** For a `#channel` with no row the server
   reads that as "join it" (§9.1), so a probe silently re-JOINs a channel the
-  user deliberately left from another client.
+  user deliberately left from another client. `{type:'history', mode:'latest'}`
+  (§4.3) is the read — it answers for any target without creating, reopening, or
+  joining anything.
 
 An older server never sends frame 8 (it's additive, and `protocolVersion` does
 not move for it) — if you don't see one, keep whatever you do today rather than
@@ -254,30 +256,58 @@ never claims a buffer is missing.
 buffers arrive as _shells_: `{kind:'backlog', …, events:[], mode:'shell',
 hasMoreOlder:true}` — "this buffer exists; fetch content when the user opens it."
 
-Hydrate a shell with **`{type:'history', mode:'latest'}`**. It is a pure read.
-If you consolidate presence noise, send `countBy:'renderable'` with it (§8) —
-this is the fetch that fills the first screenful, so it's where sizing a page in
-stored rows shows up as a blank-looking channel. `open-buffer` accepts the same
-field, for clients still hydrating that way.
+Hydrate a shell with **`{type:'history', mode:'latest'}`**, and only with that.
+It **changes nothing**: no reopen, no row minted, no JOIN, and nothing announced
+to the user's other devices. Send it for any buffer you hold, as often as you
+like. If you consolidate presence noise, send `countBy:'renderable'` with it
+(§8) — this is the fetch that fills the first screenful, so it's where sizing a
+page in stored rows shows up as a blank-looking channel.
 
-> ⚠ `{type:'open-buffer'}` also returns a populated `backlog`, and the iOS app
-> currently hydrates with it — but it is a **write verb**, not a read: for a
-> closed buffer with history it _reopens_ the buffer (a persisted state flip),
-> and for an unjoined `#channel` it JOINs. Using it to hydrate means a user
-> merely _opening a screen_ mutates persisted state. Reserve it for explicit
-> user intent ("open this DM", "join this channel"). Same hazard as the "don't
-> probe with `open-buffer`" warning above, reached from a different direction.
+It **always answers**, including for a target with no row and no history (an
+empty `events` array). A client that spends one request per buffer can't tell
+"no reply yet" from "never coming", so a silent branch would be a permanent
+loading spinner.
+
+It is also **not gated for paused accounts** — reading your own history is not a
+write. That matters more than it sounds: see the warning below.
+
+> ⚠ **`{type:'open-buffer'}` is a WRITE — don't hydrate with it.** It returns a
+> populated `backlog` too, which is exactly why it was easy to reach for. But for
+> a closed buffer with history it _reopens_ it (a persisted state flip), for a
+> bare nick it mints a DM row, and for an unjoined `#channel` it JOINs. Hydrating
+> with it means a user merely _opening a screen_ mutates state on every device
+> they own — and since an open is now announced (below), visibly. Reserve it for
+> explicit user intent ("open this DM", "join this channel"). Same hazard as the
+> "don't probe with `open-buffer`" warning above, reached from a different
+> direction.
 >
-> **And the write is silent to the user's other devices.** All three branches
-> of `handleOpenBuffer` reply with `send(ws, …)` to the requesting socket only —
-> there is no fan-out (`wsHub.ts:1138-1163`). So a reopen triggered here reaches
-> the other clients **only on their next snapshot**, leaving them showing the
-> buffer as closed until then. Don't write a `buffer-opened` handler expecting
-> to be notified of another device's open: that frame is an ack to the socket
-> that asked, not a broadcast. Of the three lifecycle frames only
-> `buffer-closed` (`wsHub.ts:2452`) and `buffer-reopened` (`wsHub.ts:1618`,
-> emitted when an incoming _event_ outranks the closed flag — not by this verb)
-> are fanned out.
+> It is also gated for paused accounts, correctly, being a write. So a client
+> that hydrates through it **cannot show a paused user anything at all**:
+> `{kind:'error', text:'account paused'}`, then a loading spinner forever. That
+> pairing is what makes this seam load-bearing rather than tidy — the paused gate
+> has encoded it all along, and a client hydrating through the write verb was
+> simply on the wrong side of it.
+
+**A successful `open-buffer` is announced to the user's other devices**, which
+receive a `backlog` **shell** for the buffer followed by `buffer-opened`. The
+requesting socket gets its full backlog and the `buffer-opened` ack, and is
+excluded from the announcement.
+
+> ⚠ **`buffer-opened` is not a "focus this" instruction.** To the socket that
+> asked, it's the reply resolving canonical casing, and focusing is reasonable.
+> To every other device it means only _this buffer is now open_ — activating on
+> it would drag the user to a buffer they opened on a different device. The two
+> are the same frame, so the only thing that distinguishes them is whether you
+> asked: track your own outstanding `open-buffer` targets and focus only on a
+> match (`vue_client/src/stores/buffers.ts`, `pendingOpens`). Clear that record
+> when the socket drops, or a reply that never arrived will claim someone else's
+> open later.
+>
+> You don't need a `buffer-opened` handler to _materialize_ the buffer — the
+> shell that travels with it already does, the same way every other
+> buffer-creating frame works (§9.1). `buffer-reopened` (`wsHub.ts:1618`) is
+> still emitted separately, when an incoming _event_ outranks a closed flag
+> rather than a verb doing it.
 
 ### 4.4 Reconnect and resume (`?since`)
 
@@ -474,12 +504,18 @@ is emitted immediately from the server's optimistic local copy.
 
 ### Channels & buffers ⏸
 
-| `type`         | Fields                        | Notes                                                                                                                   |
-| -------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `join`         | `networkId, channel, key?`    | Request only — the buffer appears on `channel-joined` (§9.1)                                                            |
-| `part`         | `networkId, channel, reason?` | Buffer survives, parted                                                                                                 |
-| `open-buffer`  | `networkId, target, countBy?` | Reopen/create: replies `backlog` + `buffer-opened`; JOINs if an unjoined channel; mints an empty DM row for a bare nick |
-| `close-buffer` | `networkId, target, reason?`  | Closes (PARTs a joined channel, untracks a DM peer). `:server:` refuses                                                 |
+| `type`         | Fields                        | Notes                                                                                                                                                                                               |
+| -------------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `join`         | `networkId, channel, key?`    | Request only — the buffer appears on `channel-joined` (§9.1)                                                                                                                                        |
+| `part`         | `networkId, channel, reason?` | Buffer survives, parted                                                                                                                                                                             |
+| `open-buffer`  | `networkId, target, countBy?` | **Write.** Reopen/create: replies `backlog` + `buffer-opened`, announces a shell + `buffer-opened` to the user's other devices; JOINs if an unjoined channel; mints an empty DM row for a bare nick |
+| `close-buffer` | `networkId, target, reason?`  | Closes (PARTs a joined channel, untracks a DM peer). `:server:` refuses                                                                                                                             |
+
+Every verb in this section is rejected while an account is paused — they are all
+writes. **Hydration is not in this section for that reason:** it's
+`{type:'history', mode:'latest'}` (§4.3, §8), which is a read and stays
+available. A client that hydrates through `open-buffer` can't show a paused user
+anything at all.
 
 ### View state (persisted server-side, fanned out to your other devices)
 
@@ -532,30 +568,30 @@ a v1 client.
 
 ### 7.1 Frame kinds
 
-| `kind`                                                                                                                                                                   | Payload                                                                                                                                                                                                                                                     | When                                               |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `snapshot`                                                                                                                                                               | `protocolVersion, maxUploadBytes, networks[], globalIgnores[], cursor?`                                                                                                                                                                                     | Connect burst / gap-fill                           |
-| `draft-snapshot` / `bookmark-ids-snapshot` / `contacts-snapshot`                                                                                                         | `drafts` / `ids[]` / `contacts[]`                                                                                                                                                                                                                           | Connect burst                                      |
-| `backlog-complete`                                                                                                                                                       | —                                                                                                                                                                                                                                                           | Last frame of the burst; absence is proof (§4.3)   |
-| `backlog`                                                                                                                                                                | `networkId, target, events[], mode, reset?, hasMoreOlder, joined, lastReadId, unread, highlights, highlightsCapped, clearedBeforeId, clearedAt, speakers?, inputHistory?` — **`mode ∈ replace\|append\|shell` is how you merge it (§8); `reset` is legacy** | Burst, `open-buffer` reply, resume gap             |
-| `irc`                                                                                                                                                                    | A decorated `MessageEvent` (§5.3) with `kind` clobbered to `'irc'`                                                                                                                                                                                          | Every live IRC-side event                          |
-| `history`                                                                                                                                                                | `networkId, target, mode, token, events[], speakers, hasMoreOlder, hasMoreNewer, hasMore, before/afterId/anchorId/anchorMissing` (per mode)                                                                                                                 | Reply to `history`                                 |
-| `read-state`                                                                                                                                                             | see §5.4                                                                                                                                                                                                                                                    | After every countable event / mark-read            |
-| `send-result`                                                                                                                                                            | `clientId, ok, error?`                                                                                                                                                                                                                                      | Ack for `send`/`action`/`notice`                   |
-| `buffer-opened` / `buffer-closed` / `buffer-reopened`                                                                                                                    | `networkId, target`                                                                                                                                                                                                                                         | Buffer lifecycle (§9.1)                            |
-| `buffer-cleared`                                                                                                                                                         | `networkId, target, clearedBeforeId, clearedAt`                                                                                                                                                                                                             | `/clear` marker                                    |
-| `pins-changed`                                                                                                                                                           | `networkId, pinned[]`                                                                                                                                                                                                                                       | Authoritative pin order                            |
-| `nicklist-collapsed-changed` / `channel-notify-changed`                                                                                                                  | `networkId, target, …`                                                                                                                                                                                                                                      | View-state sync                                    |
-| `draft-updated` / `input-history-added` / `bookmark-updated` / `nick-note-updated` / `relay-bot-updated` / `contact-updated` / `contact-deleted` / `ignore-list-updated` | various                                                                                                                                                                                                                                                     | Multi-device view-state fan-out                    |
-| `settings`                                                                                                                                                               | `changes`, `maxUploadBytes?` (only when the upload cap was touched)                                                                                                                                                                                         | Server-side settings changed                       |
-| `highlight-rules-changed`                                                                                                                                                | —                                                                                                                                                                                                                                                           | Re-fetch highlight rules                           |
-| `account-state`                                                                                                                                                          | `paused: bool`                                                                                                                                                                                                                                              | Hosted pause/resume                                |
-| `chanlist-state` / `chanlist-result`                                                                                                                                     | `/LIST` cache meta / result page                                                                                                                                                                                                                            | Channel browser                                    |
-| `e2eExport` / `e2eImport`                                                                                                                                                | E2E key material / import result                                                                                                                                                                                                                            | Replies, this socket only                          |
-| `dcc-transfer`                                                                                                                                                           | full transfer row (snake_case)                                                                                                                                                                                                                              | DCC state changes                                  |
-| `upload-progress`                                                                                                                                                        | `token, phase, destination, percent`                                                                                                                                                                                                                        | During REST upload (correlate via `progressToken`) |
-| `export`                                                                                                                                                                 | `job`                                                                                                                                                                                                                                                       | Export job progress                                |
-| `error`                                                                                                                                                                  | `text`                                                                                                                                                                                                                                                      | Non-fatal; also the reply to unknown verbs         |
+| `kind`                                                                                                                                                                   | Payload                                                                                                                                                                                                                                                     | When                                                                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `snapshot`                                                                                                                                                               | `protocolVersion, maxUploadBytes, networks[], globalIgnores[], cursor?`                                                                                                                                                                                     | Connect burst / gap-fill                                                                                                                                  |
+| `draft-snapshot` / `bookmark-ids-snapshot` / `contacts-snapshot`                                                                                                         | `drafts` / `ids[]` / `contacts[]`                                                                                                                                                                                                                           | Connect burst                                                                                                                                             |
+| `backlog-complete`                                                                                                                                                       | —                                                                                                                                                                                                                                                           | Last frame of the burst; absence is proof (§4.3)                                                                                                          |
+| `backlog`                                                                                                                                                                | `networkId, target, events[], mode, reset?, hasMoreOlder, joined, lastReadId, unread, highlights, highlightsCapped, clearedBeforeId, clearedAt, speakers?, inputHistory?` — **`mode ∈ replace\|append\|shell` is how you merge it (§8); `reset` is legacy** | Burst, `open-buffer` reply, resume gap                                                                                                                    |
+| `irc`                                                                                                                                                                    | A decorated `MessageEvent` (§5.3) with `kind` clobbered to `'irc'`                                                                                                                                                                                          | Every live IRC-side event                                                                                                                                 |
+| `history`                                                                                                                                                                | `networkId, target, mode, token, events[], speakers, hasMoreOlder, hasMoreNewer, hasMore, before/afterId/anchorId/anchorMissing` (per mode)                                                                                                                 | Reply to `history`                                                                                                                                        |
+| `read-state`                                                                                                                                                             | see §5.4                                                                                                                                                                                                                                                    | After every countable event / mark-read                                                                                                                   |
+| `send-result`                                                                                                                                                            | `clientId, ok, error?`                                                                                                                                                                                                                                      | Ack for `send`/`action`/`notice`                                                                                                                          |
+| `buffer-opened` / `buffer-closed` / `buffer-reopened`                                                                                                                    | `networkId, target`                                                                                                                                                                                                                                         | Buffer lifecycle (§9.1). `buffer-opened` is an ack to the socket that asked **and** a fan-out to the user's other devices — only focus on your own (§4.3) |
+| `buffer-cleared`                                                                                                                                                         | `networkId, target, clearedBeforeId, clearedAt`                                                                                                                                                                                                             | `/clear` marker                                                                                                                                           |
+| `pins-changed`                                                                                                                                                           | `networkId, pinned[]`                                                                                                                                                                                                                                       | Authoritative pin order                                                                                                                                   |
+| `nicklist-collapsed-changed` / `channel-notify-changed`                                                                                                                  | `networkId, target, …`                                                                                                                                                                                                                                      | View-state sync                                                                                                                                           |
+| `draft-updated` / `input-history-added` / `bookmark-updated` / `nick-note-updated` / `relay-bot-updated` / `contact-updated` / `contact-deleted` / `ignore-list-updated` | various                                                                                                                                                                                                                                                     | Multi-device view-state fan-out                                                                                                                           |
+| `settings`                                                                                                                                                               | `changes`, `maxUploadBytes?` (only when the upload cap was touched)                                                                                                                                                                                         | Server-side settings changed                                                                                                                              |
+| `highlight-rules-changed`                                                                                                                                                | —                                                                                                                                                                                                                                                           | Re-fetch highlight rules                                                                                                                                  |
+| `account-state`                                                                                                                                                          | `paused: bool`                                                                                                                                                                                                                                              | Hosted pause/resume                                                                                                                                       |
+| `chanlist-state` / `chanlist-result`                                                                                                                                     | `/LIST` cache meta / result page                                                                                                                                                                                                                            | Channel browser                                                                                                                                           |
+| `e2eExport` / `e2eImport`                                                                                                                                                | E2E key material / import result                                                                                                                                                                                                                            | Replies, this socket only                                                                                                                                 |
+| `dcc-transfer`                                                                                                                                                           | full transfer row (snake_case)                                                                                                                                                                                                                              | DCC state changes                                                                                                                                         |
+| `upload-progress`                                                                                                                                                        | `token, phase, destination, percent`                                                                                                                                                                                                                        | During REST upload (correlate via `progressToken`)                                                                                                        |
+| `export`                                                                                                                                                                 | `job`                                                                                                                                                                                                                                                       | Export job progress                                                                                                                                       |
+| `error`                                                                                                                                                                  | `text`                                                                                                                                                                                                                                                      | Non-fatal; also the reply to unknown verbs                                                                                                                |
 
 ### 7.2 `irc` event types (the inner `type` field)
 
@@ -1008,8 +1044,10 @@ What the iOS app actually ships with (`FrameParser.parseWs`,
   `join`, `part`, `quit`, `nick`, `kick`, `mode`, `topic`, `motd`, `invite`
   (plus `channel-topic` for state). Unknown → drop.
 - **Send verbs (8):** `presence`, `send`, `history` (`before`/`latest`; add
-  `countBy:'renderable'` if you consolidate — §8),
-  `mark-read`, `mark-all-read`, `join`, `open-buffer`, `close-buffer`.
+  `countBy:'renderable'` if you consolidate — §8), `mark-read`, `mark-all-read`,
+  `join`, `open-buffer`, `close-buffer`. Hydrate with `{mode:'latest'}`, never
+  with `open-buffer` — §4.3 for why that's the difference between reading a
+  buffer and reopening it on every device the user owns.
 - **REST (4):** `POST /api/auth/login/token` (or the CP login), `GET
 /api/networks`, `POST /api/auth/logout`, and optionally `GET
 /api/push/config`.
