@@ -255,6 +255,10 @@ buffers arrive as _shells_: `{kind:'backlog', …, events:[], mode:'shell',
 hasMoreOlder:true}` — "this buffer exists; fetch content when the user opens it."
 
 Hydrate a shell with **`{type:'history', mode:'latest'}`**. It is a pure read.
+If you consolidate presence noise, send `countBy:'renderable'` with it (§8) —
+this is the fetch that fills the first screenful, so it's where sizing a page in
+stored rows shows up as a blank-looking channel. `open-buffer` accepts the same
+field, for clients still hydrating that way.
 
 > ⚠ `{type:'open-buffer'}` also returns a populated `backlog`, and the iOS app
 > currently hydrates with it — but it is a **write verb**, not a read: for a
@@ -474,7 +478,7 @@ is emitted immediately from the server's optimistic local copy.
 | -------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `join`         | `networkId, channel, key?`    | Request only — the buffer appears on `channel-joined` (§9.1)                                                            |
 | `part`         | `networkId, channel, reason?` | Buffer survives, parted                                                                                                 |
-| `open-buffer`  | `networkId, target`           | Reopen/create: replies `backlog` + `buffer-opened`; JOINs if an unjoined channel; mints an empty DM row for a bare nick |
+| `open-buffer`  | `networkId, target, countBy?` | Reopen/create: replies `backlog` + `buffer-opened`; JOINs if an unjoined channel; mints an empty DM row for a bare nick |
 | `close-buffer` | `networkId, target, reason?`  | Closes (PARTs a joined channel, untracks a DM peer). `:server:` refuses                                                 |
 
 ### View state (persisted server-side, fanned out to your other devices)
@@ -632,7 +636,8 @@ gap is enormous: a 100-row page out of a netsplit can render as three visible
 lines. You fetch, fold it to nothing, notice the page was short, fetch again —
 and the user watches the buffer assemble itself.
 
-Send **`countBy:'renderable'`** (modes `before`, `after`, `latest`) and the
+Send **`countBy:'renderable'`** (modes `before`, `after`, `latest`; also honored
+on `open-buffer`, not on `around`) and the
 server sizes the page in rows that render as their own line. The consolidatable
 rows still come back — consolidation needs the whole run to summarize it — they
 just don't spend the budget. Default is `'event'`, i.e. today's behavior; an
