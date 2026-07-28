@@ -147,6 +147,30 @@ describe('buildBufferBacklog', () => {
     expect(buildBufferBacklog(userId, networkId, 'carol').joined).toBe(true);
   });
 
+  it('says hasMoreOlder:false for an empty buffer so the hydrate is not read as a shell', () => {
+    // The frame answers `open-buffer` — a client's ONE hydrate of this buffer.
+    // Omitting the field left `events:[]` indistinguishable from a shell
+    // (`events:[] + hasMoreOlder:true`), so the client stayed unhydrated on its
+    // loading spinner forever and never re-asked. Non-empty buffers hid it.
+    buffers.ensureExists(userId, networkId, 'emptybuf');
+    const frame = buildBufferBacklog(userId, networkId, 'emptybuf');
+    expect((frame.events as unknown[]).length).toBe(0);
+    expect(frame.hasMoreOlder).toBe(false);
+  });
+
+  it('says hasMoreOlder:false when the whole history fits in the slice', () => {
+    seed('#shortlog', 'only one');
+    expect(buildBufferBacklog(userId, networkId, '#shortlog').hasMoreOlder).toBe(false);
+  });
+
+  it('says hasMoreOlder:true when history predates the slice', () => {
+    // 200 is the slice cap, so 201 rows leaves exactly one older than the tail.
+    for (let i = 0; i < 201; i++) seed('#longlog', `m${i}`);
+    const frame = buildBufferBacklog(userId, networkId, '#longlog');
+    expect((frame.events as unknown[]).length).toBe(200);
+    expect(frame.hasMoreOlder).toBe(true);
+  });
+
   it('server buffer unread counts notable lines only, and includes errors (#470)', () => {
     const target = `:server:${networkId}`;
     const putServer = (type: string, opts: { nick?: string; notable?: boolean } = {}) =>

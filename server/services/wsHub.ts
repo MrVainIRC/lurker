@@ -737,9 +737,9 @@ function bufferStateFields(
 // client dedupes by id, so it's safe even if the buffer is already open.
 export function buildBufferBacklog(userId: number, networkId: number, target: string): WsPayload {
   const conn = ircManager.getConnection(userId, networkId);
-  const events = listMessages(networkId, target, { limit: 200 }).map((e) =>
-    decorateMessage(userId, e),
-  );
+  const rows = listMessages(networkId, target, { limit: 200 });
+  const events = rows.map((e) => decorateMessage(userId, e));
+  const oldestId = rows.length ? (rows[0].id ?? 0) : 0;
   return {
     kind: 'backlog',
     networkId,
@@ -747,6 +747,17 @@ export function buildBufferBacklog(userId: number, networkId: number, target: st
     events,
     // Always the recent slice, never a gap — see the header comment.
     mode: 'replace' satisfies BacklogMode,
+    // This frame answers `open-buffer`, i.e. it is a client's ONE hydrate of this
+    // buffer, and omitting this field stranded the empty case forever.
+    //
+    // A shell is `events: [] + hasMoreOlder: true`, and a client that can't see
+    // `hasMoreOlder` has to assume the shell reading — anything else would mark a
+    // buffer hydrated that isn't and render it permanently blank. So on a buffer
+    // with no messages this frame (`events: []`, field absent) was indistinguishable
+    // from "fetch me later": the client stayed unhydrated, sat on its loading
+    // spinner, and never asked again because it had already spent its one request.
+    // Non-empty buffers hid the bug — any event at all reads as hydrated.
+    hasMoreOlder: oldestId > 0 && hasOlderRow(networkId, target, oldestId),
     speakers: listSpeakers(networkId, target),
     joined: channelJoined(target, conn),
     ...bufferStateFields(userId, networkId, target),
