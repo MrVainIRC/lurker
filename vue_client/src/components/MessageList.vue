@@ -329,6 +329,7 @@ import { historyCountBy } from '../lib/historyPaging.js';
 import type { ConsolidationGroup, NickEntry, RenameEntry } from '../../../shared/consolidate.js';
 import { collapseDisplay } from '../utils/collapseDisplay.js';
 import { parseRelayMessage } from '../../../shared/parseRelay.js';
+import { asEventMode, eventModeKey, isNoiseType } from '../../../shared/eventFilter.js';
 import NickRef from './NickRef.vue';
 import LinkedText from './LinkedText.vue';
 import RenderSegments from './RenderSegments.vue';
@@ -861,7 +862,10 @@ function onMentionMenu(nick: string, e: MouseEvent): void {
   onNickMenu(e, nick);
 }
 
-const smartFilterEnabled = computed(() => !!settings.effective('chat.smart_filter'));
+// The event-noise tier (#666). One enum answers "which presence events survive"
+// for this device class; everything below it only tunes the survivors.
+const eventMode = computed(() => asEventMode(settings.effective(eventModeKey(isMobile.value))));
+const smartFilterEnabled = computed(() => eventMode.value === 'smart');
 const smartFilterDelayMs = computed(
   () => ((settings.effective('chat.smart_filter_delay') as number) || 0) * 60_000,
 );
@@ -872,7 +876,11 @@ const smartFilterJoin = computed(() => !!settings.effective('chat.smart_filter_j
 const smartFilterQuit = computed(() => !!settings.effective('chat.smart_filter_quit'));
 const smartFilterNick = computed(() => !!settings.effective('chat.smart_filter_nick'));
 
-const consolidateEnabled = computed(() => !!settings.effective('chat.consolidate_joins'));
+// At the `none` tier there are no event rows left to fold, so the consolidation
+// pass is skipped outright rather than run over a stream it can't match.
+const consolidateEnabled = computed(
+  () => eventMode.value !== 'none' && !!settings.effective('chat.consolidate_joins'),
+);
 const consolidateMaxNames = computed(
   () => (settings.effective('chat.consolidate_max_names') as number) || 5,
 );
@@ -945,6 +953,7 @@ const renderRows = computed((): RenderRow[] => {
   const out: RenderRow[] = [];
 
   const filterOn = smartFilterEnabled.value && !!buf?.speakers;
+  const hideAllEvents = eventMode.value === 'none';
   const ownNickLc = selfLower.value;
   const delayMs = smartFilterDelayMs.value;
   const unmaskMs = smartFilterUnmaskMs.value;
@@ -1021,6 +1030,16 @@ const renderRows = computed((): RenderRow[] => {
     // /clear filter (hard hide). Comes first so the divider, when emitted
     // below, lands above every other filter's surviving rows.
     if (clearedBeforeId > 0 && m.id != null && Number(m.id) <= clearedBeforeId) continue;
+
+    // `none` tier (#666): drop every event row outright — including your own,
+    // and including mode changes. Unconditional on purpose: a reader who asked
+    // for no event noise on this device wants none of it, not
+    // none-except-mine. Kicks, topic changes and invites sit outside
+    // NOISE_TYPES and still render, because they are things that happened
+    // rather than churn. Placed with the other hard hides so the rows never
+    // reach the ignore/highlight evaluation below, and so dividers anchor to
+    // the first row the reader can actually see.
+    if (hideAllEvents && isNoiseType(m.type)) continue;
 
     // Render-time ignore filter (issue #301). Self-authored events are never
     // hidden. The matcher gets full event context so level/channel/pattern

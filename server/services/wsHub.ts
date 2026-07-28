@@ -7,6 +7,8 @@ import type { WebSocket } from 'ws';
 import type { User } from '../db/users.js';
 import type { LogLine } from './systemLog.js';
 import type { MessageEvent } from '../db/messages.js';
+import type { PageUnit } from '../../shared/eventFilter.js';
+import { asPageUnit } from '../../shared/eventFilter.js';
 import { WebSocketServer } from 'ws';
 import cookie from 'cookie';
 import cookieParser from 'cookie-parser';
@@ -27,7 +29,7 @@ import { findUserById, touchUserLastSeen } from '../db/users.js';
 import { effectiveUploadCapBytes } from './uploadLimits.js';
 import {
   listMessages,
-  listMessagesRenderable,
+  listMessagesCounted,
   listMessagesAround,
   hasOlderRow,
   hasNewerRow,
@@ -746,13 +748,10 @@ export function buildBufferBacklog(
   userId: number,
   networkId: number,
   target: string,
-  countBy: 'event' | 'renderable' = 'event',
+  countBy: PageUnit = 'event',
 ): WsPayload {
   const conn = ircManager.getConnection(userId, networkId);
-  const rows =
-    countBy === 'renderable'
-      ? listMessagesRenderable(networkId, target, { limit: 200 })
-      : listMessages(networkId, target, { limit: 200 });
+  const rows = listMessagesCounted(networkId, target, countBy, { limit: 200 });
   const events = rows.map((e) => decorateMessage(userId, e));
   const oldestId = rows.length ? (rows[0].id ?? 0) : 0;
   return {
@@ -1181,7 +1180,7 @@ export function handleOpenBuffer(
   userId: number,
   networkId: number,
   requested: string,
-  countBy: 'event' | 'renderable' = 'event',
+  countBy: PageUnit = 'event',
 ): void {
   if (!networkId || !requested || requested.startsWith(':server:')) return;
   const row = getBuffer(userId, networkId, requested);
@@ -2601,7 +2600,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           userId,
           Number(msg.networkId),
           typeof msg.target === 'string' ? msg.target : '',
-          msg.countBy === 'renderable' ? 'renderable' : 'event',
+          asPageUnit(msg.countBy),
         );
         break;
       case 'part':
@@ -3107,9 +3106,10 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         // Only the CLIENT knows whether it actually folds those runs (web gates
         // on chat.consolidate_joins), which is why this is a request field and
         // not a server-side default: for a client rendering every event as its
-        // own line, 'event' is already the right unit.
-        const countBy: 'event' | 'renderable' =
-          msg.countBy === 'renderable' ? 'renderable' : 'event';
+        // own line, 'event' is already the right unit. 'chat' is the same
+        // argument one rung further for a client on the `none` event tier (#666),
+        // which draws no event rows at all.
+        const countBy = asPageUnit(msg.countBy);
         const token = msg.token ?? null;
         const speakers = listSpeakers(histNetworkId, histTarget);
         const baseReply = {
@@ -3159,10 +3159,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
             send(ws, { kind: 'error', text: 'invalid afterId' });
             break;
           }
-          const rows =
-            countBy === 'renderable'
-              ? listMessagesRenderable(histNetworkId, histTarget, { afterId, limit })
-              : listMessages(histNetworkId, histTarget, { afterId, limit });
+          const rows = listMessagesCounted(histNetworkId, histTarget, countBy, { afterId, limit });
           const events = rows.map((e) => decorateMessage(userId, e));
           const newestId = events.length ? events[events.length - 1].id : afterId;
           send(ws, {
@@ -3184,10 +3181,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           // upward paging cleanly, plus inputHistory so up-arrow recall is
           // restored for a shell (fresh-connect shells omit it, so this is the
           // only place a reloaded client gets its per-buffer recall back).
-          const rows =
-            countBy === 'renderable'
-              ? listMessagesRenderable(histNetworkId, histTarget, { limit })
-              : listMessages(histNetworkId, histTarget, { limit });
+          const rows = listMessagesCounted(histNetworkId, histTarget, countBy, { limit });
           const events = rows.map((e) => decorateMessage(userId, e));
           const oldestId = events.length ? events[0].id : 0;
           send(ws, {

@@ -3,6 +3,7 @@
 
 import Database from 'better-sqlite3';
 import { foldMutedIntoIgnoreRules } from './migrateMutedFold.js';
+import { migrateSmartFilterToEventMode } from './migrateEventMode.js';
 import path from 'path';
 import fs from 'fs';
 import { isNodeMode } from '../utils/edition.js';
@@ -1879,6 +1880,15 @@ try {
   reconcileHostedUploaderFromEnv(db);
 } catch (err) {
   console.warn('[db] hosted uploader env reconcile failed:', err);
+}
+
+// Carry the retired `chat.smart_filter` switch onto the `chat.events` tier
+// (#666). Every boot, idempotent, self-terminating — see db/migrateEventMode.ts
+// for why it writes both the desktop and the mobile key.
+try {
+  migrateSmartFilterToEventMode(db);
+} catch (err) {
+  console.warn('[db] smart-filter→event-tier migration failed (will retry next boot):', err);
 }
 
 // Gate on uploaderSeedOk: if the uploader seed threw, leave schema_version
