@@ -8,8 +8,8 @@ import { socketSend } from '../composables/useSocket.js';
 // Two-track state: a lightweight `Set<messageId>` always in memory, used by the
 // message context menu to flip "Save" ↔ "Remove bookmark" without a network
 // call. The heavyweight paginated `items` list is lazy-loaded by the
-// BookmarksModal via REST. Adds invalidate `items` so the next modal open
-// refetches, since we don't have the full row payload from the echo alone.
+// BookmarksModal via REST. A save marks that list stale so the next modal open
+// refetches, since the echo alone carries no row payload to insert.
 //
 // The Set is a cache of what we've SEEN, not a mirror of what the account owns.
 // It used to be seeded wholesale by a `bookmark-ids-snapshot` frame at connect,

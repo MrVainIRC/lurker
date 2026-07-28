@@ -13,7 +13,7 @@ import { useBookmarksStore } from './bookmarks.js';
 
 // The id set is a cache of what the client has SEEN — there is no bookmark snapshot in
 // the connect burst, so it is fed entirely by the `bookmarked` flag riding on message
-// rows plus the `bookmark-updated` echo. These are the rules that keeps it honest.
+// rows plus the `bookmark-updated` echo. These are the rules that keep it honest.
 describe('bookmarks store', () => {
   beforeEach(() => setActivePinia(createPinia()));
 
