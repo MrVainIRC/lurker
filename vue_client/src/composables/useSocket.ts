@@ -52,8 +52,10 @@ let socketListeners: AbortController | null = null;
 // calling useSocket() (which would re-register the connect lifecycle).
 export const connected = ref(false);
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-// Consecutive failed reconnect attempts, driving the backoff below. Reset the
-// moment a socket opens.
+// Consecutive failed reconnect attempts, driving the backoff below. Deliberately
+// NOT reset when a socket opens — only once one has survived RECONNECT_STABLE_MS,
+// which the close handler decides. See that constant for why opening is too early
+// to count as success.
 let reconnectAttempts = 0;
 // When the current socket opened, or null when there isn't one. Used to decide
 // whether a connection lasted long enough to count as healthy.

@@ -1176,8 +1176,16 @@ export function handleOpenBuffer(
   // all. A client that hydrates on demand has then spent its one request on something
   // that can never be answered, and sits on a loading spinner for the rest of the
   // connection. `open-buffer` must always produce a backlog for a buffer that exists.
-  const joinedChannel = channelJoined(requested, ircManager.getConnection(userId, networkId));
-  if (row && (hasMessageForTarget(networkId, row.target) || joinedChannel)) {
+  // Live membership, checked for EVERY channel prefix rather than through
+  // `channelJoined`. That helper answers `true` for anything not starting with '#',
+  // which is right for the display field it feeds (a DM is always "joined") but wrong
+  // as a branch condition: `kindForTarget` counts '&', '+' and '!' as channels too, so
+  // routing through it would report an unjoined `&local` as joined and hand back a
+  // backlog for a channel we aren't in.
+  const conn = ircManager.getConnection(userId, networkId);
+  const inChannel =
+    kindForTarget(requested) === 'channel' && !!conn?.channels.has(requested.toLowerCase());
+  if (row && (hasMessageForTarget(networkId, row.target) || inChannel)) {
     reopenBufferRow(userId, networkId, row.target);
     send(ws, buildBufferBacklog(userId, networkId, row.target));
     send(ws, { kind: 'buffer-opened', networkId, target: row.target });

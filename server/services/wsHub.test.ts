@@ -508,6 +508,38 @@ describe('handleOpenBuffer', () => {
     }
   });
 
+  it("stays a no-op for an unjoined '&' channel even though it has a row", () => {
+    // '&', '+' and '!' are channels per kindForTarget, but `channelJoined` answers
+    // `true` for anything not starting with '#'. Deciding the backlog branch through
+    // that helper would report an unjoined `&local` as joined and hand back a backlog
+    // for a channel we are not in. Membership is checked directly instead.
+    buffers.ensureExists(userId, networkId, '&unjoined');
+    const spy = vi
+      .spyOn(ircManager, 'getConnection')
+      .mockReturnValue({ channels: new Map() } as never);
+    try {
+      const { ws, frames } = mockWs();
+      handleOpenBuffer(ws, userId, networkId, '&unjoined');
+      expect(frames).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("answers a JOINED '&' channel, which is a channel prefix too", () => {
+    buffers.ensureExists(userId, networkId, '&joined');
+    const spy = vi
+      .spyOn(ircManager, 'getConnection')
+      .mockReturnValue({ channels: new Map([['&joined', {}]]) } as never);
+    try {
+      const { ws, frames } = mockWs();
+      handleOpenBuffer(ws, userId, networkId, '&joined');
+      expect(frames.some((f) => f.kind === 'backlog')).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('reopens a since-closed channel without re-JOINing, resolving casing case-insensitively', () => {
     seed('#reopen', 'history line');
     closeBuffer(userId, networkId, '#reopen');
