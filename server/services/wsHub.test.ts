@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { setupTestDb, TEST_SESSION_SECRET } from '../test-utils/testApp.js';
 import { sign as signCookie } from 'cookie-signature';
 import type { IncomingMessage } from 'http';
@@ -27,6 +27,7 @@ let buildOfflineBacklogFrames: typeof import('./wsHub.js').buildOfflineBacklogFr
 let maxMessageId: typeof import('../db/messages.js').maxMessageId;
 let handleOpenBuffer: typeof import('./wsHub.js').handleOpenBuffer;
 let sweepWsHeartbeat: typeof import('./wsHub.js').sweepWsHeartbeat;
+let dropIfBackpressured: typeof import('./wsHub.js').dropIfBackpressured;
 let buildSystemBacklog: typeof import('./wsHub.js').buildSystemBacklog;
 let systemLineToEvent: typeof import('./wsHub.js').systemLineToEvent;
 let buildSystemHistoryReply: typeof import('./wsHub.js').buildSystemHistoryReply;
@@ -56,6 +57,7 @@ beforeAll(async () => {
     buildOfflineBacklogFrames,
     handleOpenBuffer,
     sweepWsHeartbeat,
+    dropIfBackpressured,
     buildSystemBacklog,
     systemLineToEvent,
     buildSystemHistoryReply,
@@ -143,6 +145,30 @@ describe('buildBufferBacklog', () => {
   it('reports a non-channel buffer (DM) as joined', () => {
     seed('carol', 'hi');
     expect(buildBufferBacklog(userId, networkId, 'carol').joined).toBe(true);
+  });
+
+  it('says hasMoreOlder:false for an empty buffer so the hydrate is not read as a shell', () => {
+    // The frame answers `open-buffer` — a client's ONE hydrate of this buffer.
+    // Omitting the field left `events:[]` indistinguishable from a shell
+    // (`events:[] + hasMoreOlder:true`), so the client stayed unhydrated on its
+    // loading spinner forever and never re-asked. Non-empty buffers hid it.
+    buffers.ensureExists(userId, networkId, 'emptybuf');
+    const frame = buildBufferBacklog(userId, networkId, 'emptybuf');
+    expect((frame.events as unknown[]).length).toBe(0);
+    expect(frame.hasMoreOlder).toBe(false);
+  });
+
+  it('says hasMoreOlder:false when the whole history fits in the slice', () => {
+    seed('#shortlog', 'only one');
+    expect(buildBufferBacklog(userId, networkId, '#shortlog').hasMoreOlder).toBe(false);
+  });
+
+  it('says hasMoreOlder:true when history predates the slice', () => {
+    // 200 is the slice cap, so 201 rows leaves exactly one older than the tail.
+    for (let i = 0; i < 201; i++) seed('#longlog', `m${i}`);
+    const frame = buildBufferBacklog(userId, networkId, '#longlog');
+    expect((frame.events as unknown[]).length).toBe(200);
+    expect(frame.hasMoreOlder).toBe(true);
   });
 
   it('server buffer unread counts notable lines only, and includes errors (#470)', () => {
@@ -457,6 +483,63 @@ describe('handleOpenBuffer', () => {
     expect(buffers.getBuffer(userId, networkId, '&local-unvisited')).toBeUndefined();
   });
 
+  it('answers with a backlog for a joined channel that has no persisted messages', () => {
+    // The permanent-spinner case. Gating only on "has messages" sent a channel you are
+    // sitting in but have no lines for — freshly joined, or history cleared — down the
+    // JOIN branch, which replies `buffer-opened` and NO backlog. An on-demand client
+    // spends its one hydrate request on something that can never be answered and sits on
+    // a loading spinner for the rest of the connection.
+    buffers.ensureExists(userId, networkId, '#emptyjoined');
+    const spy = vi
+      .spyOn(ircManager, 'getConnection')
+      .mockReturnValue({ channels: new Map([['#emptyjoined', {}]]) } as never);
+    try {
+      const { ws, frames } = mockWs();
+      handleOpenBuffer(ws, userId, networkId, '#emptyjoined');
+      const backlog = frames.find((f) => f.kind === 'backlog');
+      expect(backlog, 'open-buffer must always answer an existing buffer').toBeDefined();
+      expect((backlog!.events as unknown[]).length).toBe(0);
+      // hasMoreOlder:false is what lets the client read an empty answer as "hydrated,
+      // genuinely nothing here" instead of as another shell to fetch later.
+      expect(backlog!.hasMoreOlder).toBe(false);
+      expect(frames.some((f) => f.kind === 'buffer-opened')).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("stays a no-op for an unjoined '&' channel even though it has a row", () => {
+    // '&', '+' and '!' are channels per kindForTarget, but `channelJoined` answers
+    // `true` for anything not starting with '#'. Deciding the backlog branch through
+    // that helper would report an unjoined `&local` as joined and hand back a backlog
+    // for a channel we are not in. Membership is checked directly instead.
+    buffers.ensureExists(userId, networkId, '&unjoined');
+    const spy = vi
+      .spyOn(ircManager, 'getConnection')
+      .mockReturnValue({ channels: new Map() } as never);
+    try {
+      const { ws, frames } = mockWs();
+      handleOpenBuffer(ws, userId, networkId, '&unjoined');
+      expect(frames).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("answers a JOINED '&' channel, which is a channel prefix too", () => {
+    buffers.ensureExists(userId, networkId, '&joined');
+    const spy = vi
+      .spyOn(ircManager, 'getConnection')
+      .mockReturnValue({ channels: new Map([['&joined', {}]]) } as never);
+    try {
+      const { ws, frames } = mockWs();
+      handleOpenBuffer(ws, userId, networkId, '&joined');
+      expect(frames.some((f) => f.kind === 'backlog')).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('reopens a since-closed channel without re-JOINing, resolving casing case-insensitively', () => {
     seed('#reopen', 'history line');
     closeBuffer(userId, networkId, '#reopen');
@@ -552,6 +635,126 @@ describe('sweepWsHeartbeat', () => {
     expect(live.calls.ping).toBe(1);
     expect(dead1.calls.terminate).toBe(1);
     expect(dead2.calls.terminate).toBe(1);
+  });
+});
+
+// A ws stand-in carrying only what the backpressure check reads/calls.
+// bufferedAmount is writable so a test can drain it between observations.
+function bpWs(bufferedAmount: number) {
+  const calls = { terminate: 0 };
+  const ws = {
+    bufferedAmount,
+    backpressure: undefined as { since: number; at: number; floor: number } | undefined,
+    terminate() {
+      calls.terminate += 1;
+    },
+  };
+  return { ws, calls };
+}
+
+function drop(ws: ReturnType<typeof bpWs>['ws'], now: number): boolean {
+  return dropIfBackpressured(ws as unknown as Parameters<typeof dropIfBackpressured>[0], now);
+}
+
+describe('dropIfBackpressured', () => {
+  const CAP = 8 * 1024 * 1024; // mirrors MAX_BUFFERED_BYTES
+  const GRACE = 30_000; // mirrors BACKPRESSURE_GRACE_MS
+
+  it('keeps a socket that is draining', () => {
+    const { ws, calls } = bpWs(0);
+    expect(drop(ws, 1000)).toBe(false);
+    expect(calls.terminate).toBe(0);
+    expect(ws.backpressure).toBeUndefined();
+  });
+
+  it('keeps a socket sitting exactly at the cap', () => {
+    const { ws } = bpWs(CAP);
+    expect(drop(ws, 1000)).toBe(false);
+    expect(ws.backpressure).toBeUndefined();
+  });
+
+  it('only starts watching on the first over-cap sighting, never drops on it', () => {
+    // A large synchronous snapshot burst legitimately puts megabytes on the
+    // socket, and the first live event lands while it's still draining.
+    const { ws, calls } = bpWs(CAP + 1);
+    expect(drop(ws, 1000)).toBe(false);
+    expect(calls.terminate).toBe(0);
+    expect(ws.backpressure).toEqual({ since: 1000, at: 1000, floor: CAP + 1 });
+  });
+
+  it('spares a socket that drains back under the cap, and forgets the streak', () => {
+    const { ws, calls } = bpWs(CAP + 1);
+    drop(ws, 1000);
+    ws.bufferedAmount = 1024; // the burst flushed
+    expect(drop(ws, 5000)).toBe(false);
+    expect(ws.backpressure).toBeUndefined();
+    expect(calls.terminate).toBe(0);
+  });
+
+  it('spares a big-but-draining socket indefinitely (a slow link, not a wedge)', () => {
+    // The regression that a size-over-time rule gets wrong: a 12 MiB snapshot to
+    // a phone on a weak link stays over the cap for far longer than the grace
+    // while behaving perfectly. Every new low restarts the clock, so it is never
+    // dropped — otherwise it reconnects into an identical burst, forever.
+    const { ws, calls } = bpWs(12 * 1024 * 1024);
+    let t = 1000;
+    for (let queued = 12 * 1024 * 1024; queued > CAP; queued -= 256 * 1024) {
+      ws.bufferedAmount = queued;
+      expect(drop(ws, t)).toBe(false);
+      t += 10_000; // 10s per observation — three times the grace, cumulatively
+    }
+    expect(calls.terminate).toBe(0);
+  });
+
+  it('holds on while still inside the grace period', () => {
+    const { ws, calls } = bpWs(CAP + 1);
+    drop(ws, 1000);
+    expect(drop(ws, 1000 + GRACE - 1)).toBe(false);
+    expect(calls.terminate).toBe(0);
+  });
+
+  it('terminates a socket that made no progress for the full grace period', () => {
+    // terminate, not close(1013): a close frame would queue BEHIND the stuck
+    // bytes and ws would hold the connection for its 30s closeTimeout, so the
+    // memory this exists to reclaim would linger. The client resumes via ?since.
+    const { ws, calls } = bpWs(CAP + 1);
+    drop(ws, 1000);
+    expect(drop(ws, 1000 + GRACE)).toBe(true);
+    expect(calls.terminate).toBe(1);
+  });
+
+  it('terminates a socket whose queue is still GROWING after the grace', () => {
+    const { ws, calls } = bpWs(CAP + 1);
+    drop(ws, 1000);
+    ws.bufferedAmount = CAP * 2; // no flush; we kept adding
+    expect(drop(ws, 1000 + GRACE)).toBe(true);
+    expect(calls.terminate).toBe(1);
+  });
+
+  it('restarts the streak when the last observation is older than the grace', () => {
+    // We only look during fan-out, so a quiet account can go minutes between
+    // calls. A socket that went over once, drained unobserved, and went over
+    // again on a later burst must not be judged against the stale timestamp —
+    // that would drop it on the FIRST sighting of the new burst.
+    const { ws, calls } = bpWs(CAP + 1);
+    drop(ws, 1000);
+    const muchLater = 1000 + GRACE * 3;
+    expect(drop(ws, muchLater)).toBe(false);
+    expect(calls.terminate).toBe(0);
+    expect(ws.backpressure).toEqual({ since: muchLater, at: muchLater, floor: CAP + 1 });
+  });
+
+  it('reports the drop even when terminate throws on an already-dying socket', () => {
+    const ws = {
+      bufferedAmount: CAP + 1,
+      backpressure: { since: 1000, at: 1000, floor: CAP + 1 } as
+        | { since: number; at: number; floor: number }
+        | undefined,
+      terminate() {
+        throw new Error('already closing');
+      },
+    };
+    expect(drop(ws as unknown as ReturnType<typeof bpWs>['ws'], 1000 + GRACE)).toBe(true);
   });
 });
 

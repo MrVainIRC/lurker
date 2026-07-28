@@ -110,6 +110,11 @@ interface LurkerWebSocket extends WebSocket {
   // visible=true) and userHasVisibleClient() stays true forever, permanently
   // suppressing auto-away.
   isAlive?: boolean;
+  // The current no-progress streak on this socket's outbound queue, or undefined
+  // when it isn't over MAX_BUFFERED_BYTES. `since` is when the streak began,
+  // `at` when we last looked, `floor` the lowest bufferedAmount seen during it.
+  // See dropIfBackpressured for why all three are needed.
+  backpressure?: { since: number; at: number; floor: number };
   // Mirrors the account's is_paused at connect time, then flipped live by the
   // user-suspended / user-resumed handlers so the read-only write guard never
   // needs a per-message DB read. (Named accountPaused, not isPaused, to avoid
@@ -732,9 +737,9 @@ function bufferStateFields(
 // client dedupes by id, so it's safe even if the buffer is already open.
 export function buildBufferBacklog(userId: number, networkId: number, target: string): WsPayload {
   const conn = ircManager.getConnection(userId, networkId);
-  const events = listMessages(networkId, target, { limit: 200 }).map((e) =>
-    decorateMessage(userId, e),
-  );
+  const rows = listMessages(networkId, target, { limit: 200 });
+  const events = rows.map((e) => decorateMessage(userId, e));
+  const oldestId = rows.length ? (rows[0].id ?? 0) : 0;
   return {
     kind: 'backlog',
     networkId,
@@ -742,6 +747,17 @@ export function buildBufferBacklog(userId: number, networkId: number, target: st
     events,
     // Always the recent slice, never a gap — see the header comment.
     mode: 'replace' satisfies BacklogMode,
+    // This frame answers `open-buffer`, i.e. it is a client's ONE hydrate of this
+    // buffer, and omitting this field stranded the empty case forever.
+    //
+    // A shell is `events: [] + hasMoreOlder: true`, and a client that can't see
+    // `hasMoreOlder` has to assume the shell reading — anything else would mark a
+    // buffer hydrated that isn't and render it permanently blank. So on a buffer
+    // with no messages this frame (`events: []`, field absent) was indistinguishable
+    // from "fetch me later": the client stayed unhydrated, sat on its loading
+    // spinner, and never asked again because it had already spent its one request.
+    // Non-empty buffers hid the bug — any event at all reads as hydrated.
+    hasMoreOlder: oldestId > 0 && hasOlderRow(networkId, target, oldestId),
     speakers: listSpeakers(networkId, target),
     joined: channelJoined(target, conn),
     ...bufferStateFields(userId, networkId, target),
@@ -1153,7 +1169,23 @@ export function handleOpenBuffer(
 ): void {
   if (!networkId || !requested || requested.startsWith(':server:')) return;
   const row = getBuffer(userId, networkId, requested);
-  if (row && hasMessageForTarget(networkId, row.target)) {
+  // A channel we are CURRENTLY IN answers with its backlog even when that backlog is
+  // empty. Gating purely on `hasMessageForTarget` sent a channel you're sitting in but
+  // have no persisted lines for — freshly joined, or one whose history was cleared —
+  // down the join branch below, which replies with `buffer-opened` and no `backlog` at
+  // all. A client that hydrates on demand has then spent its one request on something
+  // that can never be answered, and sits on a loading spinner for the rest of the
+  // connection. `open-buffer` must always produce a backlog for a buffer that exists.
+  // Live membership, checked for EVERY channel prefix rather than through
+  // `channelJoined`. That helper answers `true` for anything not starting with '#',
+  // which is right for the display field it feeds (a DM is always "joined") but wrong
+  // as a branch condition: `kindForTarget` counts '&', '+' and '!' as channels too, so
+  // routing through it would report an unjoined `&local` as joined and hand back a
+  // backlog for a channel we aren't in.
+  const conn = ircManager.getConnection(userId, networkId);
+  const inChannel =
+    kindForTarget(requested) === 'channel' && !!conn?.channels.has(requested.toLowerCase());
+  if (row && (hasMessageForTarget(networkId, row.target) || inChannel)) {
     reopenBufferRow(userId, networkId, row.target);
     send(ws, buildBufferBacklog(userId, networkId, row.target));
     send(ws, { kind: 'buffer-opened', networkId, target: row.target });
@@ -1178,8 +1210,104 @@ export function handleOpenBuffer(
 // addSocket/removeSocket); the registry just reads through it.
 const socketsByUser = new Map<number, Set<LurkerWebSocket>>();
 
+// How many bytes of un-drained outbound frames a socket may hold before it
+// counts as backpressured, and how long it must STAY that way before we give up
+// on it.
+//
+// The heartbeat reaps DEAD sockets (no pong within a sweep, ~60s). It does not
+// reap SLOW ones, and those are a different failure: a phone on a degraded link
+// is genuinely OPEN and may still pong while its TCP window is closed. `ws`
+// queues everything we hand it in the Node heap with no bound, so every live
+// event fanned out to such a socket is memory we never get back — a leak whose
+// only symptom is RSS climbing on a busy cell.
+//
+// Size alone is NOT the signal, and that's the whole subtlety here.
+// `bufferedAmount` is one number covering everything queued on the socket,
+// including the synchronous snapshot burst — legitimately megabytes on a large
+// account (up to RESUME_GAP_CAP rows per buffer, across every buffer), taking
+// real seconds to flush on a real link. A bare size check fires on the first
+// live event that lands mid-drain, kills the socket, and the client reconnects
+// into an identical burst: a permanent disconnect loop for exactly the accounts
+// the cap is meant to protect.
+//
+// So the cap only decides when to START WATCHING. What condemns a socket is
+// making no downward progress for the grace period — see dropIfBackpressured.
+// A slow client drains steadily and is never touched; one whose window has
+// closed goes flat and is dropped.
+const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+const BACKPRESSURE_GRACE_MS = 30_000;
+
 function send(ws: LurkerWebSocket, payload: WsPayload): void {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload));
+}
+
+// Drop a socket that has been unable to drain for a full grace period. Called
+// per fan-out; the first over-cap observation only starts the clock.
+//
+// `terminate()`, NOT `close(1013)`. A courteous close queues the close frame
+// BEHIND the megabytes already stuck — on a socket that by definition isn't
+// moving, the handshake can't complete, and `ws` only destroys the connection
+// after its 30s closeTimeout (`ws/lib/websocket.js` setCloseTimer). The bytes
+// this exists to reclaim would sit in the heap for another 30 seconds, and the
+// socket would linger in socketsByUser, which inverts the whole point.
+// Terminating frees both now. The client sees an abnormal close, reconnects
+// through its normal path, and resumes from `?since` — so this costs a
+// reconnect, not history, and the close code it doesn't get is one it could
+// never have received anyway.
+//
+// Deliberately NOT applied to `send`, which is what the snapshot burst uses:
+// judging a socket by the size of a burst the server itself just queued is what
+// the grace period above exists to avoid, and inside the burst there hasn't even
+// been an event-loop turn in which to drain.
+//
+// Exported (and pure over its arguments, like sweepWsHeartbeat) so the
+// drop/keep decision is unit-testable without a live WSS. `now` is injectable
+// for the same reason.
+export function dropIfBackpressured(ws: LurkerWebSocket, now: number = Date.now()): boolean {
+  const queued = ws.bufferedAmount;
+  if (queued <= MAX_BUFFERED_BYTES) {
+    // Under the line — it was a burst, not a wedge.
+    ws.backpressure = undefined;
+    return false;
+  }
+  const streak = ws.backpressure;
+  // Restart the streak on a first sighting, OR when the last observation is
+  // older than the grace period. We only look during fan-out, so a quiet
+  // account can go minutes between calls — and a streak we weren't watching is
+  // no evidence of anything. Without this, a socket that went over the cap
+  // once, drained unobserved, and went over again on a later burst would be
+  // judged against a timestamp from minutes ago and killed on the FIRST
+  // sighting of the new burst, which is exactly what the grace exists to
+  // prevent.
+  if (streak === undefined || now - streak.at > BACKPRESSURE_GRACE_MS) {
+    ws.backpressure = { since: now, at: now, floor: queued };
+    return false;
+  }
+  // Did anything actually leave the machine? We only ever ADD on this path, so
+  // a new low can only come from the socket flushing. That — not absolute size
+  // — is what separates "slow but working" from "stopped".
+  //
+  // This is the difference between a big snapshot to a phone on a weak link
+  // (megabytes queued, grinding steadily down, never dropped) and a socket
+  // whose window has closed (queue flat or climbing, dropped after the grace).
+  // Judging by size alone would kill the first case while it was behaving
+  // correctly, and it would reconnect into an identical burst — a permanent
+  // loop for exactly the clients least able to afford one.
+  if (queued < streak.floor) {
+    ws.backpressure = { since: now, at: now, floor: queued };
+    return false;
+  }
+  streak.at = now;
+  if (now - streak.since < BACKPRESSURE_GRACE_MS) return false;
+  console.warn(
+    `[wsHub] socket made no progress on ${queued} queued bytes for ${now - streak.since}ms; terminating (client resumes via ?since)`,
+  );
+  try {
+    ws.terminate();
+  } catch (_err) {
+    // Already tearing down; the close handler prunes it either way.
+  }
+  return true;
 }
 
 function fanOut(userId: number, payload: WsPayload, opts: FanOutOpts = {}): void {
@@ -1190,6 +1318,11 @@ function fanOut(userId: number, payload: WsPayload, opts: FanOutOpts = {}): void
   for (const ws of set) {
     if (opts.exceptWs && ws === opts.exceptWs) continue;
     if (ws.readyState === ws.OPEN) {
+      // Checked BEFORE the send: once a socket is provably wedged, adding to
+      // its queue is exactly what we're trying to stop. The cursor is
+      // deliberately not advanced for a dropped socket either — it never
+      // received the event, and claiming it did would make the resume skip it.
+      if (dropIfBackpressured(ws)) continue;
       ws.send(json);
       // Advance the per-socket cursor so a subsequent sendSnapshot ships
       // only the gap newer than what this socket has already received.

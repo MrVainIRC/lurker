@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import type { Ref } from 'vue';
-import { ref, onMounted, onBeforeUnmount } from 'vue';
+import { ref, onMounted } from 'vue';
 import { useNetworksStore } from '../stores/networks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { useAuthStore } from '../stores/auth.js';
@@ -52,6 +52,48 @@ let socketListeners: AbortController | null = null;
 // calling useSocket() (which would re-register the connect lifecycle).
 export const connected = ref(false);
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+// Consecutive failed reconnect attempts, driving the backoff below. Deliberately
+// NOT reset when a socket opens — only once one has survived RECONNECT_STABLE_MS,
+// which the close handler decides. See that constant for why opening is too early
+// to count as success.
+let reconnectAttempts = 0;
+// When the current socket opened, or null when there isn't one. Used to decide
+// whether a connection lasted long enough to count as healthy.
+let socketOpenedAt: number | null = null;
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 30_000;
+// How long a socket must stay open before we treat it as a *successful*
+// connection and reset the backoff.
+//
+// Resetting on `open` instead is the obvious version and it's wrong: it clears
+// the backoff the instant the upgrade succeeds, before the connection has
+// proved it can survive. Any accept-then-close pattern then retries forever at
+// the base delay with no backoff at all — and the server's backpressure reaper
+// is exactly such a pattern (accept → snapshot → drop → repeat), where each
+// iteration costs the server a full synchronous snapshot.
+//
+// **This must exceed the server's `BACKPRESSURE_GRACE_MS` (30s), or it doesn't
+// defend against the case it's named for.** That reaper can only fire after a
+// full grace period of no progress, i.e. at least 30s after the socket opened —
+// so a threshold below 30s classifies every backpressure drop as a healthy
+// connection, resets the counter, and retries in ~1s. Which is the unthrottled
+// loop. 60s keeps a comfortable margin; a normal session lasts hours, so the
+// only connections this denies a fast retry to are ones that died young.
+const RECONNECT_STABLE_MS = 60_000;
+// How long to wait before the next reconnect: exponential 1s→30s with ±25%
+// jitter, matching the iOS client's policy.
+//
+// The jitter is the load-bearing half. A flat interval (this was a hard 2s)
+// means every tab the user has open — and on a hosted cell, every tab of every
+// user on it — reconnects inside the same window after a restart, and each
+// reconnect costs the server a full synchronous snapshot burst. That's a
+// thundering herd aimed at a process that has just started and is least able to
+// absorb it. Spreading the retries is what stops a routine deploy from looking
+// like an outage.
+function nextReconnectDelay(): number {
+  const capped = Math.min(RECONNECT_BASE_MS * 2 ** reconnectAttempts, RECONNECT_MAX_MS);
+  return Math.round(capped * (0.75 + Math.random() * 0.5));
+}
 const openHandlers = new Set<() => void>();
 // Outstanding send/action ACKs keyed by clientId. Resolver is called with
 // { ok, error } when the server returns a send-result, on socket close, or on
@@ -102,8 +144,9 @@ let lastMessageAt = 0;
 // Arm (or re-arm) the probe against the CURRENT socket. The callback captures
 // the socket instance it measured and re-checks identity before acting: a
 // probe armed against socket A must never close A's healthy replacement B
-// when A dies mid-window and the 2s reconnect brings B up before the timer
-// fires (B can be OPEN with its first snapshot frame still in flight). The
+// when A dies mid-window and the reconnect brings B up before the timer fires
+// (B can be OPEN with its first snapshot frame still in flight — and with
+// backoff the first retry can land in well under a second). The
 // close handler also clears the timer outright, so identity is a second
 // fence, not the only one.
 function armLivenessProbe(): void {
@@ -791,6 +834,9 @@ function open() {
     'open',
     () => {
       connected.value = true;
+      // Stamped, not reset — the backoff clears on a connection that PROVED
+      // itself, which is decided in the close handler. See RECONNECT_STABLE_MS.
+      socketOpenedAt = Date.now();
       // Detached buffers won't survive a reconnect cleanly — the incoming
       // snapshot/backlog would otherwise be short-circuited by replaceBacklog's
       // detached guard, leaving the slice stale and the buffer cut off from
@@ -854,7 +900,14 @@ function open() {
       }
       const auth = useAuthStore();
       if (auth.user) {
-        reconnectTimer = setTimeout(open, 2000);
+        // A socket that lived a while proves the server is healthy and this was
+        // an ordinary drop — start over at the base delay. One that died young
+        // counts as a failed attempt and escalates. Decided BEFORE scheduling,
+        // since the delay is computed from the count.
+        const livedMs = socketOpenedAt === null ? 0 : Date.now() - socketOpenedAt;
+        socketOpenedAt = null;
+        reconnectAttempts = livedMs >= RECONNECT_STABLE_MS ? 0 : reconnectAttempts + 1;
+        reconnectTimer = setTimeout(open, nextReconnectDelay());
       }
     },
     opts,
@@ -942,6 +995,11 @@ export function resetSocket(): void {
     socket = null;
   }
   connected.value = false;
+  // A teardown ends the session (sign-out, or an explicit reset) — whatever
+  // backoff the last outage had built up shouldn't be inherited by the next
+  // sign-in's first reconnect.
+  reconnectAttempts = 0;
+  socketOpenedAt = null;
   hiddenSince = null;
   lastSeenEventId = 0;
   failAllPendingAcks('disconnected');
@@ -955,9 +1013,13 @@ function refreshSnapshot() {
     armLivenessProbe();
     return;
   }
-  // Socket isn't open — pull the reconnect forward instead of waiting on the
-  // 2s backoff timer. The fresh connection will trigger the server-side
-  // sendSnapshot path on its own.
+  // Socket isn't open — pull the reconnect forward instead of waiting out the
+  // backoff timer. The user is looking at the tab right now, so the wait that
+  // protects a restarting server from a herd is the wrong trade here. The
+  // attempt counter is deliberately NOT reset: if the server really is down,
+  // the retries that follow this one should resume backing off rather than
+  // restart at 1s. The fresh connection triggers the server-side sendSnapshot
+  // path on its own.
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -984,9 +1046,14 @@ export function useSocket(): SocketAPI {
     wireVisibility();
     open();
   });
-  onBeforeUnmount(() => {
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-  });
+  // Deliberately no teardown. The socket, and the reconnect timer that revives
+  // it, are module-level singletons shared by every view that calls this
+  // (DesktopChat, MobileChat, Settings, Admin) — so cancelling the timer when
+  // any ONE of them unmounts kills a reconnect the others still depend on. It
+  // only ever looked harmless because the incoming route's onMounted → open()
+  // papered over it, which also meant every route change during an outage fired
+  // an immediate un-backed-off connect, defeating the backoff above. The
+  // lifecycle that matters is the session's, and resetSocket() owns that.
   return { connected, send, reconnect: open };
 }
 
