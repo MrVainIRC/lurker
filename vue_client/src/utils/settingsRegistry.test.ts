@@ -9,6 +9,7 @@ import {
   optionVisible,
   optionEnabled,
   dependencyHint,
+  dependencyStateFor,
 } from './settingsRegistry.js';
 import type { SettingOption, SettingValue } from '../../../shared/settingsRegistry.js';
 
@@ -205,5 +206,50 @@ describe('dependencyHint', () => {
 
   it('is empty for a setting whose dependencies are satisfied', () => {
     expect(dependencyHint(opt('chat.consolidate_max_names'), reader({}))).toBe('');
+  });
+});
+
+describe('dependencyStateFor', () => {
+  it('is empty for a live setting and explains an inactive one', () => {
+    expect(dependencyStateFor(opt('chat.consolidate_max_names'), reader({}))).toBe('');
+    expect(
+      dependencyStateFor(
+        opt('chat.consolidate_max_names'),
+        reader({ 'chat.consolidate_joins': false }),
+      ),
+    ).toBe('Inactive — needs chat.consolidate_joins = on.');
+  });
+
+  it('fails CLOSED when the resolvers give up, rather than rendering a live row', () => {
+    // A registry cycle drives both resolvers into the depth cap, where they bail
+    // DIFFERENTLY: `optionEnabled` returns false, `dependencyHint` returns ''
+    // because there is no clause left to name. The pane greys a row on "hint is
+    // non-empty", so composing the two naively would mark this row inactive and
+    // then draw it fully usable — a control that looks like it works and doesn't.
+    //
+    // The cycle has to be resolvable, or it isn't a cycle: an unregistered key
+    // resolves on its value check alone and passes. Hence the injected lookup —
+    // the real REGISTRY has no cycle, which is exactly why this branch would
+    // otherwise be asserted only in a comment.
+    const a = {
+      ...opt('chat.consolidate_joins'),
+      key: 'x.a',
+      dependsOn: [{ key: 'x.b', in: [true] }],
+    } as SettingOption;
+    const b = {
+      ...opt('chat.consolidate_joins'),
+      key: 'x.b',
+      dependsOn: [{ key: 'x.a', in: [true] }],
+    } as SettingOption;
+    const lookup = (key: string) => ({ 'x.a': a, 'x.b': b })[key];
+    const readTrue = () => true;
+
+    // Both halves of the trap, asserted so a change to either shows up here.
+    expect(optionEnabled(a, readTrue, 0, lookup)).toBe(false);
+    expect(dependencyHint(a, readTrue, lookup)).toBe('');
+    // ...and the composition that has to survive them disagreeing.
+    expect(dependencyStateFor(a, readTrue, lookup)).toBe(
+      'Inactive — its dependencies could not be resolved.',
+    );
   });
 });

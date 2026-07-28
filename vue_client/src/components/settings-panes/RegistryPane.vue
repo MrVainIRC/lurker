@@ -58,8 +58,7 @@ import {
   CATEGORIES,
   GROUPS,
   optionVisible,
-  optionEnabled,
-  dependencyHint,
+  dependencyStateFor,
 } from '../../utils/settingsRegistry.js';
 import type { SettingOption, SettingValue } from '../../../../shared/settingsRegistry.js';
 import SettingsRow from '../SettingsRow.vue';
@@ -111,8 +110,7 @@ const groups = computed(() => {
 // the setting it hangs off changes — flipping the event tier greys and un-greys
 // its modifiers without a reload.
 function dependencyHintFor(opt: SettingOption): string {
-  const read = (key: string) => settings.effective(key);
-  return optionEnabled(opt, read) ? '' : dependencyHint(opt, read);
+  return dependencyStateFor(opt, (key) => settings.effective(key));
 }
 
 async function onCommit(key: string, value: SettingValue) {

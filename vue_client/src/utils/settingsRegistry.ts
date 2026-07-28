@@ -58,6 +58,14 @@ export function optionVisible(opt: SettingOption, ctx: Pick<VisibilityContext, '
 const MAX_DEPENDENCY_DEPTH = 8;
 
 /**
+ * How a dependency clause's key is resolved to its registry option. Injectable
+ * purely so the depth cap is testable: with the real registry the cap is
+ * unreachable (there is no cycle, and a test asserts every clause names a real
+ * key), which would leave the fail-closed path below asserted only in a comment.
+ */
+export type OptionLookup = (key: string) => SettingOption | null | undefined;
+
+/**
  * Whether a setting currently DOES anything, per its `dependsOn` clauses.
  *
  * Clauses are ORed: the option is live if any one of them holds. Resolution is
@@ -75,15 +83,16 @@ export function optionEnabled(
   opt: SettingOption,
   read: (key: string) => SettingValue | undefined,
   depth = 0,
+  lookup: OptionLookup = getOption,
 ): boolean {
   if (!opt.dependsOn?.length) return true;
   if (depth >= MAX_DEPENDENCY_DEPTH) return false;
   return opt.dependsOn.some((dep) => {
     if (!dep.in.includes(read(dep.key) as SettingValue)) return false;
-    const parent = getOption(dep.key);
+    const parent = lookup(dep.key);
     // A clause naming a key that isn't in the registry can't be evaluated any
     // further; the value check above is all we have, and it passed.
-    return parent ? optionEnabled(parent, read, depth + 1) : true;
+    return parent ? optionEnabled(parent, read, depth + 1, lookup) : true;
   });
 }
 
@@ -101,22 +110,25 @@ function unmetClauses(
   opt: SettingOption,
   read: (key: string) => SettingValue | undefined,
   depth = 0,
+  lookup: OptionLookup = getOption,
 ): SettingDependency[] {
   if (!opt.dependsOn?.length || depth >= MAX_DEPENDENCY_DEPTH) return [];
   const actionable: SettingDependency[] = [];
   const blockedParents: SettingOption[] = [];
   for (const dep of opt.dependsOn) {
-    const parent = getOption(dep.key);
+    const parent = lookup(dep.key);
     // Wrong value → the user changes this one. That's the actionable case.
     if (!dep.in.includes(read(dep.key) as SettingValue)) {
       actionable.push(dep);
       continue;
     }
     // Right value, but the row it names is greyed out too — recurse past it.
-    if (parent && !optionEnabled(parent, read, depth + 1)) blockedParents.push(parent);
+    if (parent && !optionEnabled(parent, read, depth + 1, lookup)) blockedParents.push(parent);
   }
   if (actionable.length) return actionable;
-  const inherited = blockedParents.flatMap((parent) => unmetClauses(parent, read, depth + 1));
+  const inherited = blockedParents.flatMap((parent) =>
+    unmetClauses(parent, read, depth + 1, lookup),
+  );
   // Two parents can bottom out on the same root clause (both consolidation keys
   // hang off the same tier pair); say it once.
   const seen = new Set<string>();
@@ -135,11 +147,32 @@ function unmetClauses(
  * prints the key under every headline, so this reads as an instruction you can
  * act on rather than a riddle about which row to find.
  */
+/**
+ * What the Settings pane actually needs: '' when the setting is live, otherwise
+ * the line to show under a greyed-out row.
+ *
+ * Composed here rather than at the call site because the two resolvers have to
+ * agree and they bail differently. `optionEnabled` returns false at the depth
+ * cap; `dependencyHint` returns '' at the same cap, having nothing to name. A
+ * caller that greys the row on "hint is non-empty" would then render a row it
+ * knows is inactive as fully live — a registry cycle would produce a control
+ * that looks usable and isn't. Fail closed instead.
+ */
+export function dependencyStateFor(
+  opt: SettingOption,
+  read: (key: string) => SettingValue | undefined,
+  lookup: OptionLookup = getOption,
+): string {
+  if (optionEnabled(opt, read, 0, lookup)) return '';
+  return dependencyHint(opt, read, lookup) || 'Inactive — its dependencies could not be resolved.';
+}
+
 export function dependencyHint(
   opt: SettingOption,
   read: (key: string) => SettingValue | undefined,
+  lookup: OptionLookup = getOption,
 ): string {
-  const clauses = unmetClauses(opt, read).map((dep) => {
+  const clauses = unmetClauses(opt, read, 0, lookup).map((dep) => {
     const values = dep.in.map((v) => (typeof v === 'boolean' ? (v ? 'on' : 'off') : String(v)));
     return `${dep.key} = ${values.join(' or ')}`;
   });
