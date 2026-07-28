@@ -27,6 +27,7 @@ import { findUserById, touchUserLastSeen } from '../db/users.js';
 import { effectiveUploadCapBytes } from './uploadLimits.js';
 import {
   listMessages,
+  listMessagesRenderable,
   listMessagesAround,
   hasOlderRow,
   hasNewerRow,
@@ -735,9 +736,23 @@ function bufferStateFields(
 // buffer is reopened (the user clicked its channel name). Unlike the snapshot
 // loop this ignores the resume cursor and always ships the recent slice; the
 // client dedupes by id, so it's safe even if the buffer is already open.
-export function buildBufferBacklog(userId: number, networkId: number, target: string): WsPayload {
+// `countBy` is the same knob `history` carries (#10) and matters for the same
+// reason: for a client that hydrates with `open-buffer` rather than
+// `{mode:'latest'}` — iOS does — this frame IS the first screenful, so sizing it
+// in stored rows is what leaves a netsplit-heavy channel looking blank on open.
+// Defaults to 'event' so the snapshot's offline `:server:` frames (which have no
+// caller to ask) are untouched.
+export function buildBufferBacklog(
+  userId: number,
+  networkId: number,
+  target: string,
+  countBy: 'event' | 'renderable' = 'event',
+): WsPayload {
   const conn = ircManager.getConnection(userId, networkId);
-  const rows = listMessages(networkId, target, { limit: 200 });
+  const rows =
+    countBy === 'renderable'
+      ? listMessagesRenderable(networkId, target, { limit: 200 })
+      : listMessages(networkId, target, { limit: 200 });
   const events = rows.map((e) => decorateMessage(userId, e));
   const oldestId = rows.length ? (rows[0].id ?? 0) : 0;
   return {
@@ -1166,6 +1181,7 @@ export function handleOpenBuffer(
   userId: number,
   networkId: number,
   requested: string,
+  countBy: 'event' | 'renderable' = 'event',
 ): void {
   if (!networkId || !requested || requested.startsWith(':server:')) return;
   const row = getBuffer(userId, networkId, requested);
@@ -1187,7 +1203,7 @@ export function handleOpenBuffer(
     kindForTarget(requested) === 'channel' && !!conn?.channels.has(requested.toLowerCase());
   if (row && (hasMessageForTarget(networkId, row.target) || inChannel)) {
     reopenBufferRow(userId, networkId, row.target);
-    send(ws, buildBufferBacklog(userId, networkId, row.target));
+    send(ws, buildBufferBacklog(userId, networkId, row.target, countBy));
     send(ws, { kind: 'buffer-opened', networkId, target: row.target });
   } else if (requested.startsWith('#')) {
     ircManager.joinChannel(userId, networkId, requested);
@@ -1199,7 +1215,7 @@ export function handleOpenBuffer(
     // buffer that never JOINs — those fall through as a no-op, exactly as the
     // pre-registry code behaved.
     const { record } = ensureBufferOpen(userId, networkId, requested);
-    send(ws, buildBufferBacklog(userId, networkId, record.target));
+    send(ws, buildBufferBacklog(userId, networkId, record.target, countBy));
     send(ws, { kind: 'buffer-opened', networkId, target: record.target });
   }
 }
@@ -2544,6 +2560,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           userId,
           Number(msg.networkId),
           typeof msg.target === 'string' ? msg.target : '',
+          msg.countBy === 'renderable' ? 'renderable' : 'event',
         );
         break;
       case 'part':
@@ -3023,6 +3040,19 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         }
         const limit = Math.min(Math.max(Number(msg.limit) || 100, 1), 500);
         const mode = typeof msg.mode === 'string' ? msg.mode : 'before';
+        // What `limit` counts (#10). 'renderable' sizes the page in the unit the
+        // reader perceives — consolidatable presence churn rides along for free
+        // instead of eating the budget — so one fetch fills a screen even on a
+        // channel that just came back from a netsplit. Default is today's
+        // behavior; an unknown value degrades to it rather than erroring, since
+        // this is an additive field an older client simply never sends.
+        //
+        // Only the CLIENT knows whether it actually folds those runs (web gates
+        // on chat.consolidate_joins), which is why this is a request field and
+        // not a server-side default: for a client rendering every event as its
+        // own line, 'event' is already the right unit.
+        const countBy: 'event' | 'renderable' =
+          msg.countBy === 'renderable' ? 'renderable' : 'event';
         const token = msg.token ?? null;
         const speakers = listSpeakers(histNetworkId, histTarget);
         const baseReply = {
@@ -3050,7 +3080,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           // halfLimit caps each side at the request's limit (default 100,
           // clamped 1..500). Total slice length tops out at 2*limit + 1.
           const halfLimit = limit;
-          const slice = listMessagesAround(histNetworkId, histTarget, anchorId, halfLimit);
+          const slice = listMessagesAround(histNetworkId, histTarget, anchorId, halfLimit, countBy);
           const events = slice.events.map((e) => decorateMessage(userId, e));
           send(ws, {
             ...baseReply,
@@ -3072,9 +3102,11 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
             send(ws, { kind: 'error', text: 'invalid afterId' });
             break;
           }
-          const events = listMessages(histNetworkId, histTarget, { afterId, limit }).map((e) =>
-            decorateMessage(userId, e),
-          );
+          const rows =
+            countBy === 'renderable'
+              ? listMessagesRenderable(histNetworkId, histTarget, { afterId, limit })
+              : listMessages(histNetworkId, histTarget, { afterId, limit });
+          const events = rows.map((e) => decorateMessage(userId, e));
           const newestId = events.length ? events[events.length - 1].id : afterId;
           send(ws, {
             ...baseReply,
@@ -3095,9 +3127,11 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           // upward paging cleanly, plus inputHistory so up-arrow recall is
           // restored for a shell (fresh-connect shells omit it, so this is the
           // only place a reloaded client gets its per-buffer recall back).
-          const events = listMessages(histNetworkId, histTarget, { limit }).map((e) =>
-            decorateMessage(userId, e),
-          );
+          const rows =
+            countBy === 'renderable'
+              ? listMessagesRenderable(histNetworkId, histTarget, { limit })
+              : listMessages(histNetworkId, histTarget, { limit });
+          const events = rows.map((e) => decorateMessage(userId, e));
           const oldestId = events.length ? events[0].id : 0;
           send(ws, {
             ...baseReply,
@@ -3130,6 +3164,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
               target: msg.target,
               before,
               limit,
+              countBy,
             },
           ) as { messages: WsPayload[]; hasOlder: boolean };
         } catch (_) {

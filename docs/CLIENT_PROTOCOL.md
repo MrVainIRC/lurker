@@ -255,6 +255,10 @@ buffers arrive as _shells_: `{kind:'backlog', …, events:[], mode:'shell',
 hasMoreOlder:true}` — "this buffer exists; fetch content when the user opens it."
 
 Hydrate a shell with **`{type:'history', mode:'latest'}`**. It is a pure read.
+If you consolidate presence noise, send `countBy:'renderable'` with it (§8) —
+this is the fetch that fills the first screenful, so it's where sizing a page in
+stored rows shows up as a blank-looking channel. `open-buffer` accepts the same
+field, for clients still hydrating that way.
 
 > ⚠ `{type:'open-buffer'}` also returns a populated `backlog`, and the iOS app
 > currently hydrates with it — but it is a **write verb**, not a read: for a
@@ -474,7 +478,7 @@ is emitted immediately from the server's optimistic local copy.
 | -------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `join`         | `networkId, channel, key?`    | Request only — the buffer appears on `channel-joined` (§9.1)                                                            |
 | `part`         | `networkId, channel, reason?` | Buffer survives, parted                                                                                                 |
-| `open-buffer`  | `networkId, target`           | Reopen/create: replies `backlog` + `buffer-opened`; JOINs if an unjoined channel; mints an empty DM row for a bare nick |
+| `open-buffer`  | `networkId, target, countBy?` | Reopen/create: replies `backlog` + `buffer-opened`; JOINs if an unjoined channel; mints an empty DM row for a bare nick |
 | `close-buffer` | `networkId, target, reason?`  | Closes (PARTs a joined channel, untracks a DM peer). `:server:` refuses                                                 |
 
 ### View state (persisted server-side, fanned out to your other devices)
@@ -507,13 +511,13 @@ is emitted immediately from the server's optimistic local copy.
 
 ### Sync & fetch
 
-| `type`            | Fields                                                                                                      | Reply                                            |
-| ----------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `snapshot`        | —                                                                                                           | Re-runs the snapshot burst as a gap-fill (§4.4)  |
-| `history`         | `networkId, target, mode: before\|after\|around\|latest, limit (1–500), token?, before?/afterId?/anchorId?` | `{kind:'history'}` (§8)                          |
-| `search`          | `query, networkId?, target?, nick?, nicks?, before?, limit?, token?`                                        | `{kind:'search-result'}`                         |
-| `list-channels` ⏸ | `networkId`                                                                                                 | Kicks off `/LIST`; progress via `chanlist-state` |
-| `chanlist-search` | `networkId, query, sortBy, sortDir, offset, limit`                                                          | `{kind:'chanlist-result'}`                       |
+| `type`            | Fields                                                                                                                | Reply                                            |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `snapshot`        | —                                                                                                                     | Re-runs the snapshot burst as a gap-fill (§4.4)  |
+| `history`         | `networkId, target, mode: before\|after\|around\|latest, limit (1–500), token?, countBy?, before?/afterId?/anchorId?` | `{kind:'history'}` (§8)                          |
+| `search`          | `query, networkId?, target?, nick?, nicks?, before?, limit?, token?`                                                  | `{kind:'search-result'}`                         |
+| `list-channels` ⏸ | `networkId`                                                                                                           | Kicks off `/LIST`; progress via `chanlist-state` |
+| `chanlist-search` | `networkId, query, sortBy, sortDir, offset, limit`                                                                    | `{kind:'chanlist-result'}`                       |
 
 ### E2E (RPE2E, per-channel opt-in)
 
@@ -621,6 +625,55 @@ connection-independent — offline networks still serve it.
 `hasMoreOlder`). Echo the request `token` discipline the web client uses if you
 pipeline requests: keep a monotonically increasing token and drop any reply
 whose token you've superseded.
+
+### `countBy` — what `limit` counts
+
+`limit` counts **stored rows**. If you consolidate presence noise — both
+first-party clients fold runs of `join`/`part`/`quit`/`nick`/`chghost` into one
+summary line, per `shared/consolidate.ts`, which is the canonical set — that is
+not the unit you render in, and on a busy channel the
+gap is enormous: a 100-row page out of a netsplit can render as three visible
+lines. You fetch, fold it to nothing, notice the page was short, fetch again —
+and the user watches the buffer assemble itself.
+
+Send **`countBy:'renderable'`** (every `history` mode, and `open-buffer`) and the
+server sizes the page in rows that render as their own line. The consolidatable
+rows still come back — consolidation needs the whole run to summarize it — they
+just don't spend the budget. Default is `'event'`, i.e. today's behavior; an
+older server ignores the field and answers exactly as before.
+
+- **What counts as renderable is the complement of the fold set**, not
+  "messages". A `kick`, `mode`, `topic`, `error`, or `invite` each renders
+  standalone, so each is worth one slot.
+- **The slice is still a contiguous id range**, exactly like an event-counted
+  one. `hasMoreOlder`, prepend-and-dedupe, and the `before: <oldest returned
+id>` cursor are unchanged. This cannot open a hole.
+- **The scan is capped** (2000 rows). Past the cap you get fewer renderable rows
+  than you asked for and `hasMoreOlder` stays true — a buffer holding tens of
+  thousands of joins between two sentences degrades to today's behavior instead
+  of shipping a huge frame.
+- **Only ask for it if you actually fold** — and only once you _know_ whether
+  you do. If your client renders every event as its own line (the web client
+  makes this a user setting), `'event'` is already the right unit, and
+  `'renderable'` would hand you up to a full scan window of rows you then
+  display in full. If the preference hasn't loaded yet, send `'event'`: of the
+  two wrong guesses, that one just costs a short first page.
+- **On `around` it sizes each side**, so the window is up to `2×limit+1`
+  _renderable_ rows. Worth sending: for a client that enters a buffer with a
+  pending jump (a push tap, a highlight, jump-to-first-unread), the `around`
+  slice **is** the hydrate — no `latest` or `open-buffer` precedes it.
+- **A page can now be much bigger than your in-memory cap, if you keep one.**
+  Two consequences, both silent when missed:
+  - `hasMoreOlder` describes the slice the server _sent_. If your ring drops
+    rows off the old edge, there is more older history than you hold regardless
+    of what the flag said — re-arm the pager yourself.
+  - Don't merge a page larger than your ring into an existing slice. It evicts
+    the very rows the reader is looking at, and their scroll position ends up
+    pointing at content that no longer exists. Take the end **adjacent** to what
+    you hold (newest rows of an older page, oldest rows of a newer one), keep
+    the merge contiguous, and treat the remainder as still fetchable. The web
+    client caps an incremental merge at 250 rows for exactly this
+    (`vue_client/src/stores/buffers.ts:28`).
 
 **Jump-to-message detaches the buffer** (Discord/Slack convention): after
 `around`, live events for that buffer should _not_ be spliced into the visible
@@ -954,7 +1007,8 @@ What the iOS app actually ships with (`FrameParser.parseWs`,
 - **`irc` types rendered:** `message`, `action`, `notice`, `error`, `system`,
   `join`, `part`, `quit`, `nick`, `kick`, `mode`, `topic`, `motd`, `invite`
   (plus `channel-topic` for state). Unknown → drop.
-- **Send verbs (8):** `presence`, `send`, `history` (`before`/`latest`),
+- **Send verbs (8):** `presence`, `send`, `history` (`before`/`latest`; add
+  `countBy:'renderable'` if you consolidate — §8),
   `mark-read`, `mark-all-read`, `join`, `open-buffer`, `close-buffer`.
 - **REST (4):** `POST /api/auth/login/token` (or the CP login), `GET
 /api/networks`, `POST /api/auth/logout`, and optionally `GET

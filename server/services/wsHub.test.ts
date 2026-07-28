@@ -557,6 +557,44 @@ describe('handleOpenBuffer', () => {
     expect(frames.find((f) => f.kind === 'buffer-opened')?.target).toBe('#reopen');
   });
 
+  it("sizes the hydrate reply in rendered rows when asked (countBy:'renderable')", () => {
+    // For a client that hydrates with open-buffer rather than {mode:'latest'} —
+    // iOS does — this frame IS the first screenful, so it needs the same knob
+    // `history` carries (#10) or a netsplit-heavy channel opens looking blank.
+    buffers.ensureExists(userId, networkId, '#churn');
+    for (let i = 1; i <= 20; i += 1) {
+      for (let j = 0; j < 30; j += 1) {
+        insertMessage({
+          networkId,
+          target: '#churn',
+          time: new Date().toISOString(),
+          type: 'join',
+          nick: `n${j}`,
+          self: false,
+        });
+      }
+      seed('#churn', `m${i}`);
+    }
+    const messagesIn = (frames: Array<Record<string, unknown>>): unknown[] => {
+      const backlog = frames.find((f) => f.kind === 'backlog')!;
+      return (backlog.events as Array<Record<string, unknown>>)
+        .filter((e) => e.type === 'message')
+        .map((e) => e.text);
+    };
+
+    const plain = mockWs();
+    handleOpenBuffer(plain.ws, userId, networkId, '#churn');
+    const asked = mockWs();
+    handleOpenBuffer(asked.ws, userId, networkId, '#churn', 'renderable');
+
+    // The builder's fixed 200-row slice, spent on presence churn: seven messages
+    // out of twenty, and the client folds the other 193 rows into a few lines.
+    expect(messagesIn(plain.frames)).toEqual(['m14', 'm15', 'm16', 'm17', 'm18', 'm19', 'm20']);
+    // Asked in the unit it renders in, the same buffer hands back everything —
+    // the runs still ride along so consolidation can summarize them.
+    expect(messagesIn(asked.frames)).toHaveLength(20);
+  });
+
   it('joins a channel with no history instead of reopening', () => {
     const { ws, frames } = mockWs();
     handleOpenBuffer(ws, userId, networkId, '#never-visited');

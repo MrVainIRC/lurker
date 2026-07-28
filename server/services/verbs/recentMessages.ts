@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { registerVerb } from '../verbRegistry.js';
-import { listMessages, hasOlderRow } from '../../db/messages.js';
+import { listMessages, listMessagesRenderable, hasOlderRow } from '../../db/messages.js';
 import { decorateMessage } from '../wsHub.js';
 
 /** Authenticated caller context passed to every verb handler. */
@@ -37,6 +37,15 @@ registerVerb({
         type: 'integer',
         description: 'Optional. Return only messages with id < before, for backward pagination.',
       },
+      countBy: {
+        type: 'string',
+        enum: ['event', 'renderable'],
+        description:
+          'What `limit` counts. "event" (default) counts every stored row. "renderable" counts ' +
+          'only rows that render as their own line — join/part/quit/nick/host-change events are ' +
+          'still returned, but do not spend the budget, so a channel full of presence churn ' +
+          'still yields a full page of readable content.',
+      },
     },
     required: ['networkId', 'target'],
     additionalProperties: false,
@@ -49,9 +58,13 @@ registerVerb({
     }
     const limit = Math.min(Math.max(Number(input.limit) || 100, 1), 500);
     const before = input.before ? Number(input.before) : undefined;
-    const events = listMessages(networkId, target, { before, limit }).map((e) =>
-      decorateMessage(ctx.userId, e),
-    );
+    // Unrecognized values fall back to today's behavior rather than erroring —
+    // the field is additive and an old caller never sends it at all.
+    const renderable = input.countBy === 'renderable';
+    const rows = renderable
+      ? listMessagesRenderable(networkId, target, { before, limit })
+      : listMessages(networkId, target, { before, limit });
+    const events = rows.map((e) => decorateMessage(ctx.userId, e));
     const oldestId = events.length ? events[0].id : 0;
     return {
       messages: events,

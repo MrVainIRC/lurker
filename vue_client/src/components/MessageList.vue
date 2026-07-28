@@ -325,6 +325,7 @@ import {
   formatDayLabel,
 } from '../utils/timestamp.js';
 import { consolidateRows } from '../utils/consolidate.js';
+import { historyCountBy } from '../lib/historyPaging.js';
 import type { ConsolidationGroup, NickEntry, RenameEntry } from '../../../shared/consolidate.js';
 import { collapseDisplay } from '../utils/collapseDisplay.js';
 import { parseRelayMessage } from '../../../shared/parseRelay.js';
@@ -1394,6 +1395,7 @@ function requestMoreHistory() {
     target: buf.target,
     before,
     limit: 100,
+    countBy: historyCountBy(),
   });
 }
 
@@ -1418,6 +1420,7 @@ function requestNewerHistory() {
     target: buf.target,
     afterId,
     limit: 100,
+    countBy: historyCountBy(),
   });
 }
 

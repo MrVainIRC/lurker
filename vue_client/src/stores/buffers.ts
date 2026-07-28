@@ -6,8 +6,26 @@ import { useNetworksStore } from './networks.js';
 import { useToastsStore } from './toasts.js';
 import { socketSend } from '../composables/useSocket.js';
 import { SYSTEM_KEY } from '../lib/virtualBuffers.js';
+import { historyCountBy } from '../lib/historyPaging.js';
 
 const MAX_PER_BUFFER = 500;
+// The most rows one INCREMENTAL merge (prepend/append) may take from a single
+// page. Deliberately well under MAX_PER_BUFFER, so a merge can never evict the
+// rows the reader is looking at.
+//
+// `countBy:'renderable'` makes this reachable: a page is sized in rows that
+// render standalone, and the presence churn rides along with them, so one page
+// can legitimately be several times the ring. Merging it wholesale would drop
+// the entire held slice — appendHistory would leave nothing of the previous
+// tail, MessageList would read both ends changing as a wholesale replace
+// (`MessageList.vue:1644`), and a detached reader's scrollTop would be left
+// pointing at content that no longer exists.
+//
+// Nothing is lost by trimming: we keep the end ADJACENT to what we already
+// hold, so the slice stays contiguous and the pager fetches the remainder on
+// the next scroll — which is why a trim forces the matching hasMore flag true
+// regardless of what the server reported for the full page.
+const MAX_MERGE_ROWS = 250;
 const MAX_SPEAKERS = 128;
 const TYPING_DURATIONS: Record<string, number> = { active: 6000, paused: 30000 };
 
@@ -400,8 +418,20 @@ export const useBuffersStore = defineStore('buffers', {
       // so it can skip unread/highlight side effects too.
       if (event.id != null && event.id <= prevMaxId) return false;
       buf.messages.push(event);
-      if (buf.messages.length > MAX_PER_BUFFER)
+      if (buf.messages.length > MAX_PER_BUFFER) {
         buf.messages.splice(0, buf.messages.length - MAX_PER_BUFFER);
+        // The ring just evicted the rows `oldestId` pointed at — reachable
+        // whenever paging up has grown the buffer past the cap, since
+        // prependHistory doesn't trim (the reader is walking backwards; the ring
+        // is re-imposed here, on the next live line). Leaving the cursor stale
+        // makes the next upward page ask for `before: <an id we no longer hold>`
+        // and prepend a slice that isn't contiguous with what's on screen — a
+        // silent hole between the two, with nothing to signal it. Re-anchor on
+        // what survived, and re-arm the pager: there is now provably more older
+        // history than we hold.
+        buf.oldestId = buf.messages[0]?.id ?? buf.oldestId;
+        buf.hasMoreOlder = true;
+      }
       if (buf.oldestId == null && event.id != null) buf.oldestId = event.id;
       // Active-divider tracking + live mark-read. Applies to the system buffer
       // too (#355): it's now a normal buffer with a server-owned read pointer
@@ -555,10 +585,14 @@ export const useBuffersStore = defineStore('buffers', {
       const fresh = events.filter(
         (e) => (e.id == null || !existing.has(e.id)) && e.type !== 'away' && e.type !== 'back',
       );
-      buf.messages = [...fresh, ...buf.messages];
+      // Keep the NEWEST rows of an oversized page — they're the ones adjacent to
+      // what we hold, so the merged slice stays contiguous.
+      const trimmed = fresh.length > MAX_MERGE_ROWS;
+      const page = trimmed ? fresh.slice(-MAX_MERGE_ROWS) : fresh;
+      buf.messages = [...page, ...buf.messages];
       const first = buf.messages[0];
       buf.oldestId = first?.id ?? buf.oldestId;
-      buf.hasMoreOlder = !!hasMoreOlder;
+      buf.hasMoreOlder = trimmed || !!hasMoreOlder;
       buf.loadingHistory = false;
       buf.unseeded = false;
       if (speakers !== undefined) this.seedSpeakers(networkId, target, speakers);
@@ -583,14 +617,21 @@ export const useBuffersStore = defineStore('buffers', {
       const fresh = events.filter(
         (e) => (e.id == null || !existing.has(e.id)) && e.type !== 'away' && e.type !== 'back',
       );
-      const combined = [...buf.messages, ...fresh];
-      buf.messages =
-        combined.length > MAX_PER_BUFFER
-          ? combined.slice(combined.length - MAX_PER_BUFFER)
-          : combined;
+      // Keep the OLDEST rows of an oversized page — the ones adjacent to our
+      // tail — so the merged slice stays contiguous and the reader's context
+      // survives the ring's eviction.
+      const trimmed = fresh.length > MAX_MERGE_ROWS;
+      const page = trimmed ? fresh.slice(0, MAX_MERGE_ROWS) : fresh;
+      const combined = [...buf.messages, ...page];
+      const evictedOlder = combined.length > MAX_PER_BUFFER;
+      buf.messages = evictedOlder ? combined.slice(combined.length - MAX_PER_BUFFER) : combined;
       buf.oldestId = buf.messages[0]?.id ?? buf.oldestId;
       buf.newestId = buf.messages[buf.messages.length - 1]?.id ?? buf.newestId;
-      buf.hasMoreNewer = !!hasMoreNewer;
+      buf.hasMoreNewer = trimmed || !!hasMoreNewer;
+      // We just evicted rows off the old edge, so there is provably more older
+      // history than we hold — whatever the pager thought before. Re-arming it
+      // here is what keeps the eviction from reading as "start of buffer".
+      if (evictedOlder) buf.hasMoreOlder = true;
       buf.loadingHistory = false;
       if (speakers !== undefined) this.seedSpeakers(networkId, target, speakers);
     },
@@ -637,6 +678,7 @@ export const useBuffersStore = defineStore('buffers', {
         anchorId,
         token,
         limit: halfLimit,
+        countBy: historyCountBy(),
       });
       // Same rollback rationale as reattachToLive — a failed send leaves no
       // response to clear the loading flag. Restoring detached to its prior
@@ -662,7 +704,9 @@ export const useBuffersStore = defineStore('buffers', {
       buf.messages = filtered.slice(-MAX_PER_BUFFER);
       buf.oldestId = buf.messages[0]?.id ?? null;
       buf.newestId = buf.messages[buf.messages.length - 1]?.id ?? null;
-      buf.hasMoreOlder = !!payload.hasMoreOlder;
+      // Same eviction rule as applyLatestReplace: an `around` window tops out at
+      // 2×limit+1 rows, which already exceeds the ring at the default limit.
+      buf.hasMoreOlder = filtered.length > buf.messages.length || !!payload.hasMoreOlder;
       buf.hasMoreNewer = !!payload.hasMoreNewer;
       buf.pendingHistoryToken = null;
       buf.loadingHistory = false;
@@ -692,6 +736,9 @@ export const useBuffersStore = defineStore('buffers', {
         target,
         token,
         limit,
+        // This is the hydrate — the fetch that fills the FIRST screenful, and so
+        // the one the spin-loop was most visible on.
+        countBy: historyCountBy(),
       });
       // socketSend returns false when the socket isn't open. No response will
       // arrive to clear loadingHistory — so without this rollback the buffer
@@ -741,6 +788,12 @@ export const useBuffersStore = defineStore('buffers', {
         (e: BufferMessage) => e.type !== 'away' && e.type !== 'back',
       );
       buf.messages = filtered.slice(-MAX_PER_BUFFER);
+      // The ring dropped rows off the old edge. `payload.hasMoreOlder` was
+      // computed by the server against the WHOLE slice it sent, so honoring a
+      // `false` here would strand the pager on history we evicted ourselves —
+      // and countBy:'renderable' can legitimately make a slice bigger than the
+      // ring (a netsplit's worth of noise rides along with the page).
+      const evictedOlder = filtered.length > buf.messages.length;
       buf.oldestId = buf.messages[0]?.id ?? null;
       buf.newestId = buf.messages[buf.messages.length - 1]?.id ?? null;
       // A token-matched latest reply is TERMINAL hydration even when every row
@@ -752,7 +805,7 @@ export const useBuffersStore = defineStore('buffers', {
       // messages yet." between attempts. Clamping to false costs nothing: an
       // empty buffer has no anchor row, so the upward pager can't page it
       // anyway.
-      buf.hasMoreOlder = filtered.length > 0 ? !!payload.hasMoreOlder : false;
+      buf.hasMoreOlder = filtered.length > 0 ? evictedOlder || !!payload.hasMoreOlder : false;
       buf.hasMoreNewer = false;
       buf.detached = false;
       buf.liveDuringDetach = 0;
