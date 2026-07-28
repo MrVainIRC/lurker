@@ -60,7 +60,7 @@ describe('useMessageActions', () => {
     it('does not label a system line saved when a real message shares its id', () => {
       // System lines have their own id sequence, so #42 here is NOT the #42 the
       // user bookmarked in a channel.
-      useBookmarksStore().noteFromEvents([{ id: 42, bookmarked: true }]);
+      useBookmarksStore().noteFromEvents([{ id: 42, bookmarked: true }], 1);
       const actions = useMessageActions().buildActions(other({ networkId: null }));
       expect(actions.find((a) => a.key === 'save')).toBeUndefined();
     });
@@ -68,7 +68,7 @@ describe('useMessageActions', () => {
     it('reflects a saved bookmark in the save label, icon, and active flag', () => {
       // Seeded the way production seeds it: off the `bookmarked` flag riding on
       // a message row, not a connect-burst snapshot.
-      useBookmarksStore().noteFromEvents([{ id: 42, bookmarked: true }]);
+      useBookmarksStore().noteFromEvents([{ id: 42, bookmarked: true }], 1);
       const save = useMessageActions()
         .buildActions(other())
         .find((a) => a.key === 'save');

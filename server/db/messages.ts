@@ -162,10 +162,14 @@ export function insertMessage(row: MessageInput): { id: number | bigint; alt: bo
 // the client keeps a Set of what it has seen rather than of everything it owns.
 //
 // The owner is derived from the message's own network, which is why no query in
-// this file has to thread a userId to ask the question. System-buffer rows
-// (network_id NULL) resolve no owner and so compute 0 — matching the insert in
-// db/bookmarks.ts, which gates on the same networks join and therefore refuses
-// to bookmark them in the first place.
+// this file has to thread a userId to ask the question. `messages.network_id` is
+// NOT NULL and foreign-keyed, so the subquery always resolves to exactly one
+// user — this is the same join `addBookmark` gates its insert on, so what a row
+// reports here and what the server will let you save can't disagree.
+//
+// System-buffer lines don't come through here at all: they live in their own
+// `system_messages` table, which is also why they can't be bookmarked and why
+// their ids overlap this table's.
 //
 // `alias` is the table's name or alias in the enclosing query, since some
 // callers select from a bare `messages` and others from `messages m`.

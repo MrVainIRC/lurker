@@ -5,6 +5,7 @@ import { useNetworksStore } from '../stores/networks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { useSettingsStore } from '../stores/settings.js';
 import { useHighlightsStore } from '../stores/highlights.js';
+import { useBookmarksStore } from '../stores/bookmarks.js';
 import { useHighlightRulesStore } from '../stores/highlightRules.js';
 import { useInputHistoryStore } from '../stores/inputHistory.js';
 import { useNavHistoryStore } from '../stores/navHistory.js';
@@ -32,6 +33,11 @@ export function resetSession(): void {
   useNetworksStore().$reset();
   useSettingsStore().$reset();
   useHighlightsStore().$reset();
+  // Saved messages are per-account and this store holds fetched ROWS, not just ids —
+  // leaving them would show the next user the previous one's saved conversations. It was
+  // never in this list; the `bookmark-ids-snapshot` frame used to overwrite the id set on
+  // every connect, which hid the gap for the ids and never covered the rows at all.
+  useBookmarksStore().$reset();
   useHighlightRulesStore().$reset();
   useInputHistoryStore().$reset();
   useNavHistoryStore().$reset();

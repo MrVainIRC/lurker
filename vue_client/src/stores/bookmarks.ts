@@ -19,6 +19,9 @@ import { socketSend } from '../composables/useSocket.js';
 // client was going to render anyway, and an id we haven't seen is simply one
 // whose line isn't on screen to label. `isSaved` is only ever asked about a
 // message the user is looking at, which is exactly what the Set covers.
+//
+// There is deliberately no `count` getter: the Set is a partial view, so any
+// total derived from it would under-report. Ask the server if that's ever needed.
 const PAGE_SIZE = 50;
 
 // The wire shape of a `GET /api/bookmarks` row (`db/bookmarks.ts`
@@ -54,20 +57,44 @@ export const useBookmarksStore = defineStore('bookmarks', {
   getters: {
     hasMore: (state) => state.nextBefore != null,
     isSaved: (state) => (messageId: number | string) => state.ids.has(Number(messageId)),
-    count: (state) => state.ids.size,
   },
   actions: {
-    // Harvest the `bookmarked` flags off a page of message rows. MERGES rather
-    // than replaces: each page only knows about its own slice, so a later page
-    // must not evict what an earlier one taught us. Unbookmarking is the echo's
-    // job (`applyUpdate`), never a page's silence.
-    noteFromEvents(events: Array<{ id?: number | string | null; bookmarked?: boolean }>) {
-      if (!Array.isArray(events)) return;
+    // Reconcile the id set against a page of message rows.
+    //
+    // Each row is authoritative FOR ITSELF, in both directions: the server computes
+    // `bookmarked` per row and omits it when false, so a row that arrives without the
+    // flag is telling us it isn't saved. Without the clear, an unsave made on another
+    // device while this tab was disconnected would never land — the `bookmark-updated`
+    // echo was missed, and the reconnect backlog that does carry the truth was being
+    // read for additions only, so the row stayed lit until someone clicked it.
+    //
+    // What it must NOT do is evict ids the page says nothing about: a page knows its own
+    // slice and no more, so silence about an id is not an unsave.
+    //
+    // `networkId` gates the whole thing because the SYSTEM buffer's rows come from a
+    // different table with its own id sequence, overlapping this one. They never carry
+    // the flag, so reconciling against them would clear real bookmarks that happen to
+    // share an id.
+    noteFromEvents(
+      events: Array<{ id?: number | string | null; bookmarked?: boolean }>,
+      networkId: number | null | undefined,
+    ) {
+      if (!Array.isArray(events) || networkId == null) return;
       for (const e of events) {
-        if (!e?.bookmarked || e.id == null) continue;
+        if (e?.id == null) continue;
         const n = Number(e.id);
-        if (Number.isFinite(n)) this.ids.add(n);
+        if (!Number.isFinite(n)) continue;
+        if (e.bookmarked) this.ids.add(n);
+        else this.ids.delete(n);
       }
+    },
+
+    // A connect burst means anything could have changed while we were away — including
+    // saves made elsewhere, which no frame replays. Re-arm the list so the next modal
+    // open refetches rather than showing what was true before the gap. The id set needs
+    // no equivalent: the backlog frames that follow reconcile it row by row.
+    markListStale() {
+      this.listDirty = true;
     },
     applyUpdate({ messageId, saved }: { messageId: number | string; saved: boolean }) {
       const id = Number(messageId);

@@ -861,7 +861,7 @@ interface SnapshotBreakdown {
   bufferCount: number;
   fresh: boolean; // true = fresh connect → online loop shipped shells, not resume frames
   networksMs: number; // ircManager.snapshotForUser (serializes channel member lists)
-  seedsMs: number; // drafts/bookmarks/system/contacts + the bulk read/cleared/closed maps
+  seedsMs: number; // drafts/system/contacts + the bulk read/cleared/closed maps
   onlineMs: number; // the live per-buffer loop (shells: unread counts; resume: +reads/speakers)
   offlineMs: number; // buildOfflineBacklogFrames
   // Online-loop op split (the rest of onlineMs is sends/input-history/overhead).
