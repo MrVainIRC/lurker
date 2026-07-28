@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { setupTestDb, TEST_SESSION_SECRET } from '../test-utils/testApp.js';
 import { sign as signCookie } from 'cookie-signature';
 import type { IncomingMessage } from 'http';
@@ -481,6 +481,31 @@ describe('handleOpenBuffer', () => {
     handleOpenBuffer(ws, userId, networkId, '&local-unvisited');
     expect(frames).toHaveLength(0);
     expect(buffers.getBuffer(userId, networkId, '&local-unvisited')).toBeUndefined();
+  });
+
+  it('answers with a backlog for a joined channel that has no persisted messages', () => {
+    // The permanent-spinner case. Gating only on "has messages" sent a channel you are
+    // sitting in but have no lines for — freshly joined, or history cleared — down the
+    // JOIN branch, which replies `buffer-opened` and NO backlog. An on-demand client
+    // spends its one hydrate request on something that can never be answered and sits on
+    // a loading spinner for the rest of the connection.
+    buffers.ensureExists(userId, networkId, '#emptyjoined');
+    const spy = vi
+      .spyOn(ircManager, 'getConnection')
+      .mockReturnValue({ channels: new Map([['#emptyjoined', {}]]) } as never);
+    try {
+      const { ws, frames } = mockWs();
+      handleOpenBuffer(ws, userId, networkId, '#emptyjoined');
+      const backlog = frames.find((f) => f.kind === 'backlog');
+      expect(backlog, 'open-buffer must always answer an existing buffer').toBeDefined();
+      expect((backlog!.events as unknown[]).length).toBe(0);
+      // hasMoreOlder:false is what lets the client read an empty answer as "hydrated,
+      // genuinely nothing here" instead of as another shell to fetch later.
+      expect(backlog!.hasMoreOlder).toBe(false);
+      expect(frames.some((f) => f.kind === 'buffer-opened')).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('reopens a since-closed channel without re-JOINing, resolving casing case-insensitively', () => {

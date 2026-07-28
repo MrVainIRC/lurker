@@ -1169,7 +1169,15 @@ export function handleOpenBuffer(
 ): void {
   if (!networkId || !requested || requested.startsWith(':server:')) return;
   const row = getBuffer(userId, networkId, requested);
-  if (row && hasMessageForTarget(networkId, row.target)) {
+  // A channel we are CURRENTLY IN answers with its backlog even when that backlog is
+  // empty. Gating purely on `hasMessageForTarget` sent a channel you're sitting in but
+  // have no persisted lines for — freshly joined, or one whose history was cleared —
+  // down the join branch below, which replies with `buffer-opened` and no `backlog` at
+  // all. A client that hydrates on demand has then spent its one request on something
+  // that can never be answered, and sits on a loading spinner for the rest of the
+  // connection. `open-buffer` must always produce a backlog for a buffer that exists.
+  const joinedChannel = channelJoined(requested, ircManager.getConnection(userId, networkId));
+  if (row && (hasMessageForTarget(networkId, row.target) || joinedChannel)) {
     reopenBufferRow(userId, networkId, row.target);
     send(ws, buildBufferBacklog(userId, networkId, row.target));
     send(ws, { kind: 'buffer-opened', networkId, target: row.target });
