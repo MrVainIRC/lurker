@@ -3080,7 +3080,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           // halfLimit caps each side at the request's limit (default 100,
           // clamped 1..500). Total slice length tops out at 2*limit + 1.
           const halfLimit = limit;
-          const slice = listMessagesAround(histNetworkId, histTarget, anchorId, halfLimit);
+          const slice = listMessagesAround(histNetworkId, histTarget, anchorId, halfLimit, countBy);
           const events = slice.events.map((e) => decorateMessage(userId, e));
           send(ws, {
             ...baseReply,

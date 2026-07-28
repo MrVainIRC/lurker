@@ -636,8 +636,7 @@ gap is enormous: a 100-row page out of a netsplit can render as three visible
 lines. You fetch, fold it to nothing, notice the page was short, fetch again —
 and the user watches the buffer assemble itself.
 
-Send **`countBy:'renderable'`** (modes `before`, `after`, `latest`; also honored
-on `open-buffer`, not on `around`) and the
+Send **`countBy:'renderable'`** (every `history` mode, and `open-buffer`) and the
 server sizes the page in rows that render as their own line. The consolidatable
 rows still come back — consolidation needs the whole run to summarize it — they
 just don't spend the budget. Default is `'event'`, i.e. today's behavior; an
@@ -653,14 +652,28 @@ id>` cursor are unchanged. This cannot open a hole.
   than you asked for and `hasMoreOlder` stays true — a buffer holding tens of
   thousands of joins between two sentences degrades to today's behavior instead
   of shipping a huge frame.
-- **Only ask for it if you actually fold.** If your client renders every event
-  as its own line (the web client makes this a user setting), `'event'` is
-  already the right unit, and `'renderable'` would hand you up to a full scan
-  window of rows you then display in full.
-- **Re-arm your pager if your own ring trims the reply.** `hasMoreOlder`
-  describes the slice the server _sent_. A renderable-counted page can exceed a
-  fixed in-memory cap, and dropping rows off the old edge means there is more
-  older history than you hold regardless of what the flag said.
+- **Only ask for it if you actually fold** — and only once you _know_ whether
+  you do. If your client renders every event as its own line (the web client
+  makes this a user setting), `'event'` is already the right unit, and
+  `'renderable'` would hand you up to a full scan window of rows you then
+  display in full. If the preference hasn't loaded yet, send `'event'`: of the
+  two wrong guesses, that one just costs a short first page.
+- **On `around` it sizes each side**, so the window is up to `2×limit+1`
+  _renderable_ rows. Worth sending: for a client that enters a buffer with a
+  pending jump (a push tap, a highlight, jump-to-first-unread), the `around`
+  slice **is** the hydrate — no `latest` or `open-buffer` precedes it.
+- **A page can now be much bigger than your in-memory cap, if you keep one.**
+  Two consequences, both silent when missed:
+  - `hasMoreOlder` describes the slice the server _sent_. If your ring drops
+    rows off the old edge, there is more older history than you hold regardless
+    of what the flag said — re-arm the pager yourself.
+  - Don't merge a page larger than your ring into an existing slice. It evicts
+    the very rows the reader is looking at, and their scroll position ends up
+    pointing at content that no longer exists. Take the end **adjacent** to what
+    you hold (newest rows of an older page, oldest rows of a newer one), keep
+    the merge contiguous, and treat the remainder as still fetchable. The web
+    client caps an incremental merge at 250 rows for exactly this
+    (`vue_client/src/stores/buffers.ts:28`).
 
 **Jump-to-message detaches the buffer** (Discord/Slack convention): after
 `around`, live events for that buffer should _not_ be spliced into the visible

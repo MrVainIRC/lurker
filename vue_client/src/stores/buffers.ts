@@ -9,6 +9,23 @@ import { SYSTEM_KEY } from '../lib/virtualBuffers.js';
 import { historyCountBy } from '../lib/historyPaging.js';
 
 const MAX_PER_BUFFER = 500;
+// The most rows one INCREMENTAL merge (prepend/append) may take from a single
+// page. Deliberately well under MAX_PER_BUFFER, so a merge can never evict the
+// rows the reader is looking at.
+//
+// `countBy:'renderable'` makes this reachable: a page is sized in rows that
+// render standalone, and the presence churn rides along with them, so one page
+// can legitimately be several times the ring. Merging it wholesale would drop
+// the entire held slice — appendHistory would leave nothing of the previous
+// tail, MessageList would read both ends changing as a wholesale replace
+// (`MessageList.vue:1644`), and a detached reader's scrollTop would be left
+// pointing at content that no longer exists.
+//
+// Nothing is lost by trimming: we keep the end ADJACENT to what we already
+// hold, so the slice stays contiguous and the pager fetches the remainder on
+// the next scroll — which is why a trim forces the matching hasMore flag true
+// regardless of what the server reported for the full page.
+const MAX_MERGE_ROWS = 250;
 const MAX_SPEAKERS = 128;
 const TYPING_DURATIONS: Record<string, number> = { active: 6000, paused: 30000 };
 
@@ -401,8 +418,20 @@ export const useBuffersStore = defineStore('buffers', {
       // so it can skip unread/highlight side effects too.
       if (event.id != null && event.id <= prevMaxId) return false;
       buf.messages.push(event);
-      if (buf.messages.length > MAX_PER_BUFFER)
+      if (buf.messages.length > MAX_PER_BUFFER) {
         buf.messages.splice(0, buf.messages.length - MAX_PER_BUFFER);
+        // The ring just evicted the rows `oldestId` pointed at — reachable
+        // whenever paging up has grown the buffer past the cap, since
+        // prependHistory doesn't trim (the reader is walking backwards; the ring
+        // is re-imposed here, on the next live line). Leaving the cursor stale
+        // makes the next upward page ask for `before: <an id we no longer hold>`
+        // and prepend a slice that isn't contiguous with what's on screen — a
+        // silent hole between the two, with nothing to signal it. Re-anchor on
+        // what survived, and re-arm the pager: there is now provably more older
+        // history than we hold.
+        buf.oldestId = buf.messages[0]?.id ?? buf.oldestId;
+        buf.hasMoreOlder = true;
+      }
       if (buf.oldestId == null && event.id != null) buf.oldestId = event.id;
       // Active-divider tracking + live mark-read. Applies to the system buffer
       // too (#355): it's now a normal buffer with a server-owned read pointer
@@ -556,10 +585,14 @@ export const useBuffersStore = defineStore('buffers', {
       const fresh = events.filter(
         (e) => (e.id == null || !existing.has(e.id)) && e.type !== 'away' && e.type !== 'back',
       );
-      buf.messages = [...fresh, ...buf.messages];
+      // Keep the NEWEST rows of an oversized page — they're the ones adjacent to
+      // what we hold, so the merged slice stays contiguous.
+      const trimmed = fresh.length > MAX_MERGE_ROWS;
+      const page = trimmed ? fresh.slice(-MAX_MERGE_ROWS) : fresh;
+      buf.messages = [...page, ...buf.messages];
       const first = buf.messages[0];
       buf.oldestId = first?.id ?? buf.oldestId;
-      buf.hasMoreOlder = !!hasMoreOlder;
+      buf.hasMoreOlder = trimmed || !!hasMoreOlder;
       buf.loadingHistory = false;
       buf.unseeded = false;
       if (speakers !== undefined) this.seedSpeakers(networkId, target, speakers);
@@ -584,12 +617,17 @@ export const useBuffersStore = defineStore('buffers', {
       const fresh = events.filter(
         (e) => (e.id == null || !existing.has(e.id)) && e.type !== 'away' && e.type !== 'back',
       );
-      const combined = [...buf.messages, ...fresh];
+      // Keep the OLDEST rows of an oversized page — the ones adjacent to our
+      // tail — so the merged slice stays contiguous and the reader's context
+      // survives the ring's eviction.
+      const trimmed = fresh.length > MAX_MERGE_ROWS;
+      const page = trimmed ? fresh.slice(0, MAX_MERGE_ROWS) : fresh;
+      const combined = [...buf.messages, ...page];
       const evictedOlder = combined.length > MAX_PER_BUFFER;
       buf.messages = evictedOlder ? combined.slice(combined.length - MAX_PER_BUFFER) : combined;
       buf.oldestId = buf.messages[0]?.id ?? buf.oldestId;
       buf.newestId = buf.messages[buf.messages.length - 1]?.id ?? buf.newestId;
-      buf.hasMoreNewer = !!hasMoreNewer;
+      buf.hasMoreNewer = trimmed || !!hasMoreNewer;
       // We just evicted rows off the old edge, so there is provably more older
       // history than we hold — whatever the pager thought before. Re-arming it
       // here is what keeps the eviction from reading as "start of buffer".
@@ -640,6 +678,7 @@ export const useBuffersStore = defineStore('buffers', {
         anchorId,
         token,
         limit: halfLimit,
+        countBy: historyCountBy(),
       });
       // Same rollback rationale as reattachToLive — a failed send leaves no
       // response to clear the loading flag. Restoring detached to its prior

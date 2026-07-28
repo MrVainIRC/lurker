@@ -318,6 +318,12 @@ export function listMessagesAround(
   target: string,
   anchorId: number,
   halfLimit = 100,
+  // Sizes each SIDE in renderable rows (#10). Matters more here than the name
+  // "jump" suggests: a client entering a buffer with a pending jump — a push
+  // notification, a highlight, jump-to-first-unread — hydrates from this slice
+  // and nothing else, so on a channel back from a netsplit an event-counted
+  // window is the same near-blank screenful the feature exists to remove.
+  countBy: 'event' | 'renderable' = 'event',
 ):
   | { events: MessageEvent[]; hasMoreOlder: boolean; hasMoreNewer: boolean }
   | { events: []; hasMoreOlder: false; hasMoreNewer: false; anchorMissing: true } {
@@ -327,8 +333,9 @@ export function listMessagesAround(
   if (!anchorRow) {
     return { events: [], hasMoreOlder: false, hasMoreNewer: false, anchorMissing: true };
   }
-  const older = listMessages(networkId, target, { before: anchorId, limit: halfLimit });
-  const newer = listMessages(networkId, target, { afterId: anchorId, limit: halfLimit });
+  const page = countBy === 'renderable' ? listMessagesRenderable : listMessages;
+  const older = page(networkId, target, { before: anchorId, limit: halfLimit });
+  const newer = page(networkId, target, { afterId: anchorId, limit: halfLimit });
   const events = [...older, rowToEvent(anchorRow), ...newer];
   const oldestId = events[0].id as number;
   const newestId = events[events.length - 1].id as number;

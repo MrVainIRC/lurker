@@ -20,8 +20,19 @@
 
 import { useSettingsStore } from '../stores/settings.js';
 
+// Until the settings bootstrap lands we don't know which the user chose, and the
+// two wrong answers aren't equally wrong. Guessing 'renderable' for someone who
+// turned consolidation OFF hands them a page of up to the server's whole scan
+// window, rendered line by line — the exact thing this gate exists to prevent.
+// Guessing 'event' for someone who left it ON just means their first page is
+// sized the way every page was before this feature, and the next scroll corrects
+// it. So: no opinion until we have one. (`settings.effective` would otherwise
+// answer from the registry default, which is `true` — a real preference for the
+// majority, but not one we've been told.)
 export type HistoryCountBy = 'event' | 'renderable';
 
 export function historyCountBy(): HistoryCountBy {
-  return useSettingsStore().effective('chat.consolidate_joins') ? 'renderable' : 'event';
+  const settings = useSettingsStore();
+  if (!settings.loaded) return 'event';
+  return settings.effective('chat.consolidate_joins') ? 'renderable' : 'event';
 }

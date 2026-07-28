@@ -1316,3 +1316,40 @@ describe('listMessagesRenderable', () => {
     expect(listMessagesRenderable(net, '#a', { limit: 2 })).toHaveLength(noiseCount + 1);
   });
 });
+
+describe('listMessagesAround countBy', () => {
+  it('sizes each side in renderable rows when asked', () => {
+    // A jump is a hydrate for any client that enters a buffer with a pending
+    // anchor (push tap, highlight, jump-to-first-unread), so an event-counted
+    // window lands them on the same near-blank screen (#10).
+    const user = createUser('around-renderable');
+    const net = createNetwork(user.id, {
+      name: 'n',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'me',
+    })!;
+    const ids: number[] = [];
+    for (let i = 1; i <= 20; i += 1) {
+      for (let j = 0; j < 10; j += 1) event(net.id, '#a', 'join', `n${j}`);
+      ids.push(chat(net.id, '#a', 'alice', `m${i}`).id);
+    }
+    const anchorId = ids[9]; // m10
+
+    const eventCounted = listMessagesAround(net.id, '#a', anchorId, 11);
+    const renderable = listMessagesAround(net.id, '#a', anchorId, 3, 'renderable');
+    const texts = (s: {
+      events: ReadonlyArray<{ type: string; text: string | null }>;
+    }): unknown[] => s.events.filter((e) => e.type === 'message').map((e) => e.text);
+
+    // 11 rows a side is one message either way — the churn ate the window.
+    expect(texts(eventCounted)).toEqual(['m9', 'm10', 'm11']);
+    // 3 renderable a side is three messages either way, anchor in the middle.
+    expect(texts(renderable)).toEqual(['m7', 'm8', 'm9', 'm10', 'm11', 'm12', 'm13']);
+    expect(renderable.events.find((e) => e.id === anchorId)).toBeDefined();
+    // Still one contiguous run, so the paging cursors either side stay valid.
+    const rendIds = renderable.events.map((e) => e.id);
+    expect(rendIds.at(-1)! - rendIds[0] + 1).toBe(rendIds.length);
+  });
+});

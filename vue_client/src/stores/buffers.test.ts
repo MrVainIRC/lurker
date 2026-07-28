@@ -714,10 +714,16 @@ describe('hydration lifecycle (blank-buffer fix)', () => {
 // in the unit we render it in, and don't let our own ring silently swallow the
 // extra rows that unit brings with it.
 describe('renderable-counted history paging', () => {
-  const useSettings = () => useSettingsStore();
+  /** Settings as they are once the bootstrap has landed. */
+  const settingsLoaded = (consolidate: boolean) => {
+    const settings = useSettingsStore();
+    settings.loaded = true;
+    settings.values['chat.consolidate_joins'] = consolidate;
+  };
 
   it('asks for renderable-counted pages while consolidation is on', () => {
     const store = useBuffersStore();
+    settingsLoaded(true);
     vi.mocked(socketSend).mockReturnValue(true);
 
     store.reattachToLive(1, '#a');
@@ -732,7 +738,22 @@ describe('renderable-counted history paging', () => {
     // in — and asking for 'renderable' would drag the server's whole scan window
     // into a page the user then sees in full.
     const store = useBuffersStore();
-    useSettings().values['chat.consolidate_joins'] = false;
+    settingsLoaded(false);
+    vi.mocked(socketSend).mockReturnValue(true);
+
+    store.reattachToLive(1, '#a');
+
+    expect(socketSend).toHaveBeenCalledWith(expect.objectContaining({ countBy: 'event' }));
+  });
+
+  it('holds off on renderable pages until the settings bootstrap lands', () => {
+    // The registry default is `true`, so `effective` would answer 'renderable'
+    // here — for a user who may well have turned consolidation off. Of the two
+    // wrong guesses that's the damaging one (a scan window rendered line by
+    // line); guessing 'event' just means the first page is sized the way every
+    // page used to be, and the next scroll corrects it.
+    const store = useBuffersStore();
+    expect(useSettingsStore().loaded).toBe(false);
     vi.mocked(socketSend).mockReturnValue(true);
 
     store.reattachToLive(1, '#a');
@@ -791,6 +812,117 @@ describe('renderable-counted history paging', () => {
 
     expect(buf.messages).toHaveLength(500);
     expect(buf.messages[0].id).toBe(3);
+    expect(buf.hasMoreOlder).toBe(true);
+  });
+});
+
+// The other half of "a page can now be bigger than the ring": what an
+// INCREMENTAL merge does with one. Both of these are silent when wrong — the
+// reader just ends up looking at the wrong content, or at a buffer with a hole
+// in it — so they're pinned rather than reasoned about.
+describe('oversized history pages vs the in-memory ring', () => {
+  const row = (id: number) => ({
+    networkId: 1,
+    target: '#a',
+    id,
+    type: 'message',
+    nick: 'bob',
+    body: 'x',
+  });
+
+  /** Hydrate '#a' with `count` rows, ids 1..count. */
+  const seed = (store: ReturnType<typeof useBuffersStore>, count: number) => {
+    vi.mocked(socketSend).mockReturnValue(true);
+    store.reattachToLive(1, '#a');
+    store.applyLatestReplace(1, '#a', {
+      token: store.byKey('1::#a')!.pendingHistoryToken,
+      events: Array.from({ length: count }, (_, i) => row(i + 1)),
+      hasMoreOlder: true,
+    });
+    return store.byKey('1::#a')!;
+  };
+
+  it('keeps the reader’s context when an append page dwarfs the ring', () => {
+    // A renderable-counted `after` page can be thousands of rows. Merged
+    // wholesale it would evict every row held, MessageList would read both ends
+    // changing as a wholesale replace, and a detached reader's scroll position
+    // would point at content that no longer exists.
+    const store = useBuffersStore();
+    const buf = seed(store, 500);
+
+    store.appendHistory(
+      1,
+      '#a',
+      Array.from({ length: 2000 }, (_, i) => row(501 + i)),
+      false,
+      undefined,
+    );
+
+    expect(buf.messages).toHaveLength(500);
+    // The previous tail survived, which is what tells the scroll watcher this
+    // was an append and not a re-snapshot.
+    expect(buf.messages.some((m) => m.id === 500)).toBe(true);
+    // Contiguous, and the page we didn't take is still fetchable.
+    expect(buf.messages.at(-1)!.id).toBe(750);
+    expect(buf.hasMoreNewer).toBe(true);
+  });
+
+  it('takes the adjacent end of an oversized prepend page and stays contiguous', () => {
+    const store = useBuffersStore();
+    // Hold ids 1000..1099 (seed() emits 1..100, so shift them up).
+    vi.mocked(socketSend).mockReturnValue(true);
+    store.reattachToLive(1, '#a');
+    store.applyLatestReplace(1, '#a', {
+      token: store.byKey('1::#a')!.pendingHistoryToken,
+      events: Array.from({ length: 100 }, (_, i) => row(1000 + i)),
+      hasMoreOlder: true,
+    });
+    const buf = store.byKey('1::#a')!;
+
+    // 900 older rows, ids 100..999 — contiguous, ending right below what we hold.
+    store.prependHistory(
+      1,
+      '#a',
+      Array.from({ length: 900 }, (_, i) => row(100 + i)),
+      false,
+      undefined,
+    );
+
+    // We took the NEWEST 250 of the page, so the merged slice is one gapless run
+    // ending where it did before. Taking the oldest 250 instead would have left
+    // a 650-row hole in the middle with nothing to signal it.
+    const ids = buf.messages.map((m) => m.id);
+    expect(ids[0]).toBe(750);
+    expect(ids.at(-1)).toBe(1099);
+    expect(ids).toEqual(Array.from({ length: 350 }, (_, i) => 750 + i));
+    expect(buf.oldestId).toBe(750);
+    // We deliberately didn't take the whole page, so the pager stays armed even
+    // though the server said there was nothing older.
+    expect(buf.hasMoreOlder).toBe(true);
+  });
+
+  it('re-anchors the paging cursor when a live line evicts the rows it pointed at', () => {
+    // prependHistory doesn't trim (the reader is walking backwards), so paging
+    // up grows the buffer past the ring and the NEXT live line re-imposes it.
+    // Leaving oldestId pointing at an evicted row makes the following upward
+    // page non-contiguous — a silent hole with nothing to signal it.
+    const store = useBuffersStore();
+    const buf = seed(store, 500);
+    store.prependHistory(
+      1,
+      '#a',
+      Array.from({ length: 200 }, (_, i) => row(i - 199)),
+      true,
+      undefined,
+    );
+    expect(buf.messages).toHaveLength(700); // over the ring, by design
+    const staleOldest = buf.oldestId;
+
+    store.pushMessage(row(501));
+
+    expect(buf.messages).toHaveLength(500);
+    expect(buf.oldestId).not.toBe(staleOldest);
+    expect(buf.oldestId).toBe(buf.messages[0].id); // the cursor tracks what survived
     expect(buf.hasMoreOlder).toBe(true);
   });
 });
