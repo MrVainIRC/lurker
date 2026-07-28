@@ -537,6 +537,12 @@ function handleMessage(raw: string): void {
     // ?since pulls only genuinely-new events rather than re-gap-filling history
     // the shells intentionally omitted. Present on fresh connects only.
     if (typeof payload.cursor === 'number') trackSeenId(payload.cursor);
+    // Saves made elsewhere while we were away are replayed by no frame — the
+    // backlogs that follow reconcile the id set row by row, but the loaded
+    // bookmarks LIST would stay as it was before the gap. Re-arm it so the next
+    // modal open refetches. This is what the departed `bookmark-ids-snapshot`
+    // used to do as a side effect of overwriting the store.
+    useBookmarksStore().markListStale();
     return;
   }
   if (payload.kind === 'backlog') {
@@ -546,6 +552,7 @@ function handleMessage(raw: string): void {
     if (payload.networkId != null && Array.isArray(payload.events)) {
       for (const e of payload.events) trackSeenId(e?.id);
     }
+    useBookmarksStore().noteFromEvents(payload.events, payload.networkId);
     applyBacklog(payload);
     return;
   }
@@ -556,6 +563,9 @@ function handleMessage(raw: string): void {
     // 'history' kind — disambiguated by `mode`.
     const buffers = useBuffersStore();
     const mode = payload.mode || 'before';
+    // Every mode carries `events`; reconcile before the mode-specific dispatch so
+    // one call covers around/latest/after/before alike.
+    useBookmarksStore().noteFromEvents(payload.events, payload.networkId);
     if (mode === 'around') {
       buffers.applyAroundSlice(payload.networkId, payload.target, payload);
     } else if (mode === 'latest') {
@@ -771,11 +781,6 @@ function handleMessage(raw: string): void {
   }
   if (payload.kind === 'contact-deleted') {
     useFriendsStore().applyContactDeleted(payload.contactId);
-    return;
-  }
-  if (payload.kind === 'bookmark-ids-snapshot') {
-    const bookmarks = useBookmarksStore();
-    bookmarks.applySnapshot(payload.ids || []);
     return;
   }
   if (payload.kind === 'bookmark-updated') {
