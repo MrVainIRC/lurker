@@ -53,18 +53,22 @@ export function migrateSmartFilterToEventMode(db: Database.Database): number {
         // does with it — so it converts to the default tier and stops being a
         // row nothing can read.
       }
+      // Only `smart` needs storing. `all` IS the registry default, and the server
+      // drops rows equal to their default on normal writes — persisting one here
+      // would light the Settings UI's "modified" marker on a setting the user
+      // never chose. Checked before the point reads below so the common
+      // (smart-filter-off) row costs nothing but its delete.
       const mode: EventMode = smart ? 'smart' : 'all';
-      for (const key of [EVENT_MODE_KEY, EVENT_MODE_KEY_MOBILE]) {
-        // Don't clobber a tier the user has ALREADY set. That happens when a
-        // client running the new build wrote a tier before this migration ran
-        // (a mid-upgrade session, or a DB restored from a mixed backup) — their
-        // explicit newer choice outranks a legacy row we're here to retire.
-        if ((readKey.get(row.userId, key) as { value: string } | undefined) !== undefined) continue;
-        // The server drops rows equal to the registry default on normal writes;
-        // match that here so a migrated `all` doesn't leave the Settings UI
-        // showing "modified" on a setting the user never chose.
-        if (mode === 'all') continue;
-        writeKey.run(row.userId, key, JSON.stringify(mode));
+      if (mode === 'smart') {
+        for (const key of [EVENT_MODE_KEY, EVENT_MODE_KEY_MOBILE]) {
+          // Don't clobber a tier the user has ALREADY set. That happens when a
+          // client running the new build wrote a tier before this migration ran
+          // (a mid-upgrade session, or a DB restored from a mixed backup) — their
+          // explicit newer choice outranks a legacy row we're here to retire.
+          const existing = readKey.get(row.userId, key) as { value: string } | undefined;
+          if (existing !== undefined) continue;
+          writeKey.run(row.userId, key, JSON.stringify(mode));
+        }
       }
       dropLegacy.run(row.userId, LEGACY_KEY);
       migrated += 1;
@@ -72,5 +76,14 @@ export function migrateSmartFilterToEventMode(db: Database.Database): number {
     return migrated;
   });
 
-  return migrate(rows) as number;
+  // BEGIN IMMEDIATE, not deferred: this transaction opens with a READ (the
+  // don't-clobber probe) before its first write. Under a deferred BEGIN that read
+  // establishes the snapshot, and on a hosted cell Litestream's once-a-second sync
+  // writes its own bookkeeping in that window — staling the snapshot so the first
+  // write dies with SQLITE_BUSY_SNAPSHOT, which is non-retryable (the 2026-07-19
+  // roswell incident, see the note in db/index.ts). The caller swallows the throw
+  // as a warning, so the cost isn't a crash: it's this migration being silently
+  // skipped for that boot, leaving everyone who had smart filtering on running
+  // with it off until some later boot wins the race.
+  return migrate.immediate(rows) as number;
 }

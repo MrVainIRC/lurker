@@ -16,6 +16,7 @@ import type {
   SettingValue,
   SettingOption,
   SettingCategory,
+  SettingDependency,
 } from '../../../shared/settingsRegistry.js';
 
 export { REGISTRY, getOption, defaultsAsObject, CATEGORIES, GROUPS };
@@ -87,16 +88,61 @@ export function optionEnabled(
 }
 
 /**
- * Human-readable "why is this greyed out" line for an inactive setting, built
- * from its own clauses. Deliberately shows dotted keys rather than labels: the
- * settings pane already prints the key under every headline, so this reads as
- * an instruction you can act on rather than a riddle about which row to find.
+ * The clauses actually standing between this setting and being live.
+ *
+ * NOT simply `opt.dependsOn`. Because `optionEnabled` is transitive, a clause can
+ * fail with its own value already satisfied — the parent it names is itself
+ * inactive. Reporting that clause verbatim sends the user to a row that already
+ * reads the way the hint demands, with no way forward (and the editor disabled,
+ * so they can't even poke at it). So: report the clauses the user can act on,
+ * and when every failure is transitive, report what the PARENTS need instead.
  */
-export function dependencyHint(opt: SettingOption): string {
-  if (!opt.dependsOn?.length) return '';
-  const clauses = opt.dependsOn.map((dep) => {
+function unmetClauses(
+  opt: SettingOption,
+  read: (key: string) => SettingValue | undefined,
+  depth = 0,
+): SettingDependency[] {
+  if (!opt.dependsOn?.length || depth >= MAX_DEPENDENCY_DEPTH) return [];
+  const actionable: SettingDependency[] = [];
+  const blockedParents: SettingOption[] = [];
+  for (const dep of opt.dependsOn) {
+    const parent = getOption(dep.key);
+    // Wrong value → the user changes this one. That's the actionable case.
+    if (!dep.in.includes(read(dep.key) as SettingValue)) {
+      actionable.push(dep);
+      continue;
+    }
+    // Right value, but the row it names is greyed out too — recurse past it.
+    if (parent && !optionEnabled(parent, read, depth + 1)) blockedParents.push(parent);
+  }
+  if (actionable.length) return actionable;
+  const inherited = blockedParents.flatMap((parent) => unmetClauses(parent, read, depth + 1));
+  // Two parents can bottom out on the same root clause (both consolidation keys
+  // hang off the same tier pair); say it once.
+  const seen = new Set<string>();
+  return inherited.filter((dep) => {
+    const id = `${dep.key}=${dep.in.join('|')}`;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+/**
+ * Human-readable "why is this greyed out, and what do I change" line.
+ *
+ * Deliberately shows dotted keys rather than labels: the settings pane already
+ * prints the key under every headline, so this reads as an instruction you can
+ * act on rather than a riddle about which row to find.
+ */
+export function dependencyHint(
+  opt: SettingOption,
+  read: (key: string) => SettingValue | undefined,
+): string {
+  const clauses = unmetClauses(opt, read).map((dep) => {
     const values = dep.in.map((v) => (typeof v === 'boolean' ? (v ? 'on' : 'off') : String(v)));
     return `${dep.key} = ${values.join(' or ')}`;
   });
+  if (!clauses.length) return '';
   return `Inactive — needs ${clauses.join(', or ')}.`;
 }

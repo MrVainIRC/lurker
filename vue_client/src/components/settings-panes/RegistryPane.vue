@@ -111,7 +111,8 @@ const groups = computed(() => {
 // the setting it hangs off changes — flipping the event tier greys and un-greys
 // its modifiers without a reload.
 function dependencyHintFor(opt: SettingOption): string {
-  return optionEnabled(opt, (key) => settings.effective(key)) ? '' : dependencyHint(opt);
+  const read = (key: string) => settings.effective(key);
+  return optionEnabled(opt, read) ? '' : dependencyHint(opt, read);
 }
 
 async function onCommit(key: string, value: SettingValue) {

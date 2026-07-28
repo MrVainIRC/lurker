@@ -160,18 +160,50 @@ describe('optionEnabled (#666)', () => {
 
 describe('dependencyHint', () => {
   it('names the keys and values that would wake the setting up', () => {
-    expect(dependencyHint(opt('chat.smart_filter_delay'))).toBe(
+    expect(dependencyHint(opt('chat.smart_filter_delay'), reader({}))).toBe(
       'Inactive — needs chat.events = smart, or chat.events.mobile = smart.',
     );
   });
 
   it('renders booleans as on/off rather than true/false', () => {
-    expect(dependencyHint(opt('chat.consolidate_max_names'))).toBe(
+    expect(
+      dependencyHint(
+        opt('chat.consolidate_max_names'),
+        reader({ 'chat.consolidate_joins': false }),
+      ),
+    ).toBe('Inactive — needs chat.consolidate_joins = on.');
+  });
+
+  it('walks past a dependency that is itself inactive', () => {
+    // The dead end this exists to prevent: with both tiers on `none`,
+    // consolidate_max_names is greyed out even though chat.consolidate_joins —
+    // the only key its own clause names — reads `on`. Pointing at that row would
+    // send the user somewhere that already looks correct, with its editor
+    // disabled so they can't even try. Name the tier instead.
+    const bothOff = reader({ 'chat.events': 'none', 'chat.events.mobile': 'none' });
+    expect(dependencyHint(opt('chat.consolidate_max_names'), bothOff)).toBe(
+      'Inactive — needs chat.events = all or smart, or chat.events.mobile = all or smart.',
+    );
+  });
+
+  it('prefers the clause the user can actually act on', () => {
+    // Consolidation is off AND the tiers are off. The nearer, directly-actionable
+    // clause wins — turning consolidation back on is a step the user can take.
+    const both = reader({
+      'chat.consolidate_joins': false,
+      'chat.events': 'none',
+      'chat.events.mobile': 'none',
+    });
+    expect(dependencyHint(opt('chat.consolidate_max_names'), both)).toBe(
       'Inactive — needs chat.consolidate_joins = on.',
     );
   });
 
   it('is empty for a setting with no dependencies', () => {
-    expect(dependencyHint(opt('chat.events'))).toBe('');
+    expect(dependencyHint(opt('chat.events'), reader({}))).toBe('');
+  });
+
+  it('is empty for a setting whose dependencies are satisfied', () => {
+    expect(dependencyHint(opt('chat.consolidate_max_names'), reader({}))).toBe('');
   });
 });

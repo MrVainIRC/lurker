@@ -33,6 +33,7 @@ import { EXPORT_TABLES, EXPORT_FORMAT_VERSION, IMPORT_ORDER } from '../db/export
 import { encryptSecret } from '../utils/secretCrypto.js';
 import { importRow as importBufferRow } from '../db/buffers.js';
 import { listBufferTargets, hasMessageForTarget } from '../db/messages.js';
+import { migrateSmartFilterToEventMode } from '../db/migrateEventMode.js';
 import ignoreRulesService from './ignoreRulesService.js';
 import type { IgnorePatternKind } from '../db/ignoredMasks.js';
 
@@ -592,6 +593,14 @@ export async function importFromZipFile(
         // history. Modern archives skip this (their buffers table imported in
         // Phase A).
         convertLegacyBuffers(data, idMaps, counts, targetUserId);
+
+        // An archive taken before #666 carries a live `chat.smart_filter` row,
+        // which the boot migration has already retired everywhere else — so
+        // importing one reintroduces a key nothing reads, and the user's smart
+        // filtering silently reverts to "show everything" until the next restart
+        // happens to re-run it. Idempotent and self-terminating, so calling it
+        // here just converts whatever this import brought in.
+        migrateSmartFilterToEventMode(db);
       })();
     } catch (err) {
       resetImportedData(targetUserId);
