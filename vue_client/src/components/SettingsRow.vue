@@ -146,6 +146,10 @@ function formatDefault(opt: SettingOption): string {
   const v = opt.default;
   if (Array.isArray(v)) return v.join(', ');
   if (typeof v === 'boolean') return v ? 'on' : 'off';
+  // Same lookup the <select> does. This line exists to tell the user what they
+  // changed away from, so it has to name it the way the control does — showing
+  // the id here while the dropdown above shows prose reads as a different value.
+  if (opt.type === 'enum') return opt.choiceLabels?.[String(v)] ?? String(v);
   return String(v);
 }
 </script>
