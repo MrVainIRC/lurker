@@ -23,6 +23,9 @@ interface MessageRow {
   from_ignored: number;
   mirrored: number;
   msgid: string | null;
+  // 0/1 from the computed `bookmarked` column — see BOOKMARKED_COL. Optional
+  // because it exists only on the SELECTs that ask for it.
+  bookmarked?: number;
 }
 
 /** A raw message row joined with network_name. */
@@ -52,6 +55,10 @@ export interface MessageEvent {
   // IRCv3 server-assigned message id (#450). Only set when the network supplied
   // one — absent (not null) otherwise, so untagged backlogs don't grow a field.
   msgid?: string;
+  // Whether the owning user has saved this line. Absent (not `false`) when they
+  // haven't, on the same reasoning as `msgid`: almost no row is bookmarked, and
+  // a false on every row is pure wire weight. See BOOKMARKED_COL.
+  bookmarked?: true;
   [key: string]: unknown;
 }
 
@@ -145,6 +152,29 @@ export function insertMessage(row: MessageInput): { id: number | bigint; alt: bo
   return { id, alt: altRow?.alt === 1 };
 }
 
+// Whether the owning user has bookmarked a row, computed per row rather than
+// shipped as a wholesale id list at connect.
+//
+// The client only ever needs this flag for lines it is actually rendering, and a
+// bookmark set is the one thing in the connect burst that grows without bound
+// over an account's life — every other snapshot there (drafts, contacts) is
+// naturally bounded. So the state travels with the messages that carry it, and
+// the client keeps a Set of what it has seen rather than of everything it owns.
+//
+// The owner is derived from the message's own network, which is why no query in
+// this file has to thread a userId to ask the question. System-buffer rows
+// (network_id NULL) resolve no owner and so compute 0 — matching the insert in
+// db/bookmarks.ts, which gates on the same networks join and therefore refuses
+// to bookmark them in the first place.
+//
+// `alias` is the table's name or alias in the enclosing query, since some
+// callers select from a bare `messages` and others from `messages m`.
+const BOOKMARKED_COL = (alias: string) => `EXISTS (
+    SELECT 1 FROM user_bookmarks ub
+    WHERE ub.message_id = ${alias}.id
+      AND ub.user_id = (SELECT n_own.user_id FROM networks n_own WHERE n_own.id = ${alias}.network_id)
+  ) AS bookmarked`;
+
 function rowToEvent(row: MessageRow): MessageEvent {
   const event: MessageEvent = {
     id: row.id,
@@ -171,6 +201,16 @@ function rowToEvent(row: MessageRow): MessageEvent {
       /* ignore malformed */
     }
   }
+  // After the `extra` spread, and it CLEARS rather than merely overwrites.
+  //
+  // `extra` is JSON built from what a network sent us; `bookmarked` is a fact
+  // about the reader's own account, so a stray key in there must never light up
+  // a line nobody saved. Assigning-when-true alone wouldn't do it: on the rows
+  // that matter — the unbookmarked ones — there'd be no assignment to overwrite
+  // the forged value with, and it would sail through. The delete is the part
+  // that makes the column authoritative.
+  delete event.bookmarked;
+  if (row.bookmarked) event.bookmarked = true;
   return event;
 }
 
@@ -186,15 +226,15 @@ export function listMessages(
   if (afterId) {
     const rows = db
       .prepare(
-        `SELECT * FROM messages WHERE network_id = ? AND target = ? AND id > ?
+        `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE network_id = ? AND target = ? AND id > ?
        ORDER BY id ASC LIMIT ?`,
       )
       .all(networkId, target, afterId, limit) as MessageRow[];
     return rows.map(rowToEvent);
   }
   const sql = before
-    ? `SELECT * FROM messages WHERE network_id = ? AND target = ? AND id < ? ORDER BY id DESC LIMIT ?`
-    : `SELECT * FROM messages WHERE network_id = ? AND target = ? ORDER BY id DESC LIMIT ?`;
+    ? `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE network_id = ? AND target = ? AND id < ? ORDER BY id DESC LIMIT ?`
+    : `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE network_id = ? AND target = ? ORDER BY id DESC LIMIT ?`;
   const params = before ? [networkId, target, before, limit] : [networkId, target, limit];
   const rows = db.prepare(sql).all(...params) as MessageRow[];
   return rows.map(rowToEvent).toReversed();
@@ -316,7 +356,9 @@ export function listMessagesCounted(
     }
   }
   const rows = db
-    .prepare(`SELECT * FROM messages WHERE ${conds.join(' AND ')} ORDER BY id ASC`)
+    .prepare(
+      `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE ${conds.join(' AND ')} ORDER BY id ASC`,
+    )
     .all(...params) as MessageRow[];
   return rows.map(rowToEvent);
 }
@@ -341,7 +383,9 @@ export function listMessagesAround(
   | { events: MessageEvent[]; hasMoreOlder: boolean; hasMoreNewer: boolean }
   | { events: []; hasMoreOlder: false; hasMoreNewer: false; anchorMissing: true } {
   const anchorRow = db
-    .prepare(`SELECT * FROM messages WHERE id = ? AND network_id = ? AND target = ?`)
+    .prepare(
+      `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE id = ? AND network_id = ? AND target = ?`,
+    )
     .get(anchorId, networkId, target) as MessageRow | undefined;
   if (!anchorRow) {
     return { events: [], hasMoreOlder: false, hasMoreNewer: false, anchorMissing: true };
@@ -432,7 +476,7 @@ export function loadHistoryWindow(
   const dir = newestFirst ? 'DESC' : 'ASC';
   const rows = db
     .prepare(
-      `SELECT * FROM messages WHERE ${conds.join(' AND ')}
+      `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE ${conds.join(' AND ')}
        ORDER BY time ${dir}, id ${dir} LIMIT ?`,
     )
     .all(...params) as MessageRow[];
@@ -725,7 +769,7 @@ export function listUserHighlights(
   { before, limit = 50 }: { before?: number; limit?: number } = {},
 ): MessageEventWithNetwork[] {
   const sql = before
-    ? `SELECT m.*, n.name AS network_name
+    ? `SELECT m.*, n.name AS network_name, ${BOOKMARKED_COL('m')}
        FROM messages m
        JOIN networks n ON n.id = m.network_id
        WHERE n.user_id = ?
@@ -734,7 +778,7 @@ export function listUserHighlights(
          AND m.id < ?
        ORDER BY m.id DESC
        LIMIT ?`
-    : `SELECT m.*, n.name AS network_name
+    : `SELECT m.*, n.name AS network_name, ${BOOKMARKED_COL('m')}
        FROM messages m
        JOIN networks n ON n.id = m.network_id
        WHERE n.user_id = ?
@@ -856,7 +900,7 @@ export function searchMessages(
     params.push(before);
   }
 
-  const sql = `SELECT m.*, n.name AS network_name
+  const sql = `SELECT m.*, n.name AS network_name, ${BOOKMARKED_COL('m')}
                FROM ${from}
                WHERE ${where.join(' AND ')}
                ORDER BY m.id DESC

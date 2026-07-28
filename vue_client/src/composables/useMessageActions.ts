@@ -11,8 +11,10 @@ export interface MessageLike {
   text?: string;
   self?: boolean;
   userhost?: string;
-  networkId?: number;
-  network_id?: number;
+  // Null on the app-scoped system buffer, which has no owning network — see the
+  // bookmark gate in buildActions.
+  networkId?: number | null;
+  network_id?: number | null;
 }
 
 export interface MessageContext {
@@ -81,8 +83,20 @@ export function useMessageActions(): MessageActionsAPI {
       actions.push({ key: 'copy', label: 'Copy text', icon: 'fa-regular fa-copy' });
     }
 
-    // Bookmarks are only meaningful for messages with a stable server id.
-    if (message.id != null) {
+    // Bookmarks need a stable server id AND an owning network.
+    //
+    // The network gate is not cosmetic. Bookmarking is ownership-checked by
+    // joining the message to its network (db/bookmarks.ts), so a system-buffer
+    // line — `networkId: null`, app-scoped — can never be saved: the insert
+    // writes nothing and the server sends no echo back. Offering "Save message"
+    // there was a button that did nothing, forever, with no feedback.
+    //
+    // It also closes a mislabel. System lines come from their own table with
+    // their own id sequence (`systemLineToEvent`), so system line #42 and
+    // message #42 coexist; asking `isSaved(42)` for the former would light up
+    // "Remove bookmark" on a line nobody ever saved.
+    const networkId = message.networkId ?? message.network_id;
+    if (message.id != null && networkId != null) {
       const saved = bookmarks.isSaved(message.id);
       actions.push({
         key: 'save',

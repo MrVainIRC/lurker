@@ -18,7 +18,7 @@ function makeCtx(): MessageContext {
 // A message from someone else, with text and a stable id — the case that yields
 // the full action set. Override individual fields per case.
 function other(over: Partial<MessageLike> = {}): MessageLike {
-  return { id: 42, nick: 'bob', text: 'hi', self: false, ...over };
+  return { id: 42, networkId: 1, nick: 'bob', text: 'hi', self: false, ...over };
 }
 
 describe('useMessageActions', () => {
@@ -49,8 +49,26 @@ describe('useMessageActions', () => {
       expect(actions.map((a) => a.key)).toEqual(['reply', 'copy', 'ignore']);
     });
 
+    it('drops save on a system-buffer line, which has no owning network', () => {
+      // networkId null == the app-scoped system buffer. The server can't save
+      // these (the ownership check joins through networks), so offering it
+      // would be a button that silently does nothing.
+      const actions = useMessageActions().buildActions(other({ networkId: null }));
+      expect(actions.map((a) => a.key)).toEqual(['reply', 'copy', 'ignore']);
+    });
+
+    it('does not label a system line saved when a real message shares its id', () => {
+      // System lines have their own id sequence, so #42 here is NOT the #42 the
+      // user bookmarked in a channel.
+      useBookmarksStore().noteFromEvents([{ id: 42, bookmarked: true }]);
+      const actions = useMessageActions().buildActions(other({ networkId: null }));
+      expect(actions.find((a) => a.key === 'save')).toBeUndefined();
+    });
+
     it('reflects a saved bookmark in the save label, icon, and active flag', () => {
-      useBookmarksStore().applySnapshot([42]);
+      // Seeded the way production seeds it: off the `bookmarked` flag riding on
+      // a message row, not a connect-burst snapshot.
+      useBookmarksStore().noteFromEvents([{ id: 42, bookmarked: true }]);
       const save = useMessageActions()
         .buildActions(other())
         .find((a) => a.key === 'save');

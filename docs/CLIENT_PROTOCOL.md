@@ -202,14 +202,13 @@ frames**, synchronously, in this order (`wsHub.ts` `sendSnapshotInner`, 1893):
    would otherwise leave your cursor at 0. `maxUploadBytes` is the largest
    upload this account may send right now — see §Uploads.
 2. `{kind:'draft-snapshot', drafts}` — saved per-buffer input drafts.
-3. `{kind:'bookmark-ids-snapshot', ids:[…]}` — bookmarked message ids.
-4. A `backlog` frame for the app-scoped **system buffer** (`networkId:null`,
+3. A `backlog` frame for the app-scoped **system buffer** (`networkId:null`,
    `target:':system:'`).
-5. `{kind:'contacts-snapshot', contacts:[…]}` — the friends/contacts list.
-6. One `backlog` frame per open buffer on each connected network.
-7. Per **offline** network: a real backlog for its `:server:` log, shells for
+4. `{kind:'contacts-snapshot', contacts:[…]}` — the friends/contacts list.
+5. One `backlog` frame per open buffer on each connected network.
+6. Per **offline** network: a real backlog for its `:server:` log, shells for
    its channels/DMs.
-8. `{kind:'backlog-complete'}` — terminal marker, nothing else in it.
+7. `{kind:'backlog-complete'}` — terminal marker, nothing else in it.
 
 Render progressively from frame 1; don't wait for the end.
 
@@ -404,7 +403,8 @@ Common fields on every **persisted** event (`db/messages.ts:31` +
   userhost, alt, mirrored, dm,
   matched, matchedRuleId,             // highlight decoration
   fromIgnored, notifyAlways, notify,
-  msgid? }                            // IRCv3 server message id, when supplied
+  msgid?,                             // IRCv3 server message id, when supplied
+  bookmarked? }                       // true when you've saved this line
 ```
 
 plus type-specific extras (`newNick`, `kicked`, `modes`, `members`, …).
@@ -420,6 +420,14 @@ with respect to `id` — order and dedupe by `id`, always (§9.3).
 own sends learn theirs via `echo-message`). Absent — not null — on rows from
 untagged networks and on optimistic self echoes. It is the future anchor for
 react/reply; today it is informational only.
+
+**`bookmarked`** is `true` when the account reading the row has saved it, and
+**absent — not `false`** otherwise, so unsaved rows (nearly all of them) cost
+nothing on the wire. There is no bookmark snapshot in the connect burst: keep a
+`Set` of the ids you've seen carrying this flag, add/remove on `bookmark-updated`,
+and treat "not in the Set" as unsaved. That bounds the state you hold by what
+you've loaded rather than by everything the account has ever saved. Full rows for
+the saved-messages list come from `GET /api/bookmarks`, which is paginated.
 
 **`notify` is the server's delivery decision — the one flag to gate a live
 alert (toast, sound, native buzz) on.** It is the union of the content signals
@@ -531,7 +539,7 @@ anything at all.
 | `set-channel-notify-always`       | `networkId, target, notifyAlways`                                                                                                                                                                                                                                                                                                                 |
 | `draft-set` / `draft-clear`       | `networkId, target, body?`                                                                                                                                                                                                                                                                                                                        |
 | `input-history-add`               | `networkId, target, text`                                                                                                                                                                                                                                                                                                                         |
-| `set-bookmark` / `unset-bookmark` | `messageId`                                                                                                                                                                                                                                                                                                                                       |
+| `set-bookmark` / `unset-bookmark` | `messageId`. Saving is a silent no-op for a message you don't own, and for system-buffer lines (`networkId:null`) which have no owning network — no `bookmark-updated` follows, so don't render a toggle optimistically                                                                                                                           |
 | `set-nick-note`                   | `networkId, nick, note`                                                                                                                                                                                                                                                                                                                           |
 | `set-relay-bot`                   | `networkId, nick, marked, pattern`                                                                                                                                                                                                                                                                                                                |
 | `set-contact` / `delete-contact`  | `contactId, displayName, notifyOnline, targets` / `contactId`                                                                                                                                                                                                                                                                                     |
@@ -572,7 +580,7 @@ a v1 client.
 | `kind`                                                                                                                                                                   | Payload                                                                                                                                                                                                                                                     | When                                                                                                                                                      |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `snapshot`                                                                                                                                                               | `protocolVersion, maxUploadBytes, networks[], globalIgnores[], cursor?`                                                                                                                                                                                     | Connect burst / gap-fill                                                                                                                                  |
-| `draft-snapshot` / `bookmark-ids-snapshot` / `contacts-snapshot`                                                                                                         | `drafts` / `ids[]` / `contacts[]`                                                                                                                                                                                                                           | Connect burst                                                                                                                                             |
+| `draft-snapshot` / `contacts-snapshot`                                                                                                                                   | `drafts` / `contacts[]`                                                                                                                                                                                                                                     | Connect burst                                                                                                                                             |
 | `backlog-complete`                                                                                                                                                       | —                                                                                                                                                                                                                                                           | Last frame of the burst; absence is proof (§4.3)                                                                                                          |
 | `backlog`                                                                                                                                                                | `networkId, target, events[], mode, reset?, hasMoreOlder, joined, lastReadId, unread, highlights, highlightsCapped, clearedBeforeId, clearedAt, speakers?, inputHistory?` — **`mode ∈ replace\|append\|shell` is how you merge it (§8); `reset` is legacy** | Burst, `open-buffer` reply, resume gap                                                                                                                    |
 | `irc`                                                                                                                                                                    | A decorated `MessageEvent` (§5.3) with `kind` clobbered to `'irc'`                                                                                                                                                                                          | Every live IRC-side event                                                                                                                                 |

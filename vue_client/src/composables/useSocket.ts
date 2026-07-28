@@ -546,6 +546,7 @@ function handleMessage(raw: string): void {
     if (payload.networkId != null && Array.isArray(payload.events)) {
       for (const e of payload.events) trackSeenId(e?.id);
     }
+    useBookmarksStore().noteFromEvents(payload.events);
     applyBacklog(payload);
     return;
   }
@@ -556,6 +557,9 @@ function handleMessage(raw: string): void {
     // 'history' kind — disambiguated by `mode`.
     const buffers = useBuffersStore();
     const mode = payload.mode || 'before';
+    // Every mode carries `events`; harvest before the mode-specific dispatch so
+    // one call covers around/latest/after/before alike.
+    useBookmarksStore().noteFromEvents(payload.events);
     if (mode === 'around') {
       buffers.applyAroundSlice(payload.networkId, payload.target, payload);
     } else if (mode === 'latest') {
@@ -771,11 +775,6 @@ function handleMessage(raw: string): void {
   }
   if (payload.kind === 'contact-deleted') {
     useFriendsStore().applyContactDeleted(payload.contactId);
-    return;
-  }
-  if (payload.kind === 'bookmark-ids-snapshot') {
-    const bookmarks = useBookmarksStore();
-    bookmarks.applySnapshot(payload.ids || []);
     return;
   }
   if (payload.kind === 'bookmark-updated') {

@@ -82,7 +82,7 @@ import {
   listPinnedForUserNetwork,
 } from '../db/pinnedBuffers.js';
 import { setNicklistCollapsed } from '../db/nicklistCollapsed.js';
-import { addBookmark, removeBookmark, listBookmarkIdsForUser } from '../db/bookmarks.js';
+import { addBookmark, removeBookmark } from '../db/bookmarks.js';
 import {
   getChannelNotifyAlways,
   setChannelNotifyAlways,
@@ -2171,11 +2171,13 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
     // the keying is global to the user, not per-buffer, so a single message is
     // cheaper than fanning a body field into every backlog row.
     send(ws, { kind: 'draft-snapshot', drafts: draftsService.snapshotForUser(userId) });
-    // Lightweight id-only seed for the bookmarks store. Per-row payloads are
-    // lazy-loaded by the BookmarksModal via REST when the user opens it; this
-    // snapshot exists solely so the message context menu can flip its label
-    // ("Save" ↔ "Remove bookmark") without a network round-trip.
-    send(ws, { kind: 'bookmark-ids-snapshot', ids: listBookmarkIdsForUser(userId) });
+    // No bookmark seed here on purpose. There used to be an id-only snapshot so
+    // the message context menu could flip its label ("Save" ↔ "Remove bookmark")
+    // without a round-trip — but it shipped EVERY id the account had ever saved,
+    // on every connect, and unlike drafts or contacts that set only ever grows.
+    // Bookmark state now rides on the message rows themselves (`bookmarked`, see
+    // db/messages.ts BOOKMARKED_COL), so a client learns what it saved from the
+    // lines it actually renders and holds state bounded by what it has loaded.
     // System buffer seed: the app-scoped system log rides the same 'backlog'
     // frame network buffers use (events + read-state + hasMoreOlder), so the
     // client treats it like any other buffer — no bespoke system-log path (#355).
