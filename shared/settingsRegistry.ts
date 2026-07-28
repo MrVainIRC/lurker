@@ -93,6 +93,16 @@ export interface EnumOption extends BaseOption {
   type: 'enum';
   choices: readonly string[];
   default: string;
+  // Display text per choice, for enums whose stored values read as identifiers
+  // rather than as English. Omit and clients render the raw value, which is the
+  // right answer for a choice like `auto` / `standard` / `compact`.
+  //
+  // The values stay the ids — see the note on `chat.image_modal.enabled` about
+  // keys aging. Renaming a stored enum value is a MIGRATION, and doing one to
+  // improve wording would be paying in orphaned rows for something a label
+  // fixes for free. A choice with no entry here falls back to its raw value, so
+  // a partial map is safe.
+  choiceLabels?: Readonly<Record<string, string>>;
 }
 
 /** Multi-value settings: an ordered list of strings. */
@@ -117,10 +127,10 @@ export interface SettingCategory {
 }
 
 // ─── Shared dependency clauses ─────────────────────────────────────────────
-// The `chat` category's modifiers all hang off the event-noise tier, which is
-// two keys (desktop + mobile). A modifier is live if EITHER device class can
-// still see the thing it modifies — a phone set to "none" must not grey out the
-// consolidation knobs a desktop is actively using, and vice versa.
+// Everything else in the Events category hangs off the event filter, which is
+// two keys (desktop + mobile). A setting is live if EITHER device class can
+// still see the thing it modifies — a phone set to "Hide all" must not grey out
+// the consolidation knobs a desktop is actively using, and vice versa.
 
 /** Live when at least one device class renders event rows at all. */
 const EVENTS_VISIBLE: readonly SettingDependency[] = Object.freeze([
@@ -749,47 +759,52 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
       'overrides this per channel and is remembered. Has no effect on mobile.',
   },
 
-  // ─── Event noise tier (#666) ──────────────────────────────────────────
-  // The primary "how much presence churn do I want to see" choice. Everything
-  // in the two groups below is a modifier on whatever this leaves standing —
-  // see shared/eventFilter.ts for the tier semantics and the noise set.
+  // ─── Events: the filter (#666) ────────────────────────────────────────
+  // The primary "how much presence churn do I want to see" choice, and the
+  // reason this category exists. Everything in the two groups below is a
+  // modifier on whatever this leaves standing — see shared/eventFilter.ts for
+  // the tier semantics and the noise set. Registry ORDER decides the order the
+  // pane renders its groups in, so keep these three adjacent and in this
+  // sequence: filter, then consolidation, then smart-filter tuning.
   {
     key: 'chat.events',
-    label: 'Event noise',
-    category: 'chat',
-    group: 'events',
+    label: 'Event filter',
+    category: 'events',
+    group: 'event-filter',
     type: 'enum',
     choices: ['all', 'smart', 'none'],
+    choiceLabels: { all: 'No filter', smart: 'Smart filter', none: 'Hide all' },
     default: 'all',
     description:
       'How much join/part/quit/nick/host-change/mode noise reaches the message list. ' +
-      '"all" (the default) shows every event, folded into summary lines when ' +
-      'consolidation is on. "smart" shows events only for nicks who have recently ' +
-      'spoken, so silent lurkers cycling on and off stay invisible. "none" hides ' +
+      '"No filter" (the default) shows every event, folded into summary lines when ' +
+      'consolidation is on. "Smart filter" shows events only for nicks who have recently ' +
+      'spoken, so silent lurkers cycling on and off stay invisible. "Hide all" removes ' +
       'event rows entirely, leaving conversation only. Kicks, topic changes and ' +
       'invites are never hidden — they are things that happened, not churn.',
   },
   {
     key: 'chat.events.mobile',
-    label: 'Event noise (mobile)',
-    category: 'chat',
-    group: 'events',
+    label: 'Event filter (mobile)',
+    category: 'events',
+    group: 'event-filter',
     type: 'enum',
     choices: ['all', 'smart', 'none'],
+    choiceLabels: { all: 'No filter', smart: 'Smart filter', none: 'Hide all' },
     default: 'all',
     description:
       'The same choice for phone-sized viewports (≤768px) and the native mobile ' +
       'apps, which read this key unconditionally. A phone screen holds a fraction ' +
-      'of the lines a desktop one does, so "none" is a common pick here even for ' +
-      'people who want "all" at their desk. Only the tier is split by device — the ' +
-      'modifiers below are shared.',
+      'of the lines a desktop one does, so "Hide all" is a common pick here even for ' +
+      'people who want everything at their desk. Only the filter is split by device — ' +
+      'the settings below are shared.',
   },
 
   // ─── Join/part consolidation (IRCCloud-style summary line) ────────────
   {
     key: 'chat.consolidate_joins',
     label: 'Consolidate join/part/quit/nick/host-change events',
-    category: 'chat',
+    category: 'events',
     group: 'consolidate',
     type: 'bool',
     default: true,
@@ -803,7 +818,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
   {
     key: 'chat.consolidate_max_names',
     label: 'Max nicks per summary category',
-    category: 'chat',
+    category: 'events',
     group: 'consolidate',
     type: 'int',
     min: 1,
@@ -821,7 +836,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
   {
     key: 'chat.show_event_host',
     label: 'Show user@host on join/part/quit/nick',
-    category: 'chat',
+    category: 'events',
     group: 'consolidate',
     type: 'bool',
     default: false,
@@ -838,7 +853,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
   {
     key: 'chat.show_join_account',
     label: 'Show services account on join lines',
-    category: 'chat',
+    category: 'events',
     group: 'consolidate',
     type: 'bool',
     default: false,
@@ -853,9 +868,8 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
   },
 
   // ─── Smart filter tuning (join/part/quit/nick noise) ──────────────────
-  // Sits directly under the tier and consolidation — the three groups answer
-  // one question between them, and the render order here is what the Settings
-  // pane groups by, so nothing unrelated may be inserted between them.
+  // Last of the three Events groups, and the narrowest — it only does anything
+  // on one rung of the filter.
   //
   // The master switch used to live here as `chat.smart_filter`; it is now the
   // middle rung of `chat.events` (#666), and a boot migration carries anyone who
@@ -863,7 +877,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
   {
     key: 'chat.smart_filter_delay',
     label: '"Recently spoke" window (minutes)',
-    category: 'chat',
+    category: 'events',
     group: 'smart-filter',
     type: 'int',
     min: 0,
@@ -878,7 +892,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
   {
     key: 'chat.smart_filter_join',
     label: 'Filter joins',
-    category: 'chat',
+    category: 'events',
     group: 'smart-filter',
     type: 'bool',
     default: true,
@@ -888,7 +902,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
   {
     key: 'chat.smart_filter_quit',
     label: 'Filter parts and quits',
-    category: 'chat',
+    category: 'events',
     group: 'smart-filter',
     type: 'bool',
     default: true,
@@ -898,7 +912,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
   {
     key: 'chat.smart_filter_nick',
     label: 'Filter nick changes',
-    category: 'chat',
+    category: 'events',
     group: 'smart-filter',
     type: 'bool',
     default: true,
@@ -908,7 +922,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
   {
     key: 'chat.smart_filter_join_unmask',
     label: 'Reveal join when user speaks (minutes)',
-    category: 'chat',
+    category: 'events',
     group: 'smart-filter',
     type: 'int',
     min: 0,
@@ -1599,6 +1613,12 @@ export function defaultsAsObject(): Record<string, SettingValue> {
 export const CATEGORIES: readonly SettingCategory[] = Object.freeze([
   { id: 'appearance', label: 'Appearance', kind: 'registry' },
   { id: 'chat', label: 'Chat', kind: 'registry' },
+  // Everything about join/part/quit/nick/host-change/mode lines: whether you see
+  // them at all, how they're folded, and how much detail each carries. Split out
+  // of Chat (#666) because the tier turned three loosely-related groups into one
+  // subject with a single primary control, and that subject is big enough to
+  // stop being a tail on a category about composing and reading messages.
+  { id: 'events', label: 'Events', kind: 'registry' },
   { id: 'input', label: 'Input bar', kind: 'registry' },
   // Bespoke: the pane leads with the configured-uploader list + picker (which is
   // table-backed, not registry-backed) and renders the surviving registry rows
@@ -1629,8 +1649,8 @@ export const GROUPS: Readonly<Record<string, string>> = Object.freeze({
   nicks: 'Nick coloring',
   layout: 'Layout',
   misc: 'Misc',
-  events: 'Event noise',
-  consolidate: 'Join/part consolidation',
+  'event-filter': 'Filter',
+  consolidate: 'Consolidation',
   composing: 'Composing',
   'smart-filter': 'Smart filter tuning',
   connection: 'Connection',

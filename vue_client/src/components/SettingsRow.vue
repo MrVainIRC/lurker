@@ -46,7 +46,14 @@
         :disabled="!!hint"
         @change="$emit('commit', ($event.target as HTMLSelectElement).value)"
       >
-        <option v-for="c in opt.choices" :key="c" :value="c">{{ c }}</option>
+        <!--
+          `choiceLabels` is optional: an enum whose values already read as
+          English (auto / standard / compact) renders them raw, and one whose
+          values are ids gets prose without those ids having to change.
+        -->
+        <option v-for="c in opt.choices" :key="c" :value="c">
+          {{ opt.choiceLabels?.[c] ?? c }}
+        </option>
       </select>
       <span v-else-if="opt.type === 'color'" class="color-edit">
         <span class="swatch" :style="{ background: value as string }"></span>
