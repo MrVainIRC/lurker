@@ -3058,7 +3058,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
       }
       case 'history': {
         const histNetworkId = msg.networkId as number;
-        const histTarget = msg.target as string;
+        let histTarget = msg.target as string;
 
         // System buffer: app-scoped, no IRC connection — dispatch to the
         // system_messages keyset access. Reply shapes match the network path
@@ -3079,6 +3079,22 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           send(ws, { kind: 'error', text: 'unknown network' });
           break;
         }
+        // Resolve the caller's casing to the row's, the way `open-buffer` always
+        // has. IRC target names are case-insensitive, but `messages.target` is
+        // BINARY-collated TEXT and rows keep whatever casing the network handed
+        // us (`#idleRPG` stays `#idleRPG` — foldBufferCase.ts:26), so an exact
+        // match against a divergently-cased request finds NOTHING. That reads as
+        // an empty buffer with `hasMoreOlder:false`: hydrated, permanently blank,
+        // and unpageable.
+        //
+        // Newly load-bearing because hydration moved onto this verb: a client can
+        // legitimately hold a key it built before the row existed (iOS synthesizes
+        // one from the typed name when joining, and the row arrives later with the
+        // server's casing), and its store folds case so the two never look
+        // different to it. The registry lookup folds; no row (a `:server:`
+        // pseudo-buffer, or a target with history but no row) falls through to
+        // what was asked. See feedback_irc_target_case_insensitive.
+        histTarget = getBuffer(userId, histNetworkId, histTarget)?.target ?? histTarget;
         const limit = Math.min(Math.max(Number(msg.limit) || 100, 1), 500);
         const mode = typeof msg.mode === 'string' ? msg.mode : 'before';
         // What `limit` counts (#10). 'renderable' sizes the page in the unit the

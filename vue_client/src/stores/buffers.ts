@@ -51,10 +51,15 @@ function joinKey(networkId: number | string, channel: string) {
 // their phone. The frame looks identical either way, so the only thing that can
 // tell them apart is whether we asked.
 //
-// Claimed once (a reply answers one request), and cleared when the socket drops,
-// so a request whose reply never arrived can't leave a latch that hijacks focus
-// on some unrelated open days later.
-const pendingOpens = new Set<string>();
+// Claimed once (a reply answers one request), and dropped on a timeout, on
+// socket close, and on logout — because "focus the next open of this target" is
+// a dangerous thing to leave armed. `open-buffer` can be refused outright (a
+// paused account answers `{kind:'error'}` and never sends `buffer-opened`), and
+// without a backstop that request would sit here for the life of the session and
+// then claim someone else's open from another device. Same reasoning and the
+// same backstop as `pendingJoins`.
+const pendingOpens = new Map<string, ReturnType<typeof setTimeout>>();
+const PENDING_OPEN_TIMEOUT = 10000;
 
 // Monotonic token tagged onto each loadAround / reattachToLive request. The
 // response handler drops slices whose token has been superseded (e.g. user
@@ -810,7 +815,12 @@ export const useBuffersStore = defineStore('buffers', {
     // steal this tab's focus.
     openBuffer(networkId: number | string, target: string): boolean {
       const key = joinKey(networkId, target);
-      pendingOpens.add(key);
+      const existing = pendingOpens.get(key);
+      if (existing) clearTimeout(existing);
+      pendingOpens.set(
+        key,
+        setTimeout(() => pendingOpens.delete(key), PENDING_OPEN_TIMEOUT),
+      );
       const sent = socketSend({
         type: 'open-buffer',
         networkId,
@@ -819,13 +829,21 @@ export const useBuffersStore = defineStore('buffers', {
         // screenful like any other hydrate (§8).
         countBy: historyCountBy(),
       });
-      if (!sent) pendingOpens.delete(key);
+      if (!sent) {
+        clearTimeout(pendingOpens.get(key)!);
+        pendingOpens.delete(key);
+      }
       return sent;
     },
     // Did THIS tab ask for `target` to be opened? Consumes the record, so the
     // reply focuses exactly once.
     claimPendingOpen(networkId: number | string, target: string): boolean {
-      return pendingOpens.delete(joinKey(networkId, target));
+      const key = joinKey(networkId, target);
+      const timer = pendingOpens.get(key);
+      if (timer === undefined) return false;
+      clearTimeout(timer);
+      pendingOpens.delete(key);
+      return true;
     },
     applyLatestReplace(networkId: number | string, target: string, payload: any) {
       const buf = ensureBuffer(this, networkId, target);
@@ -1042,6 +1060,12 @@ export const useBuffersStore = defineStore('buffers', {
       typingTimers.clear();
       for (const id of pendingJoins.values()) clearTimeout(id);
       pendingJoins.clear();
+      // Also module-level, and logout doesn't reach the socket-close path that
+      // normally clears it (resetSocket aborts the listeners, so 'close' never
+      // fires). A latch surviving into the NEXT account's session would let a
+      // cross-device open of the same target steal that user's focus.
+      for (const id of pendingOpens.values()) clearTimeout(id);
+      pendingOpens.clear();
     },
     // Register intent to join a channel without opening its buffer yet (#260).
     // confirmPendingJoin() activates it on the channel-joined confirmation;

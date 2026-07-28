@@ -305,7 +305,7 @@ excluded from the announcement.
 >
 > You don't need a `buffer-opened` handler to _materialize_ the buffer — the
 > shell that travels with it already does, the same way every other
-> buffer-creating frame works (§9.1). `buffer-reopened` (`wsHub.ts:1618`) is
+> buffer-creating frame works (§9.1). `buffer-reopened` (`wsHub.ts:1815`) is
 > still emitted separately, when an incoming _event_ outranks a closed flag
 > rather than a verb doing it.
 

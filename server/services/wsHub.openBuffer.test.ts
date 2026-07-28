@@ -181,6 +181,24 @@ describe('hydration is a pure read', () => {
     client.close();
   });
 
+  it('resolves a divergently-cased target to the stored row', async () => {
+    // `messages.target` is BINARY-collated TEXT and rows keep the network's casing, so an
+    // exact match against the caller's casing finds NOTHING — which surfaces as a hydrated,
+    // permanently blank buffer rather than an error. Newly load-bearing because hydration
+    // moved onto this verb: a client can hold a key it built before the row existed (iOS
+    // synthesizes one from the typed name when joining) and its own store folds case, so the
+    // mismatch is invisible to it.
+    seed('#CasedBuf', 'canonical row');
+    const client = await connect();
+    client.send({ type: 'history', mode: 'latest', networkId, target: '#casedbuf' });
+    const reply = await client.waitFor((f) => f.kind === 'history', 'history');
+
+    expect((reply.events as Frame[]).map((e) => e.text)).toEqual(['canonical row']);
+    // Answered under the stored casing, so a client keying by target converges on the row.
+    expect(reply.target).toBe('#CasedBuf');
+    client.close();
+  });
+
   it('is invisible to the user’s other devices', async () => {
     seed('#quiet', 'a line');
     const reader = await connect();
