@@ -42,6 +42,25 @@ function joinKey(networkId: number | string, channel: string) {
   return `${networkId}::${channel.toLowerCase()}`;
 }
 
+// Targets THIS tab has asked the server to open.
+//
+// `buffer-opened` carries two meanings now that the server fans it out. To the
+// tab that asked it's a reply — "here's the canonical casing, focus it". To the
+// user's other devices it's a state signal — "this buffer is open now" — and
+// acting on that by activating would yank someone to a buffer they opened on
+// their phone. The frame looks identical either way, so the only thing that can
+// tell them apart is whether we asked.
+//
+// Claimed once (a reply answers one request), and dropped on a timeout, on
+// socket close, and on logout — because "focus the next open of this target" is
+// a dangerous thing to leave armed. `open-buffer` can be refused outright (a
+// paused account answers `{kind:'error'}` and never sends `buffer-opened`), and
+// without a backstop that request would sit here for the life of the session and
+// then claim someone else's open from another device. Same reasoning and the
+// same backstop as `pendingJoins`.
+const pendingOpens = new Map<string, ReturnType<typeof setTimeout>>();
+const PENDING_OPEN_TIMEOUT = 10000;
+
 // Monotonic token tagged onto each loadAround / reattachToLive request. The
 // response handler drops slices whose token has been superseded (e.g. user
 // clicked a second jump while the first was in flight, or reattached before
@@ -780,6 +799,54 @@ export const useBuffersStore = defineStore('buffers', {
           buf.pendingHistoryToken = null;
         }
       }
+      // Same reasoning, different latch: a reply that can no longer arrive must
+      // not leave us primed to treat someone else's open as ours. See pendingOpens.
+      // Timers first — clearing the Map alone would leave them to fire into an
+      // empty Map across the reconnect.
+      for (const id of pendingOpens.values()) clearTimeout(id);
+      pendingOpens.clear();
+    },
+    // Ask the server to OPEN a buffer. This is a WRITE — it reopens a closed
+    // row, mints a DM row for a bare nick, or JOINs an unjoined channel — so it
+    // belongs to deliberate user intent ("open this DM", a clicked channel
+    // name), never to filling in a shell. Hydration goes through
+    // ensureHydrated/reattachToLive, which read and change nothing.
+    //
+    // The send lives here rather than at the call site so the pendingOpens
+    // bookkeeping can't be forgotten by the next caller that needs this verb —
+    // forgetting it doesn't fail loudly, it just makes another device's open
+    // steal this tab's focus.
+    openBuffer(networkId: number | string, target: string): boolean {
+      const key = joinKey(networkId, target);
+      const existing = pendingOpens.get(key);
+      if (existing) clearTimeout(existing);
+      pendingOpens.set(
+        key,
+        setTimeout(() => pendingOpens.delete(key), PENDING_OPEN_TIMEOUT),
+      );
+      const sent = socketSend({
+        type: 'open-buffer',
+        networkId,
+        target,
+        // The reply re-seeds history for a since-closed buffer, so it's a first
+        // screenful like any other hydrate (§8).
+        countBy: historyCountBy(),
+      });
+      if (!sent) {
+        clearTimeout(pendingOpens.get(key)!);
+        pendingOpens.delete(key);
+      }
+      return sent;
+    },
+    // Did THIS tab ask for `target` to be opened? Consumes the record, so the
+    // reply focuses exactly once.
+    claimPendingOpen(networkId: number | string, target: string): boolean {
+      const key = joinKey(networkId, target);
+      const timer = pendingOpens.get(key);
+      if (timer === undefined) return false;
+      clearTimeout(timer);
+      pendingOpens.delete(key);
+      return true;
     },
     applyLatestReplace(networkId: number | string, target: string, payload: any) {
       const buf = ensureBuffer(this, networkId, target);
@@ -996,6 +1063,12 @@ export const useBuffersStore = defineStore('buffers', {
       typingTimers.clear();
       for (const id of pendingJoins.values()) clearTimeout(id);
       pendingJoins.clear();
+      // Also module-level, and logout doesn't reach the socket-close path that
+      // normally clears it (resetSocket aborts the listeners, so 'close' never
+      // fires). A latch surviving into the NEXT account's session would let a
+      // cross-device open of the same target steal that user's focus.
+      for (const id of pendingOpens.values()) clearTimeout(id);
+      pendingOpens.clear();
     },
     // Register intent to join a channel without opening its buffer yet (#260).
     // confirmPendingJoin() activates it on the channel-joined confirmation;

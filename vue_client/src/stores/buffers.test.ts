@@ -926,3 +926,84 @@ describe('oversized history pages vs the in-memory ring', () => {
     expect(buf.hasMoreOlder).toBe(true);
   });
 });
+
+// `buffer-opened` means two different things depending on who asked, and the
+// frame looks identical either way (lurker WS_PROTOCOL_FIXES #1). Getting this
+// wrong is not subtle to the user — their active buffer changes under them
+// because they opened something on another device — but it is completely silent
+// in code, so it's pinned here.
+describe('open-buffer focus correlation', () => {
+  it('claims exactly one reply for a target this tab asked to open', () => {
+    const store = useBuffersStore();
+    vi.mocked(socketSend).mockReturnValue(true);
+
+    store.openBuffer(1, '#chan');
+
+    expect(socketSend).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'open-buffer', networkId: 1, target: '#chan' }),
+    );
+    // Case-insensitively, since the server answers with the row's canonical
+    // casing rather than the casing that was clicked.
+    expect(store.claimPendingOpen(1, '#CHAN')).toBe(true);
+    // ...and only once: a second frame for the same target is somebody else's.
+    expect(store.claimPendingOpen(1, '#chan')).toBe(false);
+  });
+
+  it('does not claim an open this tab never asked for', () => {
+    const store = useBuffersStore();
+    expect(store.claimPendingOpen(1, '#elsewhere')).toBe(false);
+  });
+
+  it('forgets a request whose send failed, so it cannot claim a later fan-out', () => {
+    const store = useBuffersStore();
+    vi.mocked(socketSend).mockReturnValue(false);
+
+    expect(store.openBuffer(1, '#dropped')).toBe(false);
+
+    expect(store.claimPendingOpen(1, '#dropped')).toBe(false);
+  });
+
+  it('forgets a request the server never answered', () => {
+    // `open-buffer` can be refused outright — a paused account gets `{kind:'error'}` and no
+    // `buffer-opened` — and without a backstop that request would sit armed for the life of
+    // the session, then claim an unrelated open from another device. Same backstop as
+    // pendingJoins.
+    vi.useFakeTimers();
+    try {
+      const store = useBuffersStore();
+      vi.mocked(socketSend).mockReturnValue(true);
+      store.openBuffer(1, '#unanswered');
+
+      vi.advanceTimersByTime(10_000);
+
+      expect(store.claimPendingOpen(1, '#unanswered')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('forgets pending requests on logout, which never reaches the socket-close path', () => {
+    // resetSession aborts the socket listeners, so 'close' — and therefore
+    // failInFlightHistory — never fires. A latch surviving into the next account's session
+    // would let a cross-device open steal that user's focus.
+    const store = useBuffersStore();
+    vi.mocked(socketSend).mockReturnValue(true);
+    store.openBuffer(1, '#previous-account');
+
+    store.resetTimers();
+
+    expect(store.claimPendingOpen(1, '#previous-account')).toBe(false);
+  });
+
+  it('forgets pending requests when the socket drops', () => {
+    // A reply that can no longer arrive must not leave us primed to treat some
+    // unrelated open — days later, from another device — as our own.
+    const store = useBuffersStore();
+    vi.mocked(socketSend).mockReturnValue(true);
+    store.openBuffer(1, '#stale');
+
+    store.failInFlightHistory();
+
+    expect(store.claimPendingOpen(1, '#stale')).toBe(false);
+  });
+});
