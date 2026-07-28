@@ -1228,7 +1228,7 @@ export function handleOpenBuffer(
 // a reconnect, or the in-band resync a hidden tab fires — so a user's devices
 // quietly disagreed about whether a buffer existed. That was tolerable only
 // while every hydration was accidentally an open; now that opening is deliberate
-// (`hydrate` carries the reads), it's worth announcing.
+// (`{type:'history', mode:'latest'}` carries the reads), it's worth announcing.
 //
 // **The shell is what makes this safe, and it isn't optional.** `buffer-opened`
 // is a reply first: the requesting client reads it as "here's the canonical
@@ -1241,8 +1241,8 @@ export function handleOpenBuffer(
 //
 // A shell rather than the full backlog on purpose: those devices may never look
 // at this buffer, and a shell is precisely "it exists, fetch on open" — the same
-// thing a fresh connect ships. They hydrate through `hydrate` if the user goes
-// there.
+// thing a fresh connect ships. They fill it in with `{type:'history',
+// mode:'latest'}` if the user actually goes there.
 function announceOpen(
   requester: LurkerWebSocket,
   userId: number,

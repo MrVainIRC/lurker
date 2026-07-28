@@ -801,6 +801,9 @@ export const useBuffersStore = defineStore('buffers', {
       }
       // Same reasoning, different latch: a reply that can no longer arrive must
       // not leave us primed to treat someone else's open as ours. See pendingOpens.
+      // Timers first — clearing the Map alone would leave them to fire into an
+      // empty Map across the reconnect.
+      for (const id of pendingOpens.values()) clearTimeout(id);
       pendingOpens.clear();
     },
     // Ask the server to OPEN a buffer. This is a WRITE — it reopens a closed
