@@ -852,57 +852,11 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
       'that collapse into the consolidation summary above stay account-less.',
   },
 
-  // ─── Composing (outgoing message guardrails) ─────────────────────────
-  // irc-framework splits anything past ~350 bytes into multiple PRIVMSGs on
-  // the wire. The default UX blocks the user from accidentally flooding —
-  // they have to either shorten, hit Send a second time to confirm, or flip
-  // this on to send splits silently like a traditional client.
-  {
-    key: 'chat.allow_split_messages',
-    label: 'Allow long messages to split',
-    category: 'chat',
-    group: 'composing',
-    type: 'bool',
-    default: false,
-    description:
-      'Allow long messages to send as multiple consecutive IRC lines without ' +
-      'confirmation. When off (the default), trying to send a message that ' +
-      "would split shows a SPLIT warning in the status bar and won't submit " +
-      'until you press Send a second time; one that would split into three or ' +
-      'more offers to upload the text as a file instead. /me actions never ' +
-      'split — they are blocked outright regardless of this setting.',
-  },
-  {
-    key: 'chat.send_typing_notifications',
-    label: 'Send typing notifications',
-    category: 'chat',
-    group: 'composing',
-    type: 'bool',
-    default: true,
-    description:
-      'Let other clients see when you are typing (IRCv3 +typing tag). Off stops ' +
-      'this client from sending typing/paused/done notifications while you compose ' +
-      "a message. Doesn't affect seeing other people's typing indicators.",
-  },
-  {
-    key: 'chat.keep_position_on_send',
-    label: 'Stay where you are when you send',
-    category: 'chat',
-    group: 'composing',
-    type: 'bool',
-    default: false,
-    description:
-      'Keep your scroll position when you send a message, instead of jumping to ' +
-      'the newest message. For reading back through a busy channel while still ' +
-      'replying — your own line lands at the bottom and the "Return ↓" button ' +
-      'counts it, so you can drop back down when you are ready. Off (the default) ' +
-      'jumps to the bottom on every send. Sending while you are viewing a ' +
-      'jumped-to point in history returns you to the live conversation either ' +
-      'way, since that view holds live messages back and there is nowhere in it ' +
-      'for your own message to appear.',
-  },
-
-  // ─── Smart filter (join/part/quit/nick noise) ─────────────────────────
+  // ─── Smart filter tuning (join/part/quit/nick noise) ──────────────────
+  // Sits directly under the tier and consolidation — the three groups answer
+  // one question between them, and the render order here is what the Settings
+  // pane groups by, so nothing unrelated may be inserted between them.
+  //
   // The master switch used to live here as `chat.smart_filter`; it is now the
   // middle rung of `chat.events` (#666), and a boot migration carries anyone who
   // had it on across to the tier. What remains is the tuning it always had.
@@ -964,6 +918,56 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     description:
       'If a smart-filtered nick speaks within this many minutes after their JOIN, ' +
       'the JOIN line is revealed. 0 disables unmasking.',
+  },
+
+  // ─── Composing (outgoing message guardrails) ─────────────────────────
+  // irc-framework splits anything past ~350 bytes into multiple PRIVMSGs on
+  // the wire. The default UX blocks the user from accidentally flooding —
+  // they have to either shorten, hit Send a second time to confirm, or flip
+  // this on to send splits silently like a traditional client.
+  {
+    key: 'chat.allow_split_messages',
+    label: 'Allow long messages to split',
+    category: 'chat',
+    group: 'composing',
+    type: 'bool',
+    default: false,
+    description:
+      'Allow long messages to send as multiple consecutive IRC lines without ' +
+      'confirmation. When off (the default), trying to send a message that ' +
+      "would split shows a SPLIT warning in the status bar and won't submit " +
+      'until you press Send a second time; one that would split into three or ' +
+      'more offers to upload the text as a file instead. /me actions never ' +
+      'split — they are blocked outright regardless of this setting.',
+  },
+  {
+    key: 'chat.send_typing_notifications',
+    label: 'Send typing notifications',
+    category: 'chat',
+    group: 'composing',
+    type: 'bool',
+    default: true,
+    description:
+      'Let other clients see when you are typing (IRCv3 +typing tag). Off stops ' +
+      'this client from sending typing/paused/done notifications while you compose ' +
+      "a message. Doesn't affect seeing other people's typing indicators.",
+  },
+  {
+    key: 'chat.keep_position_on_send',
+    label: 'Stay where you are when you send',
+    category: 'chat',
+    group: 'composing',
+    type: 'bool',
+    default: false,
+    description:
+      'Keep your scroll position when you send a message, instead of jumping to ' +
+      'the newest message. For reading back through a busy channel while still ' +
+      'replying — your own line lands at the bottom and the "Return ↓" button ' +
+      'counts it, so you can drop back down when you are ready. Off (the default) ' +
+      'jumps to the bottom on every send. Sending while you are viewing a ' +
+      'jumped-to point in history returns you to the live conversation either ' +
+      'way, since that view holds live messages back and there is nowhere in it ' +
+      'for your own message to appear.',
   },
 
   // ─── Inline media viewer ──────────────────────────────────────────────
