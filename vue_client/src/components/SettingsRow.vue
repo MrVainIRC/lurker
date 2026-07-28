@@ -6,7 +6,7 @@
 <template>
   <li
     class="row"
-    :class="{ modified }"
+    :class="{ modified, inactive: !!hint }"
     :data-setting-key="opt.key"
     :title="modified ? 'modified from default' : ''"
   >
@@ -26,6 +26,7 @@
         <input
           type="checkbox"
           :checked="!!value"
+          :disabled="!!hint"
           @change="$emit('commit', ($event.target as HTMLInputElement).checked)"
         />
         <span>{{ value ? 'on' : 'off' }}</span>
@@ -36,11 +37,13 @@
         :min="opt.min"
         :max="opt.max"
         :value="value"
+        :disabled="!!hint"
         @change="$emit('commit', Number(($event.target as HTMLInputElement).value))"
       />
       <select
         v-else-if="opt.type === 'enum'"
         :value="value"
+        :disabled="!!hint"
         @change="$emit('commit', ($event.target as HTMLSelectElement).value)"
       >
         <option v-for="c in opt.choices" :key="c" :value="c">{{ c }}</option>
@@ -50,12 +53,14 @@
         <input
           type="text"
           :value="value"
+          :disabled="!!hint"
           @change="$emit('commit', ($event.target as HTMLInputElement).value)"
         />
       </span>
       <textarea
         v-else-if="opt.type === 'string-list'"
         :value="(Array.isArray(value) ? value : []).join('\n')"
+        :disabled="!!hint"
         @change="
           $emit(
             'commit',
@@ -73,6 +78,7 @@
           autocomplete="off"
           spellcheck="false"
           :value="value"
+          :disabled="!!hint"
           @change="$emit('commit', ($event.target as HTMLInputElement).value)"
         />
         <button type="button" class="link reveal" @click="revealed = !revealed">
@@ -83,9 +89,16 @@
         v-else
         type="text"
         :value="value"
+        :disabled="!!hint"
         @change="$emit('commit', ($event.target as HTMLInputElement).value)"
       />
     </div>
+    <!--
+      Why this row is greyed out, and which setting to change to wake it up.
+      The value behind it is untouched — see optionEnabled() — so flipping the
+      dependency back restores exactly what was here.
+    -->
+    <p v-if="hint" class="dep-hint">{{ hint }}</p>
     <div v-if="modified" class="default-line">
       default: <code>{{ formatDefault(opt) }}</code>
     </div>
@@ -101,10 +114,17 @@ withDefaults(
     opt: SettingOption;
     value?: SettingValue;
     modified?: boolean;
+    /**
+     * Non-empty when the setting's `dependsOn` clauses don't currently hold:
+     * the explanation to show, and the flag that greys the editor out. Empty
+     * (the default) for an ordinary live row.
+     */
+    hint?: string;
   }>(),
   {
     value: undefined,
     modified: false,
+    hint: '',
   },
 );
 
@@ -144,6 +164,19 @@ function formatDefault(opt: SettingOption): string {
 }
 .row.modified .headline {
   color: var(--warn);
+}
+
+/* Dimmed, not hidden: an inactive setting still tells the reader it exists and
+   what it would do, which is how they learn the tier controls it. */
+.row.inactive .headline,
+.row.inactive .desc,
+.row.inactive .editor {
+  opacity: 0.55;
+}
+.dep-hint {
+  margin: 0;
+  color: var(--fg-muted);
+  font-style: italic;
 }
 
 .head {

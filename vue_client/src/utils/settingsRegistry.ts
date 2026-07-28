@@ -49,3 +49,54 @@ export function optionVisible(opt: SettingOption, ctx: Pick<VisibilityContext, '
   if (opt.selfHostedOnly && ctx.isNode) return false;
   return true;
 }
+
+// How deep a dependsOn chain we follow before giving up. Real chains are two
+// links (`consolidate_max_names → consolidate_joins → chat.events`); the cap is
+// purely so a registry edit that accidentally makes a cycle greys a row out
+// instead of hanging the settings pane.
+const MAX_DEPENDENCY_DEPTH = 8;
+
+/**
+ * Whether a setting currently DOES anything, per its `dependsOn` clauses.
+ *
+ * Clauses are ORed: the option is live if any one of them holds. Resolution is
+ * transitive — an option whose dependency is itself inactive is inactive too —
+ * so the registry states each link once instead of restating the whole chain on
+ * every leaf.
+ *
+ * Inactive is a rendering state, never a storage one: the value is kept and
+ * still returned, because flipping the condition back has to restore what the
+ * user had rather than a pile of defaults.
+ *
+ * `read` supplies effective values (i.e. `settingsStore.effective`).
+ */
+export function optionEnabled(
+  opt: SettingOption,
+  read: (key: string) => SettingValue | undefined,
+  depth = 0,
+): boolean {
+  if (!opt.dependsOn?.length) return true;
+  if (depth >= MAX_DEPENDENCY_DEPTH) return false;
+  return opt.dependsOn.some((dep) => {
+    if (!dep.in.includes(read(dep.key) as SettingValue)) return false;
+    const parent = getOption(dep.key);
+    // A clause naming a key that isn't in the registry can't be evaluated any
+    // further; the value check above is all we have, and it passed.
+    return parent ? optionEnabled(parent, read, depth + 1) : true;
+  });
+}
+
+/**
+ * Human-readable "why is this greyed out" line for an inactive setting, built
+ * from its own clauses. Deliberately shows dotted keys rather than labels: the
+ * settings pane already prints the key under every headline, so this reads as
+ * an instruction you can act on rather than a riddle about which row to find.
+ */
+export function dependencyHint(opt: SettingOption): string {
+  if (!opt.dependsOn?.length) return '';
+  const clauses = opt.dependsOn.map((dep) => {
+    const values = dep.in.map((v) => (typeof v === 'boolean' ? (v ? 'on' : 'off') : String(v)));
+    return `${dep.key} = ${values.join(' or ')}`;
+  });
+  return `Inactive — needs ${clauses.join(', or ')}.`;
+}

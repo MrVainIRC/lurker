@@ -39,6 +39,7 @@
           :opt="opt"
           :value="settings.effective(opt.key)"
           :modified="settings.isModified(opt.key)"
+          :hint="dependencyHintFor(opt)"
           @commit="(v) => onCommit(opt.key, v)"
           @reset="onReset(opt.key)"
         />
@@ -53,7 +54,13 @@
 import { ref, computed } from 'vue';
 import { useSettingsStore } from '../../stores/settings.js';
 import { useConfigStore } from '../../stores/config.js';
-import { CATEGORIES, GROUPS, optionVisible } from '../../utils/settingsRegistry.js';
+import {
+  CATEGORIES,
+  GROUPS,
+  optionVisible,
+  optionEnabled,
+  dependencyHint,
+} from '../../utils/settingsRegistry.js';
 import type { SettingOption, SettingValue } from '../../../../shared/settingsRegistry.js';
 import SettingsRow from '../SettingsRow.vue';
 
@@ -98,6 +105,14 @@ const groups = computed(() => {
   const order = props.only;
   return built.toSorted((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
 });
+
+// Empty for a live row; the "needs X" line for one whose dependsOn clauses
+// don't hold. Reads through `settings.effective` so it re-evaluates the moment
+// the setting it hangs off changes — flipping the event tier greys and un-greys
+// its modifiers without a reload.
+function dependencyHintFor(opt: SettingOption): string {
+  return optionEnabled(opt, (key) => settings.effective(key)) ? '' : dependencyHint(opt);
+}
 
 async function onCommit(key: string, value: SettingValue) {
   error.value = '';

@@ -21,6 +21,15 @@ export type SettingType = 'string' | 'color' | 'secret' | 'int' | 'bool' | 'enum
 /** A stored setting value, in its decoded (non-string) form. */
 export type SettingValue = string | number | boolean | string[];
 
+/**
+ * One "this setting is live when …" clause. `key` must name another registry
+ * option; the clause holds when that option's effective value is one of `in`.
+ */
+export interface SettingDependency {
+  key: string;
+  in: readonly SettingValue[];
+}
+
 interface BaseOption {
   key: string;
   label: string;
@@ -40,6 +49,23 @@ interface BaseOption {
   // trivially bypassable. The upload pipeline limits (uploads.image.*) are the
   // reference pattern: hidden here, enforced in the cell's upload route.
   selfHostedOnly?: boolean;
+
+  // Conditions under which this setting actually does anything, ORed together:
+  // the option is live if ANY clause holds. Resolution is TRANSITIVE — an
+  // option whose dependency is itself inactive is inactive too, so a chain like
+  // `consolidate_max_names → consolidate_joins → chat.events` only needs each
+  // link stated once.
+  //
+  // Presentation only, and deliberately so: an inactive setting still stores and
+  // returns its value, because the condition can flip back (switching a phone
+  // off `none` must restore exactly the modifiers that were set before, not a
+  // pile of defaults). Clients render these greyed out; nothing enforces them.
+  //
+  // The tier keys (chat.events / chat.events.mobile) are why this exists as
+  // registry data rather than a hardcoded map per client — the iOS settings
+  // screen was already carrying one of these by hand for consolidate_max_names,
+  // and the tier adds eight more.
+  dependsOn?: readonly SettingDependency[];
 }
 
 /** Free-text settings: plain strings, CSS colors, and write-only secrets. */
@@ -89,6 +115,24 @@ export interface SettingCategory {
   // As on BaseOption: hide the whole category in the hosted (node) edition.
   selfHostedOnly?: boolean;
 }
+
+// ─── Shared dependency clauses ─────────────────────────────────────────────
+// The `chat` category's modifiers all hang off the event-noise tier, which is
+// two keys (desktop + mobile). A modifier is live if EITHER device class can
+// still see the thing it modifies — a phone set to "none" must not grey out the
+// consolidation knobs a desktop is actively using, and vice versa.
+
+/** Live when at least one device class renders event rows at all. */
+const EVENTS_VISIBLE: readonly SettingDependency[] = Object.freeze([
+  { key: 'chat.events', in: ['all', 'smart'] },
+  { key: 'chat.events.mobile', in: ['all', 'smart'] },
+]);
+
+/** Live when at least one device class is on the smart tier. */
+const EVENTS_SMART: readonly SettingDependency[] = Object.freeze([
+  { key: 'chat.events', in: ['smart'] },
+  { key: 'chat.events.mobile', in: ['smart'] },
+]);
 
 export const REGISTRY: readonly SettingOption[] = Object.freeze([
   // ─── Fonts ─────────────────────────────────────────────────────────────
@@ -705,6 +749,42 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
       'overrides this per channel and is remembered. Has no effect on mobile.',
   },
 
+  // ─── Event noise tier (#666) ──────────────────────────────────────────
+  // The primary "how much presence churn do I want to see" choice. Everything
+  // in the two groups below is a modifier on whatever this leaves standing —
+  // see shared/eventFilter.ts for the tier semantics and the noise set.
+  {
+    key: 'chat.events',
+    label: 'Event noise',
+    category: 'chat',
+    group: 'events',
+    type: 'enum',
+    choices: ['all', 'smart', 'none'],
+    default: 'all',
+    description:
+      'How much join/part/quit/nick/host-change/mode noise reaches the message list. ' +
+      '"all" (the default) shows every event, folded into summary lines when ' +
+      'consolidation is on. "smart" shows events only for nicks who have recently ' +
+      'spoken, so silent lurkers cycling on and off stay invisible. "none" hides ' +
+      'event rows entirely, leaving conversation only. Kicks, topic changes and ' +
+      'invites are never hidden — they are things that happened, not churn.',
+  },
+  {
+    key: 'chat.events.mobile',
+    label: 'Event noise (mobile)',
+    category: 'chat',
+    group: 'events',
+    type: 'enum',
+    choices: ['all', 'smart', 'none'],
+    default: 'all',
+    description:
+      'The same choice for phone-sized viewports (≤768px) and the native mobile ' +
+      'apps, which read this key unconditionally. A phone screen holds a fraction ' +
+      'of the lines a desktop one does, so "none" is a common pick here even for ' +
+      'people who want "all" at their desk. Only the tier is split by device — the ' +
+      'modifiers below are shared.',
+  },
+
   // ─── Join/part consolidation (IRCCloud-style summary line) ────────────
   {
     key: 'chat.consolidate_joins',
@@ -713,11 +793,12 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     group: 'consolidate',
     type: 'bool',
     default: true,
+    dependsOn: EVENTS_VISIBLE,
     description:
       'Merge consecutive join/part/quit/nick/host-change events into a single summary line ' +
       'per nick (e.g. "Alice and Bob joined; Dave left; Eve → Eve_afk"). ' +
-      'Off shows every event individually. Composes with smart filter — events ' +
-      'the smart filter hides are excluded from the summary.',
+      'Off shows every event individually. Composes with the "smart" tier — events ' +
+      'it hides are excluded from the summary.',
   },
   {
     key: 'chat.consolidate_max_names',
@@ -728,6 +809,9 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     min: 1,
     max: 50,
     default: 5,
+    // Only names the switch directly above it: the tier condition arrives
+    // transitively through chat.consolidate_joins.
+    dependsOn: [{ key: 'chat.consolidate_joins', in: [true] }],
     description:
       'In each category (joined / left / reconnected / renamed / changed host) of a summary ' +
       'line, show at most this many nicks before collapsing the rest into ' +
@@ -741,6 +825,9 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     group: 'consolidate',
     type: 'bool',
     default: false,
+    // Hangs off the tier, not off consolidation: this decorates the individual
+    // lines, which is exactly what survives when consolidation is OFF.
+    dependsOn: EVENTS_VISIBLE,
     description:
       'Show the affected user’s user@host next to their nick on JOIN, PART, ' +
       'QUIT, and nick-change lines (e.g. "alice (~alice@host.example.net) ' +
@@ -755,6 +842,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     group: 'consolidate',
     type: 'bool',
     default: false,
+    dependsOn: EVENTS_VISIBLE,
     description:
       'Show the joining user’s services (NickServ) account next to their nick ' +
       'on JOIN lines (e.g. "alice [aliceacct] joined") — useful for channel ops ' +
@@ -815,19 +903,9 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
   },
 
   // ─── Smart filter (join/part/quit/nick noise) ─────────────────────────
-  {
-    key: 'chat.smart_filter',
-    label: 'Smart filter (hide noise from quiet users)',
-    category: 'chat',
-    group: 'smart-filter',
-    type: 'bool',
-    default: false,
-    description:
-      'Master switch for smart filtering of join/part/quit/nick noise. When enabled, ' +
-      'these events are hidden for nicks that have not recently spoken in the channel. ' +
-      'Off by default — the consolidation summary line above is usually a better fit, ' +
-      'but turn this on to also hide events for nicks who never chat.',
-  },
+  // The master switch used to live here as `chat.smart_filter`; it is now the
+  // middle rung of `chat.events` (#666), and a boot migration carries anyone who
+  // had it on across to the tier. What remains is the tuning it always had.
   {
     key: 'chat.smart_filter_delay',
     label: '"Recently spoke" window (minutes)',
@@ -837,6 +915,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     min: 0,
     max: 1440,
     default: 5,
+    dependsOn: EVENTS_SMART,
     description:
       'Window in minutes for "recently spoke". A join/part/quit/nick event is hidden ' +
       'if the affected nick has not posted a message within this many minutes before ' +
@@ -849,6 +928,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     group: 'smart-filter',
     type: 'bool',
     default: true,
+    dependsOn: EVENTS_SMART,
     description: 'Apply smart filter to JOIN events.',
   },
   {
@@ -858,6 +938,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     group: 'smart-filter',
     type: 'bool',
     default: true,
+    dependsOn: EVENTS_SMART,
     description: 'Apply smart filter to PART and QUIT events.',
   },
   {
@@ -867,6 +948,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     group: 'smart-filter',
     type: 'bool',
     default: true,
+    dependsOn: EVENTS_SMART,
     description: 'Apply smart filter to NICK change events.',
   },
   {
@@ -878,6 +960,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     min: 0,
     max: 1440,
     default: 30,
+    dependsOn: EVENTS_SMART,
     description:
       'If a smart-filtered nick speaks within this many minutes after their JOIN, ' +
       'the JOIN line is revealed. 0 disables unmasking.',
@@ -1542,9 +1625,10 @@ export const GROUPS: Readonly<Record<string, string>> = Object.freeze({
   nicks: 'Nick coloring',
   layout: 'Layout',
   misc: 'Misc',
+  events: 'Event noise',
   consolidate: 'Join/part consolidation',
   composing: 'Composing',
-  'smart-filter': 'Smart filter',
+  'smart-filter': 'Smart filter tuning',
   connection: 'Connection',
   ctcp: 'CTCP replies',
   'auto-away': 'Auto-away',

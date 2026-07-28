@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { registerVerb } from '../verbRegistry.js';
-import { listMessages, listMessagesRenderable, hasOlderRow } from '../../db/messages.js';
+import { listMessagesCounted, hasOlderRow } from '../../db/messages.js';
+import { asPageUnit } from '../../../shared/eventFilter.js';
 import { decorateMessage } from '../wsHub.js';
 
 /** Authenticated caller context passed to every verb handler. */
@@ -39,12 +40,14 @@ registerVerb({
       },
       countBy: {
         type: 'string',
-        enum: ['event', 'renderable'],
+        enum: ['event', 'renderable', 'chat'],
         description:
           'What `limit` counts. "event" (default) counts every stored row. "renderable" counts ' +
           'only rows that render as their own line — join/part/quit/nick/host-change events are ' +
           'still returned, but do not spend the budget, so a channel full of presence churn ' +
-          'still yields a full page of readable content.',
+          'still yields a full page of readable content. "chat" goes one further and also ' +
+          'excludes mode changes from the budget, matching a reader who hides event noise ' +
+          'entirely. All three return the same contiguous id range; only the sizing differs.',
       },
     },
     required: ['networkId', 'target'],
@@ -60,10 +63,10 @@ registerVerb({
     const before = input.before ? Number(input.before) : undefined;
     // Unrecognized values fall back to today's behavior rather than erroring —
     // the field is additive and an old caller never sends it at all.
-    const renderable = input.countBy === 'renderable';
-    const rows = renderable
-      ? listMessagesRenderable(networkId, target, { before, limit })
-      : listMessages(networkId, target, { before, limit });
+    const rows = listMessagesCounted(networkId, target, asPageUnit(input.countBy), {
+      before,
+      limit,
+    });
     const events = rows.map((e) => decorateMessage(ctx.userId, e));
     const oldestId = events.length ? events[0].id : 0;
     return {

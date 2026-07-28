@@ -8,6 +8,7 @@ import path from 'path';
 // Pure, no DB side effects — safe to import statically alongside the lazy
 // db-layer imports below.
 import { CONSOLIDATABLE_TYPES } from '../../shared/consolidate.js';
+import { NOISE_TYPES } from '../../shared/eventFilter.js';
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lurker-test-'));
 process.env.DATABASE_PATH = path.join(tmpDir, 'test.db');
@@ -17,7 +18,7 @@ let createNetwork: typeof import('./networks.js').createNetwork;
 let insertMessage: typeof import('./messages.js').insertMessage;
 let listMessages: typeof import('./messages.js').listMessages;
 let listMessagesAround: typeof import('./messages.js').listMessagesAround;
-let listMessagesRenderable: typeof import('./messages.js').listMessagesRenderable;
+let listMessagesCounted: typeof import('./messages.js').listMessagesCounted;
 let searchMessages: typeof import('./messages.js').searchMessages;
 let countNewer: typeof import('./messages.js').countNewer;
 let countServerBufferUnread: typeof import('./messages.js').countServerBufferUnread;
@@ -40,7 +41,7 @@ beforeAll(async () => {
     insertMessage,
     listMessages,
     listMessagesAround,
-    listMessagesRenderable,
+    listMessagesCounted,
     searchMessages,
     countNewer,
     countServerBufferUnread,
@@ -1156,7 +1157,7 @@ describe('chathistory window queries', () => {
 // property under test throughout is the one that makes it safe to do at the
 // server: the result is a CONTIGUOUS id range, exactly like a listMessages
 // slice, so it can never open a hole in the client's scrollback.
-describe('listMessagesRenderable', () => {
+describe("listMessagesCounted unit: 'renderable'", () => {
   function netFor(name: string): number {
     const user = createUser(name);
     return createNetwork(user.id, { name: 'n', host: 'h', port: 6697, tls: true, nick: name })!.id;
@@ -1186,7 +1187,7 @@ describe('listMessagesRenderable', () => {
     }
 
     const eventCounted = listMessages(net, '#a', { limit: 10 });
-    const renderable = listMessagesRenderable(net, '#a', { limit: 10 });
+    const renderable = listMessagesCounted(net, '#a', 'renderable', { limit: 10 });
 
     // Today's page: ten rows, nine of them noise that folds into one line.
     expect(eventCounted).toHaveLength(10);
@@ -1202,7 +1203,7 @@ describe('listMessagesRenderable', () => {
       for (let j = 0; j < 4; j += 1) event(net, '#a', 'part', `n${j}`);
       chat(net, '#a', 'alice', `m${i}`);
     }
-    const rows = listMessagesRenderable(net, '#a', { limit: 2 });
+    const rows = listMessagesCounted(net, '#a', 'renderable', { limit: 2 });
     // Oldest row is the boundary message itself, not the joins that precede it:
     // the next page picks that run up whole, so consolidation summarizes it once
     // rather than splitting it across two pages.
@@ -1217,8 +1218,8 @@ describe('listMessagesRenderable', () => {
       for (let j = 0; j < 3; j += 1) event(net, '#a', 'quit', `n${j}`);
       chat(net, '#a', 'alice', `m${i}`);
     }
-    const page1 = listMessagesRenderable(net, '#a', { limit: 4 });
-    const page2 = listMessagesRenderable(net, '#a', { limit: 4, before: page1[0].id });
+    const page1 = listMessagesCounted(net, '#a', 'renderable', { limit: 4 });
+    const page2 = listMessagesCounted(net, '#a', 'renderable', { limit: 4, before: page1[0].id });
     expect(page1.filter((e) => e.type === 'message').map((e) => e.text)).toEqual([
       'm9',
       'm10',
@@ -1244,7 +1245,7 @@ describe('listMessagesRenderable', () => {
       for (let j = 0; j < 3; j += 1) event(net, '#a', 'join', `n${j}`);
       ids.push(chat(net, '#a', 'alice', `m${i}`).id);
     }
-    const rows = listMessagesRenderable(net, '#a', { afterId: ids[2], limit: 3 });
+    const rows = listMessagesCounted(net, '#a', 'renderable', { afterId: ids[2], limit: 3 });
     expect(rows.every((r) => r.id > ids[2])).toBe(true);
     expect(rows.filter((e) => e.type === 'message').map((e) => e.text)).toEqual(['m4', 'm5', 'm6']);
     expectContiguous(rows, net, '#a');
@@ -1254,7 +1255,7 @@ describe('listMessagesRenderable', () => {
     const net = netFor('rend-short');
     for (let j = 0; j < 8; j += 1) event(net, '#a', 'join', `n${j}`);
     chat(net, '#a', 'alice', 'only one');
-    const rows = listMessagesRenderable(net, '#a', { limit: 100 });
+    const rows = listMessagesCounted(net, '#a', 'renderable', { limit: 100 });
     expect(rows).toHaveLength(9);
     expect(rows.filter((e) => e.type === 'message')).toHaveLength(1);
   });
@@ -1264,13 +1265,13 @@ describe('listMessagesRenderable', () => {
     // read to a client as "start of history" and stop its pager dead.
     const net = netFor('rend-allnoise');
     for (let j = 0; j < 40; j += 1) event(net, '#a', 'join', `n${j}`);
-    const rows = listMessagesRenderable(net, '#a', { limit: 100 });
+    const rows = listMessagesCounted(net, '#a', 'renderable', { limit: 100 });
     expect(rows).toHaveLength(40);
   });
 
   it('returns an empty page for a buffer with nothing in it', () => {
     const net = netFor('rend-empty');
-    expect(listMessagesRenderable(net, '#nothing', { limit: 100 })).toEqual([]);
+    expect(listMessagesCounted(net, '#nothing', 'renderable', { limit: 100 })).toEqual([]);
   });
 
   it('bounds the scan (and so the payload) at maxScan', () => {
@@ -1281,7 +1282,7 @@ describe('listMessagesRenderable', () => {
     const net = netFor('rend-cap');
     for (let j = 0; j < 300; j += 1) event(net, '#a', 'join', `n${j}`);
     chat(net, '#a', 'alice', 'the one message');
-    const rows = listMessagesRenderable(net, '#a', { limit: 50, maxScan: 100 });
+    const rows = listMessagesCounted(net, '#a', 'renderable', { limit: 50, maxScan: 100 });
     expect(rows).toHaveLength(100);
     expect(rows.filter((e) => e.type === 'message')).toHaveLength(1);
     expectContiguous(rows, net, '#a');
@@ -1296,7 +1297,7 @@ describe('listMessagesRenderable', () => {
     for (const type of ['kick', 'mode', 'topic', 'kick', 'mode']) {
       event(net, '#a', type, 'alice');
     }
-    const rows = listMessagesRenderable(net, '#a', { limit: 2 });
+    const rows = listMessagesCounted(net, '#a', 'renderable', { limit: 2 });
     expect(rows).toHaveLength(2);
     expect(rows.map((r) => r.type)).toEqual(['kick', 'mode']);
   });
@@ -1309,11 +1310,100 @@ describe('listMessagesRenderable', () => {
     const noiseCount = CONSOLIDATABLE_TYPES.size;
     chat(net, '#a', 'alice', 'the only renderable row');
 
-    const rows = listMessagesRenderable(net, '#a', { limit: 1 });
+    const rows = listMessagesCounted(net, '#a', 'renderable', { limit: 1 });
     expect(rows).toHaveLength(1);
     expect(rows[0].text).toBe('the only renderable row');
     // ...and asking for two pulls in the whole noise run behind it.
-    expect(listMessagesRenderable(net, '#a', { limit: 2 })).toHaveLength(noiseCount + 1);
+    expect(listMessagesCounted(net, '#a', 'renderable', { limit: 2 })).toHaveLength(noiseCount + 1);
+  });
+});
+
+describe("listMessagesCounted unit: 'chat' (#666)", () => {
+  function netFor(name: string): number {
+    const user = createUser(name);
+    return createNetwork(user.id, { name: 'n', host: 'h', port: 6697, tls: true, nick: name })!.id;
+  }
+
+  it("delegates to the plain pager at unit 'event'", () => {
+    // 'event' has no scan pass to do — every stored row counts — so it must be
+    // indistinguishable from listMessages, cursor semantics included.
+    const net = netFor('unit-event');
+    for (let i = 1; i <= 6; i += 1) chat(net, '#a', 'alice', `m${i}`);
+    expect(listMessagesCounted(net, '#a', 'event', { limit: 3 })).toEqual(
+      listMessages(net, '#a', { limit: 3 }),
+    );
+  });
+
+  it('excludes mode rows from the budget where renderable would spend it', () => {
+    // The reason this unit exists: a reader on the `none` tier draws nothing for
+    // a mode row, so counting it hands them a page that renders short. An op
+    // handing out +v to a room is exactly the shape that produces this.
+    const net = netFor('unit-chat-mode');
+    for (let i = 1; i <= 10; i += 1) {
+      for (let j = 0; j < 5; j += 1) event(net, '#a', 'mode', `n${j}`);
+      chat(net, '#a', 'alice', `m${i}`);
+    }
+
+    const renderable = listMessagesCounted(net, '#a', 'renderable', { limit: 6 });
+    const chatUnit = listMessagesCounted(net, '#a', 'chat', { limit: 6 });
+
+    // 'renderable' counts modes as their own line, so six slots buy one message.
+    expect(renderable.filter((e) => e.type === 'message')).toHaveLength(1);
+    // 'chat' spends all six on messages.
+    expect(chatUnit.filter((e) => e.type === 'message')).toHaveLength(6);
+  });
+
+  it('still spends the budget on kicks, topics and invites', () => {
+    // The `none` tier hides churn, not events that carry information. If these
+    // were free the page would over-fetch on a buffer made mostly of them.
+    const net = netFor('unit-chat-standalone');
+    for (const type of ['kick', 'topic', 'invite', 'kick', 'topic']) {
+      event(net, '#a', type, 'alice');
+    }
+    const rows = listMessagesCounted(net, '#a', 'chat', { limit: 2 });
+    expect(rows.map((r) => r.type)).toEqual(['kick', 'topic']);
+  });
+
+  it('treats exactly NOISE_TYPES as free', () => {
+    // Drift guard, matching the renderable one above: the server must size the
+    // page in the same unit the client renders, or the whole exercise is moot.
+    const net = netFor('unit-chat-types');
+    for (const type of NOISE_TYPES) event(net, '#a', type, 'alice');
+    chat(net, '#a', 'alice', 'the only chat row');
+
+    const rows = listMessagesCounted(net, '#a', 'chat', { limit: 1 });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].text).toBe('the only chat row');
+    expect(listMessagesCounted(net, '#a', 'chat', { limit: 2 })).toHaveLength(NOISE_TYPES.size + 1);
+  });
+
+  it('returns an all-noise buffer rather than an empty page', () => {
+    // Same trap as the renderable case: [] reads to a client as "start of
+    // history" and stops its pager dead.
+    const net = netFor('unit-chat-allnoise');
+    for (let j = 0; j < 12; j += 1) event(net, '#a', 'mode', `n${j}`);
+    expect(listMessagesCounted(net, '#a', 'chat', { limit: 50 })).toHaveLength(12);
+  });
+
+  it('pages backward through `before` without a gap or an overlap', () => {
+    const net = netFor('unit-chat-page');
+    for (let i = 1; i <= 8; i += 1) {
+      event(net, '#a', 'mode', 'op');
+      event(net, '#a', 'join', `n${i}`);
+      chat(net, '#a', 'alice', `m${i}`);
+    }
+    const page1 = listMessagesCounted(net, '#a', 'chat', { limit: 3 });
+    const page2 = listMessagesCounted(net, '#a', 'chat', { limit: 3, before: page1[0].id });
+    expect(page1.filter((e) => e.type === 'message').map((e) => e.text)).toEqual([
+      'm6',
+      'm7',
+      'm8',
+    ]);
+    expect(page2.filter((e) => e.type === 'message').map((e) => e.text)).toEqual([
+      'm3',
+      'm4',
+      'm5',
+    ]);
   });
 });
 

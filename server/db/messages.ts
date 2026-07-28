@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import db from './index.js';
-import { CONSOLIDATABLE_TYPES } from '../../shared/consolidate.js';
+import { countsTowardPage } from '../../shared/eventFilter.js';
+import type { PageUnit } from '../../shared/eventFilter.js';
 
 /** A raw row from the `messages` table. */
 interface MessageRow {
@@ -217,9 +218,12 @@ export function listMessages(
 // (consolidation excludes them on purpose), so each is worth one slot. Counting
 // only message/action/notice would still under-fill a buffer whose traffic is
 // kicks and topic edits.
-function isRenderableType(type: string): boolean {
-  return !CONSOLIDATABLE_TYPES.has(type);
-}
+//
+// The `chat` unit (#666) is the same idea one rung stricter: a client on the
+// `none` event tier draws nothing at all for join/part/quit/nick/chghost OR
+// mode, so those must not spend budget either, or the reader pages through
+// screenfuls of rows that render as nothing. `countsTowardPage` owns both
+// definitions so the server and the clients can't disagree about them.
 
 // Bounds both the floor scan and the resulting payload. A netsplit can put tens
 // of thousands of joins between two sentences; past this many rows the page
@@ -229,10 +233,19 @@ function isRenderableType(type: string): boolean {
 // motivated the feature.
 export const RENDERABLE_MAX_SCAN = 2000;
 
+/** Cursor + sizing options shared by every paging entry point here. */
+interface PageOptions {
+  before?: number;
+  afterId?: number;
+  limit?: number;
+  maxScan?: number;
+}
+
 /**
- * A page holding up to `limit` RENDERABLE rows, plus every consolidatable row
- * interleaved with them (consolidation needs the whole run to summarize it
- * accurately). Oldest-first, like `listMessages`.
+ * A page holding up to `limit` rows that COUNT under `unit`, plus every
+ * non-counting row interleaved with them (consolidation needs the whole run to
+ * summarize it accurately, and at the `chat` unit the extra rows are simply
+ * dropped by the client). Oldest-first, like `listMessages`.
  *
  * `before` pages backward (id < before), `afterId` pages forward (id > afterId),
  * neither pages the newest slice — matching `listMessages`' cursor semantics so
@@ -248,20 +261,20 @@ export const RENDERABLE_MAX_SCAN = 2000;
  * a (id, type) scan to find the boundary row, then a fetch of the range it
  * bounds.
  */
-export function listMessagesRenderable(
+export function listMessagesCounted(
   networkId: number,
   target: string,
-  {
-    before,
-    afterId,
-    limit = 100,
-    maxScan = RENDERABLE_MAX_SCAN,
-  }: { before?: number; afterId?: number; limit?: number; maxScan?: number } = {},
+  unit: PageUnit,
+  { before, afterId, limit = 100, maxScan = RENDERABLE_MAX_SCAN }: PageOptions = {},
 ): MessageEvent[] {
+  // 'event' counts every stored row, which is precisely what the plain cursor
+  // pager already does — no scan pass needed.
+  if (unit === 'event') return listMessages(networkId, target, { before, afterId, limit });
+
   const forward = afterId != null && afterId > 0;
 
   // Step 1: walk out from the cursor and stop at whichever comes first — the
-  // `limit`-th renderable row, or `maxScan` rows.
+  // `limit`-th COUNTING row, or `maxScan` rows.
   const scanSql = forward
     ? `SELECT id, type FROM messages WHERE network_id = ? AND target = ? AND id > ? ORDER BY id ASC LIMIT ?`
     : before
@@ -274,15 +287,15 @@ export function listMessagesRenderable(
   const scanned = db.prepare(scanSql).all(...scanParams) as Array<{ id: number; type: string }>;
   if (scanned.length === 0) return [];
 
-  // The last row to include. Landing ON the `limit`-th renderable row (rather
+  // The last row to include. Landing ON the `limit`-th counting row (rather
   // than past it) leaves any adjacent noise for the NEXT page, where it will be
   // consolidated with the rest of its run instead of dangling.
   let boundary = scanned[scanned.length - 1].id;
-  let renderable = 0;
+  let counted = 0;
   for (const row of scanned) {
-    if (!isRenderableType(row.type)) continue;
-    renderable += 1;
-    if (renderable === limit) {
+    if (!countsTowardPage(row.type, unit)) continue;
+    counted += 1;
+    if (counted === limit) {
       boundary = row.id;
       break;
     }
@@ -318,12 +331,12 @@ export function listMessagesAround(
   target: string,
   anchorId: number,
   halfLimit = 100,
-  // Sizes each SIDE in renderable rows (#10). Matters more here than the name
+  // Sizes each SIDE in the caller's unit (#10). Matters more here than the name
   // "jump" suggests: a client entering a buffer with a pending jump — a push
   // notification, a highlight, jump-to-first-unread — hydrates from this slice
   // and nothing else, so on a channel back from a netsplit an event-counted
   // window is the same near-blank screenful the feature exists to remove.
-  countBy: 'event' | 'renderable' = 'event',
+  countBy: PageUnit = 'event',
 ):
   | { events: MessageEvent[]; hasMoreOlder: boolean; hasMoreNewer: boolean }
   | { events: []; hasMoreOlder: false; hasMoreNewer: false; anchorMissing: true } {
@@ -333,9 +346,14 @@ export function listMessagesAround(
   if (!anchorRow) {
     return { events: [], hasMoreOlder: false, hasMoreNewer: false, anchorMissing: true };
   }
-  const page = countBy === 'renderable' ? listMessagesRenderable : listMessages;
-  const older = page(networkId, target, { before: anchorId, limit: halfLimit });
-  const newer = page(networkId, target, { afterId: anchorId, limit: halfLimit });
+  const older = listMessagesCounted(networkId, target, countBy, {
+    before: anchorId,
+    limit: halfLimit,
+  });
+  const newer = listMessagesCounted(networkId, target, countBy, {
+    afterId: anchorId,
+    limit: halfLimit,
+  });
   const events = [...older, rowToEvent(anchorRow), ...newer];
   const oldestId = events[0].id as number;
   const newestId = events[events.length - 1].id as number;

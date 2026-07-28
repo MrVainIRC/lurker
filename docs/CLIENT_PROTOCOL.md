@@ -259,9 +259,10 @@ hasMoreOlder:true}` — "this buffer exists; fetch content when the user opens i
 Hydrate a shell with **`{type:'history', mode:'latest'}`**, and only with that.
 It **changes nothing**: no reopen, no row minted, no JOIN, and nothing announced
 to the user's other devices. Send it for any buffer you hold, as often as you
-like. If you consolidate presence noise, send `countBy:'renderable'` with it
-(§8) — this is the fetch that fills the first screenful, so it's where sizing a
-page in stored rows shows up as a blank-looking channel.
+like. If you consolidate presence noise, send `countBy:'renderable'` with it —
+or `countBy:'chat'` if you hide events entirely (§8). This is the fetch that
+fills the first screenful, so it's where sizing a page in stored rows shows up
+as a blank-looking channel.
 
 It **always answers**, including for a target with no row and no history (an
 empty `events` array). A client that spends one request per buffer can't tell
@@ -678,9 +679,22 @@ rows still come back — consolidation needs the whole run to summarize it — t
 just don't spend the budget. Default is `'event'`, i.e. today's behavior; an
 older server ignores the field and answers exactly as before.
 
-- **What counts as renderable is the complement of the fold set**, not
-  "messages". A `kick`, `mode`, `topic`, `error`, or `invite` each renders
-  standalone, so each is worth one slot.
+Send **`countBy:'chat'`** instead if you hide event noise **entirely** — the
+`none` rung of the web client's event tier (`chat.events`). That unit also makes
+`mode` free, because a client drawing nothing for a mode change would otherwise
+spend budget on invisible rows. The canonical set is `NOISE_TYPES` in
+`shared/eventFilter.ts`: the fold set plus `mode`.
+
+There is deliberately **no unit for partial (smart) filtering**. Which events it
+hides depends on who spoke recently in your client, which the server can't know;
+ask for the unit your tier would otherwise use and accept the occasional short
+page.
+
+- **What counts is the complement of the set you hide**, not "messages". Under
+  `'renderable'` a `kick`, `mode`, `topic`, `error`, or `invite` each renders
+  standalone, so each is worth one slot; under `'chat'` the same holds minus
+  `mode`. Kicks, topics and invites are never free under either — they are
+  things that happened, not churn.
 - **The slice is still a contiguous id range**, exactly like an event-counted
   one. `hasMoreOlder`, prepend-and-dedupe, and the `before: <oldest returned
 id>` cursor are unchanged. This cannot open a hole.
@@ -688,12 +702,12 @@ id>` cursor are unchanged. This cannot open a hole.
   than you asked for and `hasMoreOlder` stays true — a buffer holding tens of
   thousands of joins between two sentences degrades to today's behavior instead
   of shipping a huge frame.
-- **Only ask for it if you actually fold** — and only once you _know_ whether
-  you do. If your client renders every event as its own line (the web client
+- **Ask for the unit you actually render in** — and only once you _know_ what
+  that is. If your client renders every event as its own line (the web client
   makes this a user setting), `'event'` is already the right unit, and
   `'renderable'` would hand you up to a full scan window of rows you then
   display in full. If the preference hasn't loaded yet, send `'event'`: of the
-  two wrong guesses, that one just costs a short first page.
+  wrong guesses, that one just costs a short first page.
 - **On `around` it sizes each side**, so the window is up to `2×limit+1`
   _renderable_ rows. Worth sending: for a client that enters a buffer with a
   pending jump (a push tap, a highlight, jump-to-first-unread), the `around`
@@ -1044,7 +1058,8 @@ What the iOS app actually ships with (`FrameParser.parseWs`,
   `join`, `part`, `quit`, `nick`, `kick`, `mode`, `topic`, `motd`, `invite`
   (plus `channel-topic` for state). Unknown → drop.
 - **Send verbs (8):** `presence`, `send`, `history` (`before`/`latest`; add
-  `countBy:'renderable'` if you consolidate — §8), `mark-read`, `mark-all-read`,
+  `countBy:'renderable'` if you consolidate, `'chat'` if you hide events — §8),
+  `mark-read`, `mark-all-read`,
   `join`, `open-buffer`, `close-buffer`. Hydrate with `{mode:'latest'}`, never
   with `open-buffer` — §4.3 for why that's the difference between reading a
   buffer and reopening it on every device the user owns.
