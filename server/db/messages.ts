@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import db from './index.js';
+import { CONSOLIDATABLE_TYPES } from '../../shared/consolidate.js';
 
 /** A raw row from the `messages` table. */
 interface MessageRow {
@@ -196,6 +197,115 @@ export function listMessages(
   const params = before ? [networkId, target, before, limit] : [networkId, target, limit];
   const rows = db.prepare(sql).all(...params) as MessageRow[];
   return rows.map(rowToEvent).toReversed();
+}
+
+// --- Renderable-counted paging -------------------------------------------
+
+// The same page, sized in the unit the reader perceives.
+//
+// `listMessages` counts rows in the `messages` table. Clients render
+// CONSOLIDATED rows: a run of join/part/quit/nick/chghost collapses to one
+// summary line. So on a channel with heavy presence churn a 100-row page can
+// render as three visible lines — the client sees a short page, asks for
+// another, folds that one too, and the user watches the buffer assemble itself
+// (WS_PROTOCOL_FIXES #10). Only the server can see the type mix in a slice
+// before it ships it, so only the server can size the page correctly.
+//
+// "Renderable" is deliberately the COMPLEMENT of the set the clients fold on,
+// imported from shared/consolidate.ts rather than restated here — a `kick`,
+// `mode`, `topic`, `error` or `invite` each renders as its own standalone line
+// (consolidation excludes them on purpose), so each is worth one slot. Counting
+// only message/action/notice would still under-fill a buffer whose traffic is
+// kicks and topic edits.
+function isRenderableType(type: string): boolean {
+  return !CONSOLIDATABLE_TYPES.has(type);
+}
+
+// Bounds both the floor scan and the resulting payload. A netsplit can put tens
+// of thousands of joins between two sentences; past this many rows the page
+// simply ships fewer renderable rows than asked and `hasMoreOlder` stays true,
+// i.e. the pathological buffer degrades to today's behavior instead of shipping
+// a 50 MB frame. Without it the query is unbounded on exactly the buffers that
+// motivated the feature.
+export const RENDERABLE_MAX_SCAN = 2000;
+
+/**
+ * A page holding up to `limit` RENDERABLE rows, plus every consolidatable row
+ * interleaved with them (consolidation needs the whole run to summarize it
+ * accurately). Oldest-first, like `listMessages`.
+ *
+ * `before` pages backward (id < before), `afterId` pages forward (id > afterId),
+ * neither pages the newest slice — matching `listMessages`' cursor semantics so
+ * the two are interchangeable at the call site.
+ *
+ * The result is a CONTIGUOUS id range within the buffer, exactly like today's
+ * slice: `hasMoreOlder`, prepend-and-dedupe, and the `before: <oldest returned
+ * id>` paging cursor all keep working untouched, and there is no way for this to
+ * open a hole. That property is what makes it worth doing server-side rather
+ * than having clients over-fetch and trim.
+ *
+ * Two indexed reads, both on idx_messages_buffer(network_id, target, id DESC):
+ * a (id, type) scan to find the boundary row, then a fetch of the range it
+ * bounds.
+ */
+export function listMessagesRenderable(
+  networkId: number,
+  target: string,
+  {
+    before,
+    afterId,
+    limit = 100,
+    maxScan = RENDERABLE_MAX_SCAN,
+  }: { before?: number; afterId?: number; limit?: number; maxScan?: number } = {},
+): MessageEvent[] {
+  const forward = afterId != null && afterId > 0;
+
+  // Step 1: walk out from the cursor and stop at whichever comes first — the
+  // `limit`-th renderable row, or `maxScan` rows.
+  const scanSql = forward
+    ? `SELECT id, type FROM messages WHERE network_id = ? AND target = ? AND id > ? ORDER BY id ASC LIMIT ?`
+    : before
+      ? `SELECT id, type FROM messages WHERE network_id = ? AND target = ? AND id < ? ORDER BY id DESC LIMIT ?`
+      : `SELECT id, type FROM messages WHERE network_id = ? AND target = ? ORDER BY id DESC LIMIT ?`;
+  const cursor = forward ? afterId : before;
+  const scanParams: Array<number | string> = cursor
+    ? [networkId, target, cursor, maxScan]
+    : [networkId, target, maxScan];
+  const scanned = db.prepare(scanSql).all(...scanParams) as Array<{ id: number; type: string }>;
+  if (scanned.length === 0) return [];
+
+  // The last row to include. Landing ON the `limit`-th renderable row (rather
+  // than past it) leaves any adjacent noise for the NEXT page, where it will be
+  // consolidated with the rest of its run instead of dangling.
+  let boundary = scanned[scanned.length - 1].id;
+  let renderable = 0;
+  for (const row of scanned) {
+    if (!isRenderableType(row.type)) continue;
+    renderable += 1;
+    if (renderable === limit) {
+      boundary = row.id;
+      break;
+    }
+  }
+
+  // Step 2: ship the whole contiguous range, noise included.
+  const conds = ['network_id = ?', 'target = ?'];
+  const params: Array<number | string> = [networkId, target];
+  if (forward) {
+    conds.push('id > ?', 'id <= ?');
+    params.push(afterId as number, boundary);
+  } else {
+    conds.push('id >= ?');
+    params.push(boundary);
+    if (before) {
+      conds.push('id < ?');
+      params.push(before);
+    }
+  }
+  const rows = db
+    .prepare(`SELECT * FROM messages WHERE ${conds.join(' AND ')} ORDER BY id ASC`)
+    .all(...params) as MessageRow[];
+  return rows.map(rowToEvent);
 }
 
 // Bounded context window around an arbitrary message id. Used by the

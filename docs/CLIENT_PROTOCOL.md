@@ -507,13 +507,13 @@ is emitted immediately from the server's optimistic local copy.
 
 ### Sync & fetch
 
-| `type`            | Fields                                                                                                      | Reply                                            |
-| ----------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `snapshot`        | —                                                                                                           | Re-runs the snapshot burst as a gap-fill (§4.4)  |
-| `history`         | `networkId, target, mode: before\|after\|around\|latest, limit (1–500), token?, before?/afterId?/anchorId?` | `{kind:'history'}` (§8)                          |
-| `search`          | `query, networkId?, target?, nick?, nicks?, before?, limit?, token?`                                        | `{kind:'search-result'}`                         |
-| `list-channels` ⏸ | `networkId`                                                                                                 | Kicks off `/LIST`; progress via `chanlist-state` |
-| `chanlist-search` | `networkId, query, sortBy, sortDir, offset, limit`                                                          | `{kind:'chanlist-result'}`                       |
+| `type`            | Fields                                                                                                                | Reply                                            |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `snapshot`        | —                                                                                                                     | Re-runs the snapshot burst as a gap-fill (§4.4)  |
+| `history`         | `networkId, target, mode: before\|after\|around\|latest, limit (1–500), token?, countBy?, before?/afterId?/anchorId?` | `{kind:'history'}` (§8)                          |
+| `search`          | `query, networkId?, target?, nick?, nicks?, before?, limit?, token?`                                                  | `{kind:'search-result'}`                         |
+| `list-channels` ⏸ | `networkId`                                                                                                           | Kicks off `/LIST`; progress via `chanlist-state` |
+| `chanlist-search` | `networkId, query, sortBy, sortDir, offset, limit`                                                                    | `{kind:'chanlist-result'}`                       |
 
 ### E2E (RPE2E, per-channel opt-in)
 
@@ -621,6 +621,41 @@ connection-independent — offline networks still serve it.
 `hasMoreOlder`). Echo the request `token` discipline the web client uses if you
 pipeline requests: keep a monotonically increasing token and drop any reply
 whose token you've superseded.
+
+### `countBy` — what `limit` counts
+
+`limit` counts **stored rows**. If you consolidate presence noise — both
+first-party clients fold runs of `join`/`part`/`quit`/`nick`/`chghost` into one
+summary line, per `shared/consolidate.ts`, which is the canonical set — that is
+not the unit you render in, and on a busy channel the
+gap is enormous: a 100-row page out of a netsplit can render as three visible
+lines. You fetch, fold it to nothing, notice the page was short, fetch again —
+and the user watches the buffer assemble itself.
+
+Send **`countBy:'renderable'`** (modes `before`, `after`, `latest`) and the
+server sizes the page in rows that render as their own line. The consolidatable
+rows still come back — consolidation needs the whole run to summarize it — they
+just don't spend the budget. Default is `'event'`, i.e. today's behavior; an
+older server ignores the field and answers exactly as before.
+
+- **What counts as renderable is the complement of the fold set**, not
+  "messages". A `kick`, `mode`, `topic`, `error`, or `invite` each renders
+  standalone, so each is worth one slot.
+- **The slice is still a contiguous id range**, exactly like an event-counted
+  one. `hasMoreOlder`, prepend-and-dedupe, and the `before: <oldest returned
+id>` cursor are unchanged. This cannot open a hole.
+- **The scan is capped** (2000 rows). Past the cap you get fewer renderable rows
+  than you asked for and `hasMoreOlder` stays true — a buffer holding tens of
+  thousands of joins between two sentences degrades to today's behavior instead
+  of shipping a huge frame.
+- **Only ask for it if you actually fold.** If your client renders every event
+  as its own line (the web client makes this a user setting), `'event'` is
+  already the right unit, and `'renderable'` would hand you up to a full scan
+  window of rows you then display in full.
+- **Re-arm your pager if your own ring trims the reply.** `hasMoreOlder`
+  describes the slice the server _sent_. A renderable-counted page can exceed a
+  fixed in-memory cap, and dropping rows off the old edge means there is more
+  older history than you hold regardless of what the flag said.
 
 **Jump-to-message detaches the buffer** (Discord/Slack convention): after
 `around`, live events for that buffer should _not_ be spliced into the visible
@@ -954,7 +989,8 @@ What the iOS app actually ships with (`FrameParser.parseWs`,
 - **`irc` types rendered:** `message`, `action`, `notice`, `error`, `system`,
   `join`, `part`, `quit`, `nick`, `kick`, `mode`, `topic`, `motd`, `invite`
   (plus `channel-topic` for state). Unknown → drop.
-- **Send verbs (8):** `presence`, `send`, `history` (`before`/`latest`),
+- **Send verbs (8):** `presence`, `send`, `history` (`before`/`latest`; add
+  `countBy:'renderable'` if you consolidate — §8),
   `mark-read`, `mark-all-read`, `join`, `open-buffer`, `close-buffer`.
 - **REST (4):** `POST /api/auth/login/token` (or the CP login), `GET
 /api/networks`, `POST /api/auth/logout`, and optionally `GET

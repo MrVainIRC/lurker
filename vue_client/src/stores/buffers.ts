@@ -6,6 +6,7 @@ import { useNetworksStore } from './networks.js';
 import { useToastsStore } from './toasts.js';
 import { socketSend } from '../composables/useSocket.js';
 import { SYSTEM_KEY } from '../lib/virtualBuffers.js';
+import { historyCountBy } from '../lib/historyPaging.js';
 
 const MAX_PER_BUFFER = 500;
 const MAX_SPEAKERS = 128;
@@ -584,13 +585,15 @@ export const useBuffersStore = defineStore('buffers', {
         (e) => (e.id == null || !existing.has(e.id)) && e.type !== 'away' && e.type !== 'back',
       );
       const combined = [...buf.messages, ...fresh];
-      buf.messages =
-        combined.length > MAX_PER_BUFFER
-          ? combined.slice(combined.length - MAX_PER_BUFFER)
-          : combined;
+      const evictedOlder = combined.length > MAX_PER_BUFFER;
+      buf.messages = evictedOlder ? combined.slice(combined.length - MAX_PER_BUFFER) : combined;
       buf.oldestId = buf.messages[0]?.id ?? buf.oldestId;
       buf.newestId = buf.messages[buf.messages.length - 1]?.id ?? buf.newestId;
       buf.hasMoreNewer = !!hasMoreNewer;
+      // We just evicted rows off the old edge, so there is provably more older
+      // history than we hold — whatever the pager thought before. Re-arming it
+      // here is what keeps the eviction from reading as "start of buffer".
+      if (evictedOlder) buf.hasMoreOlder = true;
       buf.loadingHistory = false;
       if (speakers !== undefined) this.seedSpeakers(networkId, target, speakers);
     },
@@ -662,7 +665,9 @@ export const useBuffersStore = defineStore('buffers', {
       buf.messages = filtered.slice(-MAX_PER_BUFFER);
       buf.oldestId = buf.messages[0]?.id ?? null;
       buf.newestId = buf.messages[buf.messages.length - 1]?.id ?? null;
-      buf.hasMoreOlder = !!payload.hasMoreOlder;
+      // Same eviction rule as applyLatestReplace: an `around` window tops out at
+      // 2×limit+1 rows, which already exceeds the ring at the default limit.
+      buf.hasMoreOlder = filtered.length > buf.messages.length || !!payload.hasMoreOlder;
       buf.hasMoreNewer = !!payload.hasMoreNewer;
       buf.pendingHistoryToken = null;
       buf.loadingHistory = false;
@@ -692,6 +697,9 @@ export const useBuffersStore = defineStore('buffers', {
         target,
         token,
         limit,
+        // This is the hydrate — the fetch that fills the FIRST screenful, and so
+        // the one the spin-loop was most visible on.
+        countBy: historyCountBy(),
       });
       // socketSend returns false when the socket isn't open. No response will
       // arrive to clear loadingHistory — so without this rollback the buffer
@@ -741,6 +749,12 @@ export const useBuffersStore = defineStore('buffers', {
         (e: BufferMessage) => e.type !== 'away' && e.type !== 'back',
       );
       buf.messages = filtered.slice(-MAX_PER_BUFFER);
+      // The ring dropped rows off the old edge. `payload.hasMoreOlder` was
+      // computed by the server against the WHOLE slice it sent, so honoring a
+      // `false` here would strand the pager on history we evicted ourselves —
+      // and countBy:'renderable' can legitimately make a slice bigger than the
+      // ring (a netsplit's worth of noise rides along with the page).
+      const evictedOlder = filtered.length > buf.messages.length;
       buf.oldestId = buf.messages[0]?.id ?? null;
       buf.newestId = buf.messages[buf.messages.length - 1]?.id ?? null;
       // A token-matched latest reply is TERMINAL hydration even when every row
@@ -752,7 +766,7 @@ export const useBuffersStore = defineStore('buffers', {
       // messages yet." between attempts. Clamping to false costs nothing: an
       // empty buffer has no anchor row, so the upward pager can't page it
       // anyway.
-      buf.hasMoreOlder = filtered.length > 0 ? !!payload.hasMoreOlder : false;
+      buf.hasMoreOlder = filtered.length > 0 ? evictedOlder || !!payload.hasMoreOlder : false;
       buf.hasMoreNewer = false;
       buf.detached = false;
       buf.liveDuringDetach = 0;

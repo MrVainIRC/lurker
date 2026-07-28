@@ -30,6 +30,7 @@ vi.mock('../composables/useSocket.js', () => ({
 }));
 
 import { useBuffersStore, bufferNeedsHydration } from './buffers.js';
+import { useSettingsStore } from './settings.js';
 import { socketSend } from '../composables/useSocket.js';
 
 // The store always seeds the app-scoped system buffer (#355). These tests assert
@@ -706,5 +707,90 @@ describe('hydration lifecycle (blank-buffer fix)', () => {
         expect.objectContaining({ type: 'history', mode: 'latest', target: '#a' }),
       );
     });
+  });
+});
+
+// WS_PROTOCOL_FIXES #10. Two halves of one rule: ask the server to size a page
+// in the unit we render it in, and don't let our own ring silently swallow the
+// extra rows that unit brings with it.
+describe('renderable-counted history paging', () => {
+  const useSettings = () => useSettingsStore();
+
+  it('asks for renderable-counted pages while consolidation is on', () => {
+    const store = useBuffersStore();
+    vi.mocked(socketSend).mockReturnValue(true);
+
+    store.reattachToLive(1, '#a');
+
+    expect(socketSend).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'history', mode: 'latest', countBy: 'renderable' }),
+    );
+  });
+
+  it('falls back to event counting when the user turned consolidation off', () => {
+    // With every event rendering as its own line, 'event' IS the unit we render
+    // in — and asking for 'renderable' would drag the server's whole scan window
+    // into a page the user then sees in full.
+    const store = useBuffersStore();
+    useSettings().values['chat.consolidate_joins'] = false;
+    vi.mocked(socketSend).mockReturnValue(true);
+
+    store.reattachToLive(1, '#a');
+
+    expect(socketSend).toHaveBeenCalledWith(expect.objectContaining({ countBy: 'event' }));
+  });
+
+  it('re-arms the upward pager when a latest slice overflows the ring', () => {
+    // The server computes hasMoreOlder against the WHOLE slice it sent. A
+    // renderable-counted page can exceed our 500-row ring (a netsplit's noise
+    // rides along), and honoring a `false` after trimming would strand the pager
+    // on history we evicted ourselves.
+    const store = useBuffersStore();
+    vi.mocked(socketSend).mockReturnValue(true);
+    store.reattachToLive(1, '#a');
+    const token = store.byKey('1::#a')!.pendingHistoryToken;
+
+    const events = Array.from({ length: 600 }, (_, i) => ({
+      networkId: 1,
+      target: '#a',
+      id: i + 1,
+      type: 'message',
+      nick: 'bob',
+      body: 'x',
+    }));
+    store.applyLatestReplace(1, '#a', { token, events, hasMoreOlder: false });
+
+    const buf = store.byKey('1::#a')!;
+    expect(buf.messages).toHaveLength(500);
+    expect(buf.messages[0].id).toBe(101); // oldest 100 evicted
+    expect(buf.hasMoreOlder).toBe(true);
+  });
+
+  it('re-arms the upward pager when appendHistory evicts off the old edge', () => {
+    const store = useBuffersStore();
+    vi.mocked(socketSend).mockReturnValue(true);
+    store.reattachToLive(1, '#a');
+    const token = store.byKey('1::#a')!.pendingHistoryToken;
+    const row = (id: number) => ({
+      networkId: 1,
+      target: '#a',
+      id,
+      type: 'message',
+      nick: 'bob',
+      body: 'x',
+    });
+    store.applyLatestReplace(1, '#a', {
+      token,
+      events: Array.from({ length: 500 }, (_, i) => row(i + 1)),
+      hasMoreOlder: false,
+    });
+    const buf = store.byKey('1::#a')!;
+    expect(buf.hasMoreOlder).toBe(false); // nothing evicted yet
+
+    store.appendHistory(1, '#a', [row(501), row(502)], false, undefined);
+
+    expect(buf.messages).toHaveLength(500);
+    expect(buf.messages[0].id).toBe(3);
+    expect(buf.hasMoreOlder).toBe(true);
   });
 });
