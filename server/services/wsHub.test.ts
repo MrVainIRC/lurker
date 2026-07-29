@@ -23,6 +23,8 @@ let ircManager: typeof import('./ircManager.js').default;
 let buildBufferBacklog: typeof import('./wsHub.js').buildBufferBacklog;
 let buildBufferShell: typeof import('./wsHub.js').buildBufferShell;
 let buildResumeSlice: typeof import('./wsHub.js').buildResumeSlice;
+let RESUME_GAP_CAP: typeof import('./wsHub.js').RESUME_GAP_CAP;
+let RESUME_LATEST_LIMIT: typeof import('./wsHub.js').RESUME_LATEST_LIMIT;
 let buildOfflineBacklogFrames: typeof import('./wsHub.js').buildOfflineBacklogFrames;
 let maxMessageId: typeof import('../db/messages.js').maxMessageId;
 let handleOpenBuffer: typeof import('./wsHub.js').handleOpenBuffer;
@@ -54,6 +56,8 @@ beforeAll(async () => {
     buildBufferBacklog,
     buildBufferShell,
     buildResumeSlice,
+    RESUME_GAP_CAP,
+    RESUME_LATEST_LIMIT,
     buildOfflineBacklogFrames,
     handleOpenBuffer,
     sweepWsHeartbeat,
@@ -228,9 +232,11 @@ describe('buildBufferBacklog', () => {
 });
 
 describe('buildResumeSlice', () => {
-  // Mirrors the server-side constants in wsHub.ts. If those change, these move.
-  const RESUME_GAP_CAP = 500;
-  const RESUME_LATEST_LIMIT = 200;
+  // The REAL constants, imported rather than mirrored. A local copy passes even
+  // when it has drifted: raise the server's cap to 800 and a test seeding 500
+  // stops being a boundary case and becomes an ordinary sub-cap gap — still
+  // green, no longer guarding anything. (Lowering the cap fails loudly, so only
+  // the raise direction was silent, which is the one that goes unnoticed.)
 
   it('ships just the missed gap and does not reset when it fits the cap', () => {
     const since = seed('#resumeSmall', 'm0');
@@ -281,6 +287,27 @@ describe('buildResumeSlice', () => {
     expect((slice.events.at(-1) as { id: number }).id).toBe(lastId);
     // There's older history beyond the latest slice — the client can page up.
     expect(slice.hasMoreOlder).toBe(true);
+  });
+
+  it('appends a gap that exactly fills the cap without truncating it (#469)', () => {
+    // THE boundary. A gap of exactly RESUME_GAP_CAP rows is complete — the cap
+    // bounded it but nothing was dropped — so it must still append. Getting this
+    // wrong resets the client wholesale on a gap that fit, throwing away its
+    // scrollback for no reason.
+    //
+    // Guards the probe-first rewrite specifically: the old test was "did the read
+    // fill the cap AND is there another row after the last one I read", the new
+    // one is "are there MORE than cap rows after the cursor". They agree only if
+    // the probe's offset is exact — an off-by-one here flips this case to
+    // 'replace' and the cap+10 case above would never catch it.
+    const since = seed('#resumeExact', 'm0');
+    let lastId = since;
+    for (let i = 1; i <= RESUME_GAP_CAP; i++) lastId = seed('#resumeExact', `m${i}`);
+    const slice = buildResumeSlice(userId, networkId, '#resumeExact', since);
+    expect(slice.mode).toBe('append');
+    expect(slice.reset).toBe(false);
+    expect(slice.events.length).toBe(RESUME_GAP_CAP);
+    expect((slice.events.at(-1) as { id: number }).id).toBe(lastId);
   });
 
   it('ships the latest slice without reset on first connect (sinceId=0)', () => {

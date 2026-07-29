@@ -21,6 +21,7 @@ let listMessagesAround: typeof import('./messages.js').listMessagesAround;
 let listMessagesCounted: typeof import('./messages.js').listMessagesCounted;
 let searchMessages: typeof import('./messages.js').searchMessages;
 let countNewer: typeof import('./messages.js').countNewer;
+let hasMoreThan: typeof import('./messages.js').hasMoreThan;
 let countServerBufferUnread: typeof import('./messages.js').countServerBufferUnread;
 let typeCountsForUnread: typeof import('./messages.js').typeCountsForUnread;
 let countHighlightsNewer: typeof import('./messages.js').countHighlightsNewer;
@@ -44,6 +45,7 @@ beforeAll(async () => {
     listMessagesCounted,
     searchMessages,
     countNewer,
+    hasMoreThan,
     countServerBufferUnread,
     typeCountsForUnread,
     countHighlightsNewer,
@@ -1441,5 +1443,75 @@ describe('listMessagesAround countBy', () => {
     // Still one contiguous run, so the paging cursors either side stay valid.
     const rendIds = renderable.events.map((e) => e.id);
     expect(rendIds.at(-1)! - rendIds[0] + 1).toBe(rendIds.length);
+  });
+});
+
+describe('hasMoreThan (#469 resume-gap probe)', () => {
+  // The connect snapshot decides append-vs-replace on this one boolean, so its
+  // boundary IS the protocol decision: one off-by-one silently flips a gap-fill
+  // into a wholesale replace and throws away the client's scrollback.
+  const setup = (name: string) => {
+    const user = createUser(name);
+    const net = createNetwork(user.id, {
+      name: 'n',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: name,
+    });
+    return net!.id;
+  };
+
+  it('is exclusive at the boundary: exactly `count` rows is NOT more than `count`', () => {
+    const net = setup('hmt-boundary');
+    const since = chat(net, '#b', 'a', 'cursor').id;
+    const ids = Array.from({ length: 10 }, (_, i) => chat(net, '#b', 'a', `m${i}`).id);
+    expect(hasMoreThan(net, '#b', since, 10)).toBe(false); // exactly 10 after
+    expect(hasMoreThan(net, '#b', since, 9)).toBe(true); // 10 > 9
+    chat(net, '#b', 'a', 'one more');
+    expect(hasMoreThan(net, '#b', since, 10)).toBe(true); // now 11
+    // Anchored on the CURSOR, not on the buffer's size.
+    expect(hasMoreThan(net, '#b', ids[4], 6)).toBe(false); // 6 rows after ids[4]
+    expect(hasMoreThan(net, '#b', ids[4], 5)).toBe(true);
+  });
+
+  it('counts only THIS buffer, since message ids are a global sequence', () => {
+    // The reason the probe uses OFFSET rather than id arithmetic. Interleaving a
+    // second buffer inflates the id span without adding rows here, so any
+    // `afterId + count` shortcut would report the gap as overflowed.
+    const net = setup('hmt-global-ids');
+    const since = chat(net, '#quiet', 'a', 'cursor').id;
+    for (let i = 0; i < 50; i++) chat(net, '#loud', 'a', `noise${i}`);
+    chat(net, '#quiet', 'a', 'only one more');
+    expect(hasMoreThan(net, '#quiet', since, 1)).toBe(false);
+    expect(hasMoreThan(net, '#quiet', since, 0)).toBe(true);
+    expect(hasMoreThan(net, '#loud', since, 49)).toBe(true);
+    expect(hasMoreThan(net, '#loud', since, 50)).toBe(false);
+  });
+
+  it('handles an empty gap, an unknown buffer, and a cursor past the tail', () => {
+    const net = setup('hmt-edges');
+    const tail = chat(net, '#e', 'a', 'only').id;
+    expect(hasMoreThan(net, '#e', tail, 0)).toBe(false); // nothing after the tail
+    expect(hasMoreThan(net, '#e', 0, 0)).toBe(true); // one row from the start
+    expect(hasMoreThan(net, '#e', tail + 1000, 0)).toBe(false); // cursor past the end
+    expect(hasMoreThan(net, '#nope', 0, 0)).toBe(false); // no such buffer
+  });
+
+  it('agrees with the read-then-measure test it replaced', () => {
+    // The probe exists to avoid READING the gap, so pin it against the thing it
+    // replaced: "the capped read filled up AND another row exists past its last".
+    // Any divergence here is a behaviour change wearing a performance label.
+    const net = setup('hmt-oracle');
+    const since = chat(net, '#o', 'a', 'cursor').id;
+    const CAP = 8;
+    for (let n = 0; n <= 12; n++) {
+      if (n > 0) chat(net, '#o', 'a', `m${n}`);
+      const gap = listMessages(net, '#o', { afterId: since, limit: CAP });
+      const lastGapId = gap.length ? gap[gap.length - 1].id : since;
+      const oracle =
+        gap.length >= CAP && listMessages(net, '#o', { afterId: lastGapId, limit: 1 }).length > 0;
+      expect(hasMoreThan(net, '#o', since, CAP)).toBe(oracle);
+    }
   });
 });

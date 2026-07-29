@@ -33,6 +33,7 @@ import {
   listMessagesAround,
   hasOlderRow,
   hasNewerRow,
+  hasMoreThan,
   hasMessageForTarget,
   listSpeakers,
   countNewer,
@@ -831,10 +832,10 @@ export function buildBufferShell(
 // Upper bound on how many missed rows a resume frame ships per buffer. Wider
 // than the first-connect default so a normal flap fills in one shot, but
 // bounded so a long disconnect can't produce an unbounded payload.
-const RESUME_GAP_CAP = 500;
+export const RESUME_GAP_CAP = 500;
 // When the gap exceeds the cap we fall back to a fresh latest slice; size it
 // to match the first-connect default.
-const RESUME_LATEST_LIMIT = 200;
+export const RESUME_LATEST_LIMIT = 200;
 
 // Per-buffer input-history slice shipped for up-arrow recall (on a :server:
 // backlog, a resume frame, or a shell's 'history' latest hydrate). This is the
@@ -903,10 +904,17 @@ export function buildResumeSlice(
   sinceId: number,
 ): { events: DecoratedEvent[]; reset: boolean; mode: BacklogMode; hasMoreOlder: boolean } {
   if (sinceId > 0) {
-    const gap = listMessages(networkId, target, { afterId: sinceId, limit: RESUME_GAP_CAP });
-    const lastGapId = gap.length ? (gap[gap.length - 1].id ?? sinceId) : sinceId;
-    const truncated = gap.length >= RESUME_GAP_CAP && hasNewerRow(networkId, target, lastGapId);
-    if (!truncated) {
+    // Ask whether the gap overflows BEFORE reading it. The truncation test used to
+    // be "read RESUME_GAP_CAP rows, and if we filled the cap, is there another one
+    // after the last?" — which meant a buffer that overflowed paid for a full
+    // capped read plus a decorate pass, then discarded every row and re-read a
+    // latest slice. That is the common case on a busy account after any real
+    // disconnect (every channel overflows), so the discarded work dominated the
+    // resume path. hasMoreThan settles the same question with one index-only
+    // probe. Equivalent by construction: "more than CAP rows exist after the
+    // cursor" is exactly what the old length-plus-hasNewerRow pair detected.
+    if (!hasMoreThan(networkId, target, sinceId, RESUME_GAP_CAP)) {
+      const gap = listMessages(networkId, target, { afterId: sinceId, limit: RESUME_GAP_CAP });
       // hasMoreOlder must be accurate even though a LOADED buffer ignores it
       // (gap-fill just appends): a client holding this buffer only as an empty
       // SHELL (the fresh-connect optimization) empty-seeds from this frame, and a
