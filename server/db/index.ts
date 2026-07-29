@@ -1053,23 +1053,29 @@ if (!hadNotableColumn) demoteLegacyServerStatusNotices();
 
 // Tell the operator before starting, because a silent stall here is
 // indistinguishable from a hang. The build blocks module import, is not
-// resumable, and on the spinning-disk installs this targets can take long
-// enough that a
-// supervisor (Docker restart policy, the control-plane heartbeat watchdog) kills
-// the container mid-build — SQLite then rolls it back and the next boot starts
-// over, which is a restart loop on precisely the installs the fix is for. An
-// operator who can see WHY boot is stalled can raise the timeout instead of
-// guessing. Only warns when there's enough history for the build to be slow, so
-// ordinary instances stay quiet.
-if (!indexExists('idx_messages_unread')) {
-  const rows = (db.prepare(`SELECT COUNT(*) AS n FROM messages`).get() as { n: number }).n;
-  if (rows > 250_000) {
-    console.warn(
-      `[db] building idx_messages_unread over ${rows.toLocaleString()} messages — one-time, ` +
-        `blocks startup, and can take minutes on slow storage. Do not kill the process: the ` +
-        `build is not resumable and a restart begins again from zero.`,
-    );
-  }
+// resumable, and on the spinning-disk installs this targets can take long enough
+// that a supervisor (Docker restart policy, the control-plane heartbeat
+// watchdog) kills the container mid-build — SQLite then rolls it back and the
+// next boot starts over, which is a restart loop on precisely the installs the
+// fix is for. An operator who can see WHY boot is stalled can raise the timeout
+// instead of guessing. Only warns when there's enough history for the build to
+// be slow, so ordinary instances stay quiet.
+//
+// The threshold test is an OFFSET probe, not COUNT(*). Counting the table to
+// decide whether to warn about a slow scan would itself be a full scan — silent,
+// and on exactly the cold-cache/spinning-disk install the warning exists for, so
+// it would just move the unexplained silence earlier. This stops at the
+// threshold. (Same idiom as messages.ts hasMoreThan, for the same reason.)
+const INDEX_BUILD_WARN_ROWS = 250_000;
+if (
+  !indexExists('idx_messages_unread') &&
+  db.prepare(`SELECT 1 FROM messages LIMIT 1 OFFSET ?`).get(INDEX_BUILD_WARN_ROWS)
+) {
+  console.warn(
+    `[db] building idx_messages_unread over ${INDEX_BUILD_WARN_ROWS.toLocaleString()}+ ` +
+      `messages — one-time, blocks startup, and can take minutes on slow storage. Do not ` +
+      `kill the process: the build is not resumable and a restart begins again from zero.`,
+  );
 }
 db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_unread
          ON messages(network_id, target, id DESC, type, from_ignored, notable)`);

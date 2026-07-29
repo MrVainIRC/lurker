@@ -832,10 +832,10 @@ export function buildBufferShell(
 // Upper bound on how many missed rows a resume frame ships per buffer. Wider
 // than the first-connect default so a normal flap fills in one shot, but
 // bounded so a long disconnect can't produce an unbounded payload.
-const RESUME_GAP_CAP = 500;
+export const RESUME_GAP_CAP = 500;
 // When the gap exceeds the cap we fall back to a fresh latest slice; size it
 // to match the first-connect default.
-const RESUME_LATEST_LIMIT = 200;
+export const RESUME_LATEST_LIMIT = 200;
 
 // Per-buffer input-history slice shipped for up-arrow recall (on a :server:
 // backlog, a resume frame, or a shell's 'history' latest hydrate). This is the
