@@ -283,6 +283,27 @@ describe('buildResumeSlice', () => {
     expect(slice.hasMoreOlder).toBe(true);
   });
 
+  it('appends a gap that exactly fills the cap without truncating it (#469)', () => {
+    // THE boundary. A gap of exactly RESUME_GAP_CAP rows is complete — the cap
+    // bounded it but nothing was dropped — so it must still append. Getting this
+    // wrong resets the client wholesale on a gap that fit, throwing away its
+    // scrollback for no reason.
+    //
+    // Guards the probe-first rewrite specifically: the old test was "did the read
+    // fill the cap AND is there another row after the last one I read", the new
+    // one is "are there MORE than cap rows after the cursor". They agree only if
+    // the probe's offset is exact — an off-by-one here flips this case to
+    // 'replace' and the cap+10 case above would never catch it.
+    const since = seed('#resumeExact', 'm0');
+    let lastId = since;
+    for (let i = 1; i <= RESUME_GAP_CAP; i++) lastId = seed('#resumeExact', `m${i}`);
+    const slice = buildResumeSlice(userId, networkId, '#resumeExact', since);
+    expect(slice.mode).toBe('append');
+    expect(slice.reset).toBe(false);
+    expect(slice.events.length).toBe(RESUME_GAP_CAP);
+    expect((slice.events.at(-1) as { id: number }).id).toBe(lastId);
+  });
+
   it('ships the latest slice without reset on first connect (sinceId=0)', () => {
     seed('#resumeFresh', 'a');
     seed('#resumeFresh', 'b');
