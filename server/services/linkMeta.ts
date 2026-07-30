@@ -400,7 +400,12 @@ const NAMED_ENTITIES: Record<string, string> = Object.assign(Object.create(null)
  * rather than making everyone else's apostrophes look broken.
  */
 export function decodeEntities(text: string): string {
-  return text.replace(/&(#x?[0-9a-f]+|[a-z][a-z0-9]*);/gi, (match, body: string) => {
+  // ⚠ The hex and decimal forms are separate alternatives on purpose. A combined
+  // `#x?[0-9a-f]+` let the DECIMAL branch match hex letters, and `parseInt(body, 10)` then
+  // prefix-parsed what it was handed: `&#99f;` decoded to `c` and `&#65a;` to `A`, where the
+  // docblock and the "leaves malformed references alone" test both say they stay literal.
+  // Splitting the alternatives means a malformed reference matches nothing at all.
+  return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]*);/gi, (match, body: string) => {
     if (body[0] === '#') {
       const code =
         body[1] === 'x' || body[1] === 'X'

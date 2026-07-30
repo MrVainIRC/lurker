@@ -25,6 +25,20 @@ describe('decodeEntities', () => {
     expect(decodeEntities('&#999999999;')).toBe('&#999999999;');
   });
 
+  it('does not let a decimal reference carry hex letters', () => {
+    // ⚠ Regression guard, found by Copilot. A combined `#x?[0-9a-f]+` alternative let the
+    // DECIMAL branch match hex digits, and `parseInt(body, 10)` prefix-parsed the result —
+    // `&#99f;` decoded to `c`, `&#65a;` to `A`. The test above says malformed references stay
+    // literal; these were silently decoding to whatever their numeric prefix happened to mean.
+    expect(decodeEntities('&#99f;')).toBe('&#99f;');
+    expect(decodeEntities('&#65a;')).toBe('&#65a;');
+    expect(decodeEntities('&#12e;')).toBe('&#12e;');
+    // The well-formed cases both still decode, in either case.
+    expect(decodeEntities('&#65;')).toBe('A');
+    expect(decodeEntities('&#x41;')).toBe('A');
+    expect(decodeEntities('&#X41;')).toBe('A');
+  });
+
   it('does not double-decode', () => {
     // A site that double-escapes gets `&amp;` back, not `&`. Decoding twice
     // would be a mangling risk for everyone else.
