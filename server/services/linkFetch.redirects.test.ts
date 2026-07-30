@@ -96,6 +96,36 @@ describe('pinnedLookup, on the path where it actually runs', () => {
   });
 });
 
+describe('the Content-Type a real origin sends', () => {
+  it('splits into a bare type and the declared charset', async () => {
+    // ⚠ The producer half of a seam that was broken end to end. `decodeBody` used to re-parse
+    // a header it was never given — callers had only `contentType`, stripped of its
+    // parameters — so a page served in a non-UTF-8 encoding decoded as UTF-8 and rendered as
+    // replacement characters. `decodeBody` now takes `charset`; this asserts something real
+    // arrives in it, off a live response rather than a hand-built object.
+    reset((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/HTML; charset="Windows-1251"' });
+      res.end('<head><title>ARRIVED</title></head>');
+    });
+    const res = await safeRequest(new URL(`${base}/page`));
+    expect(res.contentType).toBe('text/html');
+    expect(res.charset).toBe('windows-1251');
+    // And it survives buffering, which is the object the scraper actually holds.
+    const buffered = await bufferStream(res, { maxBytes: 4096 });
+    expect(buffered.charset).toBe('windows-1251');
+  });
+
+  it('reports no charset when the origin declared none', async () => {
+    reset((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<head></head>');
+    });
+    const res = await safeRequest(new URL(`${base}/page`));
+    expect(res.charset).toBeNull();
+    res.stream.destroy();
+  });
+});
+
 describe('safeRequest — following redirects', () => {
   it('follows a hop and reports the URL it ENDED at', async () => {
     // `finalUrl` is the base for resolving a relative og:image, so a stale one silently points
