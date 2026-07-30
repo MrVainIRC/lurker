@@ -90,6 +90,13 @@ export const MAX_URLS_PER_REQUEST = 20;
  * which is a change to the fetcher, not to its caller. Bounding it here is what's available,
  * and it is strictly better than not bounding it.
  *
+ * ⚠ "Fetches in flight" is only true because RESOLVE_DEADLINE_MS **aborts** rather than merely
+ * stops waiting. Racing a promise abandons the work, and an abandoned fetch keeps its socket
+ * for its own hop budget — so releasing the slot at that moment let the pool undercount its own
+ * work, and a run of slow origins pushed the real number of live fetches past MAX_CONCURRENT
+ * without bound. The signal threaded through `doResolve` is what makes the release honest, and
+ * it is load-bearing for this paragraph rather than a tidiness.
+ *
  * ⚠ Do NOT try to bound this with `maxSockets` on linkFetch's agents instead. node marks a
  * request `shouldKeepAlive = false` only when `!agent.keepAlive && !isFinite(agent.maxSockets)`,
  * and the agent hands a released socket to a queued same-host request before it ever consults
@@ -238,7 +245,11 @@ function kindForContentType(contentType: string): PreviewKind | null {
 
 /** Fetch a discovered oEmbed endpoint. Best-effort: a failure just means we fall
  *  back to whatever the Open Graph tags gave us. */
-async function fetchOEmbed(raw: string, base: URL): Promise<ReturnType<typeof readOEmbed>> {
+async function fetchOEmbed(
+  raw: string,
+  base: URL,
+  signal: AbortSignal,
+): Promise<ReturnType<typeof readOEmbed>> {
   // ⚠ The RESOLVE is inside the try, not just the normalize — the same shape `safeRequest`
   // needed for a redirect `Location`. `raw` is an href scraped out of a stranger's markup, and
   // `new URL('http://[', base)` throws ERR_INVALID_URL while BUILDING normalizeUrl's argument,
@@ -254,7 +265,11 @@ async function fetchOEmbed(raw: string, base: URL): Promise<ReturnType<typeof re
   }
   if (!url) return null;
   try {
-    const res = await fetchBuffered(url, { accept: 'application/json', maxBytes: 64 * 1024 });
+    const res = await fetchBuffered(url, {
+      accept: 'application/json',
+      maxBytes: 64 * 1024,
+      signal,
+    });
     if (res.status !== 200) return null;
     return readOEmbed(JSON.parse(res.body.toString('utf8')));
   } catch {
@@ -351,6 +366,7 @@ async function resolveScrapedPage(
   url: URL,
   body: Buffer,
   charset: string | null,
+  signal: AbortSignal,
 ): Promise<PreviewRecord> {
   // ⚠ The declared CHARSET, not the Content-Type header. `decodeBody` used to re-parse
   // `charset=…` out of what it was handed, but what reached it was `RawResponse.contentType`,
@@ -364,7 +380,7 @@ async function resolveScrapedPage(
   // Discovered oEmbed still wins over the scraped tags where a page advertises one, matching
   // Slack: it's a structured, versioned answer from the site itself rather than a bag of
   // strings. This is the discovery path, for sites not in the provider table.
-  const oembed = meta.oembedUrl ? await fetchOEmbed(meta.oembedUrl, url) : null;
+  const oembed = meta.oembedUrl ? await fetchOEmbed(meta.oembedUrl, url, signal) : null;
   return pageRecord(url, oembed, meta);
 }
 
@@ -395,7 +411,7 @@ async function imageDimensions(
   return null;
 }
 
-async function doResolve(raw: string): Promise<PreviewRecord> {
+async function doResolve(raw: string, signal: AbortSignal): Promise<PreviewRecord> {
   const url = normalizeUrl(raw);
   if (!url) return unavailable(raw);
   // ⚠ Re-checked on the NORMALISED form. The gate in `resolvePreview` measures the request
@@ -412,13 +428,13 @@ async function doResolve(raw: string): Promise<PreviewRecord> {
   // kilobyte. See `oembedEndpointFor`.
   const endpoint = oembedEndpointFor(url);
   if (endpoint) {
-    const oembed = await fetchOEmbed(endpoint, url);
+    const oembed = await fetchOEmbed(endpoint, url, signal);
     if (oembed?.title) return pageRecord(url, oembed, {});
     // Fall through and scrape. A provider can be down, or rate-limiting us, or have
     // retired an endpoint — none of which should mean no preview at all.
   }
 
-  const res = await safeRequest(url, {});
+  const res = await safeRequest(url, { signal });
   if (res.status !== 200) {
     res.stream.destroy();
     return unavailable(raw);
@@ -461,7 +477,7 @@ async function doResolve(raw: string): Promise<PreviewRecord> {
     maxBytes: MAX_SCRAPE_BYTES,
     stopAtHeadEnd: true,
   });
-  return await resolveScrapedPage(buffered.finalUrl, buffered.body, buffered.charset);
+  return await resolveScrapedPage(buffered.finalUrl, buffered.body, buffered.charset, signal);
 }
 
 /**
@@ -514,6 +530,8 @@ export async function resolvePreview(raw: string): Promise<PreviewRecord> {
     // consulting the DB cache again. That's permanent blankness, which is precisely what the
     // "deliberately not cached" note below was trying to avoid.
     let acquired = false;
+    // Tears the fetch down if the deadline fires, so the slot released below is genuinely free.
+    const controller = new AbortController();
     try {
       acquired = await pool.acquire();
       if (!acquired) {
@@ -523,7 +541,17 @@ export async function resolvePreview(raw: string): Promise<PreviewRecord> {
         // it out of OUR cache while telling the client to hold it for an hour achieved nothing.
         return unavailable(raw, TRANSIENT_TTL_MS);
       }
-      const resolved = await withDeadline(doResolve(raw), RESOLVE_DEADLINE_MS, 'resolve');
+      // ⚠ The deadline ABORTS the work, it doesn't merely stop waiting for it. Racing a promise
+      // abandons it, and abandoning is not ending: the fetch kept its socket for its own hop
+      // budget — up to minutes — while the `finally` below handed its pool slot to somebody
+      // else. So the pool undercounted its own work, and under a run of slow origins more than
+      // MAX_CONCURRENT fetches were live at once, without bound. A cap that a timeout quietly
+      // lifts is not a cap.
+      const resolved = await withDeadline(
+        doResolve(raw, controller.signal),
+        RESOLVE_DEADLINE_MS,
+        'resolve',
+      );
       // ⚠ Always echo the URL we were ASKED about, whatever the fetch ended up at.
       //
       // The endpoint's contract is one descriptor per input, in order, and callers look each
@@ -540,7 +568,10 @@ export async function resolvePreview(raw: string): Promise<PreviewRecord> {
       // ⚠ Running out of time is NOT a verdict about the URL — the origin was slow, which is a
       // fact about a moment. Cached, it would blank a perfectly good link for an hour on the
       // strength of one bad afternoon. Same treatment as pool saturation: no row, short TTL.
-      if (err instanceof DeadlineExceeded) return unavailable(raw, TRANSIENT_TTL_MS);
+      if (err instanceof DeadlineExceeded) {
+        controller.abort();
+        return unavailable(raw, TRANSIENT_TTL_MS);
+      }
       // An SSRF refusal is worth a line — it's either a misconfigured link or
       // somebody probing. Everything else (timeouts, resets, 403s) is ordinary
       // internet weather and would only be log noise.

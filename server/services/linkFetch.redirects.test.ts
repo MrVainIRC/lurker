@@ -294,3 +294,72 @@ describe('streaming, where the scrape-tuned bounds are wrong', () => {
     expect(body).toBe('startend');
   }, 20_000);
 });
+
+describe('abandoning a fetch, where it has to actually end it', () => {
+  it('destroys the connection when the caller aborts mid-body', async () => {
+    // ⚠⚠ Regression guard, and the proof is SERVER-SIDE for the same reason the redirect-body
+    // test's is: "the promise settled" says nothing about whether the socket is still open, and
+    // the socket is the whole point. A caller that gives up releases whatever it was holding —
+    // for the resolver, a slot out of an instance-wide concurrency cap — so a request that
+    // keeps running after being abandoned means the cap silently stops being one.
+    let finished: boolean | null = null;
+    const closed = new Promise<void>((resolve) => {
+      reset((_req, res) => {
+        res.on('error', () => {});
+        res.on('close', () => {
+          finished = res.writableFinished;
+          resolve();
+        });
+        res.writeHead(200, { 'content-type': 'text/html' });
+        res.write('<head><title>PARTIAL');
+        // deliberately never ended: only a teardown from our side can close this.
+      });
+    });
+
+    const controller = new AbortController();
+    const res = await safeRequest(new URL(`${base}/hangs`), { signal: controller.signal });
+    controller.abort();
+
+    await closed;
+    // The origin saw its response torn down without finishing, which is only possible because
+    // the abort reached the socket.
+    expect(finished).toBe(false);
+    expect(res.stream.destroyed).toBe(true);
+  });
+
+  it('refuses to dial at all for a signal that has already fired', async () => {
+    reset((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<head><title>SHOULD NOT BE FETCHED</title></head>');
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      safeRequest(new URL(`${base}/never`), { signal: controller.signal }),
+    ).rejects.toThrow(/abandoned/);
+    // Not "the fetch failed" — no request reached the origin at all.
+    expect(hits).toEqual([]);
+  });
+
+  it('stops a redirect walk it is part-way through', async () => {
+    // A walk is up to four requests. Aborting during hop 1 must not have hops 2 and 3 dialled
+    // on the caller's behalf — the per-hop check, not just the per-request one.
+    const controller = new AbortController();
+    reset((req, res) => {
+      if (req.url === '/hop1') {
+        controller.abort();
+        res.writeHead(302, { location: '/hop2' });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<head><title>ARRIVED ANYWAY</title></head>');
+    });
+
+    await expect(
+      safeRequest(new URL(`${base}/hop1`), { signal: controller.signal }),
+    ).rejects.toThrow(/abandoned/);
+    expect(hits).toEqual(['/hop1']);
+  });
+});

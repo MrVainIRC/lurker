@@ -234,6 +234,21 @@ export interface FetchOptions {
    * hostile host can hang us with nothing to show for it.
    */
   streaming?: boolean;
+  /**
+   * Tears the request down when it fires.
+   *
+   * ⚠ Without this, a caller that gives up on a fetch does not stop the fetch. That matters
+   * wherever giving up also releases a resource: the resolver bounds one URL's whole resolution
+   * and then frees its pool slot, so an abandoned-but-still-running request meant the pool
+   * undercounted its own work and more than MAX_CONCURRENT fetches could be live at once —
+   * under a run of slow origins, without bound. Abandoning work is not the same as ending it,
+   * and only the second one makes a concurrency cap mean anything.
+   *
+   * What it does NOT cancel is a pending `getaddrinfo`: node offers no way to, so a lookup
+   * keeps its libuv slot until the OS gives up. That gap is documented where it bites, on the
+   * resolver's pool.
+   */
+  signal?: AbortSignal;
   // ⚠ No byte ceiling here. It reads like it belongs — but nothing on this path consumes a
   // body, so nothing could enforce it, and an option that documents a guarantee it doesn't
   // provide is worse than no option. The cap lives in `BufferOptions`, where the read is.
@@ -287,6 +302,10 @@ function requestOnce(url: URL, opts: FetchOptions): Promise<RawResponse> {
   return new Promise((resolve, reject) => {
     /** Whether the response headers have arrived, which is what the timeouts above pivot on. */
     let headersSeen = false;
+    // Already given up before we dialled — don't open a socket to close it a tick later.
+    if (opts.signal?.aborted) {
+      return reject(new UnsafeUrlError('caller abandoned the request'));
+    }
     if (opts.range !== undefined && !RANGE_RE.test(opts.range)) {
       return reject(new UnsafeUrlError(`refusing to forward a malformed Range: ${opts.range}`));
     }
@@ -344,7 +363,18 @@ function requestOnce(url: URL, opts: FetchOptions): Promise<RawResponse> {
       req.destroy(new UnsafeUrlError(`hop took longer than ${HOP_DEADLINE_MS}ms`));
     }, HOP_DEADLINE_MS);
     deadline.unref();
-    req.on('close', () => clearTimeout(deadline));
+
+    // The caller gave up: end the request rather than leaving it running for whatever bound it
+    // would have hit on its own. Removed on `close` so a long-lived signal — one caller's
+    // controller outliving one hop of a redirect walk — doesn't accumulate listeners.
+    const onAbort = (): void => {
+      req.destroy(new UnsafeUrlError('caller abandoned the request'));
+    };
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    req.on('close', () => {
+      clearTimeout(deadline);
+      opts.signal?.removeEventListener('abort', onAbort);
+    });
     // ⚠ Only observable BEFORE the response headers arrive. After that this promise has already
     // resolved, so the reject is a no-op and the destroy surfaces to whoever holds the stream —
     // as an ordinary stream error, indistinguishable from a peer reset. `bufferStream` treats
@@ -375,6 +405,9 @@ export async function safeRequest(start: URL, opts: FetchOptions = {}): Promise<
   if (!entry) throw new UnsafeUrlError('refusing to fetch a disallowed URL');
   let url = entry;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    // Checked per hop, not just once: a redirect walk is up to four requests, and a caller that
+    // gave up during hop 1 must not have hops 2 and 3 dialled on its behalf.
+    if (opts.signal?.aborted) throw new UnsafeUrlError('caller abandoned the request');
     const res = await requestOnce(url, opts);
     const isRedirect = res.status >= 300 && res.status < 400 && res.headers.location;
     if (!isRedirect) return res;
