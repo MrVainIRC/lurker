@@ -29,8 +29,10 @@ export interface ScrapedMeta {
   description?: string;
   siteName?: string;
   imageUrl?: string;
-  /** og:type — `video.*` and `music.*` are the ones that change our rendering. */
-  ogType?: string;
+  // ⚠ No `ogType`. It was scraped, and documented as driving rendering, and read by nobody on
+  // any branch — what actually decides a video card is the provider table in linkEmbed.ts,
+  // because `og:type: video.other` on a site we have no embed URL for still renders as a page.
+  // A field carried through three PRs on the strength of its own comment is worse than absent.
   /** Discovered `<link rel=alternate type=application/json+oembed>` endpoint. */
   oembedUrl?: string;
 }
@@ -650,7 +652,12 @@ export function scrapeMeta(html: string): ScrapedMeta {
     'description',
     og.get('og:description') || twitter.get('twitter:description') || twitter.get('description'),
   );
-  assign('siteName', og.get('og:site_name') || twitter.get('twitter:site'));
+  // ⚠ `og:site_name` only. `twitter:site` is a HANDLE (`@nytimes`), not a site name — it names
+  // the account that owns the card, which is a different field wearing a similar key. Falling
+  // back to it put an @-handle in the card's site slot on every page that sets one and no
+  // `og:site_name`, which is a lot of them. With no site name the caller uses the hostname,
+  // which is always accurate and never someone's username.
+  assign('siteName', og.get('og:site_name'));
   assign(
     'imageUrl',
     primaryImage?.secureUrl ||
@@ -659,7 +666,6 @@ export function scrapeMeta(html: string): ScrapedMeta {
       twitter.get('twitter:image:src') ||
       imageSrc,
   );
-  assign('ogType', og.get('og:type'));
 
   // Decode and tidy at the boundary, so callers never handle a raw entity. An empty result is
   // an ABSENT field, not a present empty string: `content="   "` used to survive as `''`, and

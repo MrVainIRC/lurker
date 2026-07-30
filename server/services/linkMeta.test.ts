@@ -108,6 +108,19 @@ describe('scrapeMeta', () => {
     expect(meta.siteName).toBe('Unquoted');
   });
 
+  it('does not take a twitter:site handle as a site name', () => {
+    // ⚠ `twitter:site` is an @handle naming the ACCOUNT that owns the card, not the site. As a
+    // fallback it put `@nytimes` in the card's site slot for every page with a Twitter card and
+    // no og:site_name. Absent is the right answer: the caller falls back to the hostname, which
+    // is always accurate and is never somebody's username.
+    const meta = scrapeMeta(`<head>
+      <meta name="twitter:site" content="@nytimes">
+      <meta name="twitter:title" content="An Article">
+    </head>`);
+    expect(meta.siteName).toBeUndefined();
+    expect(meta.title).toBe('An Article');
+  });
+
   it('takes the first og:image when a page lists several', () => {
     const meta = scrapeMeta(`<head>
       <meta property="og:image" content="https://e.test/first.png">

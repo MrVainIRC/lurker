@@ -75,6 +75,28 @@ describe('optionVisible', () => {
   it('keeps paste-to-upload (a client UX pref, not a cost knob) visible in node edition', () => {
     expect(optionVisible(opt('uploads.paste.enabled'), { isNode: true })).toBe(true);
   });
+
+  it('hides a requiresFeature setting unless the instance advertises the feature', () => {
+    // Unlike selfHostedOnly — a cosmetic gate on a knob that still works — a flagged-off
+    // feature has no routes mounted at all, so the toggle would be inert. Both directions
+    // asserted: an absent flag object must read as off, not as unknown-so-show.
+    for (const key of ['chat.inline_media.enabled', 'chat.link_previews.enabled']) {
+      expect(optionVisible(opt(key), { isNode: false })).toBe(false);
+      expect(optionVisible(opt(key), { isNode: false, features: {} })).toBe(false);
+      expect(optionVisible(opt(key), { isNode: false, features: { linkPreviews: false } })).toBe(
+        false,
+      );
+      expect(optionVisible(opt(key), { isNode: false, features: { linkPreviews: true } })).toBe(
+        true,
+      );
+    }
+  });
+
+  it('leaves settings with no requiresFeature untouched by the flags', () => {
+    expect(optionVisible(opt('chat.image_modal.enabled'), { isNode: false, features: {} })).toBe(
+      true,
+    );
+  });
 });
 
 describe('optionEnabled (#666)', () => {
