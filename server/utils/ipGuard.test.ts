@@ -113,6 +113,33 @@ describe('isBlockedIpLiteral — IPv4-in-IPv6 tunnels', () => {
     expect(isBlockedIpLiteral('2606:4700:4700::1111')).toBe(false);
   });
 
+  it('refuses every shape of stray colon', () => {
+    // ⚠ Found by review after the two-elision case below. `.filter(g => g !== '')` dropped empty
+    // groups instead of rejecting them, so a leading, trailing or tripled colon all parsed as
+    // well-formed. Not reachable through a URL today — node's own parser rejects these first —
+    // but this guard is also called with DCC-supplied hosts, and "fails closed" has to mean it.
+    for (const bad of [':1:2:3:4:5:6:7:8', '1:2:3:4:5:6:7:8:', ':::1', 'a::b:', '::a:', ':']) {
+      expect(isBlockedIpLiteral(bad)).toBe(true);
+    }
+  });
+
+  it('refuses an elision that elides nothing', () => {
+    // ⚠ `::` must stand for AT LEAST one group. The lenient check didn't merely accept
+    // `1::2:3:4:5:6:7:8` — it silently REINTERPRETED it as `1:2:3:4:5:6:7:8`, a different
+    // address from the one written. A guard that judges a different address than the one that
+    // gets dialled is the classic parser-differential hole.
+    expect(isBlockedIpLiteral('1::2:3:4:5:6:7:8')).toBe(true);
+    expect(isBlockedIpLiteral('2001:0:0:0:0:0:0::1')).toBe(true);
+  });
+
+  it('still accepts the valid forms it has to', () => {
+    // The counterweight: strictness must not start refusing real addresses.
+    expect(isBlockedIpLiteral('2606:4700:4700::1111')).toBe(false); // elided middle
+    expect(isBlockedIpLiteral('2001:4860:4860:0:0:0:0:8888')).toBe(false); // fully spelled out
+    expect(isBlockedIpLiteral('::ffff:8.8.8.8')).toBe(false); // mapped, dotted
+    expect(isBlockedIpLiteral('::ffff:808:808')).toBe(false); // mapped, hex
+  });
+
   it('refuses a literal with two elisions instead of parsing it', () => {
     // `filter(g => g !== '')` swallowed the extra empty groups, so this parsed as valid — the
     // parser failing open in a guard whose whole premise is failing closed.

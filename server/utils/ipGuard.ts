@@ -59,65 +59,57 @@ export function isBlockedIpv4(ip: string): boolean {
  * because both call this.
  */
 function parseIpv6(input: string): number[] | null {
+  // A trailing dotted quad is rewritten into two hex groups FIRST, so everything below has a
+  // single parse path instead of a special case threaded through it. `::ffff:1.2.3.4` becomes
+  // `::ffff:0102:0304` and is then parsed like any other literal.
   let text = input;
-
-  // At most ONE elision. `filter(g => g !== '')` below silently swallows extra empty groups, so
-  // `2001::1::1` parsed as a perfectly good address — the parser failing open in a file whose
-  // whole premise is failing closed.
-  if (text.split('::').length > 2) return null;
-
-  // A trailing dotted quad contributes the last two groups.
-  const tail: number[] = [];
-  const dotted = /:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(text);
+  const dotted = /^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(text);
   if (dotted) {
-    const octets = dotted[1].split('.').map(Number);
+    const octets = dotted[2].split('.').map(Number);
     if (octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
-    tail.push((octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]);
-    text = text.slice(0, dotted.index + 1); // keep the ':' so the split below still works
+    const pair = (a: number, b: number): string => (((a << 8) | b) >>> 0).toString(16);
+    text = `${dotted[1]}${pair(octets[0], octets[1])}:${pair(octets[2], octets[3])}`;
   }
 
-  const elision = text.indexOf('::');
-  let head: string[];
-  let rest: string[];
-  if (elision === -1) {
-    head = text.split(':').filter((g) => g !== '');
-    rest = [];
-  } else {
-    head = text
-      .slice(0, elision)
-      .split(':')
-      .filter((g) => g !== '');
-    rest = text
-      .slice(elision + 2)
-      .split(':')
-      .filter((g) => g !== '');
-  }
-
-  const toGroup = (g: string): number | null => {
-    if (!/^[0-9a-f]{1,4}$/i.test(g)) return null;
-    return Number.parseInt(g, 16);
+  /**
+   * One colon-separated run of hex groups, or null if anything in it is malformed.
+   *
+   * ⚠ An empty group is REJECTED rather than dropped. The previous version used
+   * `.filter(g => g !== '')`, which silently accepted every kind of stray colon — a leading
+   * `:1:2:…`, a trailing `…:7:8:`, `:::1` — because the empty pieces just vanished. That's a
+   * parser failing open inside a guard whose whole premise is failing closed.
+   */
+  const groupsOf = (part: string): number[] | null => {
+    if (part === '') return [];
+    const out: number[] = [];
+    for (const g of part.split(':')) {
+      if (!/^[0-9a-f]{1,4}$/i.test(g)) return null;
+      out.push(Number.parseInt(g, 16));
+    }
+    return out;
   };
 
-  const headGroups: number[] = [];
-  for (const g of head) {
-    const v = toGroup(g);
-    if (v === null) return null;
-    headGroups.push(v);
-  }
-  const restGroups: number[] = [];
-  for (const g of rest) {
-    const v = toGroup(g);
-    if (v === null) return null;
-    restGroups.push(v);
-  }
-  restGroups.push(...tail);
+  const halves = text.split('::');
+  if (halves.length > 2) return null; // more than one elision — `2001::1::1`
 
-  const total = headGroups.length + restGroups.length;
-  if (elision === -1) {
-    return total === 8 ? [...headGroups, ...restGroups] : null;
+  if (halves.length === 1) {
+    const groups = groupsOf(text);
+    return groups !== null && groups.length === 8 ? groups : null;
   }
-  if (total > 8) return null;
-  return [...headGroups, ...Array.from<number>({ length: 8 - total }).fill(0), ...restGroups];
+
+  const left = groupsOf(halves[0]);
+  const right = groupsOf(halves[1]);
+  if (left === null || right === null) return null;
+
+  // ⚠ `>=`, not `>`. `::` must elide AT LEAST one group, so a literal that already spells out
+  // eight is malformed — and the lenient check didn't just accept it, it silently REINTERPRETED
+  // it: `1::2:3:4:5:6:7:8` came out as `1:2:3:4:5:6:7:8`, a different address from the one
+  // written. A guard that judges a different address than the one that gets dialled is the
+  // classic parser-differential hole, even when (as today) node rejects the literal first.
+  if (left.length + right.length >= 8) return null;
+
+  const elided = Array.from<number>({ length: 8 - left.length - right.length }).fill(0);
+  return [...left, ...elided, ...right];
 }
 
 /** The IPv4 embedded in an IPv6 address, for every notation that embeds one. */
