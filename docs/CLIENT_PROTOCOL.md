@@ -46,8 +46,17 @@ and the protocol version — before doing anything else:
 GET /api/config            (no auth)
 → { "edition": "standalone" | "node",
     "protocolVersion": 1,
-    "minProtocolVersion": 1 }
+    "minProtocolVersion": 1,
+    "features": { "linkPreviews": false } }
 ```
+
+`features` carries instance-level flags an operator turned on. Treat a missing
+flag as **off** — an older server that doesn't advertise one doesn't have it.
+Settings whose registry entry names a feature (`requiresFeature`) must be
+**hidden**, not merely disabled, when that flag is false: there is no server
+behind them, and the endpoints aren't mounted, so a toggle would do nothing.
+`linkPreviews` gates `chat.inline_media.enabled`, `chat.link_previews.enabled`,
+and the `/api/link-preview/*` endpoints.
 
 Node edition disables `/api/api-tokens`, `/mcp`, and `/uploads/*` static serving;
 standalone has no `/api/node/*`. The WS protocol itself is identical in both.

@@ -44,6 +44,26 @@ const IDLE_TIMEOUT_MS = 5000;
  * arrived returned and flagged `truncated`.
  */
 const HOP_DEADLINE_MS = 20_000;
+
+/**
+ * Idle allowance once a STREAMING consumer has its headers — see `FetchOptions.streaming`.
+ *
+ * ⚠ Both of the bounds above are wrong for a body that is piped rather than buffered, and the
+ * combination made `MAX_MEDIA_PROXY_BYTES` unreachable. `HOP_DEADLINE_MS` is cleared on the
+ * request's `close`, which does not fire during a body transfer, so any response still
+ * streaming at 20 s was cut — 64 MB inside 20 s needs ~26 Mbit/s sustained, so ordinary inline
+ * video died mid-playback. And `IDLE_TIMEOUT_MS` fires on a backpressured pipe: a <video> that
+ * has filled its buffer and stopped reading is normal playback, not a stall, but no bytes move
+ * and the socket times out.
+ *
+ * So a streaming caller keeps the deadline for connect-and-headers — the part that can hang
+ * with nothing to show for it — and then trades it for this, which bounds a genuinely dead
+ * origin while tolerating a reader that has paused. A stream cut here is recoverable rather
+ * than fatal: the proxy forwards `Accept-Ranges`, so a media element re-requests the range it
+ * still wants.
+ */
+const STREAM_IDLE_TIMEOUT_MS = 30_000;
+
 /** Redirects followed before giving up. Each hop is re-validated. */
 const MAX_REDIRECTS = 3;
 
@@ -204,6 +224,16 @@ export interface FetchOptions {
   /** A `Range` header to forward, so the byte proxy can serve partial content. Media elements
    *  require it: Safari won't play a <video> from a source that ignores ranges. */
   range?: string;
+  /**
+   * This caller will PIPE the body rather than buffer it.
+   *
+   * Swaps the hop deadline for `STREAM_IDLE_TIMEOUT_MS` once the response headers arrive. The
+   * defaults are tuned for a 512 KB scrape that completes in one burst, and applied to a media
+   * stream they cut a healthy transfer at 20 s and treat a paused reader as a dead origin.
+   * Connect and headers stay bounded by the deadline either way — that is the phase where a
+   * hostile host can hang us with nothing to show for it.
+   */
+  streaming?: boolean;
   // ⚠ No byte ceiling here. It reads like it belongs — but nothing on this path consumes a
   // body, so nothing could enforce it, and an option that documents a guarantee it doesn't
   // provide is worse than no option. The cap lives in `BufferOptions`, where the read is.
@@ -255,6 +285,8 @@ function parseContentType(raw: string): ContentType {
  */
 function requestOnce(url: URL, opts: FetchOptions): Promise<RawResponse> {
   return new Promise((resolve, reject) => {
+    /** Whether the response headers have arrived, which is what the timeouts above pivot on. */
+    let headersSeen = false;
     if (opts.range !== undefined && !RANGE_RE.test(opts.range)) {
       return reject(new UnsafeUrlError(`refusing to forward a malformed Range: ${opts.range}`));
     }
@@ -289,6 +321,14 @@ function requestOnce(url: URL, opts: FetchOptions): Promise<RawResponse> {
           res.destroy();
           return reject(new UnsafeUrlError(`unexpected content-encoding: ${encoding}`));
         }
+        headersSeen = true;
+        if (opts.streaming) {
+          // The deadline has done its job — it bounded connect and headers. Holding it through
+          // the body cuts every transfer that takes longer than 20 s, which for a media proxy
+          // is most of them.
+          clearTimeout(deadline);
+          req.setTimeout(STREAM_IDLE_TIMEOUT_MS);
+        }
         resolve({
           status: res.statusCode || 0,
           headers: res.headers,
@@ -309,7 +349,9 @@ function requestOnce(url: URL, opts: FetchOptions): Promise<RawResponse> {
     // resolved, so the reject is a no-op and the destroy surfaces to whoever holds the stream —
     // as an ordinary stream error, indistinguishable from a peer reset. `bufferStream` treats
     // both the same way: what arrived is a prefix, and it says so.
-    req.on('timeout', () => req.destroy(new UnsafeUrlError('timed out with no data')));
+    req.on('timeout', () =>
+      req.destroy(new UnsafeUrlError(headersSeen ? 'stalled mid-body' : 'timed out with no data')),
+    );
     req.on('error', reject);
     req.end();
   });

@@ -1,6 +1,8 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
+import { parseTruthyEnv } from './truthyEnv.js';
+
 /**
  * Whether link previews and inline media exist on this instance at all.
  *
@@ -23,6 +25,8 @@
  * its sharp, sqlite and http agents — into its module graph to read one environment variable.
  */
 export function previewsEnabled(): boolean {
-  const v = (process.env.LURKER_LINK_PREVIEWS || '').trim().toLowerCase();
-  return v === 'on' || v === '1' || v === 'true' || v === 'yes';
+  // Shares DCC's parser rather than hand-rolling a fifth truthy-env test in this codebase.
+  // Same conventional set, already unit-tested, and an operator who learns the convention once
+  // shouldn't find that `on` works for one flag and not another.
+  return parseTruthyEnv(process.env.LURKER_LINK_PREVIEWS);
 }

@@ -100,6 +100,28 @@ describe('POST /api/link-preview/resolve', () => {
     expect((await agent.post('/api/link-preview/resolve').send({ urls: 'nope' })).status).toBe(400);
   });
 
+  it('rejects a body that is not JSON at all, without a 500', async () => {
+    // ⚠⚠ Regression guard, and one no `.send({...})` test can reach — supertest always sets a
+    // JSON content type. Express 5's body-parser leaves `req.body` UNDEFINED for anything else
+    // (it returns early rather than substituting `{}`), so dereferencing it threw a TypeError
+    // into the error middleware: a 500 for exactly the malformed requests the next line's 400
+    // was written to answer, which made that branch dead code. Every other route in this repo
+    // guards it — `req.body || {}` or `(req.body as X | undefined)?.field`.
+    for (const [type, payload] of [
+      ['text/plain', 'hello'],
+      ['application/x-www-form-urlencoded', 'urls=x'],
+    ] as const) {
+      const res = await agent
+        .post('/api/link-preview/resolve')
+        .set('Content-Type', type)
+        .send(payload);
+      expect(`${type} → ${res.status}`).toBe(`${type} → 400`);
+    }
+    // ...and with no Content-Type at all.
+    const bare = await agent.post('/api/link-preview/resolve');
+    expect(bare.status).toBe(400);
+  });
+
   it('returns a descriptor for a cached page, with the thumbnail proxied', async () => {
     const url = 'https://example.com/cached-article';
     seed(url);

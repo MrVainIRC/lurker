@@ -60,16 +60,24 @@ export function mintProxyToken(url: string): string {
  * `timingSafeEqual` throws on a length mismatch, so the lengths are compared
  * first — and a wrong-length signature is rejected without leaking anything,
  * since the length of an HMAC-SHA256 is not a secret.
+ *
+ * ⚠ Compared as BYTES, not as string length. `String.length` counts UTF-16 code
+ * units while `timingSafeEqual` compares byte lengths, so a 43-character
+ * signature containing any multibyte character — `é` plus 42 ASCII — passed the
+ * guard and then threw `RangeError: Input buffers must have the same byte
+ * length` out of a function documented to return null. Express percent-decodes
+ * the path parameter, so that is reachable from any authenticated GET: a 500
+ * and a logged stack where a 403 belongs.
  */
 export function verifyProxyToken(token: string): string | null {
   const dot = token.lastIndexOf('.');
   if (dot <= 0) return null;
   const payload = token.slice(0, dot);
-  const provided = token.slice(dot + 1);
 
-  const expected = sign(payload);
+  const provided = Buffer.from(token.slice(dot + 1));
+  const expected = Buffer.from(sign(payload));
   if (provided.length !== expected.length) return null;
-  if (!crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected))) return null;
+  if (!crypto.timingSafeEqual(provided, expected)) return null;
 
   try {
     return Buffer.from(payload, 'base64url').toString('utf8');

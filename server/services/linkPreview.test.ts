@@ -47,6 +47,46 @@ function record(over: Partial<PreviewRecord> = {}): PreviewRecord {
   };
 }
 
+describe('the concurrency cap', () => {
+  it('is at least as large as one request may ask for', async () => {
+    // ⚠⚠ The relationship, asserted directly, because the behavioural test that was supposed to
+    // guard it does not: the 20 URLs it fans out are blocked addresses that `normalizeUrl`
+    // refuses before any socket opens, so every queued waiter is handed a slot in microseconds
+    // and the suite stays green with the cap set to 6 — the exact value its own comment names
+    // as the bug. A test that passes with the defect present is a comment, not a guard.
+    const { MAX_CONCURRENT, MAX_URLS_PER_REQUEST } = await import('./linkPreview.js');
+    expect(MAX_CONCURRENT).toBeGreaterThanOrEqual(MAX_URLS_PER_REQUEST);
+  });
+});
+
+describe('pageRecord: what is enough to be worth a card', () => {
+  it('keeps a video embed that has neither a title nor an image', async () => {
+    // ⚠⚠ Regression guard. `!title && !imageUrl` are PAGE concepts, and the give-up rule
+    // consulted only those: a YouTube link whose provider oEmbed call failed — rate-limited,
+    // endpoint retired, "none of which should mean no preview at all" — falls through to a
+    // scrape that finds nothing, because YouTube's og: tags sit past the 512 KB cap. So the
+    // embed URL it was already holding was thrown away and the loss cached for an hour.
+    //
+    // Tested here rather than through the live-origin harness because `videoEmbedFor` only
+    // matches real provider hosts, so this branch is unreachable from a loopback server — and a
+    // test that stops at `toDescriptor` never runs this rule at all. (It didn't. It passed with
+    // the fix reverted, which is what put this test here.)
+    const { pageRecord } = await import('./linkPreview.js');
+    const out = pageRecord(new URL('https://www.youtube.com/watch?v=abc123'), null, {});
+    expect(out.status).toBe('ok');
+    expect(out.kind).toBe('video-embed');
+    expect(out.embedUrl).toContain('youtube-nocookie.com');
+    expect(out.title).toBeNull();
+  });
+
+  it('still gives up on an ordinary page with nothing to show', async () => {
+    // The rule has to keep doing its job: a card with no title, no image and no embed is a grey
+    // rectangle, and the plain link the user typed is better.
+    const { pageRecord } = await import('./linkPreview.js');
+    expect(pageRecord(new URL('https://example.com/blank'), null, {}).status).toBe('unavailable');
+  });
+});
+
 describe('toDescriptor', () => {
   it('proxies a page thumbnail and never leaks the origin URL', () => {
     const d = toDescriptor(record({ imageUrl: 'https://cdn.example.com/t.png', imageWidth: 800 }));
@@ -62,6 +102,15 @@ describe('toDescriptor', () => {
       expect(d.src).toMatch(/^\/api\/link-preview\/media\//);
       expect(d.thumb).toBeUndefined();
     }
+  });
+
+  it('withholds thumb dimensions when there is no thumb to describe', () => {
+    // ⚠ Emitted outside the imageUrl block, these described a picture that was never sent —
+    // so a client reserved a box for nothing, which is the reflow the fields exist to prevent.
+    const d = toDescriptor(record({ imageUrl: null, imageWidth: 1200, imageHeight: 630 }));
+    expect(d.thumb).toBeUndefined();
+    expect(d.thumbWidth).toBeUndefined();
+    expect(d.thumbHeight).toBeUndefined();
   });
 
   it('carries nothing but the verdict when a preview is unavailable', () => {
@@ -87,7 +136,11 @@ describe('toDescriptor', () => {
       'javascript:alert(1)',
       'not a url',
     ]) {
-      expect(toDescriptor(record({ kind: 'video-embed', embedUrl: bad })).embedUrl).toBeUndefined();
+      const d = toDescriptor(record({ kind: 'video-embed', embedUrl: bad }));
+      expect(d.embedUrl).toBeUndefined();
+      // ...and it stops calling itself a video embed. Withholding the URL while keeping the
+      // kind describes something that can't exist: a play button wired to nothing.
+      expect(`${bad} → ${d.kind}`).toBe(`${bad} → page`);
     }
   });
 });
@@ -122,6 +175,13 @@ describe('resolvePreview', () => {
       const off = await resolvePreview(url);
       expect(off.status).toBe('unavailable');
       expect(off.title).toBeNull();
+      // ⚠ And a SHORT expiry. Keeping a transient answer out of the server's cache does nothing
+      // if the descriptor tells the client to hold it for an hour — `expiresAt` is the only
+      // thing a client has for deciding when to re-ask, so stamping the failure TTL on an
+      // instance-state answer re-created the permanent blankness at the other end.
+      const ttl = new Date(off.expiresAt).getTime() - Date.now();
+      expect(ttl).toBeLessThan(60_000);
+      expect(ttl).toBeGreaterThan(0);
     } finally {
       if (saved === undefined) delete process.env.LURKER_LINK_PREVIEWS;
       else process.env.LURKER_LINK_PREVIEWS = saved;

@@ -246,3 +246,51 @@ describe('safeRequest — following redirects', () => {
     expect(finished).toBe(false);
   });
 });
+
+describe('streaming, where the scrape-tuned bounds are wrong', () => {
+  // ⚠ Real time, not fake timers: what's under test is node's own socket timeout and the
+  // request deadline, and swapping the clock out from under them would test the mock. The gap
+  // is sized just past IDLE_TIMEOUT_MS (5 s), which is the cheaper of the two bounds to prove
+  // and the one that fires in ordinary use.
+  const IDLE_GAP_MS = 6500;
+
+  /** Headers, then a deliberate silence, then the rest — a backpressured <video> exactly. */
+  const pauseMidBody: Handler = (_req, res) => {
+    res.writeHead(200, { 'content-type': 'video/mp4' });
+    res.write('start');
+    setTimeout(() => {
+      if (!res.writableEnded) res.end('end');
+    }, IDLE_GAP_MS).unref();
+  };
+
+  it('cuts a paused body without the flag, which is the scrape behaviour', async () => {
+    // The default is right for a 512 KB scrape that arrives in one burst: a gap this long means
+    // the origin is dead. It is wrong for a pipe, and this is the proof that the flag changes
+    // something real rather than reading as though it does.
+    reset(pauseMidBody);
+    const res = await safeRequest(new URL(`${base}/paused`));
+    const outcome = await new Promise<string>((resolve) => {
+      const chunks: Buffer[] = [];
+      res.stream.on('data', (c: Buffer) => chunks.push(c));
+      res.stream.on('error', () => resolve('cut'));
+      res.stream.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    });
+    expect(outcome).toBe('cut');
+  }, 20_000);
+
+  it('lets a streaming consumer wait out the pause', async () => {
+    // ⚠⚠ The claim `MAX_MEDIA_PROXY_BYTES` depends on. A <video> that has filled its buffer and
+    // stopped reading is normal playback, not a stall — but no bytes move, so the socket
+    // timeout fires and the browser sees a network error mid-clip, after `immutable` has
+    // already gone out.
+    reset(pauseMidBody);
+    const res = await safeRequest(new URL(`${base}/paused-streaming`), { streaming: true });
+    const body = await new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      res.stream.on('data', (c: Buffer) => chunks.push(c));
+      res.stream.on('error', reject);
+      res.stream.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    });
+    expect(body).toBe('startend');
+  }, 20_000);
+});

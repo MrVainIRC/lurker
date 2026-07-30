@@ -52,6 +52,24 @@ describe('proxy tokens', () => {
     }
   });
 
+  it('rejects a signature that is the right LENGTH but the wrong number of bytes', () => {
+    // ⚠⚠ Regression guard. The length guard used `String.length` (UTF-16 code units) while
+    // `timingSafeEqual` compares BYTE lengths, so a 43-character signature carrying one
+    // multibyte character sailed past the guard and threw `RangeError: Input buffers must have
+    // the same byte length` — out of a function whose whole contract is returning null. Express
+    // percent-decodes the path parameter, so `%C3%A9` in a URL is enough to reach it: a 500 and
+    // a stack trace where a 403 belongs, repeatable at the throttle's full rate.
+    const token = mintProxyToken('https://example.com/ok.png');
+    const payload = token.slice(0, token.lastIndexOf('.'));
+    const realSig = token.slice(token.lastIndexOf('.') + 1);
+    const sameLength = `é${'a'.repeat(realSig.length - 1)}`;
+    expect(sameLength.length).toBe(realSig.length);
+    expect(Buffer.byteLength(sameLength)).not.toBe(Buffer.byteLength(realSig));
+
+    expect(() => verifyProxyToken(`${payload}.${sameLength}`)).not.toThrow();
+    expect(verifyProxyToken(`${payload}.${sameLength}`)).toBeNull();
+  });
+
   it('cannot be verified under a different secret', () => {
     // Rotating the session secret invalidates outstanding tokens, which is the
     // intended coupling — a stale token is a re-resolve, not a hole.

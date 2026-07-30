@@ -198,6 +198,28 @@ describe('resolving a page at a live origin', () => {
     expect(record.title).toBe('Survived');
   });
 
+  it('clamps a long title without splitting a character', async () => {
+    // ⚠ Regression guard. The clamp used `slice`, which counts UTF-16 code units, so a title
+    // of emoji cut at 140 ended in a lone high surrogate. That does not survive the SQLite
+    // round trip — so the requester who resolved the URL and everyone served from the cache
+    // afterwards got measurably DIFFERENT strings for the same page, and a strict decoder
+    // (Swift's JSONDecoder, on the iOS client) turns the escape into U+FFFD.
+    reset(
+      serveHtml(
+        `<html><head><meta property="og:title" content="${'👍'.repeat(200)}"></head></html>`,
+      ),
+    );
+
+    const fresh = await resolvePreview(`${base}/emoji`);
+    const title = fresh.title as string;
+    expect(title.length).toBeLessThan(400);
+    const lonely = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    expect(lonely.test(title)).toBe(false);
+    // The read-back is what the second and every later viewer is served.
+    const cached = await resolvePreview(`${base}/emoji`);
+    expect(cached.title).toBe(title);
+  });
+
   it('refuses a content type it has no rendering for', async () => {
     reset((_req, res) => {
       res.writeHead(200, { 'content-type': 'application/pdf' });
@@ -232,6 +254,61 @@ describe('one fetch per document', () => {
     // ...and each caller is answered with the exact string it sent, because that is what it
     // looks the preview up by.
     expect(records.map((r) => r.url)).toEqual(asked);
+  });
+
+  it('treats host case and a default port as the same document', async () => {
+    // ⚠ Regression guard. The key was the raw request string with a regex fragment strip, so
+    // `//LOCALHOST/x` and `//localhost/x` — and `//h:80/x` and `//h/x`, and a trailing slash —
+    // were four cache entries for one page. normalizeUrl already collapses all of them, and it
+    // is the function the fetcher uses, so keying on anything else was two identities for one
+    // thing. It is also a one-character cache bypass: vary the case and every ask refetches.
+    reset(serveHtml('<html><head><meta property="og:title" content="Canonical"></head></html>'));
+    const port = (server.address() as AddressInfo).port;
+
+    await resolvePreview(`http://localhost:${port}/canon`);
+    expect(hits).toEqual(['/canon']);
+
+    const variant = await resolvePreview(`http://LOCALHOST:${port}/canon`);
+    expect(variant.title).toBe('Canonical');
+    expect(variant.url).toBe(`http://LOCALHOST:${port}/canon`);
+    // Still one: the case variant read the row the first ask wrote.
+    expect(hits).toEqual(['/canon']);
+  });
+
+  it('keeps the scraped image when an oEmbed thumbnail is unusable', async () => {
+    // ⚠ Regression guard. `oembed?.thumbnailUrl || meta.imageUrl` picked first and vetted
+    // second, so a thumbnail_url we refuse — here a private address the SSRF guard blocks —
+    // took the slot and then evaporated, discarding a perfectly good og:image with it. On a
+    // page with no title that became a cached `unavailable`: no card for an hour because the
+    // OPTIONAL source was bad.
+    reset((req, res) => {
+      if (req.url === '/oembed.json') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            version: '1.0',
+            type: 'rich',
+            thumbnail_url: 'http://10.0.0.9/private.png',
+            thumbnail_width: 480,
+            thumbnail_height: 360,
+          }),
+        );
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(`<html><head>
+        <meta property="og:title" content="Fallback Kept">
+        <meta property="og:image" content="/real.png">
+        <link rel="alternate" type="application/json+oembed" href="/oembed.json">
+      </head></html>`);
+    });
+
+    const record = await resolvePreview(`${base}/oembed-bad-thumb`);
+    expect(record.imageUrl).toBe(`${base}/real.png`);
+    // ...and the oEmbed dimensions do NOT come along: they describe the thumbnail that lost,
+    // so pairing them with this image reserves a 4:3 box for a picture of another shape.
+    expect(record.imageWidth).toBeNull();
+    expect(record.imageHeight).toBeNull();
   });
 
   it('serves a later anchor from the cache, echoing the URL as asked', async () => {

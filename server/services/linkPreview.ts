@@ -27,6 +27,7 @@ import { scrapeMeta, readOEmbed, decodeBody, type OEmbedMeta } from './linkMeta.
 import { videoEmbedFor, oembedEndpointFor, isEmbeddableOrigin } from './linkEmbed.js';
 import { previewsEnabled } from '../utils/previews.js';
 import { SlotPool } from '../utils/slotPool.js';
+import { withDeadline, DeadlineExceeded } from '../utils/withDeadline.js';
 import {
   getCachedPreview,
   putPreview,
@@ -42,8 +43,6 @@ import { mintProxyToken } from './mediaProxyToken.js';
  *  client can be surprised by a 40 KB og:description. */
 const MAX_TITLE = 140;
 const MAX_DESCRIPTION = 300;
-/** Cap on a preview image we're willing to pull down and proxy. */
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 /**
  * Longest URL we'll carry.
  *
@@ -74,8 +73,10 @@ export const MAX_URLS_PER_REQUEST = 20;
  * page 6 previews rendered and 14 links stayed bare, and because the client stores whatever
  * verdict it's given, they stayed bare for the rest of the session.
  *
- * ⚠ This is also the only bound on how many DNS lookups the feature has outstanding, and that
- * matters more than it reads. `getaddrinfo` runs on libuv's thread pool, which caps it at
+ * ⚠ This is also what bounds how many DNS lookups RESOLVING has outstanding, and that matters
+ * more than it reads. (The byte proxy is the other half and needs its own — see `mediaPool` in
+ * routes/linkPreview.ts, which is the higher-volume one: a link resolves once, but every image
+ * on screen is a byte request.) `getaddrinfo` runs on libuv's thread pool, which caps it at
  * `(nthreads + 1) / 2` slots, and it CANNOT be cancelled — `req.destroy()` returns at once
  * while the lookup keeps its slot for the full OS timeout. Measured while building this: eight
  * concurrent blackholed lookups delayed an unrelated `dns.lookup` by ~20 s, and on this server
@@ -95,16 +96,32 @@ export const MAX_URLS_PER_REQUEST = 20;
  * `keepAlive` — so capping the agents silently restores socket reuse, and a reused socket skips
  * DNS, which skips the pinned lookup that is the SSRF guard.
  */
-const MAX_CONCURRENT = MAX_URLS_PER_REQUEST;
+export const MAX_CONCURRENT = MAX_URLS_PER_REQUEST;
 /**
  * Callers parked waiting for a slot, bounded so a flood can't grow this without limit.
  * Cross-request contention is what queues here; a single batch never has to.
  */
 const MAX_QUEUED = 200;
 /** How long a caller will wait for a slot before giving up, so an HTTP request can't hang on
- *  a backlog of slow origins. Recoverable: an `unavailable` from here is NOT written to the
- *  cache, and the client re-asks on the next priming pass. */
+ *  a backlog of slow origins. Recoverable: an `unavailable` from here is written to neither
+ *  cache — no row here, and a TRANSIENT_TTL_MS `expiresAt` so the client re-asks in seconds. */
 const MAX_QUEUE_WAIT_MS = 10_000;
+
+/**
+ * Ceiling on one URL's whole resolution, once it holds a slot.
+ *
+ * ⚠ Without this the per-hop bounds multiply out to something absurd, and it is the SLOT that
+ * makes it everyone's problem. One URL can chain three separate fetch walks — the provider
+ * oEmbed call, the page fetch it falls through to, and the oEmbed endpoint discovered in that
+ * page — each of MAX_REDIRECTS + 1 hops at HOP_DEADLINE_MS, so roughly four minutes of holding
+ * one of MAX_CONCURRENT slots while every other caller's `acquire` times out. Nothing else cuts
+ * it: there is no `server.requestTimeout` configured anywhere in this repo, so the queue wait's
+ * promise that "an HTTP request can't hang on a backlog of slow origins" was off by ~25x.
+ *
+ * A URL that hits this is transient, not a verdict — the origin was slow, which is a fact about
+ * a moment. So it gets the short client TTL and no row, like saturation.
+ */
+const RESOLVE_DEADLINE_MS = 30_000;
 
 const pool = new SlotPool({
   size: MAX_CONCURRENT,
@@ -123,7 +140,7 @@ const pool = new SlotPool({
  */
 const inFlight = new Map<string, Promise<PreviewRecord>>();
 
-function unavailable(url: string): PreviewRecord {
+function unavailable(url: string, ttlMs: number = FAIL_TTL_MS): PreviewRecord {
   return {
     url,
     status: 'unavailable',
@@ -137,15 +154,69 @@ function unavailable(url: string): PreviewRecord {
     imageHeight: null,
     embedUrl: null,
     mime: null,
-    expiresAt: new Date(Date.now() + FAIL_TTL_MS).toISOString(),
+    expiresAt: new Date(Date.now() + ttlMs).toISOString(),
   };
 }
 
+/**
+ * How long a client should sit on an `unavailable` that says nothing about the URL.
+ *
+ * ⚠ Keeping the record out of the server's cache is only half of "don't cache a transient
+ * failure". `expiresAt` goes out on the wire and is the ONLY thing a client has for deciding
+ * when to ask again — so a saturation answer stamped with the one-hour failure TTL got cached
+ * for an hour by the client regardless, which is the permanently-blank-preview outcome the
+ * server-side decision was made to avoid. The comment saying "the client re-asks on the next
+ * priming pass" was true only for a client that ignores the field, which is not something this
+ * end can enforce or should assume.
+ *
+ * Short rather than zero so a saturated instance doesn't get re-asked in a tight loop.
+ */
+const TRANSIENT_TTL_MS = 15_000;
+
+/**
+ * The cache, wrapped so a database error degrades one URL instead of a whole batch.
+ *
+ * ⚠ `resolvePreview` promises never to throw and the route builds a `Promise.all` on that
+ * promise. Both of these are synchronous better-sqlite3 calls on the single shared connection,
+ * and this repo has a documented history of SQLITE_BUSY under Litestream — so an unguarded
+ * throw here turns a transient lock into a 500 for all twenty URLs in the request. Logged
+ * rather than swallowed: a cache that has stopped working is worth knowing about, but it is
+ * degradation, not failure. Missing the read costs a refetch; missing the write costs another.
+ */
+function readCache(url: string): PreviewRecord | null {
+  try {
+    return getCachedPreview(url);
+  } catch (err) {
+    console.warn(`[lurker] link preview cache read failed: ${String(err)}`);
+    return null;
+  }
+}
+
+function writeCache(record: PreviewRecord): void {
+  try {
+    putPreview(record);
+  } catch (err) {
+    console.warn(`[lurker] link preview cache write failed: ${String(err)}`);
+  }
+}
+
+/**
+ * Trim and shorten a scraped string for display.
+ *
+ * ⚠ Cut on CODE POINTS, not on `String.prototype.slice`, which counts UTF-16 code units and
+ * will happily halve a surrogate pair. A title of emoji clamped at 140 ended in a lone high
+ * surrogate — which does not survive the SQLite round trip, so the requester who resolved the
+ * URL and everyone served from the cache afterwards got measurably different strings for the
+ * same page, and a strict JSON decoder (iOS) turned it into U+FFFD. These are display clamps,
+ * not byte budgets; there is no reason for them to be able to split a character.
+ */
 function clamp(value: string | undefined, max: number): string | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
-  return trimmed.length > max ? `${trimmed.slice(0, max - 1)}…` : trimmed;
+  const points = Array.from(trimmed);
+  if (points.length <= max) return trimmed;
+  return `${points.slice(0, max - 1).join('')}…`;
 }
 
 /**
@@ -191,8 +262,15 @@ async function fetchOEmbed(raw: string, base: URL): Promise<ReturnType<typeof re
   }
 }
 
-/** Assemble a page record from whatever combination of oEmbed and scraped tags we got. */
-function pageRecord(
+/**
+ * Assemble a page record from whatever combination of oEmbed and scraped tags we got.
+ *
+ * ⚠ Exported for tests. The give-up rule below depends on `videoEmbedFor`, which only matches
+ * real provider hosts — so the branch cannot be reached through a loopback origin, and a test
+ * that goes through `toDescriptor` instead exercises none of this. It stayed green with the
+ * rule reverted, which is how this export came to exist.
+ */
+export function pageRecord(
   url: URL,
   oembed: OEmbedMeta | null,
   meta: ReturnType<typeof scrapeMeta>,
@@ -200,32 +278,52 @@ function pageRecord(
   const embed = videoEmbedFor(url);
   const kind: PreviewKind = embed ? 'video-embed' : 'page';
 
-  let imageUrl = oembed?.thumbnailUrl || meta.imageUrl;
-  if (imageUrl) {
-    // og:image is routinely relative, and a relative URL resolves against the
-    // page we ACTUALLY landed on, not the one we asked for — redirects move the
-    // base.
-    //
-    // ⚠ NOT decoded here. `scrapeMeta` and `readOEmbed` each decode entities at their own
-    // boundary now, and decoding is deliberately once-only — a second pass turns a literal
-    // `&amp;lt;` in a filename back into `<`, and `linkMeta.test.ts` asserts the single pass.
+  /**
+   * Absolutise and vet one candidate image URL.
+   *
+   * og:image is routinely relative, and a relative URL resolves against the page we ACTUALLY
+   * landed on, not the one we asked for — redirects move the base.
+   *
+   * ⚠ NOT decoded here. `scrapeMeta` and `readOEmbed` each decode entities at their own
+   * boundary now, and decoding is deliberately once-only — a second pass turns a literal
+   * `&amp;lt;` in a filename back into `<`, and `linkMeta.test.ts` asserts the single pass.
+   */
+  const absolutise = (candidate: string | undefined): string | null => {
+    if (!candidate) return null;
     let abs: URL | null = null;
     try {
-      abs = normalizeUrl(new URL(imageUrl, url).toString());
+      abs = normalizeUrl(new URL(candidate, url).toString());
     } catch {
       // `new URL` throws on input `normalizeUrl` would merely refuse — and this input came
       // from a stranger's markup, so it reaches us as anything at all.
-      abs = null;
+      return null;
     }
-    imageUrl = abs && abs.toString().length <= MAX_URL_LENGTH ? abs.toString() : undefined;
-  }
+    if (!abs) return null;
+    const str = abs.toString();
+    return str.length <= MAX_URL_LENGTH ? str : null;
+  };
+
+  // ⚠ Each candidate is tried in turn, rather than picking one with `||` and then vetting it.
+  // Choosing first meant a page with a perfectly good og:image lost it whenever the oEmbed
+  // reply carried a thumbnail_url we refuse — a data: URI, a private-address host, something
+  // over-length — because by then `meta.imageUrl` had already been discarded. If the page also
+  // had no title that turned into a cached `unavailable`: no card at all, for an hour, because
+  // the OPTIONAL source was bad.
+  const oembedImage = absolutise(oembed?.thumbnailUrl);
+  const imageUrl = oembedImage ?? absolutise(meta.imageUrl);
 
   const title = clamp(oembed?.title || meta.title, MAX_TITLE);
   const description = clamp(meta.description, MAX_DESCRIPTION);
 
   // A card with no title and no image is a grey rectangle that says nothing.
   // Better to render the plain link the user typed.
-  if (!title && !imageUrl) return unavailable(url.toString());
+  //
+  // ⚠ ...but an embed is a card in its own right, and title/image are PAGE concepts. Without
+  // the `!embed` clause a YouTube link whose provider oEmbed call failed — rate-limited, or the
+  // endpoint retired, neither of which "should mean no preview at all" — fell through to the
+  // scrape, found nothing because YouTube's og: tags sit past the 512 KB cap, and threw away
+  // the youtube-nocookie embed URL it was already holding. Then cached that for an hour.
+  if (!title && !imageUrl && !embed) return unavailable(url.toString());
 
   return {
     url: url.toString(),
@@ -235,9 +333,13 @@ function pageRecord(
     description,
     siteName: clamp(oembed?.providerName || meta.siteName || url.hostname, MAX_TITLE),
     author: clamp(oembed?.authorName, MAX_TITLE),
-    imageUrl: imageUrl ?? null,
-    imageWidth: oembed?.thumbnailWidth ?? null,
-    imageHeight: oembed?.thumbnailHeight ?? null,
+    imageUrl,
+    // ⚠ Only when the oEmbed thumbnail is the image we actually took. `thumbnail_width` and
+    // `thumbnail_height` describe `thumbnail_url` and nothing else, so pairing them with an
+    // og:image that won instead reserves a box of the wrong shape — a 4:3 hole for a 16:9
+    // picture — which is precisely the reflow these fields exist to prevent.
+    imageWidth: oembedImage ? (oembed?.thumbnailWidth ?? null) : null,
+    imageHeight: oembedImage ? (oembed?.thumbnailHeight ?? null) : null,
     embedUrl: embed?.embedUrl ?? null,
     mime: null,
     expiresAt: new Date(Date.now() + OK_TTL_MS).toISOString(),
@@ -296,6 +398,13 @@ async function imageDimensions(
 async function doResolve(raw: string): Promise<PreviewRecord> {
   const url = normalizeUrl(raw);
   if (!url) return unavailable(raw);
+  // ⚠ Re-checked on the NORMALISED form. The gate in `resolvePreview` measures the request
+  // string, but WHATWG percent-encoding expands every non-ASCII byte threefold, so a 2,014-
+  // character URL of Cyrillic passes that gate and comes out of `normalizeUrl` at 12,014 — and
+  // on the direct-media branch below that string is stored verbatim and minted into a proxy
+  // path a third longer again, past node's own 16 KB header ceiling on the request that would
+  // fetch it. Measured, not theorised.
+  if (url.toString().length > MAX_URL_LENGTH) return unavailable(raw);
 
   // Known providers are asked directly, BEFORE anything is fetched from the page itself.
   // For YouTube this is the difference between working and not: its og: tags sit past
@@ -367,12 +476,18 @@ export async function resolvePreview(raw: string): Promise<PreviewRecord> {
   // The flag first, before even a cache read: "off" means the feature isn't participating, not
   // that it serves stale answers it happens to still have. The routes aren't mounted either —
   // this is the inner half of the same decision.
-  if (!previewsEnabled()) return unavailable(raw);
+  if (!previewsEnabled()) return unavailable(raw, TRANSIENT_TTL_MS);
   // Refused before it can be hashed, stored, or echoed. Nothing downstream caps a URL's
-  // length, and this one arrived in a request body.
+  // length, and this one arrived in a request body. A stable verdict, so it keeps the ordinary
+  // failure TTL — a URL this long will still be this long in an hour.
   if (raw.length > MAX_URL_LENGTH) return unavailable(raw);
 
-  const cached = getCachedPreview(raw);
+  // ⚠ Guarded, because the route's contract — and this function's own docblock — is that it
+  // never throws, and better-sqlite3 is synchronous on the one shared connection this process
+  // has. A single SQLITE_BUSY (a documented condition here under Litestream) would otherwise
+  // reject the whole `Promise.all` and 500 an entire 20-URL batch, where the design calls for
+  // one URL to degrade to `unavailable` on its own.
+  const cached = readCache(raw);
   // ⚠ Re-stamped with the URL as ASKED, not as stored. The row is keyed with the fragment
   // stripped so `#intro` and `#appendix` of one document share a fetch — which means the `url`
   // column holds whichever of them arrived first. Returning that verbatim is the same
@@ -402,12 +517,13 @@ export async function resolvePreview(raw: string): Promise<PreviewRecord> {
     try {
       acquired = await pool.acquire();
       if (!acquired) {
-        // Deliberately NOT cached: this says nothing about the URL, only that the instance was
-        // saturated when we asked. Caching it would turn a momentary spike into a permanently
-        // blank preview.
-        return unavailable(raw);
+        // Deliberately NOT cached, at either end: this says nothing about the URL, only that
+        // the instance was saturated when we asked. No row here, and a short `expiresAt` so a
+        // client honouring the field re-asks in seconds — see TRANSIENT_TTL_MS, because keeping
+        // it out of OUR cache while telling the client to hold it for an hour achieved nothing.
+        return unavailable(raw, TRANSIENT_TTL_MS);
       }
-      const resolved = await doResolve(raw);
+      const resolved = await withDeadline(doResolve(raw), RESOLVE_DEADLINE_MS, 'resolve');
       // ⚠ Always echo the URL we were ASKED about, whatever the fetch ended up at.
       //
       // The endpoint's contract is one descriptor per input, in order, and callers look each
@@ -418,9 +534,13 @@ export async function resolvePreview(raw: string): Promise<PreviewRecord> {
       // where it matters — resolving a relative og:image against the page we actually landed
       // on — it just isn't the identity.
       const record = { ...resolved, url: raw };
-      putPreview(record);
+      writeCache(record);
       return record;
     } catch (err) {
+      // ⚠ Running out of time is NOT a verdict about the URL — the origin was slow, which is a
+      // fact about a moment. Cached, it would blank a perfectly good link for an hour on the
+      // strength of one bad afternoon. Same treatment as pool saturation: no row, short TTL.
+      if (err instanceof DeadlineExceeded) return unavailable(raw, TRANSIENT_TTL_MS);
       // An SSRF refusal is worth a line — it's either a misconfigured link or
       // somebody probing. Everything else (timeouts, resets, 403s) is ordinary
       // internet weather and would only be log noise.
@@ -428,7 +548,7 @@ export async function resolvePreview(raw: string): Promise<PreviewRecord> {
         console.warn(`[lurker] link preview refused: ${err.message}`);
       }
       const record = unavailable(raw);
-      putPreview(record);
+      writeCache(record);
       return record;
     } finally {
       // Only release what we actually took; always clear the in-flight entry.
@@ -479,9 +599,14 @@ export function toDescriptor(record: PreviewRecord): PreviewDescriptor {
   // a cache row — so what's asserted here isn't "did videoEmbedFor behave", it's "whatever is
   // in the row, we only ever hand clients an origin we're willing to frame". There is still no
   // CSP anywhere in this repo, so this check is the frame-src.
-  if (record.embedUrl && isEmbeddableOrigin(record.embedUrl)) d.embedUrl = record.embedUrl;
-  if (record.imageWidth) d.thumbWidth = record.imageWidth;
-  if (record.imageHeight) d.thumbHeight = record.imageHeight;
+  if (record.embedUrl && isEmbeddableOrigin(record.embedUrl)) {
+    d.embedUrl = record.embedUrl;
+  } else if (record.kind === 'video-embed') {
+    // ⚠ Withholding the URL but keeping `kind: 'video-embed'` describes something that cannot
+    // exist — a client renders a play button wired to nothing. The honest downgrade is a page
+    // card, which is what it now is.
+    d.kind = 'page';
+  }
 
   if (record.imageUrl) {
     const proxied = `/api/link-preview/media/${mintProxyToken(record.imageUrl)}`;
@@ -493,12 +618,32 @@ export function toDescriptor(record: PreviewRecord): PreviewDescriptor {
     } else {
       d.thumb = proxied;
     }
+    // ⚠ Inside the block, because these describe the image that is being SENT. Emitted
+    // unconditionally they shipped a thumbWidth/thumbHeight for a `thumb` the record didn't
+    // have, so a client reserved a box for a picture that was never coming — the reflow these
+    // fields exist to prevent, caused by the fields themselves.
+    if (record.imageWidth) d.thumbWidth = record.imageWidth;
+    if (record.imageHeight) d.thumbHeight = record.imageHeight;
   }
   return d;
 }
 
 /** Ceiling on preview IMAGE bytes the proxy will serve. */
-export const MAX_IMAGE_PROXY_BYTES = MAX_IMAGE_BYTES;
+export const MAX_IMAGE_PROXY_BYTES = 8 * 1024 * 1024;
 /** Ceiling on VIDEO/AUDIO bytes. Larger because these stream to a media element rather than
  *  being decoded whole — an 8 MB cut-off truncated ordinary clips mid-playback. */
 export const MAX_MEDIA_PROXY_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Whether the byte proxy will serve this content type.
+ *
+ * ⚠ Derived from `kindForContentType` rather than restated. The route had its own copy of the
+ * same allowlist, which meant the refusal that matters most — `image/svg+xml`, a scripting
+ * format wearing a picture's clothes, served under OUR origin — existed in two places that had
+ * to be kept in step by hand. One definition, and the proxy serves exactly the kinds the
+ * resolver is willing to call media.
+ */
+export function proxyableContentType(contentType: string): boolean {
+  const kind = kindForContentType(contentType);
+  return kind === 'image' || kind === 'video' || kind === 'audio';
+}

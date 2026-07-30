@@ -3,6 +3,7 @@
 
 import crypto from 'node:crypto';
 import db from './index.js';
+import { normalizeUrl } from '../services/linkFetch.js';
 
 /** What a resolved URL turned out to be. Decided from Content-Type, never from
  *  the file extension — the extension is only ever a client-side hint about
@@ -67,26 +68,56 @@ const RESOLVER_VERSION = 1;
  * refetched forever and displayed nothing.
  */
 export function urlHash(url: string): string {
-  // The fragment is client-side only and never reaches the origin, so `#intro` and `#appendix` of
-  // one document are the same fetch. `normalizeUrl` strips it for exactly that stated reason —
-  // but the cache keyed the RAW request string, so the documented dedupe never happened and a
-  // channel linking five anchors of one page paid for five identical scrapes. Stripped here so
-  // the key collapses them, while the descriptor still echoes the URL as asked (see
-  // `resolvePreview`, where that echo is load-bearing for the client's own lookup).
-  const key = url.replace(/#.*$/, '');
+  // ⚠ The CANONICAL form, from the same function the fetcher uses, not a hand-rolled strip.
+  //
+  // The fragment is client-side only and never reaches the origin, so `#intro` and `#appendix`
+  // of one document are the same fetch — but so are `https://E.test/a` and `https://e.test/a`,
+  // and `https://e.test` and `https://e.test/`, and `https://e.test:443/a` and
+  // `https://e.test/a`. `normalizeUrl` already collapses every one of those (it lowercases the
+  // host, drops the default port, resolves dot-segments, and strips the fragment for exactly
+  // this stated reason); keying the raw string with a `/#.*$/` regex collapsed one case out of
+  // four, so the same page paid for two scrapes, two rows and two TTLs whenever it was pasted
+  // in two forms. It is also a one-character cache bypass for any authenticated client: vary
+  // the case of the host and every request is a fresh outbound fetch.
+  //
+  // Falls back to the raw string when normalizeUrl refuses the URL outright (a blocked literal,
+  // a bad scheme) — those still get a negative row, and their identity is whatever was asked.
+  const key = normalizeUrl(url)?.toString() ?? url;
   return crypto.createHash('sha256').update(`v${RESOLVER_VERSION}|${key}`).digest('hex');
 }
 
-// ⚠ `datetime(expires_at)`, not a bare comparison. `expires_at` is stored ISO-8601
-// (`2026-07-30T11:00:00.000Z`) while `datetime('now')` yields `2026-07-30 11:00:00` — and
-// SQLite compares TEXT lexicographically, where 'T' (0x54) sorts after ' ' (0x20). So for any
-// expiry on the SAME calendar date as now, the bare form always answered "still live": a 1-hour
-// failure TTL survived until midnight UTC instead of an hour. Wrapping both sides in
-// `datetime()` compares instants rather than strings.
-const selectStmt = db.prepare(`
+/**
+ * `now`, in exactly the format `expires_at` is stored in.
+ *
+ * ⚠ Both halves of this matter, and the obvious fix for the first breaks the second.
+ *
+ * `expires_at` is written as ISO-8601 (`2026-07-30T11:00:00.000Z`) while `datetime('now')`
+ * yields `2026-07-30 11:00:00` — and SQLite compares TEXT lexicographically, where 'T' (0x54)
+ * sorts after ' ' (0x20). So a bare comparison against `datetime('now')` always answered "still
+ * live" for any expiry on the same calendar date: a 1-hour failure TTL survived until midnight
+ * UTC. Wrapping both sides in `datetime()` fixes that — and makes the column NON-SARGABLE, so
+ * `idx_link_previews_expires` becomes unusable by every query that exists. Verified with EXPLAIN
+ * QUERY PLAN: `datetime(expires_at) <= datetime('now')` plans `SCAN link_previews`, while a bare
+ * comparison plans `SEARCH ... USING INDEX idx_link_previews_expires`. The sweep runs at boot and
+ * hourly, synchronously, on the one shared connection — a full scan of a URL-keyed table with a
+ * 7-day TTL is the event-loop stall this repo already instruments for.
+ *
+ * Rendering `now` into the stored format keeps both: instants compare correctly BECAUSE
+ * ISO-8601-with-Z is lexicographically ordered, and the index is usable because the column is
+ * untouched.
+ */
+const NOW_ISO = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
+
+/** ⚠ Exported so a test can EXPLAIN the statements that ACTUALLY run. Planning a paraphrase
+ *  proves nothing: an index assertion written against a hand-copied string stays green when the
+ *  shipped query changes underneath it, which is a comment wearing a test's clothes. */
+export const SELECT_SQL = `
   SELECT * FROM link_previews
-  WHERE url_hash = ? AND datetime(expires_at) > datetime('now')
-`);
+  WHERE url_hash = ? AND expires_at > ${NOW_ISO}
+`;
+export const SWEEP_SQL = `DELETE FROM link_previews WHERE expires_at <= ${NOW_ISO}`;
+
+const selectStmt = db.prepare(SELECT_SQL);
 
 const upsertStmt = db.prepare(`
   INSERT INTO link_previews (
@@ -105,9 +136,7 @@ const upsertStmt = db.prepare(`
     fetched_at = datetime('now'), expires_at = excluded.expires_at
 `);
 
-const sweepStmt = db.prepare(
-  `DELETE FROM link_previews WHERE datetime(expires_at) <= datetime('now')`,
-);
+const sweepStmt = db.prepare(SWEEP_SQL);
 
 interface Row {
   url: string;
