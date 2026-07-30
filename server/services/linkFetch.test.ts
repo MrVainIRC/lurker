@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Readable } from 'node:stream';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -144,16 +144,21 @@ describe('safeRequest refuses an internal origin that is genuinely reachable', (
 });
 
 describe('userAgent', () => {
-  it('identifies as Lurker and as a preview fetcher, with a contact URL', () => {
+  it('identifies as Lurker and as a preview fetcher, with the operator contact', async () => {
+    // ⚠ Asserted against the module's own values, not against literals. `USER_AGENT_CONTACT` is
+    // read from the real environment at import time — `docs/SELF_HOSTING.md` tells operators to
+    // set it, and `mailto:` is a documented value — so a literal `+https://` here turns
+    // `npm test`, the pre-push gate, red on the machines most likely to run it.
+    const { APP_VERSION, USER_AGENT_CONTACT } = await import('../utils/userAgent.js');
+    // Empty is falsy, so this neutralises an operator's exported override without pretending
+    // to know what they set it to.
+    vi.stubEnv('LURKER_PREVIEW_USER_AGENT', '');
     const ua = userAgent();
-    expect(ua).toContain('Lurker');
-    expect(ua).toContain('+https://');
-    expect(ua).toContain('facebookexternalhit');
-  });
-
-  it('carries the real app version rather than a hardcoded one', async () => {
-    const { APP_VERSION } = await import('../utils/userAgent.js');
-    expect(userAgent()).toContain(APP_VERSION);
+    vi.unstubAllEnvs();
+    const contact = USER_AGENT_CONTACT ? `; +${USER_AGENT_CONTACT}` : '';
+    expect(ua).toBe(
+      `Mozilla/5.0 (compatible; Lurker/${APP_VERSION}${contact}) facebookexternalhit/1.1`,
+    );
   });
 
   it('is overridable by the operator', () => {
@@ -179,6 +184,7 @@ function fakeChunks(parts: string[], headers: Record<string, string> = {}) {
     status: 200,
     headers: headers as never,
     contentType: 'text/html',
+    charset: null,
     finalUrl: new URL('https://example.com/'),
     stream: Readable.from(parts.map((p) => Buffer.from(p, 'utf8'))) as never,
   };
@@ -271,5 +277,78 @@ describe('bufferStream', () => {
     await expect(
       bufferStream(fake('...', { 'content-encoding': 'gzip' }), { maxBytes: 1000 }),
     ).rejects.toThrow(/content-encoding/);
+  });
+
+  it('is not fooled by </header>, which is in the markup of half the web', async () => {
+    // ⚠⚠ Regression guard, and the nastiest of the lot: `</head` matched as a bare substring
+    // also matches `</header>` — and because a match TRIMS rather than merely stopping, a page
+    // that omits the optional `</head>` tag had its document cut at the site nav and reported
+    // `truncated: false` about the metadata it had just thrown away.
+    const doc =
+      '<html><body><header class="site-header">Nav</header>' +
+      '<meta property="og:title" content="REAL TITLE"></body>';
+    for (const chunking of [[doc], [...doc], [doc.slice(0, 40), doc.slice(40)]]) {
+      const res = await bufferStream(fakeChunks(chunking), {
+        maxBytes: 512 * 1024,
+        stopAtHeadEnd: true,
+      });
+      expect(res.body.toString()).toContain('REAL TITLE');
+    }
+  });
+
+  it('accepts the tag however it is spelled', async () => {
+    for (const tag of ['</head>', '</head >', '</head\n>']) {
+      const res = await bufferStream(fakeChunks([`<head><title>T</title>${tag}<body>tail`]), {
+        maxBytes: 512 * 1024,
+        stopAtHeadEnd: true,
+      });
+      expect(res.body.toString()).toBe('<head><title>T</title>');
+    }
+  });
+
+  it('calls a head that arrived whole COMPLETE, even when the cap fired in the same chunk', async () => {
+    // ⚠ Regression guard. The cap check used to return before the head scan, so a chunk that
+    // both crossed the cap and closed the head skipped the trim and reported `truncated: true`
+    // — telling a caller its metadata might be incomplete about a head that was all there.
+    const res = await bufferStream(
+      fakeChunks(['<head><title>T</title></head>' + 'B'.repeat(1000)]),
+      {
+        maxBytes: 100,
+        stopAtHeadEnd: true,
+      },
+    );
+    expect(res.body.toString()).toBe('<head><title>T</title>');
+    expect(res.truncated).toBe(false);
+  });
+
+  it('keeps a buffered prefix when the peer resets mid-body, and says it is one', async () => {
+    // ⚠ Regression guard. A reset used to reject and throw the buffer away — the opposite of
+    // the policy three lines up at the cap, and it costs real previews: a complete <head>
+    // followed by a reset is every tag we needed.
+    const stream = new Readable({ read() {} });
+    stream.push(Buffer.from('<head><meta property="og:title" content="GOT IT">'));
+    const res = bufferStream({ ...fakeChunks([]), stream: stream as never }, { maxBytes: 4096 });
+    setImmediate(() => stream.destroy(new Error('ECONNRESET')));
+    const out = await res;
+    expect(out.body.toString()).toContain('GOT IT');
+    expect(out.truncated).toBe(true);
+  });
+
+  it('still rejects a reset that delivered nothing at all', async () => {
+    const stream = new Readable({ read() {} });
+    const res = bufferStream({ ...fakeChunks([]), stream: stream as never }, { maxBytes: 4096 });
+    setImmediate(() => stream.destroy(new Error('ECONNRESET')));
+    await expect(res).rejects.toThrow(/ECONNRESET/);
+  });
+
+  it('refuses a stream that is already finished rather than hanging on it', async () => {
+    // ⚠ Listeners attached to a destroyed stream fire NOTHING: no data, no end, no error. This
+    // used to be a promise that never settled — a leaked await with nothing in the log —
+    // reachable as soon as a caller inspects the headers and awaits a cache lookup.
+    const stream = new Readable({ read() {} });
+    stream.destroy();
+    await expect(
+      bufferStream({ ...fakeChunks([]), stream: stream as never }, { maxBytes: 4096 }),
+    ).rejects.toThrow(/already closed/);
   });
 });

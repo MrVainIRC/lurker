@@ -13,6 +13,12 @@
 // tested against the real implementation in ../utils/ipGuard.test.ts, and that this module
 // consults it is tested against the real implementation in ./linkFetch.test.ts. Neither of
 // those can reach a live origin; this one can't judge a real address. Together they cover it.
+//
+// ⚠⚠ Everything here goes through `localhost`, NOT `127.0.0.1`, and that is not incidental:
+// node skips DNS entirely for an address literal, so a test written against the literal never
+// invokes `pinnedLookup` at all. This is the only place its SUCCESS path runs — and since node
+// asks for `{all: true}` by default, `callback(null, safe)` is the branch every real fetch in
+// production takes. Break it and every preview fails against a fully green suite.
 
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
@@ -23,7 +29,7 @@ vi.mock('../utils/ipGuard.js', () => ({
   isBlockedIpv4: (ip: string) => ip !== '127.0.0.1',
 }));
 
-const { safeRequest, bufferStream } = await import('./linkFetch.js');
+const { safeRequest, bufferStream, UnsafeUrlError } = await import('./linkFetch.js');
 
 /** A hop. Returns the response to send, given the request. */
 type Handler = (req: http.IncomingMessage, res: http.ServerResponse) => void;
@@ -32,6 +38,8 @@ let handler: Handler;
 let hits: string[] = [];
 let server: http.Server;
 let base: string;
+/** The same origin by address literal, for the one test that wants DNS skipped. */
+let literalBase: string;
 
 beforeAll(async () => {
   server = http.createServer((req, res) => {
@@ -39,7 +47,12 @@ beforeAll(async () => {
     handler(req, res);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const port = (server.address() as AddressInfo).port;
+  // `localhost` commonly resolves to ::1 as well, which the test policy above refuses — so
+  // reaching this server at all also proves the lookup FILTERS rather than taking the first
+  // answer node hands it.
+  base = `http://localhost:${port}`;
+  literalBase = `http://127.0.0.1:${port}`;
 });
 
 afterAll(async () => {
@@ -62,6 +75,26 @@ function redirectTo(location: string, status = 302): Handler {
     res.end('ignore me');
   };
 }
+
+describe('pinnedLookup, on the path where it actually runs', () => {
+  it('connects through a resolved hostname, dropping the answers the policy refuses', async () => {
+    // The success path: `localhost` resolves, at least one answer survives the filter, node
+    // gets handed that address and the fetch completes. Nothing else in the suite runs this —
+    // the other lookup test asserts the refusal, and every literal-addressed request skips DNS.
+    reset(redirectTo('/end'));
+    const res = await safeRequest(new URL(`${base}/end`));
+    const body = await bufferStream(res, { maxBytes: 4096 });
+    expect(body.body.toString()).toContain('ARRIVED');
+    expect(hits).toEqual(['/end']);
+  });
+
+  it('is skipped entirely for an address literal, so the parse guard is the only one', async () => {
+    reset(redirectTo('/end'));
+    const res = await safeRequest(new URL(`${literalBase}/end`));
+    res.stream.destroy();
+    expect(hits).toEqual(['/end']);
+  });
+});
 
 describe('safeRequest — following redirects', () => {
   it('follows a hop and reports the URL it ENDED at', async () => {
@@ -111,6 +144,48 @@ describe('safeRequest — following redirects', () => {
     await expect(safeRequest(new URL(`${base}/loop`))).rejects.toThrow(/too many redirects/);
     // Four requests: the entry plus MAX_REDIRECTS hops, and then it stops.
     expect(hits.length).toBe(4);
+  });
+
+  it('fails CLOSED on a Location it cannot even parse', async () => {
+    // ⚠ Regression guard. `new URL(location, base)` throws ERR_INVALID_URL while BUILDING
+    // normalizeUrl's argument, so its own try/catch never saw it and an attacker-controlled
+    // header escaped as a raw TypeError — which a caller sorting UnsafeUrlError from real
+    // defects would file as a bug against us. Written straight to the socket so node's own
+    // header validation can't sanitise it first.
+    for (const bad of ['http://[', 'https://exa mple.com/', 'http://%zz/', 'http://:80/']) {
+      reset((_req, res) => {
+        res.socket?.end(`HTTP/1.1 302 Found\r\nLocation: ${bad}\r\nContent-Length: 0\r\n\r\n`);
+      });
+      await expect(safeRequest(new URL(`${base}/start`))).rejects.toThrow(UnsafeUrlError);
+    }
+  });
+
+  it('refuses a body it cannot reason about, before anyone can pipe it', async () => {
+    // ⚠ We ask for identity; an origin that gzips anyway hands back bytes we can neither size
+    // nor relay. Checked in `requestOnce` rather than `bufferStream` because the byte proxy
+    // never buffers — it would have streamed DEFLATE bytes to a browser under the origin's own
+    // `Content-Type: image/png`, a corrupt image with no transport error to explain it.
+    reset((_req, res) => {
+      res.writeHead(200, { 'content-type': 'image/png', 'content-encoding': 'gzip' });
+      res.end('nonsense');
+    });
+    await expect(safeRequest(new URL(`${base}/img`))).rejects.toThrow(/content-encoding/);
+  });
+
+  it('refuses to forward a Range it cannot vouch for', async () => {
+    // The value arrives from a browser via the proxy route. A CR/LF in it makes node throw
+    // ERR_INVALID_CHAR out of the promise executor — node blocks the injection, so nothing is
+    // smuggled, but the caller gets a TypeError where this module promises to fail closed.
+    reset(redirectTo('/end'));
+    for (const bad of ['bytes=0-1\r\nX-Evil: 1', 'everything', 'bytes=abc-def']) {
+      await expect(safeRequest(new URL(`${base}/end`), { range: bad })).rejects.toThrow(
+        UnsafeUrlError,
+      );
+    }
+    expect(hits).toEqual([]); // refused before it dialled
+    const ok = await safeRequest(new URL(`${base}/end`), { range: 'bytes=0-1023' });
+    ok.stream.destroy();
+    expect(hits).toEqual(['/end']);
   });
 
   it('DESTROYS a redirect body instead of draining it', async () => {

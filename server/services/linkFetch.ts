@@ -28,8 +28,22 @@ import type { LookupFunction } from 'node:net';
 import { isBlockedIpLiteral } from '../utils/ipGuard.js';
 import { APP_NAME, APP_VERSION, USER_AGENT_CONTACT } from '../utils/userAgent.js';
 
-/** Wall-clock budget for a single hop. */
-const TIMEOUT_MS = 5000;
+/**
+ * Idle timeout: node arms this as `socket.setTimeout`, which every arriving byte resets. It
+ * bounds a STALL — a dead connect, headers that never come — and not the transfer.
+ */
+const IDLE_TIMEOUT_MS = 5000;
+
+/**
+ * Hard ceiling on one hop, start to finish, however busy it looks.
+ *
+ * ⚠ The idle timer alone is not a budget, and the gap is exploitable rather than theoretical:
+ * an origin dribbling one byte every four seconds resets it forever, so a 512 KB read could
+ * hold a socket for weeks. This one is never reset, so a fetch is bounded at MAX_REDIRECTS + 1
+ * hops of it. Verified against a real dribbling origin: cut at ~20 s, with the prefix that had
+ * arrived returned and flagged `truncated`.
+ */
+const HOP_DEADLINE_MS = 20_000;
 /** Redirects followed before giving up. Each hop is re-validated. */
 const MAX_REDIRECTS = 3;
 
@@ -171,9 +185,18 @@ const pinnedLookup: LookupFunction = (hostname, options, callback) => {
  * A private agent with keep-alive off means every request we make goes through
  * the pin, every time. Preview fetching is not a hot path; correctness of the
  * guard is worth one handshake.
+ *
+ * ⚠⚠ The invariant is `keepAlive: false` AND an UNBOUNDED `maxSockets` — both halves, which is
+ * why the second is spelled out rather than left to the default. node only marks a request
+ * `shouldKeepAlive = false` when `!agent.keepAlive && !isFinite(agent.maxSockets)`, and the
+ * Agent's `free` handler hands a released socket to a queued same-host request BEFORE it ever
+ * consults `keepAlive`. So capping these — the obvious way to bound preview concurrency — would
+ * quietly restore socket reuse and put the DNS-pin bypass straight back. Measured: 6 concurrent
+ * requests through `{keepAlive: false}` do 6 lookups; through `{keepAlive: false, maxSockets: 2}`
+ * they do 2. Bound concurrency in the CALLER, above this module.
  */
-const httpAgent = new http.Agent({ keepAlive: false });
-const httpsAgent = new https.Agent({ keepAlive: false });
+const httpAgent = new http.Agent({ keepAlive: false, maxSockets: Infinity });
+const httpsAgent = new https.Agent({ keepAlive: false, maxSockets: Infinity });
 
 export interface FetchOptions {
   /** `Accept` header. Defaults to a browser-ish HTML preference. */
@@ -181,17 +204,49 @@ export interface FetchOptions {
   /** A `Range` header to forward, so the byte proxy can serve partial content. Media elements
    *  require it: Safari won't play a <video> from a source that ignores ranges. */
   range?: string;
-  /** Overall byte ceiling. The stream is destroyed the moment it's crossed. */
-  maxBytes?: number;
+  // ⚠ No byte ceiling here. It reads like it belongs — but nothing on this path consumes a
+  // body, so nothing could enforce it, and an option that documents a guarantee it doesn't
+  // provide is worse than no option. The cap lives in `BufferOptions`, where the read is.
 }
 
-export interface RawResponse {
+/** The bare MIME type, plus the charset the origin declared alongside it. */
+interface ContentType {
+  /** Lowercased, parameters stripped: `text/html`. */
+  contentType: string;
+  /**
+   * The declared charset, lowercased, or null.
+   *
+   * Kept as its own field because `contentType` throws the parameters away, and a caller
+   * decoding a body needs it: `text/html; charset=windows-1251` with no in-document `<meta
+   * charset>` renders as replacement characters if you assume UTF-8.
+   */
+  charset: string | null;
+}
+
+export interface RawResponse extends ContentType {
   status: number;
   headers: http.IncomingHttpHeaders;
-  contentType: string;
   /** The URL actually served, after redirects — the base for relative og:image. */
   finalUrl: URL;
   stream: IncomingMessage;
+}
+
+/**
+ * A `Range` we're willing to forward.
+ *
+ * The value comes from a browser, which means it comes from anyone who can reach the proxy
+ * route. Unvalidated, a CR or LF in it makes node throw `ERR_INVALID_CHAR` out of the promise
+ * executor below — node blocks the header injection, so nothing is smuggled, but the caller
+ * gets a raw `TypeError` where this module promises to fail closed with an `UnsafeUrlError`.
+ */
+const RANGE_RE = /^bytes=\d*-\d*(?:,\s*\d*-\d*)*$/;
+
+/** Split `text/html; charset=utf-8` into the parts callers actually use. */
+function parseContentType(raw: string): ContentType {
+  return {
+    contentType: raw.split(';')[0].trim().toLowerCase(),
+    charset: /;\s*charset\s*=\s*"?([\w-]+)"?/i.exec(raw)?.[1]?.toLowerCase() ?? null,
+  };
 }
 
 /**
@@ -200,6 +255,9 @@ export interface RawResponse {
  */
 function requestOnce(url: URL, opts: FetchOptions): Promise<RawResponse> {
   return new Promise((resolve, reject) => {
+    if (opts.range !== undefined && !RANGE_RE.test(opts.range)) {
+      return reject(new UnsafeUrlError(`refusing to forward a malformed Range: ${opts.range}`));
+    }
     const mod = url.protocol === 'https:' ? https : http;
     const req = mod.request(
       url,
@@ -207,7 +265,7 @@ function requestOnce(url: URL, opts: FetchOptions): Promise<RawResponse> {
         method: 'GET',
         lookup: pinnedLookup,
         agent: mod === https ? httpsAgent : httpAgent,
-        timeout: TIMEOUT_MS,
+        timeout: IDLE_TIMEOUT_MS,
         headers: {
           'User-Agent': userAgent(),
           Accept: opts.accept || 'text/html,application/xhtml+xml,*/*;q=0.8',
@@ -222,20 +280,36 @@ function requestOnce(url: URL, opts: FetchOptions): Promise<RawResponse> {
         },
       },
       (res) => {
-        const contentType = String(res.headers['content-type'] || '')
-          .split(';')[0]
-          .trim()
-          .toLowerCase();
+        // ⚠ Checked HERE, not in `bufferStream`, because the other consumer of a RawResponse
+        // pipes it. We asked for identity; an origin that gzips anyway hands back bytes we
+        // can neither size nor pass on — relaying them to a browser under the origin's own
+        // `Content-Type: image/png` is a corrupt image with no transport error to explain it.
+        const encoding = String(res.headers['content-encoding'] || 'identity').toLowerCase();
+        if (encoding !== 'identity') {
+          res.destroy();
+          return reject(new UnsafeUrlError(`unexpected content-encoding: ${encoding}`));
+        }
         resolve({
           status: res.statusCode || 0,
           headers: res.headers,
-          contentType,
+          ...parseContentType(String(res.headers['content-type'] || '')),
           finalUrl: url,
           stream: res,
         });
       },
     );
-    req.on('timeout', () => req.destroy(new Error('timeout')));
+    // Cleared when the request is done either way, and unref'd so a pending fetch can never be
+    // the reason the process stays up.
+    const deadline = setTimeout(() => {
+      req.destroy(new UnsafeUrlError(`hop took longer than ${HOP_DEADLINE_MS}ms`));
+    }, HOP_DEADLINE_MS);
+    deadline.unref();
+    req.on('close', () => clearTimeout(deadline));
+    // ⚠ Only observable BEFORE the response headers arrive. After that this promise has already
+    // resolved, so the reject is a no-op and the destroy surfaces to whoever holds the stream —
+    // as an ordinary stream error, indistinguishable from a peer reset. `bufferStream` treats
+    // both the same way: what arrived is a prefix, and it says so.
+    req.on('timeout', () => req.destroy(new UnsafeUrlError('timed out with no data')));
     req.on('error', reject);
     req.end();
   });
@@ -269,19 +343,34 @@ export async function safeRequest(start: URL, opts: FetchOptions = {}): Promise<
     // nothing here needs the socket back.
     res.stream.destroy();
     if (hop === MAX_REDIRECTS) throw new UnsafeUrlError('too many redirects');
-    const next = normalizeUrl(new URL(String(res.headers.location), url).toString());
+    // ⚠ The resolve is inside the try, not just the normalize. `Location: http://[` throws
+    // `ERR_INVALID_URL` while BUILDING normalizeUrl's argument, so its own try/catch never sees
+    // it — and an attacker-controlled header escaping as a raw TypeError makes a caller that
+    // sorts `UnsafeUrlError` from everything else file a bug report against us.
+    let next: URL | null = null;
+    try {
+      next = normalizeUrl(new URL(String(res.headers.location), url).toString());
+    } catch {
+      next = null;
+    }
     if (!next) throw new UnsafeUrlError('redirect to a disallowed target');
     url = next;
   }
   throw new UnsafeUrlError('too many redirects');
 }
 
-export interface BufferedResponse {
+export interface BufferedResponse extends ContentType {
   status: number;
-  contentType: string;
   finalUrl: URL;
   body: Buffer;
-  /** True when we stopped early because the cap was reached. */
+  /**
+   * True when `body` is a PREFIX of what the origin was sending — the cap fired, the peer went
+   * away mid-message, or a deadline cut it off.
+   *
+   * ⚠ Stopping at `</head>` is deliberately NOT truncation: we got the whole of what we asked
+   * for. The distinction is the whole value of this flag — a caller deciding whether metadata
+   * might be missing gets told the truth either way.
+   */
   truncated: boolean;
 }
 
@@ -310,8 +399,22 @@ export interface BufferOptions {
  * declared length broke every caller here, all of which want a PREFIX. A maintainer trusting
  * the sentence that used to be here would have believed in a guard that had been removed.
  */
-/** What `stopAtHeadEnd` looks for. Lowercased; the scan lowercases its window to match. */
-const NEEDLE = '</head';
+/**
+ * What `stopAtHeadEnd` looks for.
+ *
+ * ⚠ The trailing delimiter is load-bearing, not decoration. Matching `</head` as a bare
+ * substring also matches `</header>`, which is in the markup of roughly every site on the web
+ * — and since a match TRIMS rather than merely stops, a page that omits the optional `</head>`
+ * tag had its document silently cut at the first `</header>`, reporting `truncated: false`
+ * about metadata that had been thrown away.
+ *
+ * Known residual: a literal `</head>` inside a comment or a script string still matches, since
+ * this is a byte scan and not a tokenizer. That costs a preview, never a wrong one, and the
+ * fix is a parser rather than a longer regex.
+ */
+const HEAD_END = /<\/head[\s/>]/;
+/** The longest partial match that can carry across a chunk boundary: `</head`. */
+const HEAD_END_CARRY = 6;
 
 export async function bufferStream(
   res: RawResponse,
@@ -328,20 +431,32 @@ export async function bufferStream(
   // The place a size limit genuinely belongs is the byte proxy, which is serving a whole file
   // to a browser and enforces its own ceiling.
 
-  // We asked for identity; anything else means we can't reason about the byte
-  // count, so we don't try.
+  // We asked for identity; anything else means we can't reason about the byte count, so we
+  // don't try. `requestOnce` refuses these too — this is the same rule applied to a response
+  // that reached us some other way, since a RawResponse is just an object.
   const encoding = String(res.headers['content-encoding'] || 'identity').toLowerCase();
   if (encoding !== 'identity') {
     res.stream.destroy();
     throw new UnsafeUrlError(`unexpected content-encoding: ${encoding}`);
   }
 
+  // ⚠ Attaching listeners to a stream that is already finished means NOTHING ever fires, and
+  // this promise hangs forever with no error and no log — a leaked await, not a failure. That
+  // is reachable exactly the way the docblock above invites: inspect the headers, await a cache
+  // lookup, and come back to a response the peer reset while you were gone.
+  if (res.stream.destroyed || res.stream.readableEnded) {
+    throw new UnsafeUrlError('the response stream was already closed');
+  }
+
   return await new Promise<BufferedResponse>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
     let truncated = false;
+    /** The `</head>` cut fired: we have everything we asked for and are done reading. */
     let settled = false;
-    // Rolling state for the `</head` scan — see the data handler.
+    /** This promise has been resolved. Distinct from `settled` — see `finish`. */
+    let finished = false;
+    // Rolling state for the `</head>` scan — see the data handler.
     let tail: Buffer = Buffer.alloc(0);
     let scanned = 0;
 
@@ -350,55 +465,87 @@ export async function bufferStream(
       // this, a chunk landing after the cut appends bytes AFTER the `</head>` we just trimmed
       // to, and a chunk landing after truncation pushes the body past `maxBytes`. Both
       // guarantees this function makes are only true if it stops listening once it's done.
-      if (settled || truncated) return;
-      total += chunk.length;
-      if (total > maxBytes) {
+      if (settled) return;
+
+      // Trim to the cap but keep going into the scan below, rather than returning here. A
+      // chunk can both cross the cap AND close the head, and bailing early called that
+      // `truncated: true` — telling a caller its metadata might be incomplete about a head
+      // that had arrived whole.
+      let piece = chunk;
+      if (total + chunk.length > maxBytes) {
         // Keep the prefix — a truncated head is often still enough to find og: tags in, and
         // a partial answer beats no answer.
-        chunks.push(chunk.subarray(0, chunk.length - (total - maxBytes)));
+        piece = chunk.subarray(0, maxBytes - total);
         truncated = true;
-        res.stream.destroy();
-        return;
       }
-      chunks.push(chunk);
-      if (opts.stopAtHeadEnd && !settled) {
+      total += piece.length;
+      chunks.push(piece);
+
+      if (opts.stopAtHeadEnd) {
         // Search only the NEW bytes plus a small overlap, not the whole buffer. Concatenating
         // and latin1-decoding everything on every chunk is O(n²) — on exactly the documents the
         // 512 KB ceiling exists for (metadata buried behind hundreds of KB of script) that's
         // tens of MB of copying and a full decode per chunk.
         //
-        // `tail` is the last NEEDLE.length - 1 bytes of everything scanned so far — the most
-        // that can carry over — so a `</head` split across a boundary is found however small
-        // the chunks are. ⚠ It is NOT "the previous chunk": with chunks shorter than the
-        // needle, one chunk of context isn't enough to span it, and the offset arithmetic
-        // below silently trims into the head when it assumes more overlap than it was given.
-        const window = Buffer.concat([tail, chunk]);
-        const at = window.toString('latin1').toLowerCase().indexOf(NEEDLE);
-        if (at !== -1) {
+        // `tail` is the last HEAD_END_CARRY bytes of everything scanned so far — the most that
+        // can carry over — so a `</head>` split across a boundary is found however small the
+        // chunks are. ⚠ It is NOT "the previous chunk": with chunks shorter than the tag, one
+        // chunk of context isn't enough to span it, and the offset arithmetic below silently
+        // trims into the head when it assumes more overlap than it was given.
+        const window = Buffer.concat([tail, piece]);
+        const found = HEAD_END.exec(window.toString('latin1').toLowerCase());
+        if (found) {
           settled = true;
+          // The head arrived complete, whatever the cap did to the bytes after it.
+          truncated = false;
           // TRIM to the tag rather than merely stopping: stopping bounds the read at whatever
           // chunk boundary we landed on, so the saving would depend on the socket's chunk size.
           // Cutting makes the guarantee real — the caller gets the head and nothing after it.
-          const keep = scanned - tail.length + at;
+          const keep = scanned - tail.length + found.index;
           const whole = Buffer.concat(chunks);
           chunks.length = 0;
           chunks.push(whole.subarray(0, keep));
           res.stream.destroy();
-          return;
+          return finish();
         }
-        tail = window.subarray(Math.max(0, window.length - (NEEDLE.length - 1)));
-        scanned += chunk.length;
+        tail = window.subarray(Math.max(0, window.length - HEAD_END_CARRY));
+        scanned += piece.length;
       }
+
+      if (truncated) res.stream.destroy();
     });
 
-    res.stream.on('error', (err) => (truncated || settled ? resolve(done()) : reject(err)));
-    res.stream.on('close', () => resolve(done()));
-    res.stream.on('end', () => resolve(done()));
+    // A peer reset, our own deadline, a `req.destroy()` — all arrive here or at 'close', and
+    // all of them mean the same thing: what we have is a prefix. Throwing it away would be
+    // the opposite of the policy applied at the cap, and it throws away real previews —
+    // a complete `<head>` followed by a reset is every tag we needed.
+    res.stream.on('error', (err) => {
+      if (settled) return finish(); // the head was already complete and cut
+      if (total === 0) return reject(err); // nothing arrived; there is no partial answer
+      truncated = true;
+      finish();
+    });
+    res.stream.on('close', () => {
+      // `complete` is node's "the message framing said this was all of it". False means the
+      // body was cut short — best-effort, since a response framed only by EOF can't be judged
+      // by anyone, but it catches the Content-Length and chunked cases.
+      if (!settled && res.stream.complete === false) truncated = true;
+      finish();
+    });
+    res.stream.on('end', finish);
+
+    /** Settle once. Three events can fire for one response and `done()` copies the body. */
+    function finish(): void {
+      if (finished) return;
+      finished = true;
+      resolve(done());
+    }
 
     function done(): BufferedResponse {
       return {
         status: res.status,
         contentType: res.contentType,
+        charset: res.charset,
         finalUrl: res.finalUrl,
         body: Buffer.concat(chunks),
         truncated,
