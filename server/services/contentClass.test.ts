@@ -141,6 +141,9 @@ describe('classifyUpload — media', () => {
       ['v.mov', bmff('qt  ', []), 'video/quicktime', 'mov'],
       ['v.m4v', bmff('M4V '), 'video/x-m4v', 'm4v'],
       ['a.m4a', bmff('M4A '), 'audio/x-m4a', 'm4a'],
+      // An audio-only ISO-BMFF whose recorder stamped an audio brand (M4B/F4A/…)
+      // sniffs as audio/mp4, not audio/x-m4a. Same box structure → served as .m4a.
+      ['a.m4b', bmff('M4B ', []), 'audio/mp4', 'm4a'],
       ['a.mp3', mp3Frame, 'audio/mpeg', 'mp3'],
     ];
     for (const [name, bytes, mime, ext] of cases) {

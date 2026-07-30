@@ -74,14 +74,19 @@ const IMAGE_SNIFF_MIMES = new Set([
  * these four". They're each a small follow-up (EBML has a `Void` element that plays
  * the same role `free` does in MP4, so the trick transfers).
  *
- * MIMEs verified against file-type 19 with real/synthesized containers — note m4a
- * is `audio/x-m4a`, NOT `audio/mp4`.
+ * MIMEs verified against file-type with real/synthesized containers. Note the two
+ * m4a-ish labels: file-type reports `audio/x-m4a` for the `M4A ` brand, but audio
+ * ISO-BMFF carrying an `M4B `/`F4A `/`F4B ` (and other audio-only) major brand comes
+ * back as `audio/mp4`. Both are the same box structure walkBoxes already scrubs, so
+ * we accept both and serve them as `.m4a` — otherwise an m4a whose recorder stamped
+ * an audio brand is refused despite being perfectly cleanable.
  */
 const MEDIA_MIMES = new Map<string, string>([
   ['video/mp4', 'mp4'],
   ['video/quicktime', 'mov'],
   ['video/x-m4v', 'm4v'],
   ['audio/x-m4a', 'm4a'],
+  ['audio/mp4', 'm4a'],
   ['audio/mpeg', 'mp3'],
 ]);
 
