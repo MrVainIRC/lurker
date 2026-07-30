@@ -74,12 +74,17 @@ const IMAGE_SNIFF_MIMES = new Set([
  * these four". They're each a small follow-up (EBML has a `Void` element that plays
  * the same role `free` does in MP4, so the trick transfers).
  *
- * MIMEs verified against file-type with real/synthesized containers. Note the two
- * m4a-ish labels: file-type reports `audio/x-m4a` for the `M4A ` brand, but audio
- * ISO-BMFF carrying an `M4B `/`F4A `/`F4B ` (and other audio-only) major brand comes
- * back as `audio/mp4`. Both are the same box structure walkBoxes already scrubs, so
- * we accept both and serve them as `.m4a` — otherwise an m4a whose recorder stamped
- * an audio brand is refused despite being perfectly cleanable.
+ * MIMEs verified against file-type with real/synthesized containers. file-type
+ * labels an ISO-BMFF file by its major `ftyp` brand, so the SAME box structure
+ * surfaces under several MIMEs we handle identically:
+ *   • `M4A ` brand            → audio/x-m4a
+ *   • `M4B `/`F4A `/audio-only → audio/mp4
+ *   • `3gp4`/`3gp5` brand      → video/3gpp   (Android voice recorders emit these,
+ *                                              frequently with a `.m4a` extension)
+ *   • `3g2*` brand             → video/3gpp2
+ * They are all just ISO-BMFF boxes to walkBoxes, so accepting them costs a map entry
+ * — refusing 415s a perfectly cleanable file. m4a-ish brands serve as `.m4a`; 3gpp
+ * keeps its honest container extension.
  */
 const MEDIA_MIMES = new Map<string, string>([
   ['video/mp4', 'mp4'],
@@ -87,11 +92,13 @@ const MEDIA_MIMES = new Map<string, string>([
   ['video/x-m4v', 'm4v'],
   ['audio/x-m4a', 'm4a'],
   ['audio/mp4', 'm4a'],
+  ['video/3gpp', '3gp'],
+  ['video/3gpp2', '3g2'],
   ['audio/mpeg', 'mp3'],
 ]);
 
 /** Human list for the 415 — the error message is how a user discovers the policy. */
-export const ACCEPTED_SUMMARY = 'images, text, and audio/video (mp4, mov, m4v, m4a, mp3)';
+export const ACCEPTED_SUMMARY = 'images, text, and audio/video (mp4, mov, m4v, m4a, 3gp, mp3)';
 
 /**
  * Sniffed types that mean "this is text, I just recognized its dialect" — NOT a

@@ -144,6 +144,9 @@ describe('classifyUpload — media', () => {
       // An audio-only ISO-BMFF whose recorder stamped an audio brand (M4B/F4A/…)
       // sniffs as audio/mp4, not audio/x-m4a. Same box structure → served as .m4a.
       ['a.m4b', bmff('M4B ', []), 'audio/mp4', 'm4a'],
+      // Android voice recorders emit a 3GPP container (sniffs as video/3gpp) and
+      // frequently name it .m4a. Still ISO-BMFF → scrubbable, kept as .3gp.
+      ['rec.m4a', bmff('3gp4', ['isom', '3gp4']), 'video/3gpp', '3gp'],
       ['a.mp3', mp3Frame, 'audio/mpeg', 'mp3'],
     ];
     for (const [name, bytes, mime, ext] of cases) {
