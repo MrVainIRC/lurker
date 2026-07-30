@@ -24,6 +24,7 @@ import https from 'node:https';
 import dns from 'node:dns';
 import type { IncomingMessage } from 'node:http';
 import type { LookupAddress } from 'node:dns';
+import type { LookupFunction } from 'node:net';
 import { isBlockedIpLiteral } from '../utils/ipGuard.js';
 import { APP_NAME, APP_VERSION, USER_AGENT_CONTACT } from '../utils/userAgent.js';
 
@@ -123,27 +124,37 @@ export function normalizeUrl(raw: string): URL | null {
  * DNS-rebinding SSRF (validate `evil.com` → A 1.2.3.4, connect → A 127.0.0.1)
  * has nowhere to happen. Validating a hostname anywhere else in this file would
  * be theatre.
+ *
+ * Typed as node's own `net.LookupFunction`, which is the contract this has to
+ * satisfy — the two shapes of callback below aren't ours to choose.
  */
-function pinnedLookup(
-  hostname: string,
-  options: dns.LookupOneOptions | dns.LookupAllOptions | number,
-  callback: (err: NodeJS.ErrnoException | null, address: never, family?: number) => void,
-): void {
-  const wantAll = typeof options === 'object' && options !== null && options.all === true;
-  dns.lookup(hostname, { all: true, verbatim: true }, (err, addresses: LookupAddress[]) => {
-    if (err) return callback(err, undefined as never);
+const pinnedLookup: LookupFunction = (hostname, options, callback) => {
+  // node wants ONE address, or ALL of them when it intends to race the families — which is
+  // what it actually asks for here, `autoSelectFamily` having been on by default since node
+  // 20. Both shapes have to be answered in kind, or node reads back the wrong thing.
+  const wantAll = options.all === true;
+  // The options are node's to decide, and forwarding them is not just tidiness: it hands us
+  // `hints: ADDRCONFIG`, meaning "only answer with families this host has configured". Dropping
+  // that lets the pin approve an address the connection could never have used — a working fetch
+  // turned into a failed one on a v4-only box. Same for a `family` a future caller sets.
+  //
+  // `all` is forced on regardless of what was asked: every answer has to be judged, not just
+  // whichever one node would have picked.
+  dns.lookup(hostname, { ...options, all: true }, (err, addresses: LookupAddress[]) => {
+    // node never reads the address when the error is set; its own lookup passes nothing.
+    if (err) return callback(err, '');
     const safe = addresses.filter((a) => !isBlockedIpLiteral(a.address));
     if (safe.length === 0) {
       const e: NodeJS.ErrnoException = new UnsafeUrlError(
         `refusing to connect to ${hostname}: resolves only to internal addresses`,
       );
       e.code = 'EACCES';
-      return callback(e, undefined as never);
+      return callback(e, '');
     }
-    if (wantAll) return callback(null, safe as never);
-    callback(null, safe[0].address as never, safe[0].family);
+    if (wantAll) return callback(null, safe);
+    callback(null, safe[0].address, safe[0].family);
   });
-}
+};
 
 /**
  * Dedicated connection pools. **Never `globalAgent`.**
