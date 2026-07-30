@@ -20,7 +20,7 @@
 // asks for `{all: true}` by default, `callback(null, safe)` is the branch every real fetch in
 // production takes. Break it and every preview fails against a fully green suite.
 
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -254,13 +254,23 @@ describe('streaming, where the scrape-tuned bounds are wrong', () => {
   // and the one that fires in ordinary use.
   const IDLE_GAP_MS = 6500;
 
+  // ⚠ Tracked and cleared. Left dangling, this timer outlives its own test and fires `end()` on
+  // a destroyed ServerResponse part-way through the NEXT one — harmless today only because
+  // node's `write_()` short-circuits on `msg.destroyed`, which is a private implementation
+  // detail and not a thing to rely on. A test that reaches into a later test is a flake waiting
+  // for a scheduling change.
+  let pending: ReturnType<typeof setTimeout> | undefined;
+  afterEach(() => clearTimeout(pending));
+
   /** Headers, then a deliberate silence, then the rest — a backpressured <video> exactly. */
   const pauseMidBody: Handler = (_req, res) => {
+    res.on('error', () => {});
     res.writeHead(200, { 'content-type': 'video/mp4' });
     res.write('start');
-    setTimeout(() => {
-      if (!res.writableEnded) res.end('end');
-    }, IDLE_GAP_MS).unref();
+    pending = setTimeout(() => {
+      if (!res.writableEnded && !res.destroyed) res.end('end');
+    }, IDLE_GAP_MS);
+    pending.unref();
   };
 
   it('cuts a paused body without the flag, which is the scrape behaviour', async () => {
@@ -342,13 +352,18 @@ describe('abandoning a fetch, where it has to actually end it', () => {
     expect(hits).toEqual([]);
   });
 
-  it('stops a redirect walk it is part-way through', async () => {
-    // A walk is up to four requests. Aborting during hop 1 must not have hops 2 and 3 dialled
-    // on the caller's behalf — the per-hop check, not just the per-request one.
+  it('stops a redirect walk BETWEEN hops', async () => {
+    // ⚠ The per-hop check specifically, and getting a test to reach it takes care: aborting
+    // while hop 1's request is still open is caught by `requestOnce`'s own listener, which
+    // rejects with the same message — so the obvious version of this test passes with
+    // safeRequest's loop guard deleted. It has to fire once hop 1 has fully completed and the
+    // loop is about to dial hop 2.
     const controller = new AbortController();
     reset((req, res) => {
       if (req.url === '/hop1') {
-        controller.abort();
+        // `finish` fires when this response is fully flushed, so the abort lands after
+        // requestOnce has resolved and its own abort listener has been removed on `close`.
+        res.on('finish', () => controller.abort());
         res.writeHead(302, { location: '/hop2' });
         res.end();
         return;
@@ -360,6 +375,7 @@ describe('abandoning a fetch, where it has to actually end it', () => {
     await expect(
       safeRequest(new URL(`${base}/hop1`), { signal: controller.signal }),
     ).rejects.toThrow(/abandoned/);
+    // Hop 2 was never dialled.
     expect(hits).toEqual(['/hop1']);
   });
 });

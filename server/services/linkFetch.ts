@@ -58,9 +58,16 @@ const HOP_DEADLINE_MS = 20_000;
  *
  * So a streaming caller keeps the deadline for connect-and-headers — the part that can hang
  * with nothing to show for it — and then trades it for this, which bounds a genuinely dead
- * origin while tolerating a reader that has paused. A stream cut here is recoverable rather
- * than fatal: the proxy forwards `Accept-Ranges`, so a media element re-requests the range it
- * still wants.
+ * origin while tolerating a reader that has paused.
+ *
+ * ⚠ A cut here is recoverable only where the ORIGIN supports ranges, and this comment used to
+ * claim it always was — "the proxy forwards Accept-Ranges, so a media element re-requests the
+ * range it still wants" — which the sibling change in the same commit falsified by making that
+ * header conditional on the origin having demonstrated range support. For a dumb, slow origin
+ * that advertises nothing, which is exactly the profile most likely to idle out here, the
+ * client is told ranges are unavailable and cannot resume. That is the honest position: this
+ * bound trades a stalled socket for a broken transfer, and the trade is only clearly right
+ * because the alternative is holding a pool slot forever.
  */
 const STREAM_IDLE_TIMEOUT_MS = 30_000;
 

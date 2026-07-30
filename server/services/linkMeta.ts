@@ -697,6 +697,26 @@ export function scrapeMeta(html: string): ScrapedMeta {
  * structured fields and build any embed ourselves from a provider table we
  * control (see linkEmbed.ts).
  */
+/**
+ * Replace unpaired surrogates with U+FFFD.
+ *
+ * ⚠ This is the JSON path's equivalent of the guard `decodeEntities` already applies to numeric
+ * character references, and it is needed for the same reason at a different door:
+ * `JSON.parse('"\\ud83d"')` yields a lone U+D83D directly, no entity involved. A lone surrogate
+ * does not survive the SQLite round trip — it comes back as U+FFFD — so the requester who
+ * resolved a title and everyone served it from the cache afterwards get measurably different
+ * strings for one page, which is the divergence the clamp fix was named for, reached from an
+ * input clamping cannot see. Doing it here means a caller never handles one, whichever producer
+ * it came from.
+ */
+function stripLoneSurrogates(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+    '\uFFFD',
+  );
+}
+
 export function readOEmbed(json: unknown): OEmbedMeta | null {
   if (typeof json !== 'object' || json === null || Array.isArray(json)) return null;
   const o = json as Record<string, unknown>;
@@ -709,7 +729,7 @@ export function readOEmbed(json: unknown): OEmbedMeta | null {
   // raw entity, whichever path produced the value.
   const str = (v: unknown): string | undefined => {
     if (typeof v !== 'string') return undefined;
-    const clean = detach(decodeEntities(v).replace(/\s+/g, ' ').trim());
+    const clean = detach(stripLoneSurrogates(decodeEntities(v)).replace(/\s+/g, ' ').trim());
     return clean || undefined;
   };
   const num = (v: unknown): number | undefined =>

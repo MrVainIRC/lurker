@@ -553,6 +553,21 @@ describe('readOEmbed', () => {
     });
   });
 
+  it('replaces a lone surrogate rather than passing it on', () => {
+    // ⚠⚠ Regression guard. `decodeEntities` refuses surrogate ESCAPES, so the HTML path is
+    // covered — but oEmbed arrives via `JSON.parse`, and `JSON.parse('"\\ud83d"')` yields a lone
+    // U+D83D with no entity anywhere in it. That does not survive the SQLite round trip: it
+    // comes back U+FFFD, so the requester who resolved a title and everyone served it from the
+    // cache afterwards get different strings for one page — the exact divergence the clamp fix
+    // is named for, reached through a door clamping cannot see. YouTube and Vimeo titles are
+    // the ones that come through here.
+    const meta = readOEmbed(JSON.parse('{"title":"ok\\ud83d","author_name":"\\udc4dsomebody"}'));
+    const lonely = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    expect(lonely.test(meta?.title ?? '')).toBe(false);
+    expect(lonely.test(meta?.authorName ?? '')).toBe(false);
+    expect(meta?.title).toBe('ok\uFFFD');
+  });
+
   it('never surfaces the provider html field', () => {
     // The whole point: oEmbed hands back a ready-made iframe and we refuse it.
     const meta = readOEmbed({ type: 'video', html: '<iframe src="https://evil.test"></iframe>' });

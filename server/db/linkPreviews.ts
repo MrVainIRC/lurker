@@ -3,7 +3,6 @@
 
 import crypto from 'node:crypto';
 import db from './index.js';
-import { normalizeUrl } from '../services/linkFetch.js';
 
 /** What a resolved URL turned out to be. Decided from Content-Type, never from
  *  the file extension — the extension is only ever a client-side hint about
@@ -54,8 +53,14 @@ export const FAIL_TTL_MS = 60 * 60 * 1000;
  * fix, a relaxed content-type — and say what changed on the line below.
  *
  *   v1 — initial.
+ *   v2 — a video embed survives a page with no title and no image (a rate-limited provider
+ *        call used to discard the embed URL it was holding); an unusable oEmbed thumbnail no
+ *        longer discards the scraped og:image alongside it. Both turn stored `unavailable`
+ *        rows into `ok` ones, which is precisely what this counter is for — and the `urlHash`
+ *        rewrite in the same change is NOT a substitute, because it produces byte-identical
+ *        hashes for canonically-spelled URLs and so orphans none of the affected rows.
  */
-const RESOLVER_VERSION = 1;
+const RESOLVER_VERSION = 2;
 
 /**
  * Cache key: the requested URL, scoped to the resolver version.
@@ -80,9 +85,26 @@ export function urlHash(url: string): string {
   // in two forms. It is also a one-character cache bypass for any authenticated client: vary
   // the case of the host and every request is a fresh outbound fetch.
   //
-  // Falls back to the raw string when normalizeUrl refuses the URL outright (a blocked literal,
-  // a bad scheme) — those still get a negative row, and their identity is whatever was asked.
-  const key = normalizeUrl(url)?.toString() ?? url;
+  // ⚠ Canonicalised by `URL` itself, NOT by `normalizeUrl`. They agree on every URL
+  // `normalizeUrl` accepts — it returns the parsed URL with the fragment cleared, which is
+  // exactly this — but routing through it had two costs. It made the cache key a function of
+  // the SSRF ADDRESS POLICY, so adding a prefix to `isBlockedIpLiteral` would silently re-key
+  // every cached row in that range from a file with no connection to the resolver. And its
+  // refusals fell through to the raw string, which quietly revoked the fragment collapse for
+  // exactly those URLs: `http://10.0.0.1/x#a` and `#b` became two rows and two TTLs, for inputs
+  // the comment below promises still get one negative row.
+  //
+  // The identity of a cached thing should depend on the thing, not on what we think of it.
+  let key: string;
+  try {
+    const canonical = new URL(url);
+    canonical.hash = '';
+    key = canonical.toString();
+  } catch {
+    // Not a URL at all. It still gets a negative row, keyed by what was asked minus the
+    // fragment, so anchors of one unparseable string share it like anchors of any other.
+    key = url.replace(/#[\s\S]*$/, '');
+  }
   return crypto.createHash('sha256').update(`v${RESOLVER_VERSION}|${key}`).digest('hex');
 }
 
@@ -106,7 +128,10 @@ export function urlHash(url: string): string {
  * ISO-8601-with-Z is lexicographically ordered, and the index is usable because the column is
  * untouched.
  */
-const NOW_ISO = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
+/** ⚠ Exported so a test can substitute a fixed instant for `'now'` and assert the ranking
+ *  deterministically. A test that spells the expression out itself asserts a fact about SQLite
+ *  rather than about this module, and stays green when this line changes. */
+export const NOW_ISO = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
 
 /** ⚠ Exported so a test can EXPLAIN the statements that ACTUALLY run. Planning a paraphrase
  *  proves nothing: an index assertion written against a hand-copied string stays green when the

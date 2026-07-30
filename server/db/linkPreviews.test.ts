@@ -37,6 +37,36 @@ function record(url: string, over: Partial<PreviewRecord> = {}): PreviewRecord {
 }
 
 describe('expiry', () => {
+  it('ranks a same-day timestamp correctly, where the old form did not', () => {
+    // ⚠⚠ The real guard, and it is deliberately free of `Date.now()`. The behavioural test
+    // below only CATCHES this bug when the lapsed timestamp shares a calendar date with now —
+    // so after UTC midnight it goes green with the fix reverted, and nightly CI commonly runs
+    // exactly then. Asserted against fixed literals instead: no clock, no date arithmetic, and
+    // it fails at any hour of any day.
+    //
+    // The defect: `expires_at` is ISO-8601 (`…T10:59:00.000Z`) while `datetime('now')` yields
+    // `… 11:00:00`, SQLite compares TEXT lexicographically, and 'T' (0x54) sorts after ' '
+    // (0x20) — so a row that lapsed a minute ago read as still live until midnight UTC.
+    const lapsed = '2026-07-30T10:59:00.000Z';
+    // ⚠ Built from the module's OWN expression with a fixed instant swapped in for `'now'`.
+    // Spelling the strftime out here instead would assert a fact about SQLite and stay green
+    // when the shipped line changes — which it did, on the first draft of this test.
+    const at = (instant: string): string => {
+      const expr = mod.NOW_ISO.replace("'now'", `'${instant}'`);
+      expect(expr).not.toBe(mod.NOW_ISO); // the substitution has to have happened
+      return expr;
+    };
+    const row = db
+      .prepare(
+        `SELECT (? > ${at('2026-07-30 11:00:00')}) AS shipped,
+                (? > datetime('2026-07-30 11:00:00')) AS old`,
+      )
+      .get(lapsed, lapsed) as { shipped: number; old: number };
+
+    expect(row.shipped).toBe(0); // correctly lapsed
+    expect(row.old).toBe(1); // the bug: an hour-old expiry reads as still live
+  });
+
   it('treats a lapsed row as absent even when it lapsed today', async () => {
     // ⚠ Regression guard. `expires_at` is stored ISO-8601 (`…T11:00:00.000Z`) while
     // `datetime('now')` yields `… 11:00:00`, and SQLite compares TEXT lexicographically where
@@ -115,10 +145,23 @@ describe('the cache key', () => {
     expect(urlHash('https://e.test/a?q=1')).not.toBe(a);
   });
 
-  it('still keys a URL the fetcher refuses outright', () => {
-    // normalizeUrl returns null for these, and they still get a negative row — so the fallback
-    // has to be the string as asked rather than a crash or a shared bucket.
-    expect(urlHash('http://10.0.0.1/x')).not.toBe(urlHash('http://10.0.0.2/x'));
-    expect(urlHash('not a url')).toBe(urlHash('not a url'));
+  it('collapses fragments for a URL the fetcher refuses, too', () => {
+    // ⚠ Regression guard for a fallback that quietly revoked the rule above. Keying through
+    // `normalizeUrl` meant every URL it REFUSED — a private literal, a bad scheme — fell
+    // through to the raw string, so `#a` and `#b` of one blocked address became two rows and
+    // two independent negative TTLs. The identity of a cached thing should depend on the thing,
+    // not on what the address policy thinks of it. (The earlier version of this test asserted
+    // `urlHash(x) === urlHash(x)`, which is `f(x) === f(x)` and could not have noticed.)
+    const blocked = urlHash('http://10.0.0.1/x');
+    expect(urlHash('http://10.0.0.1/x#a')).toBe(blocked);
+    expect(urlHash('http://10.0.0.1/x#b')).toBe(blocked);
+    // ...while still telling two different blocked hosts apart.
+    expect(urlHash('http://10.0.0.2/x')).not.toBe(blocked);
+  });
+
+  it('keys something that is not a URL at all without throwing', () => {
+    const junk = urlHash('not a url');
+    expect(junk).toMatch(/^[0-9a-f]{64}$/);
+    expect(urlHash('not a url#anchor')).toBe(junk);
   });
 });

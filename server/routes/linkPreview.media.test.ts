@@ -200,3 +200,156 @@ describe('serving bytes', () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe('holding and releasing the fetch slot', () => {
+  // ⚠ These lines had no test at all — not the pool, not the 503, not the teardown — and three
+  // of the review's findings lived in them. The mediaPool is instance-wide module state, so
+  // these assertions are about what the ROUTE observably does with it.
+
+  it('tears the origin connection down when the client goes away mid-FETCH', async () => {
+    // ⚠⚠ Regression guard, and the timing is the whole test. The leak lives in the window
+    // BEFORE `safeRequest` resolves — while there is a live request but no `upstream` to
+    // destroy. An origin that answers immediately closes that window, so a version of this test
+    // with a fast handler passes against the bug (mine did). This origin sits on the headers.
+    //
+    // What went wrong: `finish()` latched its done-flag with `upstream` still null, so the
+    // destroy it existed for could never run, and the later call returned at its own guard. The
+    // origin socket stayed live and unread, outside a pool that had already counted it free —
+    // 'connect-then-abort as a cheap amplifier', which is what the comment claimed to prevent.
+    //
+    // Proved server-side: nothing client-side can see a socket we are still holding.
+    let closedEarly = false;
+    const settled = new Promise<void>((resolve) => {
+      handler = (req, res) => {
+        res.on('error', () => {});
+        // Torn down from our end before the origin ever answered.
+        req.on('close', () => {
+          closedEarly = !res.headersSent;
+          resolve();
+        });
+        // Deliberately slow: the fetch is still in flight when the client leaves.
+        setTimeout(() => {
+          if (!res.destroyed) {
+            res.writeHead(200, { 'content-type': 'video/mp4' });
+            res.end('too late');
+          }
+        }, 3_000).unref();
+      };
+    });
+
+    // ⚠ `.end()` to DISPATCH. A superagent request is lazy — it isn't sent until something
+    // subscribes — so building one and aborting it proves nothing at all; the origin never sees
+    // a connection and the assertion below waits forever for a close that cannot come.
+    const req = agent.get(`/api/link-preview/media/${tokenFor('/abandoned.mp4')}`);
+    req.end(() => {});
+    await new Promise((r) => setTimeout(r, 150));
+    req.abort();
+
+    // Bounded, because "leaked" here means "still open", and waiting forever cannot tell the
+    // two apart. A live guard closes it in milliseconds; the bug holds it for the 30 s idle
+    // timeout that `streaming: true` installs.
+    const raced = await Promise.race([
+      settled.then(() => 'closed' as const),
+      new Promise<'leaked'>((r) => setTimeout(() => r('leaked'), 2_000)),
+    ]);
+    expect(raced).toBe('closed');
+    expect(closedEarly).toBe(true);
+  }, 20_000);
+
+  it('gives the slot back after an ordinary response, so the pool does not leak', async () => {
+    // A pool that never releases looks fine until the 24th request of the process. Serving more
+    // than the pool size in sequence is the cheapest assertion that release actually runs.
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'image/png', 'content-length': String(PNG.length) });
+      res.end(PNG);
+    };
+    for (let i = 0; i < 30; i++) {
+      const res = await agent.get(`/api/link-preview/media/${tokenFor(`/seq-${i}.png`)}`);
+      expect(`${i} → ${res.status}`).toBe(`${i} → 200`);
+    }
+  }, 30_000);
+
+  it('gives the slot back after a refusal too', async () => {
+    // The error paths release through the same `close` listener. If they didn't, a run of dead
+    // origins would retire the pool a slot at a time.
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<script>alert(1)</script>');
+    };
+    for (let i = 0; i < 30; i++) {
+      const res = await agent.get(`/api/link-preview/media/${tokenFor(`/refused-${i}.html`)}`);
+      expect(`${i} → ${res.status}`).toBe(`${i} → 404`);
+    }
+  }, 30_000);
+});
+
+describe('the resource-size cap on a partial response', () => {
+  // ⚠ Each of these forms is legal, and each defeated the first version of `contentRangeTotal`
+  // — with the inversion that made it worth its own describe: the more absurd the claimed size,
+  // the more permissive the answer was.
+  const partial = (contentRange: string): void => {
+    handler = (_req, res) => {
+      res.writeHead(206, {
+        'content-type': 'video/mp4',
+        'content-range': contentRange,
+        'content-length': '1024',
+      });
+      res.end(Buffer.alloc(1024));
+    };
+  };
+
+  it('refuses a total it cannot represent instead of waving it through', async () => {
+    // `Number('9'.repeat(400))` is Infinity, `Number.isFinite` said false, and the guard read
+    // that as "no total stated, carry on".
+    partial(`bytes 0-1023/${'9'.repeat(400)}`);
+    const res = await agent
+      .get(`/api/link-preview/media/${tokenFor('/absurd.mp4')}`)
+      .set('Range', 'bytes=0-1023');
+    expect(res.status).toBe(413);
+  });
+
+  it('refuses a Content-Range it cannot parse', async () => {
+    partial('bytes 0-1023/not-a-number');
+    const res = await agent
+      .get(`/api/link-preview/media/${tokenFor('/garbage.mp4')}`)
+      .set('Range', 'bytes=0-1023');
+    expect(res.status).toBe(413);
+  });
+
+  it('judges the FIRST of a duplicated Content-Range, not the last', async () => {
+    // node joins duplicates with ', ', and a `$`-anchored pattern read only the tail — so an
+    // origin could state an acceptable size second and be believed.
+    partial(`bytes 0-1023/${1024 * 1024 * 1024}, bytes 0-1023/1024`);
+    const res = await agent
+      .get(`/api/link-preview/media/${tokenFor('/twohdr.mp4')}`)
+      .set('Range', 'bytes=0-1023');
+    expect(res.status).toBe(413);
+  });
+
+  it('still serves a partial response whose total is genuinely unknown', async () => {
+    // `bytes 0-N/*` is legal (RFC 7233 §4.2) and common for live-generated media. Refusing it
+    // outright would be the other failure: the per-response byte counter is what bounds it.
+    partial('bytes 0-1023/*');
+    const res = await agent
+      .get(`/api/link-preview/media/${tokenFor('/unknown.mp4')}`)
+      .set('Range', 'bytes=0-1023');
+    expect(res.status).toBe(206);
+  });
+});
+
+describe('range advertisement', () => {
+  it('reads Accept-Ranges as a token list, not a whole value', async () => {
+    // ⚠ node joins a duplicated header, so a range-capable origin sending it twice arrives as
+    // `'bytes, bytes'`. An equality test called that range-INCAPABLE, and Safari then refuses
+    // to play the video at all — silently, since the card itself renders fine.
+    handler = (_req, res) => {
+      // Set as an array so node emits the header twice, which is the case under test.
+      res.setHeader('Accept-Ranges', ['bytes', 'bytes']);
+      res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': '5' });
+      res.end('whole');
+    };
+    const res = await agent.get(`/api/link-preview/media/${tokenFor('/dupehdr.mp4')}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['accept-ranges']).toBe('bytes');
+  });
+});

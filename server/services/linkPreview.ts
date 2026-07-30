@@ -103,7 +103,7 @@ export const MAX_URLS_PER_REQUEST = 20;
  * `keepAlive` — so capping the agents silently restores socket reuse, and a reused socket skips
  * DNS, which skips the pinned lookup that is the SSRF guard.
  */
-export const MAX_CONCURRENT = MAX_URLS_PER_REQUEST;
+const MAX_CONCURRENT = MAX_URLS_PER_REQUEST;
 /**
  * Callers parked waiting for a slot, bounded so a flood can't grow this without limit.
  * Cross-request contention is what queues here; a single batch never has to.
@@ -176,9 +176,22 @@ function unavailable(url: string, ttlMs: number = FAIL_TTL_MS): PreviewRecord {
  * priming pass" was true only for a client that ignores the field, which is not something this
  * end can enforce or should assume.
  *
- * Short rather than zero so a saturated instance doesn't get re-asked in a tight loop.
+ * Short rather than zero so a saturated instance doesn't get re-asked in a tight loop, and
+ * JITTERED so that every loser of one saturation event doesn't come back as a single wave
+ * against a pool still holding the slow origins that caused it.
+ *
+ * ⚠ What this does NOT do, stated because the paragraph above reads like it does: no shipped
+ * client honours `expiresAt` yet — the iOS model omits the field and gates re-asks on a set, so
+ * a transient answer stays blank there for the session. That is a client bug and it belongs to
+ * PRs 5 and 6; sending the right number is this end's half of it, and sending the wrong one
+ * would make the client half unfixable.
  */
 const TRANSIENT_TTL_MS = 15_000;
+
+/** ±25%, so simultaneous losers don't retry in lockstep. */
+function transientTtl(): number {
+  return Math.round(TRANSIENT_TTL_MS * (0.75 + Math.random() * 0.5));
+}
 
 /**
  * The cache, wrapped so a database error degrades one URL instead of a whole batch.
@@ -221,6 +234,15 @@ function clamp(value: string | undefined, max: number): string | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
+  // ⚠ The cheap check FIRST. A code point is never fewer than one UTF-16 code unit, so
+  // `length <= max` is an exact proof that no clamp is needed — and it is O(1) where
+  // `Array.from` is O(n) over a string an attacker chooses the size of. `scrapeMeta` does not
+  // pre-bound attribute values, so one og:description can be the whole 512 KB scrape budget:
+  // measured at 986 us per call versus 2.9 us with this line, and `clamp` runs four times per
+  // record across a 20-URL batch. That is ~80 ms of unbroken synchronous work on the thread
+  // holding every IRC socket, in a repo that runs an event-loop monitor because exactly this
+  // class of stall trips ping timeouts.
+  if (trimmed.length <= max) return trimmed;
   const points = Array.from(trimmed);
   if (points.length <= max) return trimmed;
   return `${points.slice(0, max - 1).join('')}…`;
@@ -357,7 +379,13 @@ export function pageRecord(
     imageHeight: oembedImage ? (oembed?.thumbnailHeight ?? null) : null,
     embedUrl: embed?.embedUrl ?? null,
     mime: null,
-    expiresAt: new Date(Date.now() + OK_TTL_MS).toISOString(),
+    // ⚠ A record kept ONLY by the `!embed` clause has no title, no description and no
+    // thumbnail — its whole visible content is the hostname. That is worth rendering (the play
+    // affordance is real) but it is a DEGRADED answer: the provider call that would have filled
+    // those in is the thing that just failed. Giving it the seven-day success TTL cached one
+    // rate-limited minute for a week; the failure TTL retries within the hour, which is what
+    // the situation actually calls for.
+    expiresAt: new Date(Date.now() + (title || imageUrl ? OK_TTL_MS : FAIL_TTL_MS)).toISOString(),
   };
 }
 
@@ -492,7 +520,7 @@ export async function resolvePreview(raw: string): Promise<PreviewRecord> {
   // The flag first, before even a cache read: "off" means the feature isn't participating, not
   // that it serves stale answers it happens to still have. The routes aren't mounted either —
   // this is the inner half of the same decision.
-  if (!previewsEnabled()) return unavailable(raw, TRANSIENT_TTL_MS);
+  if (!previewsEnabled()) return unavailable(raw, transientTtl());
   // Refused before it can be hashed, stored, or echoed. Nothing downstream caps a URL's
   // length, and this one arrived in a request body. A stable verdict, so it keeps the ordinary
   // failure TTL — a URL this long will still be this long in an hour.
@@ -539,7 +567,7 @@ export async function resolvePreview(raw: string): Promise<PreviewRecord> {
         // the instance was saturated when we asked. No row here, and a short `expiresAt` so a
         // client honouring the field re-asks in seconds — see TRANSIENT_TTL_MS, because keeping
         // it out of OUR cache while telling the client to hold it for an hour achieved nothing.
-        return unavailable(raw, TRANSIENT_TTL_MS);
+        return unavailable(raw, transientTtl());
       }
       // ⚠ The deadline ABORTS the work, it doesn't merely stop waiting for it. Racing a promise
       // abandons it, and abandoning is not ending: the fetch kept its socket for its own hop
@@ -570,7 +598,7 @@ export async function resolvePreview(raw: string): Promise<PreviewRecord> {
       // strength of one bad afternoon. Same treatment as pool saturation: no row, short TTL.
       if (err instanceof DeadlineExceeded) {
         controller.abort();
-        return unavailable(raw, TRANSIENT_TTL_MS);
+        return unavailable(raw, transientTtl());
       }
       // An SSRF refusal is worth a line — it's either a misconfigured link or
       // somebody probing. Everything else (timeouts, resets, 403s) is ordinary

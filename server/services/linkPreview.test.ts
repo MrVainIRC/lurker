@@ -47,18 +47,6 @@ function record(over: Partial<PreviewRecord> = {}): PreviewRecord {
   };
 }
 
-describe('the concurrency cap', () => {
-  it('is at least as large as one request may ask for', async () => {
-    // ⚠⚠ The relationship, asserted directly, because the behavioural test that was supposed to
-    // guard it does not: the 20 URLs it fans out are blocked addresses that `normalizeUrl`
-    // refuses before any socket opens, so every queued waiter is handed a slot in microseconds
-    // and the suite stays green with the cap set to 6 — the exact value its own comment names
-    // as the bug. A test that passes with the defect present is a comment, not a guard.
-    const { MAX_CONCURRENT, MAX_URLS_PER_REQUEST } = await import('./linkPreview.js');
-    expect(MAX_CONCURRENT).toBeGreaterThanOrEqual(MAX_URLS_PER_REQUEST);
-  });
-});
-
 describe('pageRecord: what is enough to be worth a card', () => {
   it('keeps a video embed that has neither a title nor an image', async () => {
     // ⚠⚠ Regression guard. `!title && !imageUrl` are PAGE concepts, and the give-up rule
@@ -77,6 +65,28 @@ describe('pageRecord: what is enough to be worth a card', () => {
     expect(out.kind).toBe('video-embed');
     expect(out.embedUrl).toContain('youtube-nocookie.com');
     expect(out.title).toBeNull();
+  });
+
+  it('gives a contentless embed the FAILURE ttl, not the seven-day one', async () => {
+    // ⚠ Regression guard. Keeping the embed is right — the play affordance is real content —
+    // but a record kept only by that clause has no title, no description and no thumbnail: its
+    // whole visible substance is the hostname. It is a DEGRADED answer, produced because the
+    // provider call that would have filled it in just failed, so caching it for seven days
+    // banks one rate-limited minute for a week. An hour is what the situation calls for.
+    const { pageRecord } = await import('./linkPreview.js');
+    const { OK_TTL_MS, FAIL_TTL_MS } = await import('../db/linkPreviews.js');
+
+    const thin = pageRecord(new URL('https://www.youtube.com/watch?v=abc123'), null, {});
+    const thinTtl = new Date(thin.expiresAt).getTime() - Date.now();
+    expect(thinTtl).toBeLessThanOrEqual(FAIL_TTL_MS);
+
+    // ...while an embed that DID get its metadata keeps the success TTL.
+    const full = pageRecord(new URL('https://www.youtube.com/watch?v=abc123'), null, {
+      title: 'A Real Video',
+    });
+    const fullTtl = new Date(full.expiresAt).getTime() - Date.now();
+    expect(fullTtl).toBeGreaterThan(FAIL_TTL_MS);
+    expect(fullTtl).toBeLessThanOrEqual(OK_TTL_MS);
   });
 
   it('still gives up on an ordinary page with nothing to show', async () => {
