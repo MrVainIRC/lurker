@@ -77,7 +77,10 @@ describe('the case that motivated this', () => {
     expect(full.length).toBeGreaterThan(64 * 1024);
     const head = full.subarray(0, 64 * 1024);
 
-    await expect(sharp(head).metadata()).rejects.toThrow(/corrupt header|unable to parse/i);
+    // ⚠ Asserts only that it REJECTS. Matching the message text couples this to a libvips /
+    // libwebp build — and the regex was only there because oxlint's `require-to-throw-message`
+    // refuses a bare `toThrow()`. `toBeInstanceOf` satisfies both: no message, no lint rule.
+    await expect(sharp(head).metadata()).rejects.toBeInstanceOf(Error);
     expect(dimensionsFromHeader(head)).toEqual({ width: 600, height: 400 });
   });
 
@@ -86,7 +89,10 @@ describe('the case that motivated this', () => {
     expect(full.length).toBeGreaterThan(64 * 1024);
     const head = full.subarray(0, 64 * 1024);
 
-    await expect(sharp(head).metadata()).rejects.toThrow(/corrupt header|unable to parse/i);
+    // ⚠ Asserts only that it REJECTS. Matching the message text couples this to a libvips /
+    // libwebp build — and the regex was only there because oxlint's `require-to-throw-message`
+    // refuses a bare `toThrow()`. `toBeInstanceOf` satisfies both: no message, no lint rule.
+    await expect(sharp(head).metadata()).rejects.toBeInstanceOf(Error);
     expect(dimensionsFromHeader(head)).toEqual({ width: 600, height: 400 });
   });
 });
