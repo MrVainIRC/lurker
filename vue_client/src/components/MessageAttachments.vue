@@ -44,7 +44,11 @@ import { computed, onBeforeUnmount, ref, useTemplateRef, watch } from 'vue';
 import { useSettingsStore } from '../stores/settings.js';
 import { useConfigStore } from '../stores/config.js';
 import { previewableUrls, MAX_CARDS_PER_MESSAGE } from '../utils/previewUrls.js';
-import { useLinkPreview, type LinkPreview } from '../composables/useLinkPreview.js';
+import {
+  useLinkPreview,
+  usePreviewsSettled,
+  type LinkPreview,
+} from '../composables/useLinkPreview.js';
 import { useMediaViewer } from '../composables/useMediaViewer.js';
 import MessageAttachment from './MessageAttachment.vue';
 
@@ -87,6 +91,92 @@ const urls = computed(() => previewableUrls(props.text, toggles.value));
 // null ref, which is exactly the "render nothing" case.
 const entries = computed(() => urls.value.map((url) => useLinkPreview(url)));
 
+// ─── Atomic reveal ────────────────────────────────────────────────────────────
+//
+// A message shows NONE of its attachments until every URL in it has an answer, then the whole
+// block appears at once.
+//
+// The rule this serves: no layout may depend on WHEN A SIBLING RESOLVES. Deriving the
+// arrangement from the resolved set meant a message with three images, one of which was already
+// cached from an earlier post, painted as a lone image (natural aspect, `max-height: 240px`) and
+// then re-arranged into a 200px filmstrip when the other two landed — and `stripHeight` re-picked
+// portrait-vs-landscape as the mix changed, a 100px collapse mid-read. Both are sibling-timing
+// dependencies, and both are invisible to a scrolled-up reader's re-pin because the growth has
+// already happened by the time anything hears about it.
+//
+// ⚠ Deciding the arrangement from the URL list instead was considered and does NOT work:
+// `mediaKindForUrl` charges extensionless hosts to the CARD budget (previewUrls.ts), so an imgur
+// or twimg link — the common case on IRC — is predicted as a card and flips to a strip when it
+// resolves as an image. The prediction is wrong exactly where it matters.
+//
+// What this deliberately does NOT cost: a preview's own descriptor arrives atomically with the
+// decision to render it, so there is no earlier layout for it to disturb. `STRIP_PORTRAIT` stays,
+// and a lone image keeps `object-fit: contain` at its natural aspect.
+//
+// Two residuals, both deliberate, both stated so a later reader doesn't take them for oversights:
+//
+//   1. A short-TTL failure that RECOVERS on a re-ask grows the block, and can re-arrange it (one
+//      image becoming two is a strip). Holding the gate for it instead would hide a whole message
+//      for up to five minutes on the strength of one saturated fetch, which is far worse. The
+//      growth goes through `previewRevision`, so it is compensated; only its arrangement isn't.
+//      ⚠ The gate cannot RE-CLOSE for this: `flush` writes the answer into the ref before it
+//      branches on status, so a transient `unavailable` carries a value, and nothing ever writes
+//      null back to a cached ref. The only way a settled URL becomes pending again is cache
+//      eviction followed by a re-prime against a fresh ref — which is why `shown` latches.
+//   2. A message mixing an image with a slow PAGE link shows nothing until the page answers, and
+//      that can be tens of seconds. The page URL cannot be excluded from the gate: an
+//      extension-less URL might itself resolve as an image and belong in the arrangement, so
+//      "what could render" is not knowable before the answer. This is the trade atomic reveal
+//      makes — late but stable, rather than early and re-arranging.
+//
+// ⚠⚠ Asked, never timed. The first version of this gate revealed on a 1500ms deadline, on the
+// reasoning that a message's URLs all land in one batch "~24ms after ingest" — which was the
+// coalescing debounce (`FLUSH_MS`) mistaken for the round trip. The server allows 10s of queue
+// wait plus a 30s resolve deadline per URL and answers a slice with one `Promise.all`, so the
+// deadline fired on any cold link and revealed a PARTIAL set: a lone image that then became a
+// filmstrip when the straggler landed, which is verbatim the defect above. `usePreviewsSettled`
+// asks the module that actually knows, so there is no latency to guess at and no partial reveal
+// to recover from.
+const settled = usePreviewsSettled(urls);
+
+/**
+ * The URLs this message has already committed to showing.
+ *
+ * ⚠⚠ A PER-URL latch, not a per-component boolean, and the difference is a defect. The boolean
+ * had to be re-derived whenever `urls` changed — otherwise a settings flip grew the set under an
+ * already-open latch and the new images painted one at a time — and re-deriving it meant
+ * `revealed = settled`, which could go true→false and tear the whole block down. Enabling inline
+ * media with ten resolved cards on screen therefore collapsed all ten, buffer-wide, in one frame:
+ * ~1200px of uncompensated shrink, for a setting that has nothing to do with cards.
+ *
+ * A set only ever grows. New URLs stay hidden until the whole set settles, which is the property
+ * the gate exists for; anything already painted stays painted, which is the property the latch
+ * exists for.
+ *
+ * ⚠⚠ Watches `urls` AS WELL, and watching `settled` alone was a bug. Vue runs a watcher when its
+ * source's VALUE changes, so a flip that admits a URL which is ALREADY resolved — the same image
+ * posted earlier in the session, or previewed in another buffer — left `settled` true before and
+ * true after. The watcher never ran, the URL was never admitted, and its attachment stayed hidden
+ * for the life of the row with everything about it resolved and ready.
+ *
+ * The array identity churns on any settings write (`urls` allocates a fresh array each
+ * evaluation), so this fires more often than it strictly needs to. That is harmless HERE and was
+ * not in the version this replaced: the callback only ever ADDS, and re-adding a URL already in
+ * the set changes nothing, so no spurious render can follow. The defect before was a callback
+ * that could REMOVE.
+ */
+const shown = ref<ReadonlySet<string>>(new Set());
+watch(
+  [settled, urls],
+  ([ok]) => {
+    if (!ok) return;
+    const next = new Set(shown.value);
+    for (const url of urls.value) next.add(url);
+    if (next.size !== shown.value.size) shown.value = next;
+  },
+  { immediate: true },
+);
+
 /**
  * Previews that are resolved AND allowed by the settings.
  *
@@ -101,6 +191,8 @@ const visible = computed<LinkPreview[]>(() => {
   for (const entry of entries.value) {
     const p = entry.value;
     if (!p || p.status !== 'ok') continue;
+    // All-or-nothing, per URL: see `shown` above.
+    if (!shown.value.has(p.url)) continue;
     const isMedia = p.kind === 'image' || p.kind === 'video' || p.kind === 'audio';
     if (isMedia ? !toggles.value.inlineMedia : !toggles.value.linkPreviews) continue;
     // ⚠ The card cap is re-applied to the SERVER's answer, not just to the extension guess that
@@ -268,7 +360,11 @@ const stripHeight = computed(() => {
 .filmstrip::-webkit-scrollbar {
   display: none;
 }
-.filmstrip > :deep(*) {
+/* ⚠ Targets the media itself, not the direct child. An inline image is wrapped in a
+   `display: contents` span (see MessageAttachment), which generates no box — so a snap point on
+   the direct child would have nothing to align. */
+.filmstrip :deep(.inline-image),
+.filmstrip :deep(.inline-video) {
   scroll-snap-align: start;
 }
 

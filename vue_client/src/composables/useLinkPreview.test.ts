@@ -4,8 +4,15 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { primePreviews, useLinkPreview, resetLinkPreviewCache } from './useLinkPreview.js';
+import {
+  primePreviews,
+  useLinkPreview,
+  usePreviewsSettled,
+  previewRevision,
+  resetLinkPreviewCache,
+} from './useLinkPreview.js';
 import * as apiModule from '../api.js';
+import { ref, watch } from 'vue';
 
 const BOTH = { inlineMedia: true, linkPreviews: true };
 
@@ -41,9 +48,23 @@ beforeEach(() => {
   posted = [];
   respond = okFor;
   vi.spyOn(apiModule, 'api').mockImplementation(async (_url, opts) => {
-    const urls = ((opts ?? {}).body as { urls: string[] }).urls;
+    const options = opts ?? {};
+    const urls = (options.body as { urls: string[] }).urls;
     posted.push(urls);
-    return respond(urls) as never;
+    const answer = respond(urls);
+    // ⚠ The stub HONOURS `signal`, because `fetch` does and the caller now depends on it. A stub
+    // that accepts a signal and ignores it makes a hung request untestable — the promise the
+    // caller is waiting on simply never settles, and the timeout it added looks broken.
+    if (!options.signal) return answer as never;
+    return (await new Promise<unknown>((resolve, reject) => {
+      const signal = options.signal!;
+      if (signal.aborted) {
+        reject(new Error('aborted'));
+        return;
+      }
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      Promise.resolve(answer).then(resolve, reject);
+    })) as never;
   });
 });
 
@@ -319,5 +340,210 @@ describe('re-asking after expiresAt', () => {
     await tick(20_000);
     expect(posted).toHaveLength(2);
     expect(useLinkPreview('https://e.test/ghost').value?.status).toBe('ok');
+  });
+});
+
+describe('is an answer still coming?', () => {
+  // ⚠⚠ The distinction the reveal gate in `MessageAttachments` rests on. That component holds a
+  // message's whole attachment block back until every URL in it has settled, so it has to tell
+  // "in flight" apart from "nobody ever asked" — and only this module knows. Its own suite mocks
+  // `usePreviewsSettled`, so this is the ONLY place the real rule is exercised.
+  //
+  // The gate's first version guessed with a 1500ms timer instead. The guess was wrong by more
+  // than an order of magnitude (the server allows 10s of queue wait plus a 30s resolve deadline
+  // per URL, answered as one `Promise.all` over the slice), so it fired on any cold link and
+  // revealed a partial set — re-creating the very arrangement flip it existed to prevent.
+
+  const urls = (...list: string[]) => ref(list);
+
+  it('says NOT SETTLED while a primed URL is still in flight', async () => {
+    let release: (() => void) | undefined;
+    respond = (list) =>
+      new Promise((resolve) => {
+        release = () => resolve(okFor(list));
+      });
+
+    const settledRef = usePreviewsSettled(urls('https://e.test/slow'));
+    primePreviews(['https://e.test/slow'], BOTH);
+    await settle();
+    expect(settledRef.value).toBe(false);
+
+    release?.();
+    await settle();
+    expect(settledRef.value).toBe(true);
+  });
+
+  it('says SETTLED for a URL nobody ever primed', () => {
+    // ⚠ The property that makes the gate safe. `useLinkPreview` hands back a permanently-null ref
+    // for an unprimed URL, so a gate of "every entry has a value" would blank that message for
+    // the life of the tab. Not in flight means not coming, so render now.
+    expect(usePreviewsSettled(urls('https://e.test/never-primed')).value).toBe(true);
+  });
+
+  it('says SETTLED when a transport failure puts a URL back in play, with no value to show', async () => {
+    // ⚠⚠ THE FAIL-OPEN CASE, and the one the gate got wrong. `forgetForRetry` runs for every URL
+    // in a slice whose POST threw and for every URL the server omitted from a 200 — leaving a
+    // null value AND a `retry` entry. Counting that as pending hid the whole message's attachment
+    // block, cached siblings included, for the entire 15s→5min ladder and indefinitely while the
+    // server kept failing: one 502 during a deploy blanked every message sharing its batch.
+    //
+    // ⚠ This is also the ONLY test that can observe `usePreviewsSettled`'s `pendingRevision` read.
+    // Every other transition in this file moves an entry ref too, and a ref read makes the
+    // computed reactive by itself. Here the ref is null before and null after — only the pending
+    // set moves — so a SUBSCRIBED computed (which is what the component's `watch` creates) never
+    // re-evaluates without that line.
+    respond = () => {
+      throw new Error('502');
+    };
+    const settledRef = usePreviewsSettled(urls('https://e.test/broken'));
+
+    // ⚠ Subscribe AFTER priming, so the first value observed is `false`. Subscribing before means
+    // the immediate call records `true` (nothing is pending yet), the assertion at the end reads
+    // `true` whatever happened in between, and the test passes against every mutation.
+    primePreviews(['https://e.test/broken'], BOTH);
+    const seen: boolean[] = [];
+    watch(settledRef, (v) => seen.push(v), { immediate: true });
+    expect(seen).toEqual([false]);
+
+    await settle();
+
+    expect(useLinkPreview('https://e.test/broken').value).toBeNull();
+    expect(seen.at(-1)).toBe(true);
+  });
+
+  it('says SETTLED for a failure awaiting a re-ask, rather than holding the message', async () => {
+    // A transient refusal has an ANSWER; the re-ask may be minutes out. Treating a queued re-ask
+    // as pending would hide a whole message on the strength of one saturated fetch.
+    respond = transientFor;
+    const settledRef = usePreviewsSettled(urls('https://e.test/transient'));
+    primePreviews(['https://e.test/transient'], BOTH);
+    await settle();
+    expect(useLinkPreview('https://e.test/transient').value?.status).toBe('unavailable');
+    expect(settledRef.value).toBe(true);
+  });
+});
+
+describe('the re-pin signal', () => {
+  // ⚠⚠ `previewRevision` is what MessageList watches to re-anchor a scrolled-up reader, and until
+  // now NOTHING in the repo asserted it — the branch's headline change to it could be reverted
+  // with a fully green suite. Every path that moves a URL out of the pending set can open a
+  // reveal gate, and every gate that opens grows a row, so every such path has to bump it.
+
+  it('bumps for a batch that answers with no `ok` at all', async () => {
+    // The old condition was `if (changed)` — some answer was `ok`. With the gate, an
+    // `unavailable` is very often the answer that COMPLETES a message's gate and paints its whole
+    // block, so an all-unavailable batch is exactly when a re-pin is needed.
+    respond = transientFor;
+    const before = previewRevision.value;
+    primePreviews(['https://e.test/dead'], BOTH);
+    await settle();
+    expect(previewRevision.value).toBeGreaterThan(before);
+  });
+
+  it('bumps when the request fails and the gate falls open', async () => {
+    // The largest single growth this feature produces: a 502 mid-deploy fails every URL in the
+    // slice open at once, painting every block that was waiting on it — cached siblings included.
+    respond = () => {
+      throw new Error('502');
+    };
+    const before = previewRevision.value;
+    primePreviews(['https://e.test/boom'], BOTH);
+    await settle();
+    expect(previewRevision.value).toBeGreaterThan(before);
+  });
+
+  it('does NOT bump when eviction only drops URLs that had already settled', async () => {
+    // ⚠⚠ Once a long-lived tab saturates the cache, `while (size > MAX)` trims to exactly the
+    // ceiling — so EVERY prime that creates an entry evicts one. Reporting that as a layout event
+    // fired a re-pin (two forced synchronous layouts over an unvirtualised 500-row list) on
+    // essentially every incoming message, compensating for a growth that had not happened. Only
+    // an evicted URL something was still WAITING on can change what renders.
+    //
+    // Entries are created by reading, not by priming: `useLinkPreview` calls `entryFor` without
+    // touching `asked`, so these are settled from birth and eviction cannot open a gate.
+    for (let n = 0; n <= 2000; n++) useLinkPreview(`https://e.test/fill/${n}`);
+    respond = okFor;
+    const before = previewRevision.value;
+
+    primePreviews(['https://e.test/evictor'], BOTH);
+
+    expect(previewRevision.value).toBe(before);
+  });
+
+  it('does NOT bump merely for queueing work', async () => {
+    // Priming only ever ADDS to the pending set, so it can close a gate but never open one. A
+    // bump here would re-pin the list on every incoming line of chat.
+    respond = okFor;
+    primePreviews(['https://e.test/one'], BOTH);
+    await settle();
+    const before = previewRevision.value;
+    primePreviews(['https://e.test/two'], BOTH);
+    expect(previewRevision.value).toBe(before);
+  });
+});
+
+describe('a re-ask that is in flight', () => {
+  // ⚠⚠ The ordering case in `previewPending`, and the one its docblock calls load-bearing.
+  // `runReask` does `retry.set(url, {at: Infinity})` AND `queue.add(url)` on a URL whose value is
+  // still null — so if `queue`/`asked` were tested first, a recovery ATTEMPT would report the URL
+  // pending and re-hide a block that is already on screen. A shrink, caused by trying to help.
+  //
+  // Nothing else reaches it. The neighbouring tests either carry a value (which short-circuits
+  // before the clause) or run after `forgetForRetry` has emptied `asked`, so `queue || asked` is
+  // false whatever the order. Deleting the clause, or moving it after those two, left 61/61 green.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // Pins the ±25% backoff jitter to its midpoint, so the re-ask lands at exactly the 15s floor
+    // and the assertion can sit inside the 24ms window before the flush drains `queue`.
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('stays SETTLED while its re-ask is queued and in flight', async () => {
+    respond = () => {
+      throw new Error('502');
+    };
+    const settledRef = usePreviewsSettled(ref(['https://e.test/reasked']));
+    primePreviews(['https://e.test/reasked'], BOTH);
+    await vi.advanceTimersByTimeAsync(60);
+    expect(settledRef.value).toBe(true);
+
+    // Hang the retry, and stop the clock the instant `runReask` has re-queued it — before the
+    // 24ms coalescing timer drains `queue` again. This is the only window in which the URL is in
+    // `retry` AND `queue` with a null value, which is precisely the state the clause is about.
+    respond = () => new Promise(() => {});
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(settledRef.value).toBe(true);
+  });
+});
+
+describe('a resolve that never answers', () => {
+  // ⚠⚠ `api()` is a bare `fetch` with no signal and no timeout, so a dead NAT mapping or a proxy
+  // that accepts and never replies leaves the promise pending forever — and `flush` awaits its
+  // slices sequentially, so one hung POST also strands every later slice. Before the reveal gate
+  // that cost a missing card; with it, every message holding one of those URLs renders NO
+  // attachments, permanently. A gate that must fail open cannot be built on a request that never
+  // settles.
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const tick = (ms: number) => vi.advanceTimersByTimeAsync(ms);
+
+  it('gives up on a hung request and reports the URL settled', async () => {
+    respond = () => new Promise(() => {});
+    const settledRef = usePreviewsSettled(ref(['https://e.test/hung']));
+    primePreviews(['https://e.test/hung'], BOTH);
+    const seen: boolean[] = [];
+    watch(settledRef, (v) => seen.push(v), { immediate: true });
+
+    await tick(60);
+    expect(seen.at(-1)).toBe(false);
+
+    // Past RESOLVE_TIMEOUT_MS. The URL goes back in play through the same `forgetForRetry` path a
+    // transport error takes, which is what makes it settled rather than merely un-asked.
+    await tick(46_000);
+
+    expect(seen.at(-1)).toBe(true);
   });
 });

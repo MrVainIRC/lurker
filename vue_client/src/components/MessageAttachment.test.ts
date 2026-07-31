@@ -12,7 +12,7 @@
 // answering correctly — nothing was testing the span between those two facts.
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ref } from 'vue';
+import { computed, nextTick, ref, type Ref } from 'vue';
 import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import MessageAttachment from './MessageAttachment.vue';
@@ -25,10 +25,51 @@ import { MAX_CARDS_PER_MESSAGE } from '../utils/previewUrls.js';
 
 // Resolution is driven by message ingest, so components only read — stub the read. A real
 // `ref` is required: the templates rely on Vue's auto-unwrapping, which is keyed on `isRef`.
+//
+// ⚠ ONE ref per URL, cached, rather than a fresh one per call. The real composable does the same
+// (`entryFor`), and the atomic-reveal suite depends on it: answering a URL AFTER mount has to
+// reach the ref the component is already watching. Cleared by the top-level `beforeEach` below.
 const resolved = new Map<string, LinkPreview>();
+const refs = new Map<string, Ref<LinkPreview | null>>();
+function entryRef(url: string): Ref<LinkPreview | null> {
+  let entry = refs.get(url);
+  if (!entry) {
+    entry = ref<LinkPreview | null>(resolved.get(url) ?? null);
+    refs.set(url, entry);
+  }
+  return entry;
+}
+
+// URLs the real module would say an answer is still expected for. Kept separate from `resolved`
+// because the whole point of the reveal gate is that "no value yet" and "no answer coming" are
+// DIFFERENT states — a stub that conflated them could not observe the distinction it exists for.
+const inFlight = new Set<string>();
+const flightBump = ref(0);
+
+// ⚠ Every export is a lazy arrow, so nothing here is dereferenced at factory time. A `vi.mock`
+// factory runs before this file's module-level consts initialise, which is why a value export
+// (`previewRevision: ref(0)`) dies at collection and these do not.
 vi.mock('../composables/useLinkPreview.js', () => ({
-  useLinkPreview: (url: string) => ref(resolved.get(url) ?? null),
+  useLinkPreview: (url: string) => entryRef(url),
+  usePreviewsSettled: (urls: Ref<readonly string[]>) =>
+    computed(() => {
+      void flightBump.value;
+      return urls.value.every((url) => !inFlight.has(url));
+    }),
 }));
+
+/** Mark URLs as awaiting an answer. */
+function setInFlight(...urls: string[]): void {
+  for (const url of urls) inFlight.add(url);
+  flightBump.value++;
+}
+
+/** Deliver an answer into the ref the component is already watching. */
+function answer(p: LinkPreview): void {
+  entryRef(p.url).value = p;
+  inFlight.delete(p.url);
+  flightBump.value++;
+}
 
 function preview(over: Partial<LinkPreview> & { url: string }): LinkPreview {
   return {
@@ -56,6 +97,15 @@ const IMAGE = preview({
   thumbWidth: 800,
   thumbHeight: 600,
   mime: 'image/png',
+});
+
+// ⚠ TOP-LEVEL, not inside `seedSettings`. The ref cache lived there and so was skipped by the one
+// test that builds its own Pinia (it needs `image_modal` off), which then rendered the PREVIOUS
+// test's refs — its own `resolved.set` calls were dead, and planting a null ref made it crash on
+// an undefined element rather than fail its stated assertion.
+beforeEach(() => {
+  refs.clear();
+  inFlight.clear();
 });
 
 function seedSettings({ inlineMedia = true, linkPreviews = true, feature = true } = {}) {
@@ -328,6 +378,224 @@ describe('MessageAttachments — arrangement', () => {
     // The ingest-driven model's normal early state, and the case a row must render as
     // "nothing" rather than as a placeholder that later collapses.
     expect(mountFor('https://e.test/not-primed').find('.attachments').exists()).toBe(false);
+  });
+});
+
+describe('MessageAttachments — atomic reveal', () => {
+  // The rule: no layout may depend on WHEN A SIBLING RESOLVES. A message with two image URLs, one
+  // of them already cached from an earlier post, used to paint as a lone image and then
+  // re-arrange into a filmstrip when the second landed — and `stripHeight` re-picked
+  // portrait-vs-landscape as the mix changed. Both moved a scrolled-up reader with no way to
+  // compensate, because the growth had already happened by the time anything heard about it.
+
+  beforeEach(() => resolved.clear());
+
+  const img = (n: number, w = 800, h = 600) =>
+    preview({
+      url: `https://e.test/${n}.png`,
+      kind: 'image',
+      src: `/api/link-preview/media/t${n}`,
+      thumbWidth: w,
+      thumbHeight: h,
+    });
+
+  const TWO = 'https://e.test/1.png https://e.test/2.png';
+
+  it('shows nothing while a sibling is still in flight, then the whole block at once', async () => {
+    // ⚠ The FIRST assertion is the one that bites: without the gate this renders a lone
+    // `.inline-image`, which is the arrangement that then flips.
+    resolved.set(img(1).url, img(1));
+    seedSettings();
+    setInFlight(img(2).url);
+    const wrapper = mount(MessageAttachments, { props: { text: TWO } });
+    expect(wrapper.find('.attachments').exists()).toBe(false);
+    expect(wrapper.find('.inline-image').exists()).toBe(false);
+
+    answer(img(2));
+    await nextTick();
+
+    expect(wrapper.find('.filmstrip').exists()).toBe(true);
+    expect(wrapper.findAll('.filmstrip img')).toHaveLength(2);
+  });
+
+  it('decides the strip height once, from the complete group', async () => {
+    // ⚠ TWO portraits arrive first, so that without the gate there IS a filmstrip mid-flight — at
+    // 300px, the whole-group-portrait height — which then collapses to 200px when the rest land.
+    // An earlier draft seeded ONE image and passed with the gate reverted, because one image is
+    // never a filmstrip either way. Two of four portrait is landscape ("primarily portrait" is
+    // `portrait * 2 > length`), so the complete group is a 200px row.
+    resolved.set(img(1, 600, 900).url, img(1, 600, 900));
+    resolved.set(img(2, 500, 1000).url, img(2, 500, 1000));
+    seedSettings();
+    setInFlight(img(3).url, img(4).url);
+    const wrapper = mount(MessageAttachments, {
+      props: { text: `${TWO} https://e.test/3.png https://e.test/4.png` },
+    });
+    expect(wrapper.find('.filmstrip').exists()).toBe(false);
+
+    answer(img(3, 1200, 500));
+    answer(img(4, 1000, 400));
+    await nextTick();
+
+    expect(wrapper.find('.filmstrip').attributes('style')).toContain('200px');
+  });
+
+  it('does not stall on a URL no answer is coming for', () => {
+    // ⚠⚠ The property the whole gate rests on, and the reason it asks the module rather than
+    // running a timer. `useLinkPreview` hands back a permanently-null ref for a URL nobody primed,
+    // so a gate of "every entry has a value" would blank this message for the life of the tab.
+    // Not in flight means not coming, and the block renders now.
+    //
+    // ⚠ This one does NOT fail if the gate is deleted, and it CANNOT observe the pending rule
+    // itself — this suite mocks `usePreviewsSettled`, so mutating `previewPending` leaves it
+    // green. (Checked, after an earlier version of this comment claimed otherwise.) The real rule
+    // is guarded in `useLinkPreview.test.ts` → "is an answer still coming?", where all three of
+    // its clauses are revert-proven. What this asserts is the component half: that a settled-but-
+    // valueless URL is rendered past rather than waited on.
+    resolved.set(img(1).url, img(1));
+    seedSettings();
+    const wrapper = mount(MessageAttachments, { props: { text: TWO } });
+    expect(wrapper.find('.inline-image').exists()).toBe(true);
+  });
+
+  it('does not hide a block already on screen when a URL goes back in flight', async () => {
+    // A transient failure is re-asked (`runReask` re-queues it), which puts a settled URL back
+    // into the pending set. Un-revealing would be a SHRINK, which disturbs a reader exactly as
+    // much as the growth this gate exists to prevent.
+    resolved.set(img(1).url, img(1));
+    resolved.set(img(2).url, img(2));
+    seedSettings();
+    const wrapper = mount(MessageAttachments, { props: { text: TWO } });
+    expect(wrapper.find('.filmstrip').exists()).toBe(true);
+
+    setInFlight(img(2).url);
+    await nextTick();
+
+    expect(wrapper.find('.filmstrip').exists()).toBe(true);
+  });
+
+  it('survives an unrelated settings write while a URL is back in flight', async () => {
+    // ⚠⚠ `urls` is a computed that allocates a fresh array every evaluation, and it re-evaluates
+    // on ANY settings write, because the store replaces `values` wholesale. Watching the array
+    // IDENTITY therefore fired the re-gate on a byte-identical URL list — so toggling the channel
+    // list, or a highlight sound, or a cross-device sync, re-derived `revealed` from a `settled`
+    // that can legitimately be false and made a strip vanish mid-read. That is the same shrink
+    // the latch exists to prevent, reintroduced by the line meant to scope it.
+    resolved.set(img(1).url, img(1));
+    resolved.set(img(2).url, img(2));
+    seedSettings();
+    const wrapper = mount(MessageAttachments, { props: { text: TWO } });
+    expect(wrapper.find('.filmstrip').exists()).toBe(true);
+
+    // A cache eviction plus a repost re-primes a URL against a fresh null ref, so `settled` goes
+    // false again under a latch that is holding the strip on screen.
+    setInFlight(img(2).url);
+    // ...and now something entirely unrelated writes a setting.
+    useSettingsStore().values = {
+      ...useSettingsStore().values,
+      'chat.highlight_sound.enabled': true,
+    };
+    await nextTick();
+
+    expect(wrapper.find('.filmstrip').exists()).toBe(true);
+  });
+
+  it('shows a URL added by a settings flip that was ALREADY resolved', async () => {
+    // ⚠⚠ `shown` grows inside a watcher on `settled`, and Vue only runs that when the VALUE
+    // changes. If the flip adds a URL that is already in the cache — the same image posted
+    // earlier in the session, or previewed in another buffer — `settled` is true before and true
+    // after, so the watcher never fires and the URL is never admitted. The attachment then stays
+    // hidden for the life of the row, with everything about it resolved and ready.
+    const CARD = 'https://news.example/article';
+    resolved.set(CARD, preview({ url: CARD, kind: 'page', title: 'A page' }));
+    resolved.set(img(1).url, img(1));
+    seedSettings({ inlineMedia: false, linkPreviews: true });
+    const wrapper = mount(MessageAttachments, {
+      props: { text: `https://e.test/1.png ${CARD}` },
+    });
+    expect(wrapper.find('.card').exists()).toBe(true);
+    expect(wrapper.find('.inline-image').exists()).toBe(false);
+
+    // Nothing goes in flight: the image was resolved all along, it simply wasn't previewable.
+    useSettingsStore().values['chat.inline_media.enabled'] = true;
+    await nextTick();
+
+    expect(wrapper.find('.inline-image').exists()).toBe(true);
+    expect(wrapper.find('.card').exists()).toBe(true);
+  });
+
+  it('holds back only the NEW URLs when a settings flip grows the set', async () => {
+    // ⚠⚠ The one path that changes `urls` without remounting: `/set` from the composer, or a
+    // settings sync from another device. Two things have to be true at once here, and an earlier
+    // version got the second exactly backwards.
+    //
+    //   1. The newly-previewable image must NOT paint until it has settled — otherwise the flip
+    //      renders it piecemeal, which is what the gate exists to prevent.
+    //   2. The card that was ALREADY on screen must stay on screen. Re-deriving one shared
+    //      `revealed` flag from `settled` tore the whole block down instead: ten resolved cards
+    //      collapsing buffer-wide, ~1200px of uncompensated shrink, for a setting about images.
+    const CARD = 'https://news.example/article';
+    resolved.set(CARD, preview({ url: CARD, kind: 'page', title: 'A page' }));
+    seedSettings({ inlineMedia: false, linkPreviews: true });
+    const wrapper = mount(MessageAttachments, {
+      props: { text: `https://e.test/1.png ${CARD}` },
+    });
+    expect(wrapper.find('.card').exists()).toBe(true);
+
+    setInFlight(img(1).url);
+    useSettingsStore().values['chat.inline_media.enabled'] = true;
+    await nextTick();
+
+    expect(wrapper.find('.inline-image').exists()).toBe(false);
+    expect(wrapper.find('.card').exists()).toBe(true);
+
+    answer(img(1));
+    await nextTick();
+    expect(wrapper.find('.inline-image').exists()).toBe(true);
+    expect(wrapper.find('.card').exists()).toBe(true);
+  });
+});
+
+describe('MessageAttachment — a box that does not depend on bytes', () => {
+  beforeEach(() => seedSettings());
+
+  // ⚠ These assert the CLASS BINDING, which is the load-bearing logic; the height itself is CSS
+  // and happy-dom applies no stylesheet. Stated rather than implied, because a test that can't
+  // observe what it names is the trap this feature has already been caught by once.
+
+  const unmeasured = preview({
+    url: 'https://e.test/exotic',
+    kind: 'image',
+    src: '/api/link-preview/media/tokX',
+  });
+
+  it('reserves the box on a WRAPPER, and only for an unmeasured image outside a strip', () => {
+    // ⚠ All three cases in ONE test, deliberately. Split apart, the two negative cases asserted
+    // `not.toContain(...)` and stayed green with the binding deleted entirely — vacuous against
+    // the very mutation they look like they guard.
+    //
+    // `imageDimensions` returns null for a format sharp can't parse in the 64 KB it reads — ico
+    // and bmp both arrive as `kind: 'image'` with null dimensions. With no width/height attributes
+    // there is no ratio to reserve a box from, so the element lays out at the UA default and grows
+    // on decode: video's pre-465f838 bug, still live for images.
+    //
+    // ⚠⚠ The height is on the WRAPPER and that is the assertion that matters. Pinned on the
+    // `<img>`, the empty letterbox around a 16x16 favicon became part of a 240px-tall control
+    // that calls `stopPropagation` — swallowing the row tap that is the only opener of the
+    // message-actions sheet on touch. A wrapper with no handlers leaves those pixels to the row.
+    const lone = mount(MessageAttachment, { props: { preview: unmeasured } });
+    expect(lone.find('.dim-reserve').exists()).toBe(true);
+    expect(lone.find('.dim-reserve img.inline-image').exists()).toBe(true);
+
+    // A measured image keeps its own aspect — the descriptor arrives atomically with the decision
+    // to render at all, so natural aspect costs nothing and a fixed box would only waste space.
+    const measured = mount(MessageAttachment, { props: { preview: IMAGE } });
+    expect(measured.find('.dim-reserve').exists()).toBe(false);
+
+    // In a strip the row already decides the height; a second fixed box would fight it.
+    const strip = mount(MessageAttachment, { props: { preview: unmeasured, inStrip: true } });
+    expect(strip.find('.dim-reserve').exists()).toBe(false);
+    expect(strip.find('img').classes()).toContain('strip-item');
   });
 });
 
