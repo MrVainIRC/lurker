@@ -104,12 +104,14 @@ async function flush(): Promise<void> {
         body: { urls: slice },
       });
       let changed = false;
+      const answered = new Set<string>();
       for (const preview of res.previews ?? []) {
         const entry = cache.get(preview.url);
         // Only an `ok` preview renders anything, so only an `ok` preview can change a row's
         // height — bumping the revision for a batch of `unavailable` answers would make the
         // list re-pin for no reason.
         if (entry) {
+          answered.add(preview.url);
           entry.value = preview;
           if (preview.status === 'ok') {
             changed = true;
@@ -119,30 +121,22 @@ async function flush(): Promise<void> {
           }
         }
       }
+      // ⚠⚠ Reconciled against what was SENT, not just iterated over what came back. A URL the
+      // server omits — a truncated response, a batch cap drifting out of step with MAX_BATCH,
+      // a 200 carrying an error body that `?? []` turns into zero previews — otherwise reached
+      // a state no recovery path could see: `asked` still holds it so priming skips it, no
+      // `retry` entry exists so nothing re-asks it, and `dropIfExpired` returns early because a
+      // null value has no `expiresAt`. Permanently blank, from a response that looked fine.
+      for (const url of slice) if (!answered.has(url)) forgetForRetry(url);
       if (changed) previewRevision.value++;
       scheduleReask();
     } catch {
-      // A failed resolve leaves the ref null, which renders as "no preview" —
-      // the same as a link the server couldn't unfurl. There is nothing useful
-      // to tell the user about a decoration that didn't appear, and an error
-      // state in the message list would be worse than the missing card.
-      // Dropped from `asked` as well as `cache`, so a request that failed for transport
-      // reasons can be retried on the next priming pass rather than being remembered as a
-      // permanent verdict about the URL.
-      for (const url of slice) {
-        const entry = cache.get(url);
-        if (entry && entry.value === null) {
-          cache.delete(url);
-          asked.delete(url);
-        } else if (entry && entry.value?.status !== 'ok') {
-          // ⚠ A re-ask that fails in transport must stay armed. `runReask` disarms a URL when it
-          // queues it, on the assumption that the answer re-arms it — so without this branch the
-          // FIRST dropped connection during a re-ask would retire that URL permanently, which is
-          // the same never-recovers outcome the re-ask exists to prevent. No deadline to honour
-          // here (there was no answer), so it's the backoff floor alone.
-          armReask(url, NaN);
-        }
-      }
+      // A failed resolve leaves the ref null, which renders as "no preview" — the same as a
+      // link the server couldn't unfurl. There is nothing useful to tell the user about a
+      // decoration that didn't appear, and an error state in the message list would be worse
+      // than the missing card. Every URL in the slice is put back in play; none of them got an
+      // answer, so none of them has a verdict to remember.
+      for (const url of slice) forgetForRetry(url);
       scheduleReask();
     }
   }
@@ -182,11 +176,54 @@ let reaskTimer: ReturnType<typeof setTimeout> | null = null;
 const REASK_FLOOR_MS = 15_000;
 const REASK_CEILING_MS = 5 * 60_000;
 
+/**
+ * The longest TTL that still means "come back" rather than "this is the answer".
+ *
+ * ⚠⚠ Without this test every dead link became a perpetual poller. The server answers a real
+ * failure with a one-hour TTL and a transient refusal with ~15 seconds, and re-asking both
+ * meant 300 dead links scrolled past turned into 300 outbound fetches an hour, per open tab,
+ * forever. Worse, the client's hourly deadline and the server's row TTL start at the same
+ * instant, so the re-ask landed just AFTER `expires_at` lapsed — a guaranteed cache miss and a
+ * fresh fetch to a known-dead origin every single time. A verdict is re-asked only by a new
+ * priming pass, which is what `dropIfExpired` is for.
+ */
+const VERDICT_TTL_MS = 60_000;
+
+/** ±25%, matching the server's own jitter on the TTL it sends. */
+function jitter(ms: number): number {
+  return Math.round(ms * (0.75 + Math.random() * 0.5));
+}
+
 function armReask(url: string, expiresAtMs: number): void {
+  const untilExpiry = Number.isFinite(expiresAtMs) ? expiresAtMs - Date.now() : 0;
+  if (untilExpiry > VERDICT_TTL_MS) {
+    retry.delete(url);
+    return;
+  }
   const tries = (retry.get(url)?.tries ?? 0) + 1;
   const floor = Math.min(REASK_CEILING_MS, REASK_FLOOR_MS * 2 ** (tries - 1));
-  const untilExpiry = Number.isFinite(expiresAtMs) ? expiresAtMs - Date.now() : 0;
-  retry.set(url, { at: Date.now() + Math.max(untilExpiry, floor), tries });
+  // ⚠ Jittered, and this is not cosmetic. The server jitters its transient TTL specifically so
+  // that "every loser of one saturation event doesn't come back as a single wave" — and taking
+  // `max(untilExpiry, floor)` against a fixed floor threw that away, re-synchronising every
+  // client onto the same millisecond. A thundering herd aimed at a server that has just said it
+  // is overloaded.
+  retry.set(url, { at: Date.now() + jitter(Math.max(untilExpiry, floor)), tries });
+}
+
+/**
+ * Put a URL back in play after an answer that wasn't one.
+ *
+ * ⚠⚠ The ref is deliberately NOT deleted. `MessageAttachments` captures the Ref OBJECT in a
+ * computed keyed on the message text, so a mounted row goes on watching whichever object it
+ * first received. Deleting the cache entry and minting a fresh one on the next ask therefore
+ * delivered the answer into an object nothing was watching: a fresh read showed `ok` while the
+ * row on screen stayed blank forever. Resetting `asked` re-opens the URL to priming without
+ * ever changing its identity.
+ */
+function forgetForRetry(url: string): void {
+  if (!cache.has(url)) return;
+  asked.delete(url);
+  armReask(url, NaN);
 }
 
 /** One timer for the whole map, set to the earliest deadline — not a timer per URL. */
@@ -253,9 +290,12 @@ function dropIfExpired(url: string): void {
   const expiresAt = entry?.value?.expiresAt;
   if (!expiresAt) return;
   if (Date.parse(expiresAt) > Date.now()) return;
-  cache.delete(url);
+  // ⚠ Neither the ref nor the backoff ladder is discarded. The ref because mounted rows hold it
+  // (see `forgetForRetry`); the `retry` entry because `tries` is the only record of how many
+  // times this URL has already failed — dropping it reset the ladder to zero, so a channel
+  // where a bot reposts a failing link never accumulated any backoff at all. The stale value
+  // keeps rendering meanwhile, which beats blanking a card that is merely due a refresh.
   asked.delete(url);
-  retry.delete(url);
 }
 
 function entryFor(url: string): Ref<LinkPreview | null> {

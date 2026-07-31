@@ -151,7 +151,13 @@ describe('re-asking after expiresAt', () => {
   // again. So a saturated instance blanked a preview for the life of the tab.
   //
   // Fake timers because the shortest honest wait here is the server's own 15 seconds.
-  beforeEach(() => vi.useFakeTimers());
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // The backoff is jittered ±25% on purpose (see `jitter`), which makes every deadline in
+    // these tests a range. Pinned to the midpoint so the timing assertions can be exact; the
+    // jitter itself is asserted separately below, where the randomness is the subject.
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+  });
   afterEach(() => vi.useRealTimers());
 
   /** Let the coalescing timer fire and the request settle, under fake timers. */
@@ -235,5 +241,83 @@ describe('re-asking after expiresAt', () => {
     expect(posted).toHaveLength(2);
     await tick(16_000);
     expect(posted).toHaveLength(3);
+  });
+
+  it('treats a one-hour verdict as an answer, not as something to come back for', async () => {
+    // ⚠⚠ The distinction the whole re-ask depends on. The server answers a genuine failure with
+    // FAIL_TTL_MS (1h) and a transient refusal with ~15s; re-asking both turns every dead link
+    // in the scrollback into an hourly outbound fetch for the life of the tab — and one that is
+    // guaranteed to miss the server's own cache, because both deadlines start together.
+    respond = (urls) => ({
+      previews: urls.map((url) => ({
+        url,
+        status: 'unavailable',
+        kind: 'page',
+        expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      })),
+    });
+    primePreviews(['https://e.test/dead'], BOTH);
+    await tick(60);
+    expect(posted).toHaveLength(1);
+    await tick(3 * 60 * 60_000); // three hours
+    expect(posted).toHaveLength(1);
+  });
+
+  it('jitters the re-ask so simultaneous losers do not return as one wave', async () => {
+    // The server jitters its transient TTL precisely so that everything refused by one
+    // saturation event doesn't come back together. Taking `max(untilExpiry, floor)` against a
+    // FIXED floor threw that away and re-synchronised every client onto the same millisecond —
+    // a thundering herd aimed at a server that has just reported itself overloaded.
+    let n = 0;
+    vi.spyOn(Math, 'random').mockImplementation(() => (n++ === 0 ? 0 : 1)); // 0.75x, then 1.25x
+    respond = transientFor;
+    primePreviews(['https://e.test/a https://e.test/b'], BOTH);
+    await tick(60);
+    expect(posted).toEqual([['https://e.test/a', 'https://e.test/b']]);
+
+    // Answered together, they must not come BACK together: 11.25s and 18.75s.
+    await tick(12_000);
+    expect(posted).toHaveLength(2);
+    expect(posted[1]).toEqual(['https://e.test/a']);
+    await tick(8_000);
+    expect(posted).toHaveLength(3);
+    expect(posted[2]).toEqual(['https://e.test/b']);
+  });
+
+  it('recovers a row whose batch failed, without orphaning the ref it is watching', async () => {
+    // ⚠⚠ Components capture the Ref OBJECT, not the URL, so deleting a cache entry and minting
+    // a fresh one on the next ask delivers the answer into an object nothing is watching. The
+    // symptom is the nastiest kind: a fresh read reports `ok` while the row on screen stays
+    // blank forever, so the cache looks correct from every angle except the one that matters.
+    const held = useLinkPreview('https://e.test/held'); // a mounted row takes its ref
+    respond = () => {
+      throw new Error('offline');
+    };
+    primePreviews(['https://e.test/held'], BOTH);
+    await tick(60);
+    expect(posted).toHaveLength(1);
+    expect(held.value).toBeNull();
+
+    respond = okFor;
+    await tick(20_000);
+    expect(posted).toHaveLength(2);
+    // The SAME ref the row is watching must be the one that resolved.
+    expect(held.value?.status).toBe('ok');
+    expect(useLinkPreview('https://e.test/held')).toBe(held);
+  });
+
+  it('re-asks a URL the server silently omitted from an otherwise-fine response', async () => {
+    // No error, no verdict, no retry entry, and `asked` still holding it — a URL dropped from
+    // the response reached a state every recovery path stepped over. `?? []` on a malformed 200
+    // does the same thing to a whole batch at once.
+    respond = () => ({ previews: [] });
+    primePreviews(['https://e.test/ghost'], BOTH);
+    await tick(60);
+    expect(posted).toHaveLength(1);
+
+    respond = okFor;
+    await tick(20_000);
+    expect(posted).toHaveLength(2);
+    expect(useLinkPreview('https://e.test/ghost').value?.status).toBe('ok');
   });
 });

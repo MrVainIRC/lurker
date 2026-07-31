@@ -16,10 +16,29 @@ describe('previewableUrls — the toggles', () => {
     expect(previewableUrls('https://e.test/a.png and https://e.test/page', NEITHER)).toEqual([]);
   });
 
-  it('inline media selects file links and ignores pages', () => {
-    expect(previewableUrls('https://e.test/a.png https://e.test/article', MEDIA_ONLY)).toEqual([
-      'https://e.test/a.png',
+  it('gates the two classes asymmetrically, because only one of them is knowable', () => {
+    // `mediaKindForUrl` recognises MEDIA extensions and returns null for everything else — a
+    // page, a bare host, an extensionless image alike. So "this is media" is a verdict the
+    // client can act on, and "this is not media" never is. Link-previews-off therefore drops a
+    // .png outright, while inline-media-off cannot drop an unknown without breaking the
+    // extensionless image case below.
+    expect(previewableUrls('https://e.test/a.png', PAGES_ONLY)).toEqual([]);
+    expect(previewableUrls('https://e.test/a.png', MEDIA_ONLY)).toEqual(['https://e.test/a.png']);
+  });
+
+  it('inline media still asks about an EXTENSIONLESS link, because it cannot tell', () => {
+    // ⚠ The deliberate trade, and it costs a fetch: with only inline media on, an extensionless
+    // URL is asked about even though most turn out to be pages. The alternative is worse —
+    // imgur, twimg and every CDN serve images from extensionless paths, so treating "no
+    // extension" as "definitely a page" made inline media permanently unable to render the
+    // majority of real image links. Bounded by the CARD cap (3), not the media cap, so a
+    // link-heavy message can't become twenty speculative fetches. A page that comes back is
+    // still not RENDERED — MessageAttachments re-checks the server's answer.
+    expect(previewableUrls('https://i.imgur.com/aBcDeF', MEDIA_ONLY)).toEqual([
+      'https://i.imgur.com/aBcDeF',
     ]);
+    const many = Array.from({ length: 9 }, (_, i) => `https://e.test/p${i}`).join(' ');
+    expect(previewableUrls(many, MEDIA_ONLY)).toHaveLength(MAX_CARDS_PER_MESSAGE);
   });
 
   it('link previews selects pages and ignores file links', () => {
@@ -64,6 +83,40 @@ describe('previewableUrls — what counts as a URL', () => {
 
   it('keeps a path that legitimately contains punctuation', () => {
     expect(previewableUrls('https://e.test/a.b.c/d', BOTH)).toEqual(['https://e.test/a.b.c/d']);
+  });
+
+  it('ends a URL where the LINKIFIER ends it, brackets and all', () => {
+    // ⚠ Two parsers disagreeing about where a URL stops is the bug. The anchor the user clicks
+    // is built by nickColor's balance-aware trimmer, so stripping ')' unconditionally here
+    // resolved a DIFFERENT address than the one in the message: the real page 200s, the
+    // clipped one 404s, and that 404 is cached for an hour under a string that appears nowhere
+    // in the text. Same helper for both, so they cannot drift.
+    const wiki = 'https://en.wikipedia.org/wiki/Rust_(programming_language)';
+    expect(previewableUrls(`see ${wiki}`, BOTH)).toEqual([wiki]);
+    // ...while a URL merely wrapped in brackets still loses them.
+    expect(previewableUrls('(https://e.test/y)', BOTH)).toEqual(['https://e.test/y']);
+  });
+
+  it('never resolves a link hidden behind a spoiler', () => {
+    // ⚠⚠ The renderer skips URL splitting inside a spoiler run precisely so a link cannot leak
+    // the hidden content. Resolving one anyway renders the target full-size as a SIBLING of the
+    // click-to-reveal box — the spoiler is defeated by the preview, and for an image the payload
+    // is on screen before anyone chooses to reveal it. Only inline media need be on.
+    const hidden = '\x0301,01https://secret.example/leak.png\x03';
+    expect(previewableUrls(hidden, BOTH)).toEqual([]);
+    expect(previewableUrls(hidden, MEDIA_ONLY)).toEqual([]);
+    // A visible link in the same message is unaffected.
+    expect(previewableUrls(`ok https://e.test/fine.png ${hidden}`, BOTH)).toEqual([
+      'https://e.test/fine.png',
+    ]);
+  });
+
+  it('strips formatting codes out of the URL rather than resolving them', () => {
+    // A colour reset immediately after a link put \x03 INSIDE the matched token, so the
+    // resolver was handed an address with a control character on the end.
+    expect(previewableUrls('\x0304https://e.test/red.png\x03 done', BOTH)).toEqual([
+      'https://e.test/red.png',
+    ]);
   });
 
   it('keeps a query string intact', () => {

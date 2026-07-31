@@ -67,7 +67,7 @@ function escapeRegex(s: string): string {
 // they'd be unbalanced inside the token — `https://en.wikipedia.org/wiki/Foo_(bar)`
 // keeps its trailing ')', but `(see https://example.com)` doesn't. Shared by
 // the URL and channel-name splitters.
-function trimTrailingPunctuation(s: string): string {
+export function trimTrailingPunctuation(s: string): string {
   const PAIRS: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
   let end = s.length;
   while (end > 0) {
@@ -317,7 +317,7 @@ export function mircColor(
   return MIRC_PALETTE_FALLBACK[index] ?? null;
 }
 
-interface IrcRun {
+export interface IrcRun {
   text: string;
   bold: boolean;
   italic: boolean;
@@ -336,7 +336,7 @@ interface IrcRun {
 //   \x0F                                                 — reset all
 //   \x03[FG[,BG]] mIRC colour                            — FG and BG kept
 //   \x04[hex6[,hex6]] truecolour                         — consumed, dropped
-function parseIrcFormatting(text: string): IrcRun[] {
+export function parseIrcFormatting(text: string): IrcRun[] {
   const runs: IrcRun[] = [];
   let bold = false,
     italic = false,

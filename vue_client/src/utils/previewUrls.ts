@@ -3,6 +3,7 @@
 
 import { createUrlRegex } from '../../../shared/urlPattern.js';
 import { mediaKindForUrl } from './uploadHostMatch.js';
+import { parseIrcFormatting, trimTrailingPunctuation } from './nickColor.js';
 
 /**
  * Cap on CARDS per message.
@@ -45,6 +46,14 @@ export interface PreviewToggles {
  * authoritatively from Content-Type, and the render path re-checks that answer
  * against the settings. Guessing wrong costs one wasted resolve, never a render
  * the user switched off.
+ *
+ * ⚠⚠ Runs through the IRC formatting parser rather than over the raw wire text, for two
+ * reasons that both bite. A URL inside a SPOILER run must not be resolved at all — the
+ * renderer (nickColor's `toRenderSegments`) deliberately skips URL splitting there so a link
+ * can't leak hidden content, and unfurling one renders the target full-size next to the
+ * click-to-reveal box, which defeats the spoiler completely. And formatting codes live INSIDE
+ * the matched token otherwise: `\x03` on the end of a URL was being sent to the resolver as
+ * part of the address.
  */
 export function previewableUrls(
   text: string | null | undefined,
@@ -58,29 +67,44 @@ export function previewableUrls(
   let mediaCount = 0;
   let cardCount = 0;
 
-  for (const match of text.matchAll(createUrlRegex())) {
-    const raw = match[0];
-    // The shared pattern also matches bare `www.` hosts and email addresses.
-    // Neither is fetchable as written, and we are emphatically not resolving
-    // somebody's email address.
-    if (!/^https?:\/\//i.test(raw)) continue;
+  for (const run of parseIrcFormatting(text)) {
+    // Same test the renderer uses for the IRC spoiler convention: a run whose foreground and
+    // background are the same colour is invisible text.
+    if (run.fg != null && run.bg != null && run.fg === run.bg) continue;
 
-    // Trailing punctuation belongs to the sentence, not to the URL: "see
-    // https://example.com/x." must not resolve a path ending in a full stop.
-    // A closing bracket is included for the same reason, at the known cost of
-    // clipping the rare URL that legitimately ends in one.
-    const url = raw.replace(/[.,;:!?)\]}'"]+$/, '');
-    if (!url || seen.has(url)) continue;
+    for (const match of run.text.matchAll(createUrlRegex())) {
+      const raw = match[0];
+      // The shared pattern also matches bare `www.` hosts and email addresses.
+      // Neither is fetchable as written, and we are emphatically not resolving
+      // somebody's email address.
+      if (!/^https?:\/\//i.test(raw)) continue;
 
-    const looksLikeMedia = mediaKindForUrl(url) !== null;
-    if (looksLikeMedia ? !inlineMedia : !linkPreviews) continue;
-    if (looksLikeMedia ? mediaCount >= MAX_MEDIA_PER_MESSAGE : cardCount >= MAX_CARDS_PER_MESSAGE)
-      continue;
+      // ⚠ The LINKIFIER's trimmer, deliberately shared rather than re-expressed. The old
+      // regex stripped closing brackets unconditionally while the anchor-building path is
+      // balance-aware, so `…/wiki/Rust_(programming_language)` was resolved a character short
+      // of the URL the user actually clicks: the card silently never appeared, and the 404 was
+      // cached for an hour under a string appearing nowhere in the message. Two parsers
+      // disagreeing about where a URL ends is the bug; one parser is the fix.
+      const url = trimTrailingPunctuation(raw);
+      if (!url || seen.has(url)) continue;
 
-    if (looksLikeMedia) mediaCount++;
-    else cardCount++;
-    seen.add(url);
-    out.push(url);
+      // Three-way, not two. `mediaKindForUrl` returns null both for "definitely a page" and
+      // for "no extension to judge by" — and collapsing those meant an extensionless image
+      // host (imgur, twimg) could never render for someone who enabled ONLY inline media,
+      // permanently, since priming is ingest-driven. Unknowns are charged to the CARD budget,
+      // which is the tight one, so honouring them can't turn a link-heavy message into twenty
+      // speculative fetches.
+      const isMedia = mediaKindForUrl(url) !== null;
+      const wanted = isMedia ? inlineMedia : linkPreviews || inlineMedia;
+      if (!wanted) continue;
+      if (isMedia ? mediaCount >= MAX_MEDIA_PER_MESSAGE : cardCount >= MAX_CARDS_PER_MESSAGE)
+        continue;
+
+      if (isMedia) mediaCount++;
+      else cardCount++;
+      seen.add(url);
+      out.push(url);
+    }
   }
   return out;
 }
