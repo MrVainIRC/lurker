@@ -14,6 +14,7 @@
 // for a per-user, default-off setting.
 
 import sharp from 'sharp';
+import { dimensionsFromHeader } from '../utils/imageHeader.js';
 import {
   bufferStream,
   fetchBuffered,
@@ -422,19 +423,37 @@ async function resolveScrapedPage(
  * simply appears inside it.
  *
  * A header-sized read is enough for every format that matters: the dimensions live in the
- * first few hundred bytes of a JPEG/PNG/GIF/WebP. Failure is fine and common (a truncated
- * buffer sharp can't parse, an exotic format) — the clients fall back to a fixed max height,
- * which is merely the old behaviour.
+ * first few hundred bytes of a JPEG/PNG/GIF/WebP. Failure is fine (an exotic format, a header
+ * sharp can't make sense of) — the client falls back to a reserved box, which costs a little
+ * space rather than a layout jump.
+ *
+ * ⚠⚠ SHARP ALONE IS NOT ENOUGH, and the reason is counter-intuitive: it is not that the header
+ * is truncated — every format here puts its dimensions in the first few dozen bytes — it is that
+ * some containers declare a TOTAL LENGTH and their loaders refuse a file shorter than it claims,
+ * before decoding anything. Measured at this exact cap: png, jpeg and avif read fine; webp, gif
+ * and tiff all throw. No sharp option relaxes it (`failOn: 'none'` and `failOn: 'truncated'` both
+ * still throw), because the rejection is above the decoder.
+ *
+ * QA saw this as "solo .webp images get a grey background but .png ones don't" — a size-specific
+ * bug wearing a format-specific costume, since a WebP under 64 KB was measured correctly. The
+ * fallback reads the two fields directly for the two formats that are ordinary to paste into IRC.
  */
 async function imageDimensions(
   res: RawResponse,
 ): Promise<{ width: number; height: number } | null> {
   try {
     const head = await bufferStream(res, { maxBytes: 64 * 1024 });
-    const meta = await sharp(head.body).metadata();
-    if (meta.width && meta.height) return { width: meta.width, height: meta.height };
+    try {
+      const meta = await sharp(head.body).metadata();
+      if (meta.width && meta.height) return { width: meta.width, height: meta.height };
+    } catch {
+      // Fall through: sharp refusing a truncated container is the case below, not a dead end.
+    }
+    // ⚠ Second, never first. sharp handles more formats and is the better answer wherever it
+    // works; this must not shadow it with a narrower implementation that could disagree.
+    return dimensionsFromHeader(head.body);
   } catch {
-    // Not worth distinguishing: no dimensions means no reservation, not no preview.
+    // The read itself failed. No dimensions means no reservation, not no preview.
   }
   return null;
 }
