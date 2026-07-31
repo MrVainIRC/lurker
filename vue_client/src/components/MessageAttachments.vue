@@ -43,7 +43,7 @@
 import { computed, onBeforeUnmount, ref, useTemplateRef, watch } from 'vue';
 import { useSettingsStore } from '../stores/settings.js';
 import { useConfigStore } from '../stores/config.js';
-import { previewableUrls } from '../utils/previewUrls.js';
+import { previewableUrls, MAX_CARDS_PER_MESSAGE } from '../utils/previewUrls.js';
 import { useLinkPreview, type LinkPreview } from '../composables/useLinkPreview.js';
 import { useMediaViewer } from '../composables/useMediaViewer.js';
 import MessageAttachment from './MessageAttachment.vue';
@@ -95,15 +95,28 @@ const entries = computed(() => urls.value.map((url) => useLinkPreview(url)));
  * redirects to an HTML login page is not. Otherwise "link previews off" could still be talked
  * into rendering a card.
  */
-const visible = computed<LinkPreview[]>(() =>
-  entries.value
-    .map((entry) => entry.value)
-    .filter((p): p is LinkPreview => {
-      if (!p || p.status !== 'ok') return false;
-      const isMedia = p.kind === 'image' || p.kind === 'video' || p.kind === 'audio';
-      return isMedia ? toggles.value.inlineMedia : toggles.value.linkPreviews;
-    }),
-);
+const visible = computed<LinkPreview[]>(() => {
+  const out: LinkPreview[] = [];
+  let cards = 0;
+  for (const entry of entries.value) {
+    const p = entry.value;
+    if (!p || p.status !== 'ok') continue;
+    const isMedia = p.kind === 'image' || p.kind === 'video' || p.kind === 'audio';
+    if (isMedia ? !toggles.value.inlineMedia : !toggles.value.linkPreviews) continue;
+    // ⚠ The card cap is re-applied to the SERVER's answer, not just to the extension guess that
+    // prompted the request. `previewableUrls` charges anything that looks like media to the
+    // generous media budget (20), so twenty image-looking URLs that all resolve as pages —
+    // extensionless CDN links, a `.png` that redirects to an HTML login page — arrived as twenty
+    // stacked cards and took over the screen. The tight cap exists because a card costs real
+    // vertical space, and only the resolved kind knows whether one is being built.
+    if (!isMedia) {
+      if (cards >= MAX_CARDS_PER_MESSAGE) continue;
+      cards++;
+    }
+    out.push(p);
+  }
+  return out;
+});
 
 /** Strip candidates: pictures and video, which read as a row. Audio doesn't — a row of
  *  transport controls is not a gallery — so it stays stacked and full-width. */
@@ -178,15 +191,26 @@ function updateEdges(): void {
 // The strip's scrollable width changes without it being scrolled — the window resizes, images
 // finish laying out, a re-render swaps the group. One observer catches all of those, including
 // the initial measurement, which is why there's no separate onMounted call.
+// ⚠ Re-runs when the strip's CONTENTS change, not only when the element itself is swapped. The
+// children were enumerated once, so a strip that gained an item — a later preview resolving into
+// a group that was already on screen — kept observing the old set and never re-measured. Its
+// `atEnd` then stayed true while there was now something to scroll to, and the fade that
+// advertises it silently stopped appearing. `flush: 'post'` so the new children exist to observe.
 let observer: ResizeObserver | null = null;
-watch(stripEl, (el) => {
-  observer?.disconnect();
-  observer = null;
-  if (!el) return;
-  observer = new ResizeObserver(() => updateEdges());
-  observer.observe(el);
-  for (const child of el.children) observer.observe(child);
-});
+watch(
+  [stripEl, strip],
+  () => {
+    observer?.disconnect();
+    observer = null;
+    const el = stripEl.value;
+    if (!el) return;
+    observer = new ResizeObserver(() => updateEdges());
+    observer.observe(el);
+    for (const child of el.children) observer.observe(child);
+    updateEdges();
+  },
+  { flush: 'post' },
+);
 onBeforeUnmount(() => observer?.disconnect());
 
 const stripHeight = computed(() => {

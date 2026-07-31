@@ -21,6 +21,7 @@ import type { LinkPreview } from '../composables/useLinkPreview.js';
 import { useSettingsStore } from '../stores/settings.js';
 import { useConfigStore } from '../stores/config.js';
 import { useMediaViewer } from '../composables/useMediaViewer.js';
+import { MAX_CARDS_PER_MESSAGE } from '../utils/previewUrls.js';
 
 // Resolution is driven by message ingest, so components only read — stub the read. A real
 // `ref` is required: the templates rely on Vue's auto-unwrapping, which is keyed on `isRef`.
@@ -249,6 +250,23 @@ describe('MessageAttachments — arrangement', () => {
     expect(wrapper.find('.filmstrip').attributes('style')).toContain('200px');
   });
 
+  it('caps CARDS against the server answer, not against the extension guess', () => {
+    // ⚠ `previewableUrls` charges anything that LOOKS like media to the generous media budget
+    // (20), because a strip costs the same at 2 as at 12. But an image-looking URL that resolves
+    // as a page — an extensionless CDN link, a .png that redirects to an HTML login page —
+    // becomes a CARD, and a card costs real vertical space. Applying the tight cap only to the
+    // guess meant twenty such links rendered twenty stacked cards and took over the screen.
+    const urls: string[] = [];
+    for (let n = 0; n < 8; n++) {
+      const url = `https://e.test/looks-like-media${n}.png`;
+      urls.push(url);
+      resolved.set(url, preview({ url, kind: 'page', title: `T${n}` }));
+    }
+    seedSettings();
+    const wrapper = mount(MessageAttachments, { props: { text: urls.join(' ') } });
+    expect(wrapper.findAll('.card')).toHaveLength(MAX_CARDS_PER_MESSAGE);
+  });
+
   it('keeps cards out of the strip', () => {
     seed(img(1, 800, 600), img(2, 800, 600), YOUTUBE);
     const wrapper = mountFor(`https://e.test/1.png https://e.test/2.png ${YOUTUBE.url}`);
@@ -396,11 +414,12 @@ describe('MessageAttachments — the lightbox is a gallery over the strip', () =
 describe('MessageAttachments — the strip advertises that it scrolls', () => {
   beforeEach(() => resolved.clear());
 
-  it('shows no fade when there is nothing to scroll to', () => {
-    // The affordance has to be honest in both directions: a permanent fade implies more
-    // content when the strip is fully scrolled, and dims the first image for no reason when
-    // there's nothing to the left. Under happy-dom nothing overflows, so neither side moves.
-    for (const n of [1, 2]) {
+  // ⚠⚠ happy-dom reports every box as zero, so `scrollWidth - clientWidth` is 0 and BOTH edges
+  // read as reached no matter what the code does. The previous version of this suite asserted
+  // exactly that and was therefore vacuous — it passed with `updateEdges` inverted. Geometry has
+  // to be stubbed for the assertion to be about this component at all.
+  function stripWith(geometry: { scrollLeft: number; scrollWidth: number; clientWidth: number }) {
+    for (const n of [1, 2, 3]) {
       const p = preview({
         url: `https://e.test/${n}.png`,
         kind: 'image',
@@ -412,11 +431,41 @@ describe('MessageAttachments — the strip advertises that it scrolls', () => {
     }
     seedSettings();
     const strip = mount(MessageAttachments, {
-      props: { text: 'https://e.test/1.png https://e.test/2.png' },
+      props: { text: 'https://e.test/1.png https://e.test/2.png https://e.test/3.png' },
     }).find('.filmstrip');
+    for (const [key, value] of Object.entries(geometry)) {
+      Object.defineProperty(strip.element, key, { value, configurable: true });
+    }
+    return strip;
+  }
 
-    expect(strip.exists()).toBe(true);
+  it('shows no fade when there is nothing to scroll to', () => {
+    // A permanent fade would be a lie in both directions: it implies more content when the
+    // strip is fully scrolled, and dims the first image when there's nothing to the left.
+    const strip = stripWith({ scrollLeft: 0, scrollWidth: 300, clientWidth: 300 });
+    void strip.trigger('scroll');
     expect(strip.classes()).not.toContain('fade-start');
+    expect(strip.classes()).not.toContain('fade-end');
+  });
+
+  it('fades only the end while sitting at the left edge', async () => {
+    const strip = stripWith({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
+    await strip.trigger('scroll');
+    expect(strip.classes()).toContain('fade-end');
+    expect(strip.classes()).not.toContain('fade-start');
+  });
+
+  it('fades both sides in the middle', async () => {
+    const strip = stripWith({ scrollLeft: 350, scrollWidth: 1000, clientWidth: 300 });
+    await strip.trigger('scroll');
+    expect(strip.classes()).toContain('fade-start');
+    expect(strip.classes()).toContain('fade-end');
+  });
+
+  it('fades only the start once scrolled to the far end', async () => {
+    const strip = stripWith({ scrollLeft: 700, scrollWidth: 1000, clientWidth: 300 });
+    await strip.trigger('scroll');
+    expect(strip.classes()).toContain('fade-start');
     expect(strip.classes()).not.toContain('fade-end');
   });
 });
