@@ -8,24 +8,36 @@
        `width`/`height` are the server's real pixel dimensions, and they're load-bearing rather
        than decorative — the browser derives the intrinsic aspect ratio from them and reserves
        the right box BEFORE any bytes arrive. -->
-  <img
+  <!-- ⚠ The RESERVER is this span, not the image. When the server could not measure an image
+       there is no ratio to reserve a box from, and pinning the height on the `<img>` itself made
+       its empty letterbox part of the image: a 16x16 favicon.ico became a 240px-tall,
+       full-column-wide element carrying `role="button"` and a handler that calls
+       `stopPropagation`, so a tap anywhere in the ~99% of it that is background opened the
+       lightbox AND swallowed the row click — which on touch is the only thing that opens the
+       message-actions sheet. The height belongs to a wrapper that has no handlers, so those
+       pixels keep belonging to the row. Same defect class as the `@click.stop` note below,
+       re-created by a fixed box instead of by a modifier. -->
+  <span
     v-if="preview.kind === 'image' && preview.src"
-    class="inline-image"
-    :class="{ 'strip-item': inStrip, 'no-dims': !inStrip && !hasDimensions }"
-    :src="preview.src"
-    :width="preview.thumbWidth || undefined"
-    :height="preview.thumbHeight || undefined"
-    alt=""
-    loading="lazy"
-    decoding="async"
-    :role="viewerEnabled ? 'button' : undefined"
-    :tabindex="viewerEnabled ? 0 : undefined"
-    :aria-label="viewerEnabled ? imageLabel : undefined"
-    @click="onImageClick"
-    @keydown.enter.prevent="activate"
-    @keydown.space.prevent="activate"
-    @load="$emit('measured')"
-  />
+    :class="needsReservedBox ? 'dim-reserve' : 'dim-passthrough'"
+  >
+    <img
+      class="inline-image"
+      :class="{ 'strip-item': inStrip, 'in-reserve': needsReservedBox }"
+      :src="preview.src"
+      :width="preview.thumbWidth || undefined"
+      :height="preview.thumbHeight || undefined"
+      alt=""
+      loading="lazy"
+      decoding="async"
+      :role="viewerEnabled ? 'button' : undefined"
+      :tabindex="viewerEnabled ? 0 : undefined"
+      :aria-label="viewerEnabled ? imageLabel : undefined"
+      @click="onImageClick"
+      @keydown.enter.prevent="activate"
+      @keydown.space.prevent="activate"
+    />
+  </span>
   <!-- ⚠ `@loadedmetadata` matters more here than the image's `@load` does. The server measures
        dimensions for images only, so a video has NO width/height to reserve a box with and lays
        out at the UA default 300x150 until its metadata arrives — then jumps to full size. The
@@ -120,7 +132,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, ref } from 'vue';
 import type { LinkPreview } from '../composables/useLinkPreview.js';
 import { useSettingsStore } from '../stores/settings.js';
 
@@ -133,9 +145,13 @@ const props = defineProps<{
   inStrip?: boolean;
 }>();
 
-// Emitted when an image finishes decoding. Only matters when the server couldn't give us
-// dimensions (an exotic format, a truncated header) — there the box wasn't reserved, so the
-// row does grow on load and the list needs a chance to re-pin.
+// ⚠ `measured` is emitted by VIDEO and AUDIO only, and the image `@load` emit that used to sit
+// beside them is deliberately gone. Every rendered image now has its box before any bytes: the
+// server's width/height attributes, `.strip-item`'s row height, or `.dim-reserve`'s wrapper. So
+// `@load` could no longer report growth — but it still fired `repinAfterPreviewGrowth(true)`,
+// which for a reader at the live tail runs `scrollToBottom()`. With the atomic reveal landing a
+// message's images in one flush, a five-image message meant five scroll corrections for growth
+// that cannot happen.
 // `activate` rather than opening the viewer here: what a click MEANS depends on the
 // arrangement, and the arrangement is the parent's business. A tap on one image of a strip
 // should open the whole strip as a gallery, and only the parent knows what the strip holds.
@@ -155,6 +171,14 @@ const isVideo = computed(() => props.preview.kind === 'video-embed' && !!props.p
  * parse inside the 64 KB it reads.
  */
 const hasDimensions = computed(() => !!props.preview.thumbWidth && !!props.preview.thumbHeight);
+
+/**
+ * Whether this image needs a wrapper to hold its height open.
+ *
+ * Only outside a strip: the strip row already fixes the height there, and a second fixed box
+ * would fight it.
+ */
+const needsReservedBox = computed(() => !props.inStrip && !hasDimensions.value);
 
 /**
  * ⚠⚠ THERE IS DELIBERATELY NO `@error` HANDLING, and that is a decision rather than an omission.
@@ -248,29 +272,36 @@ function activate(): void {
   border-radius: var(--radius-md);
   display: block;
 }
-/* ⚠ A FIXED height, for the same reason `.inline-video` has one: with no width/height attributes
-   there is no intrinsic ratio to reserve a box from, so the element is laid out at the UA default
-   for a replaced element with no dimensions and grows to its real size on decode — the one case
-   where an inline image's height depends on bytes rather than on its descriptor.
-   `max-width: 100%` still applies, and because `height` is no longer `auto` a too-wide image is
-   constrained horizontally and letterboxed by `object-fit: contain` rather than changing height.
-   Only vertical movement disturbs a scroll position, so the width settling on decode costs
-   nothing.
-   240px, matching the `max-height` an image with dimensions would have been scaled into, so the
-   fallback and the normal case agree on the tallest a lone image gets.
-   NOT applied in a strip: the row already fixes the height there (see `.strip-item`). */
-.inline-image.no-dims {
+/* ⚠ The height lives on the WRAPPER, and the image sizes itself inside it.
+   With no width/height attributes there is no intrinsic ratio to reserve a box from, so the
+   element lays out at the UA default for a replaced element with no dimensions and grows to its
+   real size on decode — the one shape whose height would otherwise depend on bytes rather than on
+   its descriptor. 240px matches the `max-height` a measured image is scaled into, so the fallback
+   and the normal case agree on the tallest a lone image gets.
+   Putting it here rather than on the `<img>` is what keeps the empty area around a small image
+   from becoming a click target — see the template. */
+/* When no box needs reserving the wrapper generates NO box at all, so layout, flex participation
+   and the strip's sizing behave exactly as they did when the image was the direct child. */
+.dim-passthrough {
+  display: contents;
+}
+.dim-reserve {
+  display: block;
   height: 240px;
-  /* ⚠ `scale-down`, NOT `contain`. `contain` scales UP to fill the box, so an unmeasured 16x16
-     favicon.ico — sharp decodes jpeg/png/webp/tiff/gif/svg/heif/raw, so ico and bmp arrive as
-     `kind: 'image'` with null dimensions — rendered at 240x240 and 15x blurry. `scale-down` takes
-     the smaller of `none` and `contain`, so a small image stays its own size inside the box.
-     The box is still 240px tall, which is the price of a height that's knowable before the bytes:
-     empty space around a rare small image, rather than a jump on every one. */
-  object-fit: scale-down;
-  /* And a fill, so the reserved box reads as a placeholder rather than as a hole punched in the
+  /* A fill, so the reserved box reads as a placeholder rather than as a hole punched in the
      conversation — `loading="lazy"` means it can sit empty until the row nears the viewport. */
   background: var(--embed-bg);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+/* Inside the reserve the image is bounded by the box and never scaled up: sharp decodes
+   jpeg/png/webp/tiff/gif/svg/heif/raw, so ico and bmp arrive as `kind: 'image'` with null
+   dimensions, and a 16x16 favicon stretched to 240px would be 15x blurry. */
+.inline-image.in-reserve {
+  max-height: 100%;
+  max-width: 100%;
+  width: auto;
+  height: auto;
 }
 /* Only advertises a click when a click does something — the viewer is opt-out. */
 .inline-image[role='button'] {

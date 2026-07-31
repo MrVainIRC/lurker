@@ -11,6 +11,16 @@ export interface ApiRequestOptions {
   method?: string;
   body?: unknown;
   headers?: Record<string, string>;
+  /**
+   * Abort the request.
+   *
+   * ⚠ Without one, a `fetch` here can hang FOREVER — there is no default timeout in any browser
+   * for a socket that stays open, so a dead NAT mapping, a sleeping laptop or a proxy that
+   * accepts and never answers leaves the promise pending for the life of the tab. Racing a timer
+   * against it is not the same thing: the request keeps its socket, still downloads and parses
+   * the body, and resolves into a handler that has already given up.
+   */
+  signal?: AbortSignal;
 }
 
 // One-shot guard so an unrecoverable 401 can't loop the page reload.
@@ -82,10 +92,11 @@ export function clearAuthRecoveryGuard(): void {
 // that want a checked shape can pass it explicitly: `api<{ user: User }>(url)`.
 export async function api<T = any>(
   url: string,
-  { method = 'GET', body, headers }: ApiRequestOptions = {},
+  { method = 'GET', body, headers, signal }: ApiRequestOptions = {},
 ): Promise<T> {
   const res = await fetch(url, {
     method,
+    signal,
     credentials: 'include',
     headers: {
       Accept: 'application/json',

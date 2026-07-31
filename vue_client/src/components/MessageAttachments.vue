@@ -119,6 +119,10 @@ const entries = computed(() => urls.value.map((url) => useLinkPreview(url)));
 //      image becoming two is a strip). Holding the gate for it instead would hide a whole message
 //      for up to five minutes on the strength of one saturated fetch, which is far worse. The
 //      growth goes through `previewRevision`, so it is compensated; only its arrangement isn't.
+//      ⚠ The gate cannot RE-CLOSE for this: `flush` writes the answer into the ref before it
+//      branches on status, so a transient `unavailable` carries a value, and nothing ever writes
+//      null back to a cached ref. The only way a settled URL becomes pending again is cache
+//      eviction followed by a re-prime against a fresh ref — which is why `shown` latches.
 //   2. A message mixing an image with a slow PAGE link shows nothing until the page answers, and
 //      that can be tens of seconds. The page URL cannot be excluded from the gate: an
 //      extension-less URL might itself resolve as an image and belong in the arrangement, so
@@ -135,35 +139,31 @@ const entries = computed(() => urls.value.map((url) => useLinkPreview(url)));
 // to recover from.
 const settled = usePreviewsSettled(urls);
 
-// Latched, so a URL re-entering the queue (a re-ask after a transient failure) cannot HIDE a
-// block that is already on screen — a shrink disturbs a reader exactly as much as a growth.
-const revealed = ref(false);
+/**
+ * The URLs this message has already committed to showing.
+ *
+ * ⚠⚠ A PER-URL latch, not a per-component boolean, and the difference is a defect. The boolean
+ * had to be re-derived whenever `urls` changed — otherwise a settings flip grew the set under an
+ * already-open latch and the new images painted one at a time — and re-deriving it meant
+ * `revealed = settled`, which could go true→false and tear the whole block down. Enabling inline
+ * media with ten resolved cards on screen therefore collapsed all ten, buffer-wide, in one frame:
+ * ~1200px of uncompensated shrink, for a setting that has nothing to do with cards.
+ *
+ * A set only ever grows. New URLs stay hidden until the whole set settles, which is the property
+ * the gate exists for; anything already painted stays painted, which is the property the latch
+ * exists for. Neither needs a watcher on `urls`, so the spurious-fire problem goes with it — that
+ * watcher keyed on array identity, and `urls` allocates a fresh array on ANY settings write.
+ */
+const shown = ref<ReadonlySet<string>>(new Set());
 watch(
   settled,
   (ok) => {
-    if (ok) revealed.value = true;
+    if (!ok) return;
+    const next = new Set(shown.value);
+    for (const url of urls.value) next.add(url);
+    if (next.size !== shown.value.size) shown.value = next;
   },
   { immediate: true },
-);
-
-// ⚠ The latch is scoped to the CURRENT url set, not to the component's lifetime. Switching
-// `chat.inline_media.enabled` on from the composer or from another device re-primes without
-// remounting anything (see useSocket's `wirePreviewToggles`), so `urls` grows under a latch that
-// was already open and the new images paint one at a time — the piecemeal render this gate
-// exists to prevent, arriving by the one path that never remounts. Re-deriving from `settled`
-// closes the gate again until the new set is complete.
-// ⚠⚠ Keyed on the CONTENTS, not the array. `urls` is a computed that allocates a fresh array on
-// every evaluation, and it re-evaluates whenever `toggles` does — which is on ANY settings write,
-// because the store replaces `values` wholesale. So watching the array identity fired this on an
-// unrelated toggle (the channel-list chevron, a highlight sound, a cross-device sync) with a
-// byte-identical URL list, and re-derived `revealed` from a `settled` that can legitimately be
-// false — making a strip that was on screen vanish mid-read. That is the same shrink the latch
-// above exists to prevent, reintroduced by the line meant to scope it.
-watch(
-  () => urls.value.join('\n'),
-  () => {
-    revealed.value = settled.value;
-  },
 );
 
 /**
@@ -175,13 +175,13 @@ watch(
  * into rendering a card.
  */
 const visible = computed<LinkPreview[]>(() => {
-  // All-or-nothing: see the atomic-reveal block above.
-  if (!revealed.value) return [];
   const out: LinkPreview[] = [];
   let cards = 0;
   for (const entry of entries.value) {
     const p = entry.value;
     if (!p || p.status !== 'ok') continue;
+    // All-or-nothing, per URL: see `shown` above.
+    if (!shown.value.has(p.url)) continue;
     const isMedia = p.kind === 'image' || p.kind === 'video' || p.kind === 'audio';
     if (isMedia ? !toggles.value.inlineMedia : !toggles.value.linkPreviews) continue;
     // ⚠ The card cap is re-applied to the SERVER's answer, not just to the extension guess that
@@ -349,7 +349,11 @@ const stripHeight = computed(() => {
 .filmstrip::-webkit-scrollbar {
   display: none;
 }
-.filmstrip > :deep(*) {
+/* ⚠ Targets the media itself, not the direct child. An inline image is wrapped in a
+   `display: contents` span (see MessageAttachment), which generates no box — so a snap point on
+   the direct child would have nothing to align. */
+.filmstrip :deep(.inline-image),
+.filmstrip :deep(.inline-video) {
   scroll-snap-align: start;
 }
 

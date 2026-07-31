@@ -91,37 +91,22 @@ const MAX_BATCH = 20;
 const FLUSH_MS = 24;
 
 /**
- * Ceiling on one resolve round trip, client side.
+ * Ceiling on ONE FLUSH — every slice of it, not each slice separately.
  *
- * ⚠⚠ Not belt-and-braces. `api()` is a bare `fetch` with no signal and no timeout, so a dead NAT
- * mapping, a sleeping laptop or a proxy that accepts and never answers leaves the promise pending
- * FOREVER — and `flush` awaits its slices sequentially, so one hung POST also strands every later
- * slice with no request ever sent. Before the reveal gate that cost a missing card; with it, every
- * message holding one of those URLs renders no attachments at all, permanently. The gate must
- * fail open, and a request that never settles is the one way it cannot.
+ * ⚠⚠ Two distinct hangs, and the per-slice form only fixed one. `api()` had no signal and no
+ * timeout, so a proxy that accepts and never answers left the promise pending for the life of the
+ * tab; and `flush` awaits its slices SEQUENTIALLY, so that one stuck POST also stranded every
+ * later slice with no request ever sent. Bounding each slice separately left the second hang
+ * intact at 45s x sliceIndex — a 200-URL history page would not issue its last POST for seven and
+ * a half minutes, and with the reveal gate every message holding one of those URLs renders no
+ * attachments at all until it does. One deadline across the call bounds the blanking to this
+ * number no matter how many slices there are.
  *
- * Generous against the server's own budget (10s of queue wait plus a 30s resolve deadline, all
- * answered as one `Promise.all`), so this only fires when the round trip is genuinely stuck
- * rather than merely slow. Losing the race puts the slice back in play through the same
- * `forgetForRetry` path a transport error takes.
+ * Generous against the server's own budget — 10s of queue wait plus a 30s resolve deadline,
+ * answered as one `Promise.all` over the slice — so it only fires when the round trip is
+ * genuinely stuck rather than merely slow.
  */
 const RESOLVE_TIMEOUT_MS = 45_000;
-
-function withTimeout<T>(work: Promise<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('resolve timed out')), RESOLVE_TIMEOUT_MS);
-    work.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err as Error);
-      },
-    );
-  });
-}
 
 async function flush(): Promise<void> {
   flushTimer = null;
@@ -129,15 +114,35 @@ async function flush(): Promise<void> {
   queue = new Set();
   if (urls.length === 0) return;
 
+  const deadline = Date.now() + RESOLVE_TIMEOUT_MS;
   for (let i = 0; i < urls.length; i += MAX_BATCH) {
     const slice = urls.slice(i, i + MAX_BATCH);
     try {
-      const res = await withTimeout(
-        api<{ previews: LinkPreview[] }>('/api/link-preview/resolve', {
+      const remaining = deadline - Date.now();
+      // Nothing left of the budget: put the rest back in play WITHOUT posting. A request issued
+      // against an already-blown deadline would only add load to a server that has just failed to
+      // answer, and the URLs reach the same recoverable state either way.
+      if (remaining <= 0) throw new Error('resolve budget exhausted');
+      // ⚠ A real abort, not a race. `Promise.race` against a timer leaves the socket open, the
+      // body still downloading, and the completed answer discarded into a handler that has
+      // already re-armed all 20 URLs for a re-ask — so one stuck slice fanned out into ~18
+      // duplicate POSTs aimed at a server that was already struggling.
+      //
+      // ⚠ `AbortController` + `setTimeout` rather than `AbortSignal.timeout`, which no test can
+      // reach: vitest's fake timers don't patch it, so the only way to exercise this would be a
+      // 45-second wall-clock wait — i.e. it would never be exercised.
+      const abort = new AbortController();
+      const abortTimer = setTimeout(() => abort.abort(), remaining);
+      let res: { previews: LinkPreview[] };
+      try {
+        res = await api<{ previews: LinkPreview[] }>('/api/link-preview/resolve', {
           method: 'POST',
           body: { urls: slice },
-        }),
-      );
+          signal: abort.signal,
+        });
+      } finally {
+        clearTimeout(abortTimer);
+      }
       const answered = new Set<string>();
       for (const preview of res.previews ?? []) {
         const entry = cache.get(preview.url);
@@ -158,15 +163,20 @@ async function flush(): Promise<void> {
       // `retry` entry exists so nothing re-asks it, and `dropIfExpired` returns early because a
       // null value has no `expiresAt`. Permanently blank, from a response that looked fine.
       for (const url of slice) if (!answered.has(url)) forgetForRetry(url);
-      // ⚠⚠ Any ANSWER bumps this, not only an `ok` one. This used to be `if (changed)`, guarded by
-      // a comment reading "only an `ok` preview renders anything, so only an `ok` preview can
-      // change a row's height" — which stopped being true when the reveal gate landed.
-      // `MessageAttachments` holds a message's whole block back until every URL in it has settled,
-      // so an `unavailable` is very often the answer that COMPLETES that gate and paints the
-      // block: growth out of a batch containing no `ok` at all, with nothing telling the list to
-      // re-pin. The cost of the wider condition is one no-op re-pin per all-unavailable batch —
-      // per BATCH, not per row — which is the cheaper side of the trade by a wide margin.
-      if (answered.size > 0) previewRevision.value++;
+      // ⚠⚠ UNCONDITIONAL, and the condition it replaced went through two wrong versions.
+      //
+      // It was `if (changed)` — only an `ok` answer — guarded by a comment reading "only an `ok`
+      // preview renders anything, so only an `ok` preview can change a row's height". True until
+      // the reveal gate existed; after it, an `unavailable` is very often the answer that
+      // COMPLETES a gate and paints a whole block. Then it was `answered.size > 0`, which still
+      // missed the case where the server answers with nothing at all: `forgetForRetry` runs for
+      // every unanswered URL, that too opens gates, and nothing bumped.
+      //
+      // The rule this now follows: ANY path that can move a URL out of the pending set can open a
+      // gate, and every gate that opens grows a row. `pendingRevision` marks exactly those paths,
+      // so the two are bumped together wherever a gate can open — never in `primePreviews`'s
+      // queueing branch, which only ever ADDS to the pending set and so can only close one.
+      previewRevision.value++;
       pendingRevision.value++;
       scheduleReask();
     } catch {
@@ -176,6 +186,11 @@ async function flush(): Promise<void> {
       // than the missing card. Every URL in the slice is put back in play; none of them got an
       // answer, so none of them has a verdict to remember.
       for (const url of slice) forgetForRetry(url);
+      // ⚠ Both, for the reason above: `forgetForRetry` fails the gate OPEN, so a 502 mid-deploy
+      // paints every block that was waiting on this slice — including cached siblings that have
+      // been resolved all along. That is the largest single growth this feature produces, and it
+      // was the one path with no re-pin at all.
+      previewRevision.value++;
       pendingRevision.value++;
       scheduleReask();
     }
@@ -287,11 +302,11 @@ function runReask(): void {
     // Evicted by the cache ceiling, or dropped by `dropIfExpired` on a priming pass — either
     // way nobody is holding a ref for it, so there is nothing to re-ask on behalf of.
     if (!cache.has(url)) {
+      // ⚠ No bump, and not by omission: `previewPending` tests `retry` BEFORE `queue`/`asked`, so
+      // a URL in this loop is already settled and stays settled — deleting its `retry` entry is
+      // not a transition anything can observe. (`retry ⊆ cache` also makes this branch itself
+      // unreachable today; it is kept as a guard, not as a live path.)
       retry.delete(url);
-      // ⚠ Bumped, because this IS a pending->settled transition. The `continue` skips `queued`,
-      // so without it every `usePreviewsSettled` keeps its cached `false` and a message's block
-      // stays hidden until some unrelated bump happens along.
-      pendingRevision.value++;
       continue;
     }
     // Parked as in-flight rather than deleted, and the difference is the whole backoff: the
@@ -318,17 +333,27 @@ function runReask(): void {
  */
 const MAX_CACHE_ENTRIES = 2000;
 
+/**
+ * Returns whether eviction removed a URL that was still PENDING — i.e. whether it can have opened
+ * a reveal gate.
+ *
+ * ⚠ Not "did it evict anything". Once a long-lived tab saturates the cache, `while (size > MAX)`
+ * trims to exactly the ceiling, so EVERY prime that creates an entry evicts one — and reporting
+ * that as a layout event fired a re-pin (two forced synchronous layouts over an unvirtualised
+ * 500-row list) on essentially every incoming message, to compensate for a growth that had not
+ * happened. Only an evicted URL that something was still waiting on can change what renders.
+ */
 function evictIfNeeded(): boolean {
-  let evicted = false;
+  let openedGate = false;
   while (cache.size > MAX_CACHE_ENTRIES) {
     const oldest = cache.keys().next().value;
     if (oldest === undefined) break;
+    if (previewPending(oldest)) openedGate = true;
     cache.delete(oldest);
     asked.delete(oldest);
     retry.delete(oldest);
-    evicted = true;
   }
-  return evicted;
+  return openedGate;
 }
 
 /** Drop entries whose server-side TTL has lapsed, so they can be asked about again.
@@ -383,7 +408,7 @@ export function primePreviews(
     }
   }
   if (queued && flushTimer === null) flushTimer = setTimeout(() => void flush(), FLUSH_MS);
-  const evicted = evictIfNeeded();
+  const evictionOpenedGate = evictIfNeeded();
   // ⚠ CONDITIONAL, and that matters more than it looks. This runs for every live message, whether
   // or not it carries a URL, and every mounted `MessageAttachments` is an eager subscriber to a
   // computed that reads this ref — so an unconditional bump made one ordinary line of channel
@@ -398,11 +423,11 @@ export function primePreviews(
   // an unconditional bump changes no observable behaviour — the computed re-evaluates to the same
   // value, so a `watch` never fires — it only burns the work. A test would have to count
   // evaluations from outside the computed, which nothing here can do.
-  if (queued || evicted) pendingRevision.value++;
+  if (queued || evictionOpenedGate) pendingRevision.value++;
   // ⚠ Eviction can OPEN a reveal gate — it makes a URL non-pending without any answer arriving —
   // so the block paints with nothing having bumped `previewRevision`. That happens during a
   // history-page ingest, which is exactly when a scrolled-up reader is being anchored.
-  if (evicted) previewRevision.value++;
+  if (evictionOpenedGate) previewRevision.value++;
 }
 
 /**

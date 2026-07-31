@@ -500,11 +500,16 @@ describe('MessageAttachments — atomic reveal', () => {
     expect(wrapper.find('.filmstrip').exists()).toBe(true);
   });
 
-  it('closes the gate again when a settings flip grows the URL set', async () => {
-    // ⚠ The one path that changes `urls` WITHOUT remounting: `/set` from the composer, or a
-    // settings sync from another device. A latch scoped to the component's lifetime stays open,
-    // and the newly-previewable images then paint one at a time — the piecemeal render this gate
-    // exists to prevent, arriving by the only route that never remounts.
+  it('holds back only the NEW URLs when a settings flip grows the set', async () => {
+    // ⚠⚠ The one path that changes `urls` without remounting: `/set` from the composer, or a
+    // settings sync from another device. Two things have to be true at once here, and an earlier
+    // version got the second exactly backwards.
+    //
+    //   1. The newly-previewable image must NOT paint until it has settled — otherwise the flip
+    //      renders it piecemeal, which is what the gate exists to prevent.
+    //   2. The card that was ALREADY on screen must stay on screen. Re-deriving one shared
+    //      `revealed` flag from `settled` tore the whole block down instead: ten resolved cards
+    //      collapsing buffer-wide, ~1200px of uncompensated shrink, for a setting about images.
     const CARD = 'https://news.example/article';
     resolved.set(CARD, preview({ url: CARD, kind: 'page', title: 'A page' }));
     seedSettings({ inlineMedia: false, linkPreviews: true });
@@ -517,7 +522,8 @@ describe('MessageAttachments — atomic reveal', () => {
     useSettingsStore().values['chat.inline_media.enabled'] = true;
     await nextTick();
 
-    expect(wrapper.find('.attachments').exists()).toBe(false);
+    expect(wrapper.find('.inline-image').exists()).toBe(false);
+    expect(wrapper.find('.card').exists()).toBe(true);
 
     answer(img(1));
     await nextTick();
@@ -539,27 +545,32 @@ describe('MessageAttachment — a box that does not depend on bytes', () => {
     src: '/api/link-preview/media/tokX',
   });
 
-  it('fixes the box only for an unmeasured image outside a strip', () => {
+  it('reserves the box on a WRAPPER, and only for an unmeasured image outside a strip', () => {
     // ⚠ All three cases in ONE test, deliberately. Split apart, the two negative cases asserted
-    // `not.toContain('no-dims')` and stayed green with the binding deleted entirely — vacuous
-    // against the very mutation they look like they guard. Together, deleting the binding fails
-    // this test on its first case.
+    // `not.toContain(...)` and stayed green with the binding deleted entirely — vacuous against
+    // the very mutation they look like they guard.
     //
     // `imageDimensions` returns null for a format sharp can't parse in the 64 KB it reads — ico
     // and bmp both arrive as `kind: 'image'` with null dimensions. With no width/height attributes
     // there is no ratio to reserve a box from, so the element lays out at the UA default and grows
     // on decode: video's pre-465f838 bug, still live for images.
+    //
+    // ⚠⚠ The height is on the WRAPPER and that is the assertion that matters. Pinned on the
+    // `<img>`, the empty letterbox around a 16x16 favicon became part of a 240px-tall control
+    // that calls `stopPropagation` — swallowing the row tap that is the only opener of the
+    // message-actions sheet on touch. A wrapper with no handlers leaves those pixels to the row.
     const lone = mount(MessageAttachment, { props: { preview: unmeasured } });
-    expect(lone.find('img').classes()).toContain('no-dims');
+    expect(lone.find('.dim-reserve').exists()).toBe(true);
+    expect(lone.find('.dim-reserve img.inline-image').exists()).toBe(true);
 
     // A measured image keeps its own aspect — the descriptor arrives atomically with the decision
     // to render at all, so natural aspect costs nothing and a fixed box would only waste space.
     const measured = mount(MessageAttachment, { props: { preview: IMAGE } });
-    expect(measured.find('img').classes()).not.toContain('no-dims');
+    expect(measured.find('.dim-reserve').exists()).toBe(false);
 
-    // In a strip the row already decides the height; a second fixed height would fight it.
+    // In a strip the row already decides the height; a second fixed box would fight it.
     const strip = mount(MessageAttachment, { props: { preview: unmeasured, inStrip: true } });
-    expect(strip.find('img').classes()).not.toContain('no-dims');
+    expect(strip.find('.dim-reserve').exists()).toBe(false);
     expect(strip.find('img').classes()).toContain('strip-item');
   });
 });

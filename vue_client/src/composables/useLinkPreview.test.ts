@@ -8,6 +8,7 @@ import {
   primePreviews,
   useLinkPreview,
   usePreviewsSettled,
+  previewRevision,
   resetLinkPreviewCache,
 } from './useLinkPreview.js';
 import * as apiModule from '../api.js';
@@ -47,9 +48,23 @@ beforeEach(() => {
   posted = [];
   respond = okFor;
   vi.spyOn(apiModule, 'api').mockImplementation(async (_url, opts) => {
-    const urls = ((opts ?? {}).body as { urls: string[] }).urls;
+    const options = opts ?? {};
+    const urls = (options.body as { urls: string[] }).urls;
     posted.push(urls);
-    return respond(urls) as never;
+    const answer = respond(urls);
+    // ⚠ The stub HONOURS `signal`, because `fetch` does and the caller now depends on it. A stub
+    // that accepts a signal and ignores it makes a hung request untestable — the promise the
+    // caller is waiting on simply never settles, and the timeout it added looks broken.
+    if (!options.signal) return answer as never;
+    return (await new Promise<unknown>((resolve, reject) => {
+      const signal = options.signal!;
+      if (signal.aborted) {
+        reject(new Error('aborted'));
+        return;
+      }
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      Promise.resolve(answer).then(resolve, reject);
+    })) as never;
   });
 });
 
@@ -404,6 +419,101 @@ describe('is an answer still coming?', () => {
     primePreviews(['https://e.test/transient'], BOTH);
     await settle();
     expect(useLinkPreview('https://e.test/transient').value?.status).toBe('unavailable');
+    expect(settledRef.value).toBe(true);
+  });
+});
+
+describe('the re-pin signal', () => {
+  // ⚠⚠ `previewRevision` is what MessageList watches to re-anchor a scrolled-up reader, and until
+  // now NOTHING in the repo asserted it — the branch's headline change to it could be reverted
+  // with a fully green suite. Every path that moves a URL out of the pending set can open a
+  // reveal gate, and every gate that opens grows a row, so every such path has to bump it.
+
+  it('bumps for a batch that answers with no `ok` at all', async () => {
+    // The old condition was `if (changed)` — some answer was `ok`. With the gate, an
+    // `unavailable` is very often the answer that COMPLETES a message's gate and paints its whole
+    // block, so an all-unavailable batch is exactly when a re-pin is needed.
+    respond = transientFor;
+    const before = previewRevision.value;
+    primePreviews(['https://e.test/dead'], BOTH);
+    await settle();
+    expect(previewRevision.value).toBeGreaterThan(before);
+  });
+
+  it('bumps when the request fails and the gate falls open', async () => {
+    // The largest single growth this feature produces: a 502 mid-deploy fails every URL in the
+    // slice open at once, painting every block that was waiting on it — cached siblings included.
+    respond = () => {
+      throw new Error('502');
+    };
+    const before = previewRevision.value;
+    primePreviews(['https://e.test/boom'], BOTH);
+    await settle();
+    expect(previewRevision.value).toBeGreaterThan(before);
+  });
+
+  it('does NOT bump when eviction only drops URLs that had already settled', async () => {
+    // ⚠⚠ Once a long-lived tab saturates the cache, `while (size > MAX)` trims to exactly the
+    // ceiling — so EVERY prime that creates an entry evicts one. Reporting that as a layout event
+    // fired a re-pin (two forced synchronous layouts over an unvirtualised 500-row list) on
+    // essentially every incoming message, compensating for a growth that had not happened. Only
+    // an evicted URL something was still WAITING on can change what renders.
+    //
+    // Entries are created by reading, not by priming: `useLinkPreview` calls `entryFor` without
+    // touching `asked`, so these are settled from birth and eviction cannot open a gate.
+    for (let n = 0; n <= 2000; n++) useLinkPreview(`https://e.test/fill/${n}`);
+    respond = okFor;
+    const before = previewRevision.value;
+
+    primePreviews(['https://e.test/evictor'], BOTH);
+
+    expect(previewRevision.value).toBe(before);
+  });
+
+  it('does NOT bump merely for queueing work', async () => {
+    // Priming only ever ADDS to the pending set, so it can close a gate but never open one. A
+    // bump here would re-pin the list on every incoming line of chat.
+    respond = okFor;
+    primePreviews(['https://e.test/one'], BOTH);
+    await settle();
+    const before = previewRevision.value;
+    primePreviews(['https://e.test/two'], BOTH);
+    expect(previewRevision.value).toBe(before);
+  });
+});
+
+describe('a re-ask that is in flight', () => {
+  // ⚠⚠ The ordering case in `previewPending`, and the one its docblock calls load-bearing.
+  // `runReask` does `retry.set(url, {at: Infinity})` AND `queue.add(url)` on a URL whose value is
+  // still null — so if `queue`/`asked` were tested first, a recovery ATTEMPT would report the URL
+  // pending and re-hide a block that is already on screen. A shrink, caused by trying to help.
+  //
+  // Nothing else reaches it. The neighbouring tests either carry a value (which short-circuits
+  // before the clause) or run after `forgetForRetry` has emptied `asked`, so `queue || asked` is
+  // false whatever the order. Deleting the clause, or moving it after those two, left 61/61 green.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // Pins the ±25% backoff jitter to its midpoint, so the re-ask lands at exactly the 15s floor
+    // and the assertion can sit inside the 24ms window before the flush drains `queue`.
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('stays SETTLED while its re-ask is queued and in flight', async () => {
+    respond = () => {
+      throw new Error('502');
+    };
+    const settledRef = usePreviewsSettled(ref(['https://e.test/reasked']));
+    primePreviews(['https://e.test/reasked'], BOTH);
+    await vi.advanceTimersByTimeAsync(60);
+    expect(settledRef.value).toBe(true);
+
+    // Hang the retry, and stop the clock the instant `runReask` has re-queued it — before the
+    // 24ms coalescing timer drains `queue` again. This is the only window in which the URL is in
+    // `retry` AND `queue` with a null value, which is precisely the state the clause is about.
+    respond = () => new Promise(() => {});
+    await vi.advanceTimersByTimeAsync(15_000);
+
     expect(settledRef.value).toBe(true);
   });
 });
