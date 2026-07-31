@@ -151,13 +151,24 @@ const settled = usePreviewsSettled(urls);
  *
  * A set only ever grows. New URLs stay hidden until the whole set settles, which is the property
  * the gate exists for; anything already painted stays painted, which is the property the latch
- * exists for. Neither needs a watcher on `urls`, so the spurious-fire problem goes with it — that
- * watcher keyed on array identity, and `urls` allocates a fresh array on ANY settings write.
+ * exists for.
+ *
+ * ⚠⚠ Watches `urls` AS WELL, and watching `settled` alone was a bug. Vue runs a watcher when its
+ * source's VALUE changes, so a flip that admits a URL which is ALREADY resolved — the same image
+ * posted earlier in the session, or previewed in another buffer — left `settled` true before and
+ * true after. The watcher never ran, the URL was never admitted, and its attachment stayed hidden
+ * for the life of the row with everything about it resolved and ready.
+ *
+ * The array identity churns on any settings write (`urls` allocates a fresh array each
+ * evaluation), so this fires more often than it strictly needs to. That is harmless HERE and was
+ * not in the version this replaced: the callback only ever ADDS, and re-adding a URL already in
+ * the set changes nothing, so no spurious render can follow. The defect before was a callback
+ * that could REMOVE.
  */
 const shown = ref<ReadonlySet<string>>(new Set());
 watch(
-  settled,
-  (ok) => {
+  [settled, urls],
+  ([ok]) => {
     if (!ok) return;
     const next = new Set(shown.value);
     for (const url of urls.value) next.add(url);

@@ -500,6 +500,30 @@ describe('MessageAttachments — atomic reveal', () => {
     expect(wrapper.find('.filmstrip').exists()).toBe(true);
   });
 
+  it('shows a URL added by a settings flip that was ALREADY resolved', async () => {
+    // ⚠⚠ `shown` grows inside a watcher on `settled`, and Vue only runs that when the VALUE
+    // changes. If the flip adds a URL that is already in the cache — the same image posted
+    // earlier in the session, or previewed in another buffer — `settled` is true before and true
+    // after, so the watcher never fires and the URL is never admitted. The attachment then stays
+    // hidden for the life of the row, with everything about it resolved and ready.
+    const CARD = 'https://news.example/article';
+    resolved.set(CARD, preview({ url: CARD, kind: 'page', title: 'A page' }));
+    resolved.set(img(1).url, img(1));
+    seedSettings({ inlineMedia: false, linkPreviews: true });
+    const wrapper = mount(MessageAttachments, {
+      props: { text: `https://e.test/1.png ${CARD}` },
+    });
+    expect(wrapper.find('.card').exists()).toBe(true);
+    expect(wrapper.find('.inline-image').exists()).toBe(false);
+
+    // Nothing goes in flight: the image was resolved all along, it simply wasn't previewable.
+    useSettingsStore().values['chat.inline_media.enabled'] = true;
+    await nextTick();
+
+    expect(wrapper.find('.inline-image').exists()).toBe(true);
+    expect(wrapper.find('.card').exists()).toBe(true);
+  });
+
   it('holds back only the NEW URLs when a settings flip grows the set', async () => {
     // ⚠⚠ The one path that changes `urls` without remounting: `/set` from the composer, or a
     // settings sync from another device. Two things have to be true at once here, and an earlier
