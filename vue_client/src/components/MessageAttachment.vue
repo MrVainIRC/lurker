@@ -100,13 +100,23 @@
            from the video host on render — not even the thumbnail, which is proxied through us
            like every other preview image. The first request the viewer makes to YouTube is the
            one they asked for by pressing play. -->
+      <!-- ⚠⚠ `origin`, NOT `no-referrer`, and this is the difference between a player and an
+           error message. YouTube's embedded player validates the embedding page from the
+           `Referer` header, and with none it refuses every video: **"Error 153 — Video player
+           configuration error"**, for the whole life of this component. Proven by A/B rather
+           than reasoned about — two iframes, same embed URL, same `allow`, differing only in
+           this attribute: `no-referrer` fails and `origin` plays.
+           `origin` sends `scheme://host` and never the path, so YouTube learns that some Lurker
+           instance framed a video — which the embed request tells it anyway — and not which
+           channel, which buffer, or which page. The privacy property that does the real work
+           here is the facade above it: nothing at all is requested until the reader asks. -->
       <iframe
         v-if="playing"
         class="card-embed"
         :src="preview.embedUrl"
         title="Video player"
         allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
-        referrerpolicy="no-referrer"
+        referrerpolicy="origin"
         allowfullscreen
       ></iframe>
       <button

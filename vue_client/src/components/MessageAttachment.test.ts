@@ -163,6 +163,22 @@ describe('MessageAttachment — video embed', () => {
     expect(wrapper.find('iframe').attributes('src')).toContain('youtube-nocookie.com');
   });
 
+  it('sends the origin to the player, because no-referrer breaks every video', async () => {
+    // ⚠⚠ This looks like a privacy REGRESSION and is the opposite: it is what makes the player
+    // work at all. YouTube's embedded player validates the embedding page from the `Referer`
+    // header, and `referrerpolicy="no-referrer"` — which this shipped with — meant every video
+    // answered "Error 153, Video player configuration error" instead of playing. Proven by A/B:
+    // two iframes, same embed URL, same `allow`, differing only in this attribute.
+    //
+    // So the assertion is on the exact value, not on "some policy is set". `origin` sends
+    // `scheme://host` and never the path, and the property that does the real privacy work is
+    // the facade — nothing reaches the video host until the reader presses play, which the two
+    // tests above guard.
+    const wrapper = mount(MessageAttachment, { props: { preview: YOUTUBE } });
+    await wrapper.find('.card-play').trigger('click');
+    expect(wrapper.find('iframe').attributes('referrerpolicy')).toBe('origin');
+  });
+
   it('points the thumbnail at our proxy, never at the origin', () => {
     const wrapper = mount(MessageAttachment, { props: { preview: YOUTUBE } });
     expect(wrapper.find('.card-thumb-wide').attributes('src')).toBe('/api/link-preview/media/tok');
