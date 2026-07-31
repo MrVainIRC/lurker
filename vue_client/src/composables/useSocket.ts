@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import type { Ref } from 'vue';
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch } from 'vue';
 import { useNetworksStore } from '../stores/networks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { useAuthStore } from '../stores/auth.js';
 import { useSettingsStore } from '../stores/settings.js';
+import { primePreviews } from './useLinkPreview.js';
+import { previewableEventTexts } from '../utils/previewEvents.js';
+import { useConfigStore } from '../stores/config.js';
 import { useHighlightRulesStore } from '../stores/highlightRules.js';
 import { useInputHistoryStore } from '../stores/inputHistory.js';
 import { useDraftStore } from '../stores/drafts.js';
@@ -190,6 +193,10 @@ function applyEvent(event: any): void {
       // server's read-state broadcast (fired after every countable event),
       // so we don't increment them here.
       if (!buffers.pushMessage(event)) break;
+      // A live message is the one case where growth is expected and harmless: it lands at the
+      // bottom, where the list's existing stick-to-bottom logic follows it down. Primed after
+      // the dedupe check so a replayed event doesn't re-queue.
+      primeEventPreviews([event]);
       // Speakers feeds tab-complete and the nick-picker. Our own messages
       // would just clutter our own suggestions, so they don't count as
       // "people who recently spoke here."
@@ -455,6 +462,74 @@ function applyEvent(event: any): void {
   }
 }
 
+// Kick off preview resolution for a batch of incoming events.
+//
+// ⚠ This is the ONLY place previews are requested. Rendering a row never triggers a fetch —
+// see the header of composables/useLinkPreview. Priming here is what gives scrollback the
+// Slack/Discord property: by the time a history page's rows are rendered their previews are
+// usually already known, so the rows are laid out correctly on first paint instead of growing
+// under the reader a moment later.
+//
+// Fire-and-forget by design. A history page must not wait on the internet before it can be
+// read, and nothing here can fail in a way a reader should hear about.
+function primeEventPreviews(
+  events: unknown,
+  fallbackNetworkId?: number | string | null,
+  fallbackTarget?: string | null,
+): void {
+  if (!Array.isArray(events) || events.length === 0) return;
+  // ANDed with the instance feature flag, matching MessageAttachments — priming a URL the
+  // server has no route for would be a guaranteed 404 per batch.
+  const config = useConfigStore();
+  if (!config.linkPreviews) return;
+  const settings = useSettingsStore();
+  const toggles = {
+    inlineMedia: settings.effective('chat.inline_media.enabled') === true,
+    linkPreviews: settings.effective('chat.link_previews.enabled') === true,
+  };
+  if (!toggles.inlineMedia && !toggles.linkPreviews) return;
+  primePreviews(previewableEventTexts(events, fallbackNetworkId, fallbackTarget), toggles);
+}
+
+let previewTogglesWired = false;
+
+/**
+ * Re-prime what is ALREADY in the store when a preview setting is switched on.
+ *
+ * ⚠⚠ Module-level and wired once, deliberately — this lived in `MessageList` and could not fire
+ * for the path almost everyone uses. Settings is a separate route with no `KeepAlive`, so
+ * opening it destroys the chat view and the watcher with it; coming back mounts a fresh one
+ * with no `immediate`, which therefore never observes the flip. Nor does the remount re-ingest
+ * anything, because the buffer already has messages. The net effect was that turning the
+ * setting on in the settings UI left every existing message without a preview, forever — the
+ * exact outcome the watcher was written to prevent. It only ever worked via `/set` and
+ * cross-device sync, which is why it survived QA.
+ *
+ * Every loaded buffer, not just the active one: `MessageList` is not keyed per buffer, so
+ * priming only what happens to be on screen left every other buffer blank for the session.
+ */
+function wirePreviewToggles(): void {
+  if (previewTogglesWired) return;
+  previewTogglesWired = true;
+  const config = useConfigStore();
+  const settings = useSettingsStore();
+  watch(
+    () => [
+      config.linkPreviews && settings.effective('chat.inline_media.enabled') === true,
+      config.linkPreviews && settings.effective('chat.link_previews.enabled') === true,
+    ],
+    ([inlineMedia, linkPreviews], previous) => {
+      // Only on a flip TO enabled. Turning one off needs no work: the rows stop rendering.
+      const gained = (inlineMedia && !previous?.[0]) || (linkPreviews && !previous?.[1]);
+      if (!gained) return;
+      const buffers = useBuffersStore();
+      for (const buf of Object.values(buffers.buffers)) {
+        primeEventPreviews(buf.messages, buf.networkId, buf.target);
+      }
+    },
+  );
+}
+
 function applySnapshot(snapshot: any[], globalIgnores: any[] = []): void {
   const networks = useNetworksStore();
   const buffers = useBuffersStore();
@@ -553,6 +628,7 @@ function handleMessage(raw: string): void {
       for (const e of payload.events) trackSeenId(e?.id);
     }
     useBookmarksStore().noteFromEvents(payload.events, payload.networkId);
+    primeEventPreviews(payload.events, payload.networkId, payload.target);
     applyBacklog(payload);
     return;
   }
@@ -566,6 +642,7 @@ function handleMessage(raw: string): void {
     // Every mode carries `events`; reconcile before the mode-specific dispatch so
     // one call covers around/latest/after/before alike.
     useBookmarksStore().noteFromEvents(payload.events, payload.networkId);
+    primeEventPreviews(payload.events, payload.networkId, payload.target);
     if (mode === 'around') {
       buffers.applyAroundSlice(payload.networkId, payload.target, payload);
     } else if (mode === 'latest') {
@@ -1057,6 +1134,7 @@ function wireVisibility() {
 export function useSocket(): SocketAPI {
   onMounted(() => {
     wireVisibility();
+    wirePreviewToggles();
     open();
   });
   // Deliberately no teardown. The socket, and the reconnect timer that revives
