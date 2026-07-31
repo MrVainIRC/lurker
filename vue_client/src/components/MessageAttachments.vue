@@ -139,14 +139,16 @@ function openStripAt(item: LinkPreview): void {
   // the "open in browser" failure card for a file that plays fine inline. A video in a strip has
   // its own inline controls anyway; it isn't a lightbox item.
   const gallery = strip.value.filter((p) => p.kind === 'image');
-  const items = gallery.map((p) => ({ url: p.src ?? p.url }));
+  // `shareUrl` carries the ORIGIN address alongside the proxy path we render, so "copy link"
+  // hands over something another person can actually open.
+  const items = gallery.map((p) => ({ url: p.src ?? p.url, shareUrl: p.url }));
   const at = gallery.indexOf(item);
   if (at === -1) return;
   viewer.openGallery(items, at);
 }
 
 function openSingle(item: LinkPreview): void {
-  viewer.open(item.src ?? item.url);
+  viewer.openGallery([{ url: item.src ?? item.url, shareUrl: item.url }], 0);
 }
 
 // ─── Scroll affordance ────────────────────────────────────────────────────────

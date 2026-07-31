@@ -18,9 +18,18 @@
     alt=""
     loading="lazy"
     decoding="async"
-    @click.stop="openViewer"
+    :role="viewerEnabled ? 'button' : undefined"
+    :tabindex="viewerEnabled ? 0 : undefined"
+    @click="onImageClick"
+    @keydown.enter.prevent="activate"
+    @keydown.space.prevent="activate"
     @load="$emit('measured')"
   />
+  <!-- ⚠ `@loadedmetadata` matters more here than the image's `@load` does. The server measures
+       dimensions for images only, so a video has NO width/height to reserve a box with and lays
+       out at the UA default 300x150 until its metadata arrives — then jumps to full size. The
+       resolve-time `previewRevision` has already fired by then, and the scroller's ResizeObserver
+       watches its own box rather than its content, so without this nothing at all notices. -->
   <video
     v-else-if="preview.kind === 'video' && preview.src"
     class="inline-video"
@@ -29,6 +38,7 @@
     controls
     preload="metadata"
     @click.stop
+    @loadedmetadata="$emit('measured')"
   />
   <audio
     v-else-if="preview.kind === 'audio' && preview.src"
@@ -37,6 +47,7 @@
     controls
     preload="metadata"
     @click.stop
+    @loadedmetadata="$emit('measured')"
   />
 
   <!-- A page, or a video page. Discord's panel treatment: the card sits on its own slightly
@@ -138,10 +149,30 @@ function play(): void {
   playing.value = true;
 }
 
-function openViewer(): void {
-  // The viewer is opt-out (chat.image_modal.enabled); when it's off, an inline image is just
-  // an image and a click does nothing special.
-  if (settings.effective('chat.image_modal.enabled') !== true) return;
+// The viewer is opt-out (chat.image_modal.enabled); when it's off, an inline image is just an
+// image. That has to be true of the EVENT too, not only of the outcome — see below.
+const viewerEnabled = computed(() => settings.effective('chat.image_modal.enabled') === true);
+
+/**
+ * ⚠ Propagation is stopped only when the click is actually being consumed.
+ *
+ * `@click.stop="openViewer"` compiles to `withModifiers(openViewer, ['stop'])`, and the
+ * modifier runs BEFORE the handler — so with the media viewer switched off the tap was
+ * swallowed and then discarded by the handler's own guard. On touch the row's click is the only
+ * thing that opens the message-actions sheet (hover actions are desktop-only, and there is no
+ * long-press or contextmenu path), so an image became a dead zone covering the largest target
+ * in the row: no viewer, no sheet, nothing.
+ */
+function onImageClick(e: MouseEvent): void {
+  if (!viewerEnabled.value) return;
+  e.stopPropagation();
+  emit('activate');
+}
+
+/** Keyboard equivalent. An element advertising `cursor: pointer` and a `button` role has to be
+ *  reachable without one — matching RenderSegments, MircColorPicker and SuggestionStrip. */
+function activate(): void {
+  if (!viewerEnabled.value) return;
   emit('activate');
 }
 </script>
@@ -160,8 +191,11 @@ function openViewer(): void {
   height: auto;
   object-fit: contain;
   border-radius: var(--radius-md);
-  cursor: pointer;
   display: block;
+}
+/* Only advertises a click when a click does something — the viewer is opt-out. */
+.inline-image[role='button'] {
+  cursor: pointer;
 }
 .inline-video,
 .inline-audio {
@@ -222,9 +256,9 @@ function openViewer(): void {
   min-width: 0;
   flex: 1;
 }
+/* Hierarchy by colour alone — AGENTS.md: one font size across the entire UI. */
 .card-site {
   color: var(--fg-muted);
-  font-size: 0.85em;
 }
 .card-title {
   display: block;
@@ -290,7 +324,6 @@ function openViewer(): void {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 20px;
   /* Optically centred: a triangle glyph's visual mass sits left of its box. */
   padding-left: 3px;
 }

@@ -129,7 +129,11 @@
               interactive-nicks
               @nick-click="onMentionMenu"
             />
-            <MessageAttachments :text="row.m?.text" @measured="repinAfterPreviewGrowth(true)" />
+            <MessageAttachments
+              v-if="previewsActive && mightHaveLink(row.m?.text)"
+              :text="row.m?.text"
+              @measured="repinAfterPreviewGrowth(true)"
+            />
           </span>
           <span class="time">{{ row.continuationTime ? '' : time(row.m?.time) }}</span>
         </template>
@@ -272,7 +276,11 @@
                  deleted or doubled every event row, from an edit site that gives no hint the
                  two are connected. -->
             <MessageAttachments
-              v-if="row.m?.type === 'message' || row.m?.type === 'action'"
+              v-if="
+                (row.m?.type === 'message' || row.m?.type === 'action') &&
+                previewsActive &&
+                mightHaveLink(row.m?.text)
+              "
               :text="row.m?.text"
               @measured="repinAfterPreviewGrowth(true)"
             />
@@ -348,7 +356,7 @@ import NickRef from './NickRef.vue';
 import LinkedText from './LinkedText.vue';
 import RenderSegments from './RenderSegments.vue';
 import MessageAttachments from './MessageAttachments.vue';
-import { previewRevision, primePreviews } from '../composables/useLinkPreview.js';
+import { previewRevision } from '../composables/useLinkPreview.js';
 import { useConfigStore } from '../stores/config.js';
 import IgnoreModal from './IgnoreModal.vue';
 import { useMessageActions } from '../composables/useMessageActions.js';
@@ -1681,7 +1689,13 @@ async function repinAfterPreviewGrowth(afterGrowth = false) {
 function topVisibleMessageId(el: HTMLElement): number | null {
   const box = el.getBoundingClientRect();
   const hit = document.elementFromPoint(box.left + box.width / 2, box.top + 2);
-  if (!hit) return null;
+  // ⚠ `elementFromPoint` is DOCUMENT-global and knows nothing about this scroller. The media
+  // viewer — which a filmstrip click opens — is `position: fixed; inset: 0` and a plain sibling
+  // of the list, as is every AppModal overlay (search, bookmarks, highlights). With one open the
+  // probe lands on the overlay, `closest()` finds no row, and the sibling walk below wanders
+  // through the overlay's own subtree. Scoped here so an unrelated overlay can't decide where a
+  // scrolled-up reader gets anchored.
+  if (!hit || !el.contains(hit)) return null;
 
   const idOf = (node: Element | null): number | null => {
     const raw = (node as HTMLElement | null)?.dataset?.msgId;
@@ -1708,7 +1722,22 @@ function topVisibleMessageId(el: HTMLElement): number | null {
   //
   // Walking siblings needs no measurement at all, is correct by construction, and costs a few
   // steps instead of a layout read per row.
-  let node: Element | null = hit.closest('.line, .notice') ?? hit;
+  let node: Element | null = hit.closest('.line, .notice');
+  if (!node) {
+    // ⚠ The point landed in the CONTAINER itself, not in a row — routine in compact mode, where
+    // `.line` carries a 10px top margin, so there is a real gap between rows to land in. The
+    // previous fallback (`?? hit`, then `querySelector('[data-msg-id]')`) then searched the
+    // whole list and returned its FIRST row: `pinAnchorRow` restored the identical scrollTop,
+    // which is the "reliably anchors the oldest row" outcome the note below says was designed
+    // out. Find the first row that is actually at or below the viewport top instead, comparing
+    // client rects — the one coordinate space both sides of the comparison agree on.
+    for (const child of el.children) {
+      if (child.getBoundingClientRect().bottom > box.top) {
+        node = child;
+        break;
+      }
+    }
+  }
   while (node) {
     const found = idOf(node.matches('[data-msg-id]') ? node : node.querySelector('[data-msg-id]'));
     if (found != null) return found;
@@ -1719,25 +1748,30 @@ function topVisibleMessageId(el: HTMLElement): number | null {
 
 watch(previewRevision, () => void repinAfterPreviewGrowth());
 
-// Priming happens at message INGEST, which means messages already in the store were never
-// asked about if the feature was off when they arrived — and turning a toggle on doesn't
-// re-ingest anything. Without this, enabling either setting shows previews only for messages
-// that arrive AFTERWARDS, which reads as the setting being broken.
-watch(
-  () => [
-    config.linkPreviews && settings.effective('chat.inline_media.enabled') === true,
-    config.linkPreviews && settings.effective('chat.link_previews.enabled') === true,
-  ],
-  ([inlineMedia, linkPreviews], previous) => {
-    // Only on a flip TO enabled. Turning one off needs no work: the rows simply stop rendering.
-    const gained = (inlineMedia && !previous?.[0]) || (linkPreviews && !previous?.[1]);
-    if (!gained) return;
-    primePreviews(
-      messages.value.map((m) => m.text as string | null | undefined),
-      { inlineMedia, linkPreviews },
-    );
-  },
+// ⚠ The re-prime-on-toggle watcher used to live here and could not work: Settings is a separate
+// route, so opening it destroys this component and the watcher, and the remount never sees the
+// flip. It now lives in useSocket, which outlives navigation — see `wirePreviewToggles`.
+
+/**
+ * Whether an attachment could render at all right now.
+ *
+ * ⚠ Checked HERE, at the mount site, rather than only inside MessageAttachments. The component
+ * was mounted once per message row regardless — 500 instances, each building a computed and
+ * running the URL regex — so every user of a default-off feature paid for it on every buffer
+ * switch. Hoisting the gate up also means an unrelated settings write can't invalidate a
+ * per-row computed 500 times over.
+ */
+const previewsActive = computed(
+  () =>
+    config.linkPreviews &&
+    (settings.effective('chat.inline_media.enabled') === true ||
+      settings.effective('chat.link_previews.enabled') === true),
 );
+
+/** Cheap pre-filter: no scheme, no possible attachment. Skips the regex for most rows. */
+function mightHaveLink(text: string | null | undefined): boolean {
+  return !!text && text.includes('://');
+}
 
 // Watch the messages array shape so we can react to:
 //   - prepend (older history): pin the OLD first row's viewport position.

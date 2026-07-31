@@ -138,6 +138,62 @@ describe('MessageAttachment — inline image', () => {
   });
 });
 
+describe('MessageAttachment — the click must not be eaten', () => {
+  it('lets the click reach the row when the media viewer is switched off', async () => {
+    // ⚠⚠ `@click.stop` runs its modifier BEFORE the handler, so propagation died and the
+    // handler's own `image_modal` guard then discarded the event. On touch the row's click is
+    // the only opener of the message-actions sheet — hover actions are desktop-only and there
+    // is no long-press path — so an image became a dead zone over the biggest target in the row:
+    // no viewer, no sheet, nothing at all.
+    seedSettings();
+    useSettingsStore().values['chat.image_modal.enabled'] = false;
+    const wrapper = mount(MessageAttachment, { props: { preview: IMAGE } });
+    const img = wrapper.find('.inline-image');
+
+    let reachedRow = false;
+    img.element.addEventListener('click', (e) => {
+      // Whatever the row would do, it must at least still SEE the event.
+      if (!e.cancelBubble) reachedRow = true;
+    });
+    await img.trigger('click');
+    expect(reachedRow).toBe(true);
+    expect(wrapper.emitted('activate')).toBeUndefined();
+    // Nor does it advertise a click it won't honour.
+    expect(img.attributes('role')).toBeUndefined();
+    expect(img.attributes('tabindex')).toBeUndefined();
+  });
+
+  it('is reachable from the keyboard when the viewer IS on', () => {
+    seedSettings();
+    const wrapper = mount(MessageAttachment, { props: { preview: IMAGE } });
+    const img = wrapper.find('.inline-image');
+    expect(img.attributes('role')).toBe('button');
+    expect(img.attributes('tabindex')).toBe('0');
+  });
+
+  it('activates on Enter and Space, not only on a mouse click', async () => {
+    seedSettings();
+    const wrapper = mount(MessageAttachment, { props: { preview: IMAGE } });
+    await wrapper.find('.inline-image').trigger('keydown.enter');
+    await wrapper.find('.inline-image').trigger('keydown.space');
+    expect(wrapper.emitted('activate')).toHaveLength(2);
+  });
+});
+
+describe('MessageAttachment — growth the list can react to', () => {
+  it('tells the list when a video finally reports its size', async () => {
+    // ⚠ The server measures dimensions for IMAGES only, so a video has no width/height to
+    // reserve a box with: it lays out at the UA default 300x150 and jumps to full size when
+    // metadata arrives. `previewRevision` has already fired by then and the scroller's
+    // ResizeObserver watches its own box rather than its content, so nothing else notices.
+    seedSettings();
+    const video = preview({ url: 'https://e.test/c.mp4', kind: 'video', src: '/api/lp/media/v' });
+    const wrapper = mount(MessageAttachment, { props: { preview: video } });
+    await wrapper.find('video').trigger('loadedmetadata');
+    expect(wrapper.emitted('measured')).toHaveLength(1);
+  });
+});
+
 describe('MessageAttachments — arrangement', () => {
   beforeEach(() => resolved.clear());
 
@@ -285,6 +341,27 @@ describe('MessageAttachments — the lightbox is a gallery over the strip', () =
     // And the arrows are live in both directions, which is the whole point.
     expect(viewer.hasPrev.value).toBe(true);
     expect(viewer.hasNext.value).toBe(true);
+    // ⚠ ...but "copy link" must hand over the ORIGIN. The rendered path is relative and behind
+    // requireAuth, so copying it produced something that resolves to nothing for anybody else —
+    // not even another user on the same instance — while the link TEXT in the same message
+    // copied the real URL. Two controls, two answers, one of them useless.
+    expect(viewer.shareUrl.value).toBe('https://e.test/2.png');
+    expect(viewer.items.value.map((i) => i.shareUrl)).toEqual([
+      'https://e.test/1.png',
+      'https://e.test/2.png',
+      'https://e.test/3.png',
+    ]);
+  });
+
+  it('carries the origin for a lone image too', () => {
+    const one = img(9);
+    resolved.set(one.url, one);
+    seedSettings();
+    const wrapper = mount(MessageAttachments, { props: { text: one.url } });
+    void wrapper.find('.inline-image').trigger('click');
+    const viewer = useMediaViewer();
+    expect(viewer.url.value).toBe('/api/link-preview/media/t9');
+    expect(viewer.shareUrl.value).toBe('https://e.test/9.png');
   });
 
   it('opens a lone image as a gallery of one, also through the proxy', () => {
