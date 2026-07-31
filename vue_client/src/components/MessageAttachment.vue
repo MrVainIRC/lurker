@@ -204,8 +204,18 @@ function activate(): void {
   border-radius: var(--radius-md);
   display: block;
 }
+/* ⚠ A FIXED height, not a max. The server measures dimensions for images only, so a video has
+   no intrinsic ratio to reserve a box from: it lays out at the UA default 300x150 and jumps to
+   its real size when `loadedmetadata` fires. `@loadedmetadata` lets the list re-pin, but that is
+   only a mitigation — the re-pin can follow the bottom and cannot hold a scrolled-up reader
+   still, because by the time we hear about the growth it has already happened.
+   Pinning the height removes the jump instead of compensating for it: the box is correct before
+   a single byte arrives. Width still settles when the ratio is known, which costs nothing —
+   only vertical movement disturbs a scroll position.
+   Matches the filmstrip's landscape row, so a lone video and a video in a group are the same
+   height. */
 .inline-video {
-  max-height: 280px;
+  height: 200px;
 }
 .inline-audio {
   width: 100%;
