@@ -40,11 +40,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, useTemplateRef, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue';
 import { useSettingsStore } from '../stores/settings.js';
 import { useConfigStore } from '../stores/config.js';
 import { previewableUrls, MAX_CARDS_PER_MESSAGE } from '../utils/previewUrls.js';
-import { useLinkPreview, type LinkPreview } from '../composables/useLinkPreview.js';
+import {
+  useLinkPreview,
+  previewRevision,
+  type LinkPreview,
+} from '../composables/useLinkPreview.js';
 import { useMediaViewer } from '../composables/useMediaViewer.js';
 import MessageAttachment from './MessageAttachment.vue';
 
@@ -87,6 +91,85 @@ const urls = computed(() => previewableUrls(props.text, toggles.value));
 // null ref, which is exactly the "render nothing" case.
 const entries = computed(() => urls.value.map((url) => useLinkPreview(url)));
 
+// ─── Atomic reveal ────────────────────────────────────────────────────────────
+//
+// A message shows NONE of its attachments until every URL in it has an answer, then the whole
+// block appears at once.
+//
+// The rule this serves: no layout may depend on WHEN A SIBLING RESOLVES. Deriving the
+// arrangement from the resolved set meant a message with three images, one of which was already
+// cached from an earlier post, painted as a lone image (natural aspect, `max-height: 240px`) and
+// then re-arranged into a 200px filmstrip when the other two landed — and `stripHeight` re-picked
+// portrait-vs-landscape as the mix changed, a 100px collapse mid-read. Both are sibling-timing
+// dependencies, and both are invisible to a scrolled-up reader's re-pin because the growth has
+// already happened by the time anything hears about it.
+//
+// ⚠ Deciding the arrangement from the URL list instead was considered and does NOT work:
+// `mediaKindForUrl` charges extensionless hosts to the CARD budget (previewUrls.ts), so an imgur
+// or twimg link — the common case on IRC — is predicted as a card and flips to a strip when it
+// resolves as an image. The prediction is wrong exactly where it matters.
+//
+// What this deliberately does NOT cost: a preview's own descriptor arrives atomically with the
+// decision to render it, so there is no earlier layout for it to disturb. `STRIP_PORTRAIT` stays,
+// and a lone image keeps `object-fit: contain` at its natural aspect.
+const allResolved = computed(() => entries.value.every((entry) => entry.value !== null));
+
+/**
+ * How long to wait for the stragglers before showing what we have.
+ *
+ * ⚠⚠ NOT a nicety — this is the safety net, and the gate above is unsafe without it.
+ * `useLinkPreview` returns a PERMANENTLY null ref for a URL nobody primed, so any divergence
+ * between what this component treats as previewable and what the priming path actually asked
+ * about would mean the message shows nothing for the life of the tab — strictly worse than the
+ * partial render this replaces. Both sides call the same `previewableUrls`, so they should not
+ * diverge; this is what makes "should not" survive being wrong.
+ *
+ * Long enough that the normal case never sees it (everything in one message lands in one batch,
+ * ~24ms after ingest), short enough that a real straggler doesn't read as a broken message.
+ */
+const REVEAL_DEADLINE_MS = 1500;
+
+const revealed = ref(false);
+let revealTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearRevealTimer(): void {
+  if (revealTimer === null) return;
+  clearTimeout(revealTimer);
+  revealTimer = null;
+}
+
+// Latched: once shown, stay shown. A straggler arriving after a deadline reveal then appends,
+// which is a growth event — accepted, because it can only happen on the deadline path.
+watch(
+  allResolved,
+  (ok) => {
+    if (!ok) return;
+    clearRevealTimer();
+    revealed.value = true;
+  },
+  { immediate: true },
+);
+
+onMounted(() => {
+  // ⚠ Only armed when the gate is unsatisfied AT MOUNT. Scrolling into history mounts rows whose
+  // previews resolved long ago; those reveal synchronously through the watcher above and must
+  // not pay for a timer apiece.
+  if (revealed.value) return;
+  revealTimer = setTimeout(() => {
+    revealTimer = null;
+    // ⚠⚠ BEFORE the flag, and this ordering is load-bearing. MessageList re-pins by watching
+    // `previewRevision`, which only bumps when a BATCH lands — a reveal fired by this timer
+    // would otherwise grow the row with nothing watching, and the growth would be uncompensated
+    // for a scrolled-up reader. Bumping first puts the pre-flush watcher (a lower scheduler id,
+    // since MessageList is the parent) ahead of this component's re-render, which is what lets
+    // it measure the anchor BEFORE the block appears.
+    previewRevision.value++;
+    revealed.value = true;
+  }, REVEAL_DEADLINE_MS);
+});
+
+onBeforeUnmount(clearRevealTimer);
+
 /**
  * Previews that are resolved AND allowed by the settings.
  *
@@ -96,6 +179,8 @@ const entries = computed(() => urls.value.map((url) => useLinkPreview(url)));
  * into rendering a card.
  */
 const visible = computed<LinkPreview[]>(() => {
+  // All-or-nothing: see the atomic-reveal block above.
+  if (!revealed.value) return [];
   const out: LinkPreview[] = [];
   let cards = 0;
   for (const entry of entries.value) {

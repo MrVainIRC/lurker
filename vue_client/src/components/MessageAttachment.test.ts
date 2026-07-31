@@ -11,8 +11,8 @@
 // The first suite exists because QA saw no YouTube card while the server was verified to be
 // answering correctly — nothing was testing the span between those two facts.
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ref } from 'vue';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { nextTick, ref, type Ref } from 'vue';
 import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import MessageAttachment from './MessageAttachment.vue';
@@ -25,9 +25,27 @@ import { MAX_CARDS_PER_MESSAGE } from '../utils/previewUrls.js';
 
 // Resolution is driven by message ingest, so components only read — stub the read. A real
 // `ref` is required: the templates rely on Vue's auto-unwrapping, which is keyed on `isRef`.
+//
+// ⚠ ONE ref per URL, cached, rather than a fresh one per call. The real composable does the same
+// (`entryFor`), and the atomic-reveal suite depends on it: seeding a URL AFTER mount has to reach
+// the ref the component is already watching. `seedSettings` clears the cache, so each test still
+// starts from a clean slate.
 const resolved = new Map<string, LinkPreview>();
+const refs = new Map<string, Ref<LinkPreview | null>>();
+function entryRef(url: string): Ref<LinkPreview | null> {
+  let entry = refs.get(url);
+  if (!entry) {
+    entry = ref<LinkPreview | null>(resolved.get(url) ?? null);
+    refs.set(url, entry);
+  }
+  return entry;
+}
+// `vi.hoisted` because a `vi.mock` factory runs before module-level consts initialise, and this
+// one is dereferenced AT factory time rather than inside a lazy arrow like `useLinkPreview` is.
+const previewRevision = vi.hoisted(() => ({ value: 0 }));
 vi.mock('../composables/useLinkPreview.js', () => ({
-  useLinkPreview: (url: string) => ref(resolved.get(url) ?? null),
+  useLinkPreview: (url: string) => entryRef(url),
+  previewRevision,
 }));
 
 function preview(over: Partial<LinkPreview> & { url: string }): LinkPreview {
@@ -59,6 +77,8 @@ const IMAGE = preview({
 });
 
 function seedSettings({ inlineMedia = true, linkPreviews = true, feature = true } = {}) {
+  // Per-test slate for the cached preview refs — see the mock above.
+  refs.clear();
   setActivePinia(createPinia());
   // The instance feature flag gates both user settings — a stored `true` must not render on an
   // instance that has the feature off, where the routes aren't even mounted. Defaults on here so
@@ -328,6 +348,165 @@ describe('MessageAttachments — arrangement', () => {
     // The ingest-driven model's normal early state, and the case a row must render as
     // "nothing" rather than as a placeholder that later collapses.
     expect(mountFor('https://e.test/not-primed').find('.attachments').exists()).toBe(false);
+  });
+});
+
+describe('MessageAttachments — atomic reveal', () => {
+  // The rule: no layout may depend on WHEN A SIBLING RESOLVES. A message with two image URLs, one
+  // of them already cached from an earlier post, used to paint as a lone image and then
+  // re-arrange into a filmstrip when the second landed — and `stripHeight` re-picked
+  // portrait-vs-landscape as the mix changed. Both moved a scrolled-up reader with no way to
+  // compensate, because the growth had already happened by the time anything heard about it.
+
+  beforeEach(() => {
+    resolved.clear();
+    previewRevision.value = 0;
+  });
+  afterEach(() => vi.useRealTimers());
+
+  const img = (n: number, w = 800, h = 600) =>
+    preview({
+      url: `https://e.test/${n}.png`,
+      kind: 'image',
+      src: `/api/link-preview/media/t${n}`,
+      thumbWidth: w,
+      thumbHeight: h,
+    });
+
+  const TWO = 'https://e.test/1.png https://e.test/2.png';
+
+  it('shows nothing while a sibling is still unresolved, then the whole block at once', async () => {
+    // ⚠ The assertion that bites is the FIRST one: with the gate removed this renders a lone
+    // `.inline-image`, which is the arrangement that then flips.
+    resolved.set(img(1).url, img(1));
+    seedSettings();
+    const wrapper = mount(MessageAttachments, { props: { text: TWO } });
+    expect(wrapper.find('.attachments').exists()).toBe(false);
+    expect(wrapper.find('.inline-image').exists()).toBe(false);
+
+    entryRef(img(2).url).value = img(2);
+    await nextTick();
+
+    expect(wrapper.find('.filmstrip').exists()).toBe(true);
+    expect(wrapper.findAll('.filmstrip img')).toHaveLength(2);
+  });
+
+  it('decides the strip height once, from the complete group', async () => {
+    // ⚠ TWO portraits resolve first, so that without the gate there IS a filmstrip mid-flight —
+    // at 300px, since the group is entirely portrait — which then collapses to 200px when the
+    // third lands and tips the predicate. The first assertion is what notices the loss of the
+    // gate; an earlier draft of this test seeded ONE image and passed with the fix reverted,
+    // because one image is never a filmstrip either way.
+    // Two of four portrait is landscape ("primarily portrait" is `portrait * 2 > length`), so the
+    // complete group is a 200px row while the half that resolves first is a 300px one.
+    resolved.set(img(1, 600, 900).url, img(1, 600, 900));
+    resolved.set(img(2, 500, 1000).url, img(2, 500, 1000));
+    seedSettings();
+    const wrapper = mount(MessageAttachments, {
+      props: { text: `${TWO} https://e.test/3.png https://e.test/4.png` },
+    });
+    expect(wrapper.find('.filmstrip').exists()).toBe(false);
+
+    entryRef(img(3).url).value = img(3, 1200, 500);
+    entryRef(img(4).url).value = img(4, 1000, 400);
+    await nextTick();
+
+    expect(wrapper.find('.filmstrip').attributes('style')).toContain('200px');
+  });
+
+  it('reveals synchronously, and arms no timer, when everything already resolved', () => {
+    // The common case once a row scrolls back into view: the answers landed long ago. A timer
+    // apiece for every mounted row would be pure waste.
+    vi.useFakeTimers();
+    resolved.set(img(1).url, img(1));
+    resolved.set(img(2).url, img(2));
+    seedSettings();
+    const wrapper = mount(MessageAttachments, { props: { text: TWO } });
+    expect(wrapper.find('.filmstrip').exists()).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('reveals what it has after the deadline, and bumps previewRevision BEFORE it does', async () => {
+    // ⚠⚠ The safety net. `useLinkPreview` returns a permanently-null ref for a URL nobody primed,
+    // so without this a parser/policy divergence between the render path and the priming path
+    // would blank the message for the life of the tab.
+    vi.useFakeTimers();
+    resolved.set(img(1).url, img(1));
+    seedSettings();
+    const wrapper = mount(MessageAttachments, { props: { text: TWO } });
+    expect(wrapper.find('.attachments').exists()).toBe(false);
+
+    vi.advanceTimersByTime(1500);
+    await nextTick();
+
+    expect(wrapper.find('.inline-image').exists()).toBe(true);
+    // ⚠ The bump is what `MessageList`'s pre-flush watcher re-pins on. A timer-driven reveal is
+    // invisible to it otherwise, so the growth lands uncompensated on a scrolled-up reader — the
+    // exact failure mode this whole change exists to remove. Asserting the COUNT would not
+    // notice the ordering, so the ordering is covered by the bump happening at all plus the
+    // component's own statement order; this assertion guards the bump.
+    expect(previewRevision.value).toBe(1);
+  });
+
+  it('clears its deadline timer on unmount', () => {
+    // "Leaked" here means a timer that outlives the row and bumps previewRevision — a re-pin on
+    // behalf of a component that no longer exists.
+    vi.useFakeTimers();
+    seedSettings();
+    const wrapper = mount(MessageAttachments, { props: { text: TWO } });
+    expect(vi.getTimerCount()).toBe(1);
+    wrapper.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('MessageAttachment — a box that does not depend on bytes', () => {
+  beforeEach(() => seedSettings());
+
+  // ⚠ These assert the CLASS BINDING, which is the load-bearing logic; the height itself is CSS
+  // and happy-dom applies no stylesheet. Stated rather than implied, because a test that can't
+  // observe what it names is the trap this feature has already been caught by once.
+
+  const unmeasured = preview({
+    url: 'https://e.test/exotic',
+    kind: 'image',
+    src: '/api/link-preview/media/tokX',
+  });
+
+  it('gives an image the server could not measure a fixed box', () => {
+    // `imageDimensions` returns null for a format sharp can't parse in the 64 KB it reads. With
+    // no width/height attributes there is no ratio to reserve a box from, so the element lays out
+    // at the UA default and grows on decode — video's pre-465f838 bug, still live for images.
+    const wrapper = mount(MessageAttachment, { props: { preview: unmeasured } });
+    expect(wrapper.find('img').classes()).toContain('no-dims');
+  });
+
+  it('leaves a measured image to its own aspect ratio', () => {
+    // The descriptor arrives atomically with the decision to render at all, so natural aspect
+    // costs nothing — and a fixed box would letterbox or upscale for no reason.
+    const wrapper = mount(MessageAttachment, { props: { preview: IMAGE } });
+    expect(wrapper.find('img').classes()).not.toContain('no-dims');
+    expect(wrapper.find('img').attributes('width')).toBe('800');
+  });
+
+  it('does not fix the height of an unmeasured image inside a strip', () => {
+    // The row already decides the height there; a second fixed height would fight it.
+    const wrapper = mount(MessageAttachment, {
+      props: { preview: unmeasured, inStrip: true },
+    });
+    expect(wrapper.find('img').classes()).not.toContain('no-dims');
+    expect(wrapper.find('img').classes()).toContain('strip-item');
+  });
+
+  it('keeps the reserved box when the bytes never arrive', async () => {
+    // A rotated session secret invalidates outstanding proxy tokens, and an origin can die
+    // between resolve and render. The attributes are what reserve the box, so the failure must
+    // not remove them — it only swaps the UA's broken-image glyph for the card panel's fill.
+    const wrapper = mount(MessageAttachment, { props: { preview: IMAGE } });
+    await wrapper.find('img').trigger('error');
+    expect(wrapper.find('img').classes()).toContain('failed');
+    expect(wrapper.find('img').attributes('width')).toBe('800');
+    expect(wrapper.find('img').attributes('height')).toBe('600');
   });
 });
 

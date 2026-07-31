@@ -11,7 +11,7 @@
   <img
     v-if="preview.kind === 'image' && preview.src"
     class="inline-image"
-    :class="{ 'strip-item': inStrip }"
+    :class="{ 'strip-item': inStrip, 'no-dims': !inStrip && !hasDimensions, failed }"
     :src="preview.src"
     :width="preview.thumbWidth || undefined"
     :height="preview.thumbHeight || undefined"
@@ -25,6 +25,7 @@
     @keydown.enter.prevent="activate"
     @keydown.space.prevent="activate"
     @load="$emit('measured')"
+    @error="failed = true"
   />
   <!-- ⚠ `@loadedmetadata` matters more here than the image's `@load` does. The server measures
        dimensions for images only, so a video has NO width/height to reserve a box with and lays
@@ -146,6 +147,26 @@ const playing = ref(false);
 
 const isVideo = computed(() => props.preview.kind === 'video-embed' && !!props.preview.embedUrl);
 
+/**
+ * Whether the server could measure this image.
+ *
+ * The `width`/`height` attributes are what reserve the box before any bytes arrive, so their
+ * ABSENCE is the one case where an inline image's height depends on the decode — see `.no-dims`.
+ * `imageDimensions` fails legitimately and not rarely: an exotic format, or a header sharp can't
+ * parse inside the 64 KB it reads.
+ */
+const hasDimensions = computed(() => !!props.preview.thumbWidth && !!props.preview.thumbHeight);
+
+/**
+ * The bytes didn't arrive.
+ *
+ * A proxy token that no longer verifies (the session secret was rotated), an origin that has
+ * since died. Only affects PAINT: the reserved box is a function of the width/height attributes
+ * and `.no-dims`, both of which survive a failed load, so this never changes the row's height —
+ * it swaps the UA's broken-image glyph for the same panel fill a card uses.
+ */
+const failed = ref(false);
+
 function play(): void {
   playing.value = true;
 }
@@ -215,6 +236,25 @@ function activate(): void {
   object-fit: contain;
   border-radius: var(--radius-md);
   display: block;
+}
+/* ⚠ A FIXED height, for the same reason `.inline-video` has one: with no width/height attributes
+   there is no intrinsic ratio to reserve a box from, so the element is laid out at the UA default
+   for a replaced element with no dimensions and grows to its real size on decode — the one case
+   where an inline image's height depends on bytes rather than on its descriptor.
+   `max-width: 100%` still applies, and because `height` is no longer `auto` a too-wide image is
+   constrained horizontally and letterboxed by `object-fit: contain` rather than changing height.
+   Only vertical movement disturbs a scroll position, so the width settling on decode costs
+   nothing.
+   240px, matching the `max-height` an image with dimensions would have been scaled into, so the
+   fallback and the normal case agree on the tallest a lone image gets.
+   NOT applied in a strip: the row already fixes the height there (see `.strip-item`). */
+.inline-image.no-dims {
+  height: 240px;
+}
+/* A failed load keeps whatever box was reserved — the attributes and `.no-dims` both survive it —
+   so this is paint only: the panel fill a card uses, instead of the UA's broken-image glyph. */
+.inline-image.failed {
+  background: var(--embed-bg);
 }
 /* Only advertises a click when a click does something — the viewer is opt-out. */
 .inline-image[role='button'] {
