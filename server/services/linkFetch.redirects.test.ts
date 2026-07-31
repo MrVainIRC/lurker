@@ -20,7 +20,7 @@
 // asks for `{all: true}` by default, `callback(null, safe)` is the branch every real fetch in
 // production takes. Break it and every preview fails against a fully green suite.
 
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -244,5 +244,138 @@ describe('safeRequest — following redirects', () => {
     await expect(safeRequest(new URL(`${base}/start`))).rejects.toThrow(/disallowed target/);
     await closed;
     expect(finished).toBe(false);
+  });
+});
+
+describe('streaming, where the scrape-tuned bounds are wrong', () => {
+  // ⚠ Real time, not fake timers: what's under test is node's own socket timeout and the
+  // request deadline, and swapping the clock out from under them would test the mock. The gap
+  // is sized just past IDLE_TIMEOUT_MS (5 s), which is the cheaper of the two bounds to prove
+  // and the one that fires in ordinary use.
+  const IDLE_GAP_MS = 6500;
+
+  // ⚠ Tracked and cleared. Left dangling, this timer outlives its own test and fires `end()` on
+  // a destroyed ServerResponse part-way through the NEXT one — harmless today only because
+  // node's `write_()` short-circuits on `msg.destroyed`, which is a private implementation
+  // detail and not a thing to rely on. A test that reaches into a later test is a flake waiting
+  // for a scheduling change.
+  let pending: ReturnType<typeof setTimeout> | undefined;
+  afterEach(() => clearTimeout(pending));
+
+  /** Headers, then a deliberate silence, then the rest — a backpressured <video> exactly. */
+  const pauseMidBody: Handler = (_req, res) => {
+    res.on('error', () => {});
+    res.writeHead(200, { 'content-type': 'video/mp4' });
+    res.write('start');
+    pending = setTimeout(() => {
+      if (!res.writableEnded && !res.destroyed) res.end('end');
+    }, IDLE_GAP_MS);
+    pending.unref();
+  };
+
+  it('cuts a paused body without the flag, which is the scrape behaviour', async () => {
+    // The default is right for a 512 KB scrape that arrives in one burst: a gap this long means
+    // the origin is dead. It is wrong for a pipe, and this is the proof that the flag changes
+    // something real rather than reading as though it does.
+    reset(pauseMidBody);
+    const res = await safeRequest(new URL(`${base}/paused`));
+    const outcome = await new Promise<string>((resolve) => {
+      const chunks: Buffer[] = [];
+      res.stream.on('data', (c: Buffer) => chunks.push(c));
+      res.stream.on('error', () => resolve('cut'));
+      res.stream.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    });
+    expect(outcome).toBe('cut');
+  }, 20_000);
+
+  it('lets a streaming consumer wait out the pause', async () => {
+    // ⚠⚠ The claim `MAX_MEDIA_PROXY_BYTES` depends on. A <video> that has filled its buffer and
+    // stopped reading is normal playback, not a stall — but no bytes move, so the socket
+    // timeout fires and the browser sees a network error mid-clip, after `immutable` has
+    // already gone out.
+    reset(pauseMidBody);
+    const res = await safeRequest(new URL(`${base}/paused-streaming`), { streaming: true });
+    const body = await new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      res.stream.on('data', (c: Buffer) => chunks.push(c));
+      res.stream.on('error', reject);
+      res.stream.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    });
+    expect(body).toBe('startend');
+  }, 20_000);
+});
+
+describe('abandoning a fetch, where it has to actually end it', () => {
+  it('destroys the connection when the caller aborts mid-body', async () => {
+    // ⚠⚠ Regression guard, and the proof is SERVER-SIDE for the same reason the redirect-body
+    // test's is: "the promise settled" says nothing about whether the socket is still open, and
+    // the socket is the whole point. A caller that gives up releases whatever it was holding —
+    // for the resolver, a slot out of an instance-wide concurrency cap — so a request that
+    // keeps running after being abandoned means the cap silently stops being one.
+    let finished: boolean | null = null;
+    const closed = new Promise<void>((resolve) => {
+      reset((_req, res) => {
+        res.on('error', () => {});
+        res.on('close', () => {
+          finished = res.writableFinished;
+          resolve();
+        });
+        res.writeHead(200, { 'content-type': 'text/html' });
+        res.write('<head><title>PARTIAL');
+        // deliberately never ended: only a teardown from our side can close this.
+      });
+    });
+
+    const controller = new AbortController();
+    const res = await safeRequest(new URL(`${base}/hangs`), { signal: controller.signal });
+    controller.abort();
+
+    await closed;
+    // The origin saw its response torn down without finishing, which is only possible because
+    // the abort reached the socket.
+    expect(finished).toBe(false);
+    expect(res.stream.destroyed).toBe(true);
+  });
+
+  it('refuses to dial at all for a signal that has already fired', async () => {
+    reset((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<head><title>SHOULD NOT BE FETCHED</title></head>');
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      safeRequest(new URL(`${base}/never`), { signal: controller.signal }),
+    ).rejects.toThrow(/abandoned/);
+    // Not "the fetch failed" — no request reached the origin at all.
+    expect(hits).toEqual([]);
+  });
+
+  it('stops a redirect walk BETWEEN hops', async () => {
+    // ⚠ The per-hop check specifically, and getting a test to reach it takes care: aborting
+    // while hop 1's request is still open is caught by `requestOnce`'s own listener, which
+    // rejects with the same message — so the obvious version of this test passes with
+    // safeRequest's loop guard deleted. It has to fire once hop 1 has fully completed and the
+    // loop is about to dial hop 2.
+    const controller = new AbortController();
+    reset((req, res) => {
+      if (req.url === '/hop1') {
+        // `finish` fires when this response is fully flushed, so the abort lands after
+        // requestOnce has resolved and its own abort listener has been removed on `close`.
+        res.on('finish', () => controller.abort());
+        res.writeHead(302, { location: '/hop2' });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<head><title>ARRIVED ANYWAY</title></head>');
+    });
+
+    await expect(
+      safeRequest(new URL(`${base}/hop1`), { signal: controller.signal }),
+    ).rejects.toThrow(/abandoned/);
+    // Hop 2 was never dialled.
+    expect(hits).toEqual(['/hop1']);
   });
 });

@@ -29,8 +29,10 @@ export interface ScrapedMeta {
   description?: string;
   siteName?: string;
   imageUrl?: string;
-  /** og:type — `video.*` and `music.*` are the ones that change our rendering. */
-  ogType?: string;
+  // ⚠ No `ogType`. It was scraped, and documented as driving rendering, and read by nobody on
+  // any branch — what actually decides a video card is the provider table in linkEmbed.ts,
+  // because `og:type: video.other` on a site we have no embed URL for still renders as a page.
+  // A field carried through three PRs on the strength of its own comment is worse than absent.
   /** Discovered `<link rel=alternate type=application/json+oembed>` endpoint. */
   oembedUrl?: string;
 }
@@ -650,7 +652,12 @@ export function scrapeMeta(html: string): ScrapedMeta {
     'description',
     og.get('og:description') || twitter.get('twitter:description') || twitter.get('description'),
   );
-  assign('siteName', og.get('og:site_name') || twitter.get('twitter:site'));
+  // ⚠ `og:site_name` only. `twitter:site` is a HANDLE (`@nytimes`), not a site name — it names
+  // the account that owns the card, which is a different field wearing a similar key. Falling
+  // back to it put an @-handle in the card's site slot on every page that sets one and no
+  // `og:site_name`, which is a lot of them. With no site name the caller uses the hostname,
+  // which is always accurate and never someone's username.
+  assign('siteName', og.get('og:site_name'));
   assign(
     'imageUrl',
     primaryImage?.secureUrl ||
@@ -659,7 +666,6 @@ export function scrapeMeta(html: string): ScrapedMeta {
       twitter.get('twitter:image:src') ||
       imageSrc,
   );
-  assign('ogType', og.get('og:type'));
 
   // Decode and tidy at the boundary, so callers never handle a raw entity. An empty result is
   // an ABSENT field, not a present empty string: `content="   "` used to survive as `''`, and
@@ -691,6 +697,26 @@ export function scrapeMeta(html: string): ScrapedMeta {
  * structured fields and build any embed ourselves from a provider table we
  * control (see linkEmbed.ts).
  */
+/**
+ * Replace unpaired surrogates with U+FFFD.
+ *
+ * ⚠ This is the JSON path's equivalent of the guard `decodeEntities` already applies to numeric
+ * character references, and it is needed for the same reason at a different door:
+ * `JSON.parse('"\\ud83d"')` yields a lone U+D83D directly, no entity involved. A lone surrogate
+ * does not survive the SQLite round trip — it comes back as U+FFFD — so the requester who
+ * resolved a title and everyone served it from the cache afterwards get measurably different
+ * strings for one page, which is the divergence the clamp fix was named for, reached from an
+ * input clamping cannot see. Doing it here means a caller never handles one, whichever producer
+ * it came from.
+ */
+function stripLoneSurrogates(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+    '\uFFFD',
+  );
+}
+
 export function readOEmbed(json: unknown): OEmbedMeta | null {
   if (typeof json !== 'object' || json === null || Array.isArray(json)) return null;
   const o = json as Record<string, unknown>;
@@ -703,7 +729,7 @@ export function readOEmbed(json: unknown): OEmbedMeta | null {
   // raw entity, whichever path produced the value.
   const str = (v: unknown): string | undefined => {
     if (typeof v !== 'string') return undefined;
-    const clean = detach(decodeEntities(v).replace(/\s+/g, ' ').trim());
+    const clean = detach(stripLoneSurrogates(decodeEntities(v)).replace(/\s+/g, ' ').trim());
     return clean || undefined;
   };
   const num = (v: unknown): number | undefined =>

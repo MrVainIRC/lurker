@@ -2696,7 +2696,14 @@ async function runNetwork(
 // Notifications still own registry-backed keys, which belong in the surface.
 function settingExposed(opt: SettingOption): boolean {
   return (
-    CATEGORIES.some((c) => c.id === opt.category) && optionVisible(opt, { isNode: config.isNode })
+    CATEGORIES.some((c) => c.id === opt.category) &&
+    // ⚠ Same visibility rule as the settings pane, deliberately. `/set` is a first-class way to
+    // operate every setting, so a key hidden in one surface and offered in the other is a
+    // half-hidden feature — and `requiresFeature` keys have no server behind them at all.
+    optionVisible(opt, {
+      isNode: config.isNode,
+      features: { linkPreviews: config.linkPreviews },
+    })
   );
 }
 

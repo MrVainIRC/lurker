@@ -1,0 +1,396 @@
+// Copyright (c) 2026 Brad Root
+// SPDX-License-Identifier: MPL-2.0
+
+// Two endpoints, both authenticated:
+//
+//   POST /api/link-preview/resolve      urls[] → descriptors[]
+//   GET  /api/link-preview/media/:token → the bytes, streamed
+//
+// REST rather than WebSocket because these are reads, and Lurker's reads are
+// REST (search is the one deliberate exception, and it's deliberate because it
+// needs a token/reply round trip the REST surface can't express). The byte
+// endpoint has to be a URL regardless — that's what an <img src> is.
+
+import { Router } from 'express';
+import type { Request, Response } from 'express';
+import { requireAuth } from '../middleware/auth.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
+import { RequestThrottle } from '../middleware/rateLimit.js';
+import {
+  resolvePreview,
+  toDescriptor,
+  proxyableContentType,
+  MAX_IMAGE_PROXY_BYTES,
+  MAX_MEDIA_PROXY_BYTES,
+  MAX_URLS_PER_REQUEST,
+} from '../services/linkPreview.js';
+import { verifyProxyToken } from '../services/mediaProxyToken.js';
+import { normalizeUrl, safeRequest } from '../services/linkFetch.js';
+import { previewsEnabled } from '../utils/previews.js';
+import { SlotPool } from '../utils/slotPool.js';
+
+const router = Router();
+router.use(requireAuth);
+
+/**
+ * Per-account cap on resolutions.
+ *
+ * Keyed by user rather than by IP, unlike the auth limiters: this route is
+ * authenticated, so the account is the accurate identity, and an IP key would
+ * lump everyone behind one household NAT together. The ceiling is set for a
+ * human scrolling fast through link-heavy scrollback — clients batch and dedupe
+ * before asking, so hitting this means something is looping.
+ */
+const resolveThrottle = new RequestThrottle({
+  windowMs: 60_000,
+  maxRequests: 120,
+});
+
+/**
+ * Per-account cap on BYTE requests.
+ *
+ * ⚠ The byte endpoint needs its own. Only `/resolve` was throttled, so any authenticated session
+ * could loop `GET /media/:token` for a token it already held: keep-alive is off by design, so
+ * each request opens a fresh upstream socket and pulls up to the cap — a few hundred in flight
+ * saturate the cell's egress and file descriptors and hammer the origin from the operator's IP,
+ * which is the exact resource the resolve throttle exists to protect.
+ *
+ * Set well above what a person browsing generates (the browser and iOS URLCache hold these for a
+ * day, so a re-scroll costs nothing) and far below what a loop does.
+ */
+const mediaThrottle = new RequestThrottle({ windowMs: 60_000, maxRequests: 300 });
+
+/**
+ * Byte fetches in flight across the whole instance.
+ *
+ * ⚠ Its OWN pool, and not optional. The resolver's pool documents itself as the bound on the
+ * feature's outstanding DNS lookups — `getaddrinfo` runs on libuv's thread pool and cannot be
+ * cancelled, so a destroyed request keeps its slot for the full OS timeout, and the other DNS
+ * consumer on this server is IRC connection setup. This route never went through that pool, and
+ * it is the HIGHER-volume half: one resolve per link, but one byte request per image on screen.
+ * `mediaThrottle` bounds the rate and not the concurrency, and the agents are deliberately
+ * `keepAlive: false, maxSockets: Infinity`, so a session replaying tokens it already holds could
+ * open sockets and uncancellable lookups without limit.
+ *
+ * Separate from the resolver's rather than shared with it because the two have opposite
+ * profiles: a metadata fetch is a sub-second burst, a byte fetch can hold its slot for the
+ * length of a video. Sharing would let one video stall every preview on the instance.
+ *
+ * ⚠ That same argument applies WITHIN this pool, and is not addressed here: a thumbnail and a
+ * 64 MB video share these slots, so a handful of streams can make every image on the instance
+ * queue. Two mitigations rather than a second pool (which would need the kind before the
+ * headers that reveal it): MAX_TRANSFER_MS bounds how long any one slot can be held, and the
+ * wait is short — an <img> that can't get a slot should fail in three seconds and be retried by
+ * the page, not stall for ten and then get a 503 that <img> treats as permanent.
+ */
+const mediaPool = new SlotPool({ size: 24, maxQueued: 200, waitMs: 3_000 });
+
+/**
+ * Ceiling on one proxied transfer, start to finish.
+ *
+ * ⚠ `streaming: true` clears HOP_DEADLINE_MS, which is the only bound in the fetcher that a
+ * byte cannot reset — deliberately, because it cut healthy video at 20 s. But that left this
+ * route with NO total-time bound: an origin dribbling one byte every 25 s resets the idle timer
+ * forever, never reaches the 64 MB counter, and holds a pool slot indefinitely. The resolver
+ * got RESOLVE_DEADLINE_MS in the same change; this is the other half of it.
+ *
+ * Generous on purpose — 64 MB inside five minutes is ~1.8 Mbit/s, well under any real
+ * server-to-origin link — so it bounds abuse without cutting a slow-but-genuine transfer.
+ */
+const MAX_TRANSFER_MS = 5 * 60_000;
+
+/**
+ * Total size of the resource a `Content-Range` describes.
+ *
+ * Returns a number, `'unknown'` when the origin legitimately doesn't say (`bytes 0-N/*`, which
+ * RFC 7233 §4.2 allows), or `'unusable'` for anything we can't make sense of.
+ *
+ * ⚠ Three ways the first version let the cap be walked past, and the shape of two of them is
+ * worth keeping in mind: **the more absurd the claim, the more permissive the answer.**
+ *   - `bytes 0-N/*` matched nothing (the pattern demanded digits), so an origin that declines
+ *     to state a size got waved through.
+ *   - A 400-digit total made `Number()` return `Infinity`, `Number.isFinite` false, and the
+ *     guard conclude "no total, carry on". Now it fails CLOSED.
+ *   - `$`-anchoring read only the last of a duplicated header, which node joins with a comma.
+ */
+function contentRangeTotal(header: string | undefined): number | 'unknown' | 'unusable' {
+  if (!header) return 'unknown';
+  // node joins duplicate headers with ', '. Judge the FIRST — an origin repeating itself gets
+  // read the way a client would read it, not the way an attacker would prefer.
+  const first = header.split(',')[0];
+  const slash = first.lastIndexOf('/');
+  if (slash === -1) return 'unusable';
+  const total = first.slice(slash + 1).trim();
+  if (total === '*') return 'unknown';
+  if (!/^\d+$/.test(total)) return 'unusable';
+  const n = Number(total);
+  // Past 2^53 the digits are real but the number isn't; a length we can't represent is a
+  // length we refuse rather than one we ignore.
+  return Number.isSafeInteger(n) ? n : 'unusable';
+}
+
+router.post(
+  '/resolve',
+  asyncHandler(async (req: Request, res: Response) => {
+    // Same inner gate as the byte route. The router isn't mounted when the feature is off, so
+    // this is unreachable in a running server — but both endpoints answering the flag the same
+    // way is what keeps that true if the mounting ever moves.
+    if (!previewsEnabled()) {
+      res.status(404).end();
+      return;
+    }
+
+    // ⚠ `?? {}`, because Express 5's body-parser leaves `req.body` UNDEFINED rather than empty
+    // for any request that isn't JSON — no Content-Type, `text/plain`, a form post. Reading
+    // through it threw a TypeError into the error middleware, so the 400 two lines down was
+    // dead code for precisely the malformed requests it exists to answer, and a client sending
+    // the wrong content type got a 500 and a logged stack instead of being told what was wrong.
+    const body = (req.body ?? {}) as { urls?: unknown };
+    if (!Array.isArray(body.urls)) {
+      res.status(400).json({ error: 'urls must be an array' });
+      return;
+    }
+
+    const urls = body.urls
+      .filter((u): u is string => typeof u === 'string')
+      .slice(0, MAX_URLS_PER_REQUEST);
+
+    const verdict = resolveThrottle.allow(String(req.user!.id));
+    if (!verdict.ok) {
+      res.set('Retry-After', String(verdict.retryAfter));
+      res.status(429).json({ error: 'too many preview requests — slow down' });
+      return;
+    }
+
+    // Resolved in parallel, but `resolvePreview` never rejects and coalesces
+    // duplicates internally, so this can't turn into an unbounded fan-out or an
+    // unhandled rejection.
+    const previews = await Promise.all(
+      urls.map(async (u) => toDescriptor(await resolvePreview(u))),
+    );
+    res.json({ previews });
+  }),
+);
+
+router.get(
+  '/media/:token',
+  asyncHandler(async (req: Request, res: Response) => {
+    if (!previewsEnabled()) {
+      res.status(404).end();
+      return;
+    }
+
+    const verdict = mediaThrottle.allow(String(req.user!.id));
+    if (!verdict.ok) {
+      res.set('Retry-After', String(verdict.retryAfter));
+      res.status(429).json({ error: 'too many media requests — slow down' });
+      return;
+    }
+
+    // The token is the capability: the server minted it during resolve, after the
+    // URL had already passed the guard, so a client can only replay a decision we
+    // made. It cannot author one.
+    const raw = verifyProxyToken(String(req.params.token));
+    if (!raw) {
+      res.status(403).end();
+      return;
+    }
+
+    // Re-vetted from scratch anyway. The token proves we approved this URL at some
+    // point; it says nothing about where the name points NOW, and a DNS record
+    // that was public an hour ago can be 10.0.0.5 today. safeRequest re-runs the
+    // pinned lookup on every hop.
+    const url = normalizeUrl(raw);
+    if (!url) {
+      res.status(403).end();
+      return;
+    }
+
+    if (!(await mediaPool.acquire())) {
+      // Saturated, not broken. 503 + Retry-After so a media element backs off and retries,
+      // rather than 404, which an <img> treats as a permanent verdict and never re-asks.
+      res.set('Retry-After', '5');
+      res.status(503).end();
+      return;
+    }
+
+    // ⚠ Registered BEFORE the fetch is awaited, and it owns the slot release.
+    //
+    // Attaching this after `await safeRequest(...)` — which can take the full hop deadline —
+    // meant a client that aborted during the fetch had already fired `close`, so the listener
+    // written to stop us "holding a socket to the origin" was attached to an event that would
+    // never fire again. Writes then fail silently while the byte counter below keeps the
+    // upstream in flowing mode, so the whole body drains to the origin's end with nobody to
+    // send it to: connect-then-abort as a cheap amplifier.
+    //
+    // `close` on a response fires whether it finished or aborted, which makes it the one place
+    // that always runs — so it is also where the pool slot goes back.
+    // ⚠⚠ The abort is what makes this work, and its absence is what made the previous version
+    // a comment rather than a teardown: `finish()` latched `done = true` while `upstream` was
+    // still null, so on the abort-during-fetch path — the one this whole block exists for — the
+    // `upstream?.stream.destroy()` it was written to perform could never run, and the later
+    // `finish()` returned at its own guard. The origin socket was left live and unread, outside
+    // a pool that had already counted it as free. Aborting the CONTROLLER covers the window
+    // before there is a stream to destroy; this route was also the one `safeRequest` caller
+    // that never passed a signal, in the same diff that added signals for exactly this reason.
+    const controller = new AbortController();
+    let upstream: Awaited<ReturnType<typeof safeRequest>> | null = null;
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      clearTimeout(transferDeadline);
+      controller.abort();
+      upstream?.stream.destroy();
+      mediaPool.release();
+    };
+    // Bounds slot occupancy even when nothing else will — see MAX_TRANSFER_MS. Tearing the
+    // response down routes through `release` via `close`, so there is still one release path.
+    const transferDeadline = setTimeout(() => {
+      upstream?.stream.destroy();
+      res.destroy();
+    }, MAX_TRANSFER_MS);
+    transferDeadline.unref();
+
+    res.on('close', release);
+    // A response already gone by the time we got a slot never emits `close` again.
+    if (res.destroyed) {
+      release();
+      return;
+    }
+
+    try {
+      upstream = await safeRequest(url, {
+        accept: 'image/*,video/*,audio/*;q=0.9,*/*;q=0.5',
+        // Forwarded so inline video works at all. Safari (iOS and macOS) refuses to play a
+        // <video> whose source doesn't honour byte ranges, and seeking is broken everywhere
+        // without it — and this route is what serves `kind === 'video'`.
+        range: typeof req.headers.range === 'string' ? req.headers.range : undefined,
+        // Piped, not buffered: the scrape-tuned deadlines cut a healthy media transfer at 20 s
+        // and read a backpressured <video> as a dead origin. See FetchOptions.streaming.
+        streaming: true,
+        // So giving up actually ends the fetch. Without it the release above frees a slot while
+        // the request is still dialling — including an uncancellable lookup — which is the
+        // undercount this pool exists to prevent.
+        signal: controller.signal,
+      });
+      // The client left, or the stream died, while we were awaiting. Without this the response
+      // never gets its `end()` — and `Content-Length` may already have gone out — so the
+      // browser hangs on a half-open response with no error to show.
+      if (released || res.destroyed || upstream.stream.destroyed) {
+        // ⚠ Destroyed HERE, not delegated to `release()`. If the client left during the fetch,
+        // `release()` has already run and latched — calling it again returns at its own guard
+        // and the stream we have only just been handed stays open, unread, until an idle
+        // timeout the streaming flag has already loosened to 30 s.
+        upstream.stream.destroy();
+        release();
+        return;
+      }
+
+      // 206 is a success here: it's what a range request is asking for. 416 is the origin
+      // telling the client its range is unsatisfiable, which is an answer the media element
+      // knows how to act on — passing it through as 404 makes an unsatisfiable seek look like
+      // a missing file.
+      if (upstream.status === 416) {
+        upstream.stream.destroy();
+        if (upstream.headers['content-range']) {
+          res.setHeader('Content-Range', String(upstream.headers['content-range']));
+        }
+        res.status(416).end();
+        return;
+      }
+      const ok = upstream.status === 200 || upstream.status === 206;
+      if (!ok || !proxyableContentType(upstream.contentType)) {
+        upstream.stream.destroy();
+        res.status(404).end();
+        return;
+      }
+      // ⚠ Per-KIND cap. The single 8 MB ceiling was named for images and silently applied to
+      // everything, so a 30 MB mp4 rendered inline was streamed to 8 MB and then had both ends
+      // destroyed — the <video> died with a network error partway through, and since the
+      // `immutable` Cache-Control had already gone out the browser could cache the truncated
+      // body. Video and audio are streamed to a media element and are legitimately larger.
+      const cap = upstream.contentType.startsWith('image/')
+        ? MAX_IMAGE_PROXY_BYTES
+        : MAX_MEDIA_PROXY_BYTES;
+      const declared = Number(upstream.headers['content-length']);
+      // ⚠ On a 206 the declared length is the length of the PART, so checking it alone let the
+      // cap be walked straight past: a client asking for a gigabyte 1 MB at a time satisfies
+      // `declared <= cap` every single time. The resource's real size is the figure after the
+      // slash in Content-Range, and that is what the cap is about.
+      const total = contentRangeTotal(upstream.headers['content-range'] as string | undefined);
+      const oversize =
+        (Number.isFinite(declared) && declared > cap) ||
+        total === 'unusable' ||
+        (typeof total === 'number' && total > cap);
+      if (oversize) {
+        upstream.stream.destroy();
+        res.status(413).end();
+        return;
+      }
+
+      res.setHeader('Content-Type', upstream.contentType);
+      // Belt and braces against the response being interpreted as anything other
+      // than the media type we just allowlisted.
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+      // No filename: it would come from a URL someone else controls.
+      res.setHeader('Content-Disposition', 'inline');
+      res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+      // The token is a pure function of the URL, so a given token always denotes
+      // the same bytes — safe to cache hard, and it's what keeps a scroll through
+      // an image-heavy channel from re-proxying on every pass. `private` because
+      // the response travels over an authenticated session.
+      res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
+
+      // Range plumbing, so a media element can seek. ⚠ Only claimed when the origin actually
+      // demonstrated it: advertising `Accept-Ranges: bytes` for a source that ignores Range
+      // makes a media element seek by requesting a range and then silently receive the whole
+      // file from byte zero, which reads as a seek that jumps back to the start.
+      // ⚠ A TOKEN match. node joins a duplicated header, so a range-capable origin that sends
+      // `Accept-Ranges: bytes` twice arrives as `'bytes, bytes'` and an equality test calls it
+      // range-incapable — at which point Safari refuses to play the <video> at all, silently:
+      // the card renders, the video just never starts.
+      const upstreamRanges =
+        upstream.status === 206 ||
+        String(upstream.headers['accept-ranges'] || '')
+          .toLowerCase()
+          .split(',')
+          .some((token) => token.trim() === 'bytes');
+      if (upstreamRanges) res.setHeader('Accept-Ranges', 'bytes');
+      if (upstream.headers['content-range']) {
+        res.setHeader('Content-Range', String(upstream.headers['content-range']));
+      }
+
+      // ⚠ Content-Length is only forwarded when we KNOW we'll send exactly that many bytes.
+      // Echoing it verbatim while the body was truncated at the cap produced a length/body
+      // mismatch — the client saw ERR_HTTP_CONTENT_LENGTH_MISMATCH (a broken transfer) rather
+      // than a clean, cacheable failure.
+      if (Number.isFinite(declared) && declared <= cap) {
+        res.setHeader('Content-Length', String(declared));
+      }
+      res.status(upstream.status === 206 ? 206 : 200);
+
+      // Enforce the cap on bytes actually seen, not on the declared length — an
+      // origin can omit Content-Length or lie about it.
+      let sent = 0;
+      const stream = upstream.stream;
+      stream.on('data', (chunk: Buffer) => {
+        sent += chunk.length;
+        if (sent > cap) {
+          stream.destroy();
+          res.destroy();
+        }
+      });
+      stream.on('error', () => res.destroy());
+      stream.pipe(res);
+    } catch {
+      // Blocked address, timeout, reset — all the same to a caller waiting on an
+      // image, and none of them worth distinguishing in a status code.
+      release();
+      if (!res.headersSent) res.status(404).end();
+    }
+  }),
+);
+
+export default router;
