@@ -70,20 +70,27 @@
        run against real links and rejected on looking at it: the picture dominates the message
        rather than annotating it, and a 240px band per link turns a few pasted URLs into a page
        of somebody else's pictures. The square annotates, which is what a preview is for.
-       ⚠ No site/author line. Discord doesn't have one and it was the least useful line on the
-       card: the URL it names is already in the message, a word above it. -->
+       ⚠ No site/author LINE. Discord doesn't have one and it was the least useful line on the
+       card: the URL it names is already in the message, a word above it. The site name is still
+       what the card falls back to when a page has no title — see `heading`. -->
   <div v-else class="card" :class="{ 'card-video': isVideo }">
-    <!-- ⚠ Gated, because a card is `ok` on a title OR an image (`pageRecord`). An image-only
-         card rendered this block empty and the gap then paid for text that isn't there. -->
-    <div v-if="hasText" class="card-text">
+    <!-- ⚠⚠ BOTH unconditional, and that is the fix for a whole class of empty card. `pageRecord`
+         returns ok on a title OR an image, so `preview.title` is absent on ordinary answers —
+         an og:image with no og:title, and the deliberately-degraded video record that keeps an
+         embed URL after a rate-limited provider call. With the heading gated on `title` those
+         rendered as a tinted panel containing a picture and nothing else, or nothing at all: no
+         text, no ANCHOR, and no accessible name, since the thumbnail is `alt=""`. A preview that
+         goes nowhere and names nothing still costs a card slot and a row of height.
+         `heading` cannot be empty, so this element always exists and the card always links. -->
+    <div class="card-text">
       <a
-        v-if="preview.title"
         class="card-title"
         :href="preview.url"
+        :title="heading"
         target="_blank"
         rel="noreferrer noopener"
         @click.stop
-        >{{ preview.title }}</a
+        >{{ heading }}</a
       >
       <div v-if="preview.description" class="card-desc">{{ preview.description }}</div>
     </div>
@@ -106,10 +113,20 @@
            configuration error"**, for the whole life of this component. Proven by A/B rather
            than reasoned about — two iframes, same embed URL, same `allow`, differing only in
            this attribute: `no-referrer` fails and `origin` plays.
-           `origin` sends `scheme://host` and never the path, so YouTube learns that some Lurker
-           instance framed a video — which the embed request tells it anyway — and not which
-           channel, which buffer, or which page. The privacy property that does the real work
-           here is the facade above it: nothing at all is requested until the reader asks. -->
+           ⚠ It is a REAL trade, not a free one, and an earlier version of this comment claimed
+           otherwise ("the embed request tells them anyway"). It does not: an iframe `src` load
+           is a navigation, so no `Origin` header is appended, and under `no-referrer` the
+           provider genuinely could not identify the embedding host. After this it learns
+           `scheme://host` — which for a self-hosted instance can itself be identifying. What is
+           bought is the feature existing at all, and what is NOT given up is the path: never
+           which channel, which buffer, or which message.
+           ⚠ `origin` rather than `strict-origin`, deliberately. They are byte-identical while
+           both EMBED_ORIGINS are https, and differ on an http page — where `strict-origin` sends
+           nothing and puts Error 153 straight back. Lurker is self-hosted and routinely reached
+           over plain http on a LAN, so the stricter value would break the case most likely to
+           hit it.
+           The privacy property doing the real work is the facade above: nothing at all is
+           requested from the video host until the reader asks for it. -->
       <iframe
         v-if="playing"
         class="card-embed"
@@ -182,13 +199,35 @@ const playing = ref(false);
 const isVideo = computed(() => props.preview.kind === 'video-embed' && !!props.preview.embedUrl);
 
 /**
- * Whether this card has anything to say in words.
+ * What the card is called, and what its link says. Never empty.
  *
- * `pageRecord` returns `ok` on a title OR an image, so "a card" does not imply text: an og:image
- * with no og:title (or a title `scrapeMeta` found nothing for) is a legitimate, common answer.
- * The text block is a flex child of a gapped card, so rendering it empty spends a gap on nothing.
+ * ⚠⚠ The guarantee is the point. `pageRecord` returns `ok` on a title OR an image, so a card
+ * without a title is an ordinary answer rather than an edge case — an og:image with no og:title,
+ * a paywalled article that ships a description and no heading, and the deliberately-degraded
+ * video record that survives a rate-limited provider call with nothing but an embed URL. Each of
+ * those rendered as a panel with no anchor in it at all: a preview that goes nowhere, looks
+ * finished, and (with an `alt=""` thumbnail) presents to a screen reader as an empty div.
+ *
+ * `siteName` is the fallback because the SERVER already guarantees it — `pageRecord` clamps
+ * `providerName || og:site_name || url.hostname`, so it is non-null for every ok card, and that
+ * hostname fallback exists precisely to be the thing a card can always show. The URL is parsed
+ * here as a third rung anyway: a descriptor is a wire value, and a client that depends on a
+ * server invariant should be able to survive its absence rather than render blank.
+ *
+ * ⚠ This is NOT the site line coming back. There is no separate row for it — when a page has a
+ * title, that is the whole heading and the hostname appears nowhere.
  */
-const hasText = computed(() => !!(props.preview.title || props.preview.description));
+const heading = computed(() => {
+  const p = props.preview;
+  if (p.title) return p.title;
+  if (p.siteName) return p.siteName;
+  try {
+    return new URL(p.url).host || p.url;
+  } catch {
+    // A URL that won't parse is still a string worth showing over an empty card.
+    return p.url;
+  }
+});
 
 /*
  * ⚠⚠ There is deliberately NO per-card layout choice, and it is a decision rather than an
@@ -431,7 +470,13 @@ function activate(): void {
 /* The exception: a video's facade goes UNDER the text and full width, because a player reduced
    to a 72px square is not a player. ⚠ This is about the PLAYER, not about the picture — an
    iframe replaces that box on the first click, so its 16:9 is the embed's geometry and not a
-   choice about how to present an image. */
+   choice about how to present an image.
+   ⚠⚠ Load-bearing beyond the arrangement: without it the card stays a ROW, and the flex maths
+   then deletes the text rather than shrinking the player. `.card-text` is `flex: 1` (basis 0%)
+   while `.card-media` carries `width: 100%` (basis = the whole content box), so the bases
+   already consume the line and the text resolves to 0px wide — title and description vanish
+   behind their own `overflow: hidden`, with no overflow anywhere to hint at it. The class
+   binding has a test for exactly this reason. */
 .card-video {
   flex-direction: column;
   gap: var(--space-3);
@@ -478,6 +523,12 @@ function activate(): void {
 }
 .card-desc {
   color: var(--fg-muted);
+  /* ⚠ Same break rule as the title, and for the same reason. `line-clamp` bounds LINES; it does
+     nothing about a single token too wide for the column, which `overflow: hidden` then cuts
+     mid-glyph with no ellipsis — the `…` only ever appears at a line boundary. An og:description
+     is a stranger's markup bounded only by MAX_DESCRIPTION (300 chars), and a bare tracking URL
+     or a German compound is one unbreakable token. */
+  overflow-wrap: anywhere;
   /* Three lines: enough to tell what a page is, not enough to become the message. */
   display: -webkit-box;
   -webkit-line-clamp: 3;

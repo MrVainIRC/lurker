@@ -35,11 +35,13 @@ export const OK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const FAIL_TTL_MS = 60 * 60 * 1000;
 
 /**
- * Bumped whenever the resolver's LOGIC changes in a way that could turn a previous
- * `unavailable` into an `ok`.
+ * Bumped whenever the resolver would produce a DIFFERENT RECORD for the same input.
  *
  * Folded into the cache key, so a bump orphans every old row rather than requiring a schema
- * change or a manual flush — the expiry sweep collects them in its own time.
+ * change or a manual flush — the expiry sweep collects them in its own time. ⚠ It orphans them
+ * ALL, not only the affected ones, so every previously-previewed URL is re-fetched from its
+ * origin the next time somebody scrolls past it. That is the price of the mechanism and the
+ * reason this is a deliberate edit rather than something derived from a file hash.
  *
  * This is not hypothetical bookkeeping. During development the YouTube fix was invisible for
  * an hour after it shipped, because the previous code had already cached
@@ -50,14 +52,14 @@ export const FAIL_TTL_MS = 60 * 60 * 1000;
  * this point: the table has never existed in a release, so there are no v0 rows anywhere to
  * orphan and a higher number would only imply a version somebody ran.
  *
- * ⚠⚠ Bump it whenever the resolver would produce a DIFFERENT RECORD for the same input — not
- * only when a stored `unavailable` becomes an `ok`. That narrower rule is what this said for two
- * versions and it reads as the whole test, which it isn't: a change that extracts a NEW FIELD
- * from the same page leaves every affected row a perfectly good `ok`, so nothing looks stale
- * anywhere, and the new field is simply empty for a week on every URL anyone had already pasted.
- * Caught during development of a card-layout change that read one — and it presented as the
- * LAYOUT never working, because from outside a process a stale cache is indistinguishable from a
- * broken feature. Say what changed on the line below.
+ * ⚠⚠ A DIFFERENT RECORD, not only a different VERDICT. This said "could turn a stored
+ * `unavailable` into an `ok`" for two versions, and that reads as the whole test when it is only
+ * the loudest case: a change that fills in a FIELD leaves every affected row a perfectly good
+ * `ok`, so nothing looks stale anywhere and the new value is simply missing for a week on every
+ * URL anyone had already pasted. From outside a process that is indistinguishable from the
+ * feature never having worked, which is how it gets reported. v3 below is exactly that shape,
+ * and it was already merged and live before anyone noticed the bump was owed. Say what changed
+ * on the line below.
  *
  *   v1 — initial.
  *   v2 — a video embed survives a page with no title and no image (a rate-limited provider
@@ -66,8 +68,16 @@ export const FAIL_TTL_MS = 60 * 60 * 1000;
  *        rows into `ok` ones, which is precisely what this counter is for — and the `urlHash`
  *        rewrite in the same change is NOT a substitute, because it produces byte-identical
  *        hashes for canonically-spelled URLs and so orphans none of the affected rows.
+ *   v3 — #697: `imageDimensions` measures WebP and GIF headers sharp refuses to read, so those
+ *        records now carry `imageWidth`/`imageHeight` where they stored null. ⚠ Owed by that
+ *        change and not taken with it — every WebP or GIF over 64 KB previewed before it is
+ *        still a live cache hit with no dimensions, so `toDescriptor` omits `thumbWidth`, the
+ *        client reserves `.dim-reserve` instead of the picture's own aspect, and the QA report
+ *        #697 was merged to fix ("solo .webp renders with the fallback placeholder, .png
+ *        doesn't") is still true for every one of them. Verbatim the failure the rule above now
+ *        describes, which is how it was found.
  */
-const RESOLVER_VERSION = 2;
+const RESOLVER_VERSION = 3;
 
 /**
  * Cache key: the requested URL, scoped to the resolver version.

@@ -214,6 +214,30 @@ describe('MessageAttachment — video embed', () => {
     expect(wrapper.find('.card-play').exists()).toBe(true);
     expect(wrapper.find('.card-thumb-wide').exists()).toBe(false);
   });
+
+  it('names the degraded embed record the server deliberately stores', () => {
+    // ⚠ `pageRecord` keeps a video embed that has NO title, no description and no thumbnail —
+    // the provider oEmbed call was rate-limited and the scrape found nothing past the 512 KB
+    // cap — because the play affordance is real content. It gives that record the FAILURE ttl
+    // for the same reason, describing it in so many words as one whose "whole visible content
+    // is the hostname". So the client has to actually render a hostname: without the `heading`
+    // fallback this was a wordless black 16:9 box with a ▶ and no way to reach the page.
+    const wrapper = mount(MessageAttachment, {
+      props: {
+        preview: preview({
+          url: 'https://www.youtube.com/watch?v=abc123',
+          kind: 'video-embed',
+          siteName: 'www.youtube.com',
+          embedUrl: 'https://www.youtube-nocookie.com/embed/abc123',
+        }),
+      },
+    });
+    expect(wrapper.find('.card-play').exists()).toBe(true);
+    expect(wrapper.find('a.card-title').text()).toBe('www.youtube.com');
+    expect(wrapper.find('a.card-title').attributes('href')).toBe(
+      'https://www.youtube.com/watch?v=abc123',
+    );
+  });
 });
 
 describe('MessageAttachment — the two card shapes', () => {
@@ -274,14 +298,55 @@ describe('MessageAttachment — the two card shapes', () => {
     expect(wrapper.find('.card-thumb').exists()).toBe(false);
   });
 
-  it('renders no text block for a card that is only an image', () => {
-    // The other half of the same asymmetry: an og:image with no og:title. An empty `.card-text`
-    // still costs the card's gap, so it would carry a stray band beside its picture.
-    const wrapper = mount(MessageAttachment, {
-      props: { preview: page({ title: undefined, description: undefined }) },
-    });
-    expect(wrapper.find('.card-thumb').exists()).toBe(true);
-    expect(wrapper.find('.card-text').exists()).toBe(false);
+  it('is never empty, never nameless, and never without a link', () => {
+    // ⚠⚠ The regression this suite exists for now. `pageRecord` returns ok on a title OR an
+    // image, so a titleless card is an ordinary answer — and with the heading gated on `title`,
+    // each of these rendered as a tinted panel with NO anchor: a preview that goes nowhere,
+    // looks finished, and reads to a screen reader as an empty div, because the thumbnail is
+    // `alt=""`. The last one rendered as literally `<div class="card"></div>`.
+    //
+    // Reachable, not theoretical: `pageRecord` deliberately stores ok records with title,
+    // description and imageUrl all null (the `!embed` clause), and `toDescriptor` downgrades
+    // such a row to `kind: 'page'` whenever `isEmbeddableOrigin` refuses its cached embedUrl.
+    const cases = [
+      ['an image and no title', page({ title: undefined, description: undefined })],
+      ['a description and no title', page({ title: undefined })],
+      ['nothing at all', preview({ url: 'https://news.example/article', kind: 'page' })],
+    ] as const;
+
+    for (const [what, p] of cases) {
+      const wrapper = mount(MessageAttachment, { props: { preview: p } });
+      const link = wrapper.find('a.card-title');
+      // ⚠ `${what}` in the assertion, not just in a comment: three mounts in one test otherwise
+      // report an anonymous failure and the reader has to count them.
+      expect(`${what}: ${link.exists()}`).toBe(`${what}: true`);
+      expect(`${what}: ${link.attributes('href')}`).toBe(`${what}: https://news.example/article`);
+      // Falls back to the host, which is the one thing every card can always show.
+      expect(`${what}: ${link.text()}`).toBe(`${what}: news.example`);
+    }
+  });
+
+  it('prefers the page title over the fallback, so the host shows up nowhere', () => {
+    // The other direction, and the reason `heading` is not the site line returning: when a page
+    // HAS a title that is the whole heading, and the hostname appears in no part of the card.
+    const wrapper = mount(MessageAttachment, { props: { preview: page() } });
+    expect(wrapper.find('a.card-title').text()).toBe('A headline');
+    expect(wrapper.text()).not.toContain('news.example');
+  });
+
+  it('keeps a video card a COLUMN, or its text collapses to nothing', () => {
+    // ⚠⚠ The one load-bearing class binding here, and it had no guard: deleting
+    // `:class="{ 'card-video': isVideo }"` left the whole suite green.
+    //
+    // Losing it does not merely re-arrange the card, it DELETES the text. `.card` stays a row;
+    // `.card-text` is `flex: 1` (basis 0%) while `.card-media` carries `width: 100%` (basis =
+    // the entire content box), so the bases already fill the line and the text resolves to 0px
+    // wide — title and description vanish behind their own `overflow: hidden`, silently.
+    const wrapper = mount(MessageAttachment, { props: { preview: YOUTUBE } });
+    expect(wrapper.find('.card').classes()).toContain('card-video');
+    // ...and a page card must NOT get it, or its thumbnail drops below the text.
+    const card = mount(MessageAttachment, { props: { preview: page() } });
+    expect(card.find('.card').classes()).not.toContain('card-video');
   });
 });
 
