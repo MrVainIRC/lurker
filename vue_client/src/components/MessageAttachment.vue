@@ -64,12 +64,18 @@
   />
 
   <!-- A page, or a video page. Discord's panel treatment: the card sits on its own slightly
-       raised background so it reads as a distinct object rather than as more chat text. -->
+       raised background so it reads as a distinct object rather than as more chat text.
+       TWO shapes: a small square beside the text, or text on its own. ⚠ A landscape image under
+       the text — Discord's large-embed form, and what this component briefly did — was built,
+       run against real links and rejected on looking at it: the picture dominates the message
+       rather than annotating it, and a 240px band per link turns a few pasted URLs into a page
+       of somebody else's pictures. The square annotates, which is what a preview is for.
+       ⚠ No site/author line. Discord doesn't have one and it was the least useful line on the
+       card: the URL it names is already in the message, a word above it. -->
   <div v-else class="card" :class="{ 'card-video': isVideo }">
-    <div class="card-text">
-      <div v-if="preview.siteName" class="card-site">
-        {{ preview.siteName }}<template v-if="preview.author"> · {{ preview.author }}</template>
-      </div>
+    <!-- ⚠ Gated, because a card is `ok` on a title OR an image (`pageRecord`). An image-only
+         card rendered this block empty and the gap then paid for text that isn't there. -->
+    <div v-if="hasText" class="card-text">
       <a
         v-if="preview.title"
         class="card-title"
@@ -82,13 +88,13 @@
       <div v-if="preview.description" class="card-desc">{{ preview.description }}</div>
     </div>
 
-    <!-- Video: the thumbnail goes full-width with a play badge, because a video reduced to a
-         72px square is pointless. Everything else keeps the small right-aligned thumbnail. -->
     <!-- ⚠ Gated on isVideo alone, NOT on having a thumbnail. `pageRecord` returns ok as soon as
          there is a title OR an image, so an oEmbed reply with a title but no thumbnail_url (or
          an og:image that normalizeUrl rejected) yielded embedUrl set and thumb undefined — both
          this branch and the `v-else-if="preview.thumb"` one were false, so the card showed a
-         title with the ▶, and the whole video, unreachable. -->
+         title with the ▶, and the whole video, unreachable. A video keeps its box with no
+         thumbnail because the box is what the play control lives in; a PAGE with no image has
+         nothing to put in one and renders none — see below. -->
     <div v-if="isVideo" class="card-media">
       <!-- THE FACADE. The iframe does not exist until this is clicked, so nothing is requested
            from the video host on render — not even the thumbnail, which is proxied through us
@@ -120,6 +126,9 @@
         <span class="play-badge" aria-hidden="true">▶</span>
       </button>
     </div>
+    <!-- ⚠ NO block at all without an image, rather than an empty square. A card is `ok` on a
+         title OR an image, so a title-only card is an ordinary answer — and a reserved box with
+         nothing coming is furniture. -->
     <img
       v-else-if="preview.thumb"
       class="card-thumb"
@@ -161,6 +170,39 @@ const settings = useSettingsStore();
 const playing = ref(false);
 
 const isVideo = computed(() => props.preview.kind === 'video-embed' && !!props.preview.embedUrl);
+
+/**
+ * Whether this card has anything to say in words.
+ *
+ * `pageRecord` returns `ok` on a title OR an image, so "a card" does not imply text: an og:image
+ * with no og:title (or a title `scrapeMeta` found nothing for) is a legitimate, common answer.
+ * The text block is a flex child of a gapped card, so rendering it empty spends a gap on nothing.
+ */
+const hasText = computed(() => !!(props.preview.title || props.preview.description));
+
+/*
+ * ⚠⚠ There is deliberately NO per-card layout choice, and it is a decision rather than an
+ * omission — the version that had one was built and then removed.
+ *
+ * It read `thumbWidth`/`thumbHeight` and gave a landscape image the full-width band Discord uses,
+ * keeping the square for logos and portraits. It worked, and the shape it produced was worse:
+ * a 240px picture per link reads as the message rather than as a note about it, and two links in
+ * a row take a screenful. The square annotates. That is what a preview is for, and it is now the
+ * answer for every image regardless of its shape.
+ *
+ * Recorded because the evidence gathered for it is the expensive part and someone will want it
+ * again. Real markup, sampled from the sites themselves: GitHub declares `og:image:width` 1200 by
+ * 600, Ars Technica 512x512 (a square LOGO), Wikipedia 869x1200 (portrait), while the New York
+ * Times and the BBC declare an image and no size at all. And ⚠⚠ `twitter:card` cannot stand in
+ * for the missing sizes: Ars Technica declares `summary_large_image` beside that square logo, so
+ * the author's stated intent disagrees with the author's own picture in exactly the direction
+ * that produces the bad crop.
+ *
+ * Whatever replaces this must still take its shape from the DESCRIPTOR rather than the image.
+ * Reading `naturalWidth` on load would be accurate and is the one thing this component may not
+ * do: the layout would then depend on bytes and every card would re-arrange on decode, which is
+ * R1, the rule the rest of this file exists to keep.
+ */
 
 /**
  * Whether the server could measure this image.
@@ -346,6 +388,8 @@ function activate(): void {
 
 .card {
   display: flex;
+  /* A row: text, then the square to the right of it. Text first in the DOM, so this is source
+     order — nothing is re-ordered visually. `.card-video` below is the one exception. */
   gap: var(--space-4);
   align-items: flex-start;
   /* A raised panel, Discord-style, so the card reads as a distinct object rather than as more
@@ -355,7 +399,11 @@ function activate(): void {
      it disappears the moment the pointer crosses its row. */
   background: var(--embed-bg);
   border-radius: var(--radius-md);
-  padding: var(--space-4);
+  /* ⚠ Deliberately more than the app's usual inset. Elsewhere `--space-4` separates things
+     inside a dense list; here it is the margin of a PANEL, and at 8px the text sat on its edge
+     and the thumbnail ran to it. The padding is what makes the card read as an object with
+     content in it rather than as a tinted block. */
+  padding: var(--space-6);
 }
 /* The Slack-style left rule is a MOBILE-only cue. On desktop the app already has a vertical
    border running down the side of the message column right next to this, and a second rule a
@@ -364,41 +412,73 @@ function activate(): void {
 @media (max-width: 768px) {
   .card {
     border-left: 3px solid var(--border);
-    /* The rule replaces the panel's own left padding rather than adding to it. */
+    /* The rule replaces the panel's own left padding rather than adding to it: 3px of border
+       plus 10px lands within a pixel of the 12px the other three sides get, so the rule reads
+       as the panel's edge rather than as a stripe with a gutter beside it. */
     padding-left: var(--space-5);
   }
 }
+/* The exception: a video's facade goes UNDER the text and full width, because a player reduced
+   to a 72px square is not a player. ⚠ This is about the PLAYER, not about the picture — an
+   iframe replaces that box on the first click, so its 16:9 is the embed's geometry and not a
+   choice about how to present an image. */
 .card-video {
   flex-direction: column;
   gap: var(--space-3);
 }
 .card-text {
-  min-width: 0;
+  /* Takes the space the thumbnail doesn't, and `min-width: 0` is what lets it: a flex item's
+     automatic minimum is its content, so a long unbroken title would otherwise push the square
+     off the card instead of wrapping. */
   flex: 1;
+  min-width: 0;
+  /* The lines were flush against each other, separated by nothing but line-height, so a two-line
+     title ran into its description and the block read as one paragraph. Hierarchy is on colour
+     and weight (AGENTS.md: one font size), and spacing is the third thing that rule leaves
+     available. */
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
 }
+/* ─── The line budget ──────────────────────────────────────────────────────────
+   2 + 3, so a card's height is a small known set of values rather than one per link. Both fields
+   are a stranger's markup: the server clamps them by CHARACTERS (MAX_TITLE 140,
+   MAX_DESCRIPTION 300), which bounds the payload but not the height — 140 characters is one line
+   or four depending on the viewport.
+   ⚠ `line-clamp` is not `font-size`: the AGENTS.md rule forbids sizing text, and hierarchy here
+   stays where it was, on colour and weight. */
+
 /* Hierarchy by colour alone — AGENTS.md: one font size across the entire UI. */
-.card-site {
-  color: var(--fg-muted);
-}
 .card-title {
-  display: block;
   color: var(--accent);
   font-weight: 600;
   text-decoration: none;
   overflow-wrap: anywhere;
-}
-.card-title:hover {
-  text-decoration: underline;
-}
-.card-desc {
-  color: var(--fg-muted);
-  /* Two lines: enough to tell what a page is, not enough to become the message. */
+  /* Two lines. ⚠ `-webkit-box` REPLACES `display: block` rather than joining it — clamping is a
+     property of that box type, so an anchor left inline (or set to block) ignores the clamp
+     silently. */
   display: -webkit-box;
   -webkit-line-clamp: 2;
   line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.card-title:hover {
+  text-decoration: underline;
+}
+.card-desc {
+  color: var(--fg-muted);
+  /* Three lines: enough to tell what a page is, not enough to become the message. */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* The small square. ⚠ A fixed CSS box, so it reserves its own height with no dimensions and no
+   decode — the same byte-independence the wide box gets from `aspect-ratio`. `cover` because a
+   square hole is being cut out of something that may not be square. */
 .card-thumb {
   width: 72px;
   height: 72px;
@@ -407,6 +487,11 @@ function activate(): void {
   flex: none;
 }
 
+/* The player's box, and the only place a card reserves a ratio.
+   ⚠ 16:9 because an iframe REPLACES this element on the first click — it is the embed's own
+   geometry, not a presentation choice, and any other value letterboxes a real video inside its
+   own player. The ratio lives on the wrapper so the box exists before the thumbnail's bytes do,
+   which is the same byte-independence direct media gets from its width/height attributes. */
 .card-media {
   position: relative;
   width: 100%;

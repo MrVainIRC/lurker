@@ -48,9 +48,16 @@ export const FAIL_TTL_MS = 60 * 60 * 1000;
  *
  * ⚠ Starts at 1, deliberately, even though the resolver was rewritten several times before
  * this point: the table has never existed in a release, so there are no v0 rows anywhere to
- * orphan and a higher number would only imply a version somebody ran. Bump it when a change
- * to the resolver could turn a stored `unavailable` into an `ok` — a new provider, a parser
- * fix, a relaxed content-type — and say what changed on the line below.
+ * orphan and a higher number would only imply a version somebody ran.
+ *
+ * ⚠⚠ Bump it whenever the resolver would produce a DIFFERENT RECORD for the same input — not
+ * only when a stored `unavailable` becomes an `ok`. That narrower rule is what this said for two
+ * versions and it reads as the whole test, which it isn't: a change that extracts a NEW FIELD
+ * from the same page leaves every affected row a perfectly good `ok`, so nothing looks stale
+ * anywhere, and the new field is simply empty for a week on every URL anyone had already pasted.
+ * Caught during development of a card-layout change that read one — and it presented as the
+ * LAYOUT never working, because from outside a process a stale cache is indistinguishable from a
+ * broken feature. Say what changed on the line below.
  *
  *   v1 — initial.
  *   v2 — a video embed survives a page with no title and no image (a rate-limited provider

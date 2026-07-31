@@ -132,7 +132,22 @@ describe('MessageAttachment — video embed', () => {
     const wrapper = mount(MessageAttachment, { props: { preview: YOUTUBE } });
     expect(wrapper.find('.card').exists()).toBe(true);
     expect(wrapper.text()).toContain('PAPA NUGS');
-    expect(wrapper.text()).toContain('YouTube');
+    // ⚠ ...and NOT the site or author. `siteName` and `author` stay on the wire — iOS may want
+    // them, and the hostname fallback is computed server-side — but the web card doesn't spend a
+    // line on naming a URL that is already in the message a word above it.
+    expect(wrapper.text()).not.toContain('YouTube');
+    expect(wrapper.text()).not.toContain('Maslow Unknown');
+  });
+
+  it('gives a video the player box whatever shape its thumbnail is', () => {
+    // ⚠ The layout rule below is about SHARE IMAGES. A video's box is the player's geometry —
+    // an iframe replaces it — so a square oEmbed thumbnail must not talk it into the small
+    // square, which would leave the play control in a 72px box and the video effectively gone.
+    const wrapper = mount(MessageAttachment, {
+      props: { preview: preview({ ...YOUTUBE, thumbWidth: 480, thumbHeight: 480 }) },
+    });
+    expect(wrapper.find('.card-media .card-play').exists()).toBe(true);
+    expect(wrapper.find('.card-thumb').exists()).toBe(false);
   });
 
   it('shows the play facade, and NOT an iframe, before any click', () => {
@@ -165,9 +180,92 @@ describe('MessageAttachment — video embed', () => {
     expect(wrapper.find('.card').exists()).toBe(true);
     expect(wrapper.find('.card-play').exists()).toBe(false);
     expect(wrapper.find('iframe').exists()).toBe(false);
-    // The thumbnail survives, in its small right-aligned form.
+    // The thumbnail survives — as an ordinary page card's image, and YOUTUBE declares no
+    // dimensions, so it takes the small square. See the layout suite below.
     expect(wrapper.find('.card-thumb').attributes('src')).toBe('/api/link-preview/media/tok');
     expect(wrapper.find('.card-title').attributes('href')).toBe(YOUTUBE.url);
+  });
+
+  it('keeps the box, and the play control, for a video with no thumbnail at all', () => {
+    // ⚠ The box is gated on `isVideo` alone and must stay that way: an oEmbed reply carrying a
+    // title but no thumbnail_url (or an og:image `normalizeUrl` refused) leaves `thumb` undefined
+    // with `embedUrl` set. Gating the block on the thumbnail instead put the card in a state with
+    // no branch true at all — a title, and a video that could never be played.
+    const wrapper = mount(MessageAttachment, {
+      props: { preview: preview({ ...YOUTUBE, thumb: undefined }) },
+    });
+    expect(wrapper.find('.card-media').exists()).toBe(true);
+    expect(wrapper.find('.card-play').exists()).toBe(true);
+    expect(wrapper.find('.card-thumb-wide').exists()).toBe(false);
+  });
+});
+
+describe('MessageAttachment — the two card shapes', () => {
+  beforeEach(() => seedSettings());
+
+  // #692 items 2 and 3. A card is a small square beside its text, or text on its own.
+  //
+  // ⚠⚠ A THIRD shape — the landscape band under the text, Discord's large embed — was built and
+  // removed after looking at it on real links. Its tests are gone with it, but the property they
+  // were really guarding survives here: whatever shape a card takes, it must take it from the
+  // DESCRIPTOR and not from the image. Measuring the picture on load would make the layout depend
+  // on bytes, so every card would lay out once and re-arrange on decode (R1).
+  //
+  // ⚠ The LINE BUDGET half of #692 (title 2, description 3) is pure CSS with no class binding to
+  // observe, and happy-dom applies no stylesheet — so there is deliberately no test for it here
+  // rather than one that would stay green with every clamp deleted.
+
+  const page = (over: Partial<LinkPreview> = {}) =>
+    preview({
+      url: 'https://news.example/article',
+      kind: 'page',
+      title: 'A headline',
+      description: 'A standfirst.',
+      thumb: '/api/link-preview/media/tokP',
+      ...over,
+    });
+
+  it('puts the image beside the text as a small square, whatever shape it is', () => {
+    // ⚠ The dimensions here are GitHub's real 1200x600 — a landscape share image, and once the
+    // trigger for the band. They must change nothing now: a shape that varies per link is
+    // exactly what was removed, and a descriptor field nothing reads is the easiest thing in the
+    // world to start reading again by accident.
+    const wide = mount(MessageAttachment, {
+      props: { preview: page({ thumbWidth: 1200, thumbHeight: 600 }) },
+    });
+    const square = mount(MessageAttachment, {
+      props: { preview: page({ thumbWidth: 512, thumbHeight: 512 }) },
+    });
+    const undeclared = mount(MessageAttachment, { props: { preview: page() } });
+
+    for (const wrapper of [wide, square, undeclared]) {
+      expect(wrapper.find('.card-thumb').attributes('src')).toBe('/api/link-preview/media/tokP');
+      // Not the player's box either, which is the only ratio-reserved block left.
+      expect(wrapper.find('.card-media').exists()).toBe(false);
+      // Text leads, in source order — nothing is re-ordered visually.
+      const kids = [...wrapper.find('.card').element.children].map((el) => el.className);
+      expect(kids).toEqual(['card-text', 'card-thumb']);
+    }
+  });
+
+  it('degrades to text only when the card has no image', () => {
+    // ⚠ `pageRecord` returns ok on a title OR an image, so this is an ordinary answer and not an
+    // edge case. Reserving the square regardless would leave an empty box beside the text —
+    // furniture for a picture that is never coming.
+    const wrapper = mount(MessageAttachment, { props: { preview: page({ thumb: undefined }) } });
+    expect(wrapper.find('.card').exists()).toBe(true);
+    expect(wrapper.text()).toContain('A headline');
+    expect(wrapper.find('.card-thumb').exists()).toBe(false);
+  });
+
+  it('renders no text block for a card that is only an image', () => {
+    // The other half of the same asymmetry: an og:image with no og:title. An empty `.card-text`
+    // still costs the card's gap, so it would carry a stray band beside its picture.
+    const wrapper = mount(MessageAttachment, {
+      props: { preview: page({ title: undefined, description: undefined }) },
+    });
+    expect(wrapper.find('.card-thumb').exists()).toBe(true);
+    expect(wrapper.find('.card-text').exists()).toBe(false);
   });
 });
 
