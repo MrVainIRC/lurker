@@ -288,11 +288,11 @@ function activate(): void {
 .dim-reserve {
   display: block;
   height: 240px;
-  /* A fill, so the reserved box reads as a placeholder rather than as a hole punched in the
-     conversation — `loading="lazy"` means it can sit empty until the row nears the viewport. */
-  background: var(--embed-bg);
-  border-radius: var(--radius-md);
-  overflow: hidden;
+  /* ⚠ NO fill, deliberately. It had one — the reasoning was that a lazily-loaded empty box reads
+     as a hole punched in the conversation. QA read it the other way round: a panel-coloured
+     rectangle is what a link-preview CARD looks like, so an image that merely hadn't been
+     measured announced itself as a different kind of object entirely. Direct media has no chrome
+     anywhere else in this component, and reserved space is not a thing to advertise. */
 }
 /* Inside the reserve the image is bounded by the box and never scaled up: sharp decodes
    jpeg/png/webp/tiff/gif/svg/heif/raw, so ico and bmp arrive as `kind: 'image'` with null
