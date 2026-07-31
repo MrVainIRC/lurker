@@ -164,12 +164,27 @@ describe('MessageAttachment — the click must not be eaten', () => {
     expect(img.attributes('tabindex')).toBeUndefined();
   });
 
-  it('is reachable from the keyboard when the viewer IS on', () => {
+  it('is reachable from the keyboard when the viewer IS on, and is NAMED', () => {
+    // ⚠ The name is the half that's easy to miss. `alt=""` is correct for a decorative image and
+    // stops being sufficient the instant `role="button"` is applied — the img role that gave the
+    // empty alt its meaning is gone, leaving a focusable control with no accessible name. The
+    // filename is carried so a strip of several doesn't present identically-named buttons.
     seedSettings();
     const wrapper = mount(MessageAttachment, { props: { preview: IMAGE } });
     const img = wrapper.find('.inline-image');
     expect(img.attributes('role')).toBe('button');
     expect(img.attributes('tabindex')).toBe('0');
+    expect(img.attributes('aria-label')).toBe('Open image: a.png');
+  });
+
+  it('carries no name, and no role, when it is not a control', () => {
+    seedSettings();
+    useSettingsStore().values['chat.image_modal.enabled'] = false;
+    const img = mount(MessageAttachment, { props: { preview: IMAGE } }).find('.inline-image');
+    expect(img.attributes('role')).toBeUndefined();
+    expect(img.attributes('aria-label')).toBeUndefined();
+    // Still decorative, which is what an empty alt is for.
+    expect(img.attributes('alt')).toBe('');
   });
 
   it('activates on Enter and Space, not only on a mouse click', async () => {

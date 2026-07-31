@@ -20,6 +20,7 @@
     decoding="async"
     :role="viewerEnabled ? 'button' : undefined"
     :tabindex="viewerEnabled ? 0 : undefined"
+    :aria-label="viewerEnabled ? imageLabel : undefined"
     @click="onImageClick"
     @keydown.enter.prevent="activate"
     @keydown.space.prevent="activate"
@@ -152,6 +153,28 @@ function play(): void {
 // The viewer is opt-out (chat.image_modal.enabled); when it's off, an inline image is just an
 // image. That has to be true of the EVENT too, not only of the outcome — see below.
 const viewerEnabled = computed(() => settings.effective('chat.image_modal.enabled') === true);
+
+/**
+ * The accessible name for the image WHEN IT IS A CONTROL.
+ *
+ * ⚠ `alt=""` is right for a decorative image and stops being sufficient the moment `role="button"`
+ * is applied: the img role that made an empty alt meaningful is gone, and what's left is a
+ * focusable control with no name. Only set while the viewer is enabled, because that is the only
+ * time this is a control at all — a plain inline image stays decoration of the message text,
+ * which the surrounding link already names.
+ *
+ * The filename is included when the URL yields one, so a strip of five doesn't present five
+ * identically-named buttons to anyone moving through them by keyboard.
+ */
+const imageLabel = computed(() => {
+  let name = '';
+  try {
+    name = decodeURIComponent(new URL(props.preview.url).pathname.split('/').pop() ?? '');
+  } catch {
+    // A URL that won't parse just doesn't contribute a filename.
+  }
+  return name ? `Open image: ${name}` : 'Open image';
+});
 
 /**
  * ⚠ Propagation is stopped only when the click is actually being consumed.
