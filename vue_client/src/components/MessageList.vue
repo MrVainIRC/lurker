@@ -129,6 +129,7 @@
               interactive-nicks
               @nick-click="onMentionMenu"
             />
+            <MessageAttachments :text="row.m?.text" @measured="repinAfterPreviewGrowth(true)" />
           </span>
           <span class="time">{{ row.continuationTime ? '' : time(row.m?.time) }}</span>
         </template>
@@ -262,6 +263,19 @@
             <template v-else-if="row.m?.type === 'error'"
               ><LinkedText :text="row.m.text ?? ''"
             /></template>
+            <!-- ⚠ OUTSIDE the v-if/v-else-if chain above, deliberately. Sitting between
+                 RenderSegments and the first `v-else-if` re-parented the ENTIRE event chain
+                 (join/part/quit/kick/…) onto this element's condition instead of
+                 `hasInlineText`. Output was identical only because message|action is a subset
+                 of what hasInlineText covers — so any later edit to the condition here (gating
+                 on a setting, adding `notice`, extracting the component) would have silently
+                 deleted or doubled every event row, from an edit site that gives no hint the
+                 two are connected. -->
+            <MessageAttachments
+              v-if="row.m?.type === 'message' || row.m?.type === 'action'"
+              :text="row.m?.text"
+              @measured="repinAfterPreviewGrowth(true)"
+            />
           </span>
         </template>
         <div
@@ -333,6 +347,9 @@ import { asEventMode, eventModeKey, isNoiseType } from '../../../shared/eventFil
 import NickRef from './NickRef.vue';
 import LinkedText from './LinkedText.vue';
 import RenderSegments from './RenderSegments.vue';
+import MessageAttachments from './MessageAttachments.vue';
+import { previewRevision, primePreviews } from '../composables/useLinkPreview.js';
+import { useConfigStore } from '../stores/config.js';
 import IgnoreModal from './IgnoreModal.vue';
 import { useMessageActions } from '../composables/useMessageActions.js';
 import type {
@@ -437,6 +454,7 @@ const props = withDefaults(
 const networks = useNetworksStore();
 const buffers = useBuffersStore();
 const settings = useSettingsStore();
+const config = useConfigStore();
 const ignores = useIgnoresStore();
 const highlights = useHighlightRulesStore();
 const relayBots = useRelayBotsStore();
@@ -1603,6 +1621,124 @@ async function pinAnchorRow(el: HTMLElement, anchorId: number, useHeightFallback
   }
 }
 
+// The RESIDUAL preview case, after priming moved resolution to message ingest (see
+// composables/useLinkPreview): a reader scrolling fast enough to outrun the priming request
+// renders a row before its preview is known, and the row grows when it lands.
+//
+// This used to fire on every scroll into history, because resolution was triggered BY
+// rendering — and the compensation walked every row in the buffer reading offsetTop and
+// offsetHeight, forcing a synchronous layout per row. That was QA's "the whole screen is
+// trying to redraw". Priming makes the growth rare; this makes handling it cheap.
+//
+// `overflow-anchor: none` on the scroller (see the CSS) means the browser won't compensate on
+// its own — the same deliberate choice that makes history prepends predictable.
+//
+// BOTH cases need handling, and the previous pass got this wrong. The reasoning then was that
+// growth above the viewport "belongs to the prepend paths that already pin an anchor" — but a
+// prepend's pin runs when the prepend lands, and the previews for that batch resolve a moment
+// LATER. Nothing was covering the gap, which is exactly what QA hit: scroll up, history
+// arrives, previews arrive, position lost.
+//
+// This watcher runs BEFORE the DOM updates (Vue's default 'pre' flush), which is what makes a
+// correction possible at all: `pinAnchorRow` measures the anchor now, awaits the re-render, and
+// puts it back where it was.
+//
+// The anchor is found with elementFromPoint — O(1). Scanning every row for the first visible
+// one, as an earlier version did, read offsetTop/offsetHeight per row and forced a synchronous
+// layout for each; that was QA's "the whole screen is trying to redraw".
+/**
+ * @param afterGrowth true when the growth has ALREADY happened (an image `load` event) rather
+ *   than being about to happen (the pre-flush `previewRevision` watcher).
+ *
+ * ⚠ A post-growth call can only follow the bottom. `pinAnchorRow` works by measuring the
+ * anchor, awaiting the re-render, and restoring — so if the row grew before we were told, it
+ * measures the already-grown position and restores the same scrollTop it started from: a no-op
+ * that reads like a fix. Only the pre-flush path can hold a scrolled-up reader still, which is
+ * why server-provided dimensions matter — they move the growth into that path.
+ */
+async function repinAfterPreviewGrowth(afterGrowth = false) {
+  const el = scroller.value;
+  if (!el) return;
+  if (afterGrowth && !stickToBottom.value) return;
+  if (stickToBottom.value) {
+    // A reader at the live tail wants to follow the growth down, same as a live append.
+    await nextTick();
+    scrollToBottom();
+    return;
+  }
+  const anchorId = topVisibleMessageId(el);
+  if (anchorId != null) await pinAnchorRow(el, anchorId, false);
+}
+
+/**
+ * The id of the message row at the top of the viewport, in constant time.
+ *
+ * `elementFromPoint` asks the browser what it has already laid out rather than re-measuring
+ * anything, so this costs the same whether the buffer holds ten rows or a thousand. A point
+ * just inside the top edge lands on whatever the reader's eye is on; walking up to the nearest
+ * `[data-msg-id]` turns it into the anchor `pinAnchorRow` wants.
+ */
+function topVisibleMessageId(el: HTMLElement): number | null {
+  const box = el.getBoundingClientRect();
+  const hit = document.elementFromPoint(box.left + box.width / 2, box.top + 2);
+  if (!hit) return null;
+
+  const idOf = (node: Element | null): number | null => {
+    const raw = (node as HTMLElement | null)?.dataset?.msgId;
+    const id = Number(raw);
+    return raw != null && Number.isFinite(id) && id > 0 ? id : null;
+  };
+
+  // The row under the top edge is often NOT a message: date/unread/away/cleared dividers carry
+  // no `data-msg-id` at all, and a consolidated joins/parts block carries
+  // `data-cons-first-id`/`-last-id` instead. Both are routine at the top of the viewport when
+  // scrolling into history — which is precisely when this correction is needed — so returning
+  // null there silently skipped the re-pin. Walk forward to the next real message instead.
+  const direct = idOf(hit.closest('[data-msg-id]'));
+  if (direct != null) return direct;
+
+  // Walk FORWARD in document order from whatever is at the top edge, rather than measuring.
+  //
+  // ⚠ The obvious version — scanning every row for `offsetTop + offsetHeight > el.scrollTop` —
+  // is wrong here: `offsetTop` is relative to the nearest POSITIONED ancestor, and
+  // `.message-list` sets no `position`, so it carries the scroller's own document offset and the
+  // comparison mixes coordinate spaces. It came out true for row 0 at any realistic scrollTop,
+  // making the "fallback" reliably return the OLDEST row in the buffer. (The prepend code is
+  // safe from this because it only ever uses offsetTop *differences*.)
+  //
+  // Walking siblings needs no measurement at all, is correct by construction, and costs a few
+  // steps instead of a layout read per row.
+  let node: Element | null = hit.closest('.line, .notice') ?? hit;
+  while (node) {
+    const found = idOf(node.matches('[data-msg-id]') ? node : node.querySelector('[data-msg-id]'));
+    if (found != null) return found;
+    node = node.nextElementSibling;
+  }
+  return null;
+}
+
+watch(previewRevision, () => void repinAfterPreviewGrowth());
+
+// Priming happens at message INGEST, which means messages already in the store were never
+// asked about if the feature was off when they arrived — and turning a toggle on doesn't
+// re-ingest anything. Without this, enabling either setting shows previews only for messages
+// that arrive AFTERWARDS, which reads as the setting being broken.
+watch(
+  () => [
+    config.linkPreviews && settings.effective('chat.inline_media.enabled') === true,
+    config.linkPreviews && settings.effective('chat.link_previews.enabled') === true,
+  ],
+  ([inlineMedia, linkPreviews], previous) => {
+    // Only on a flip TO enabled. Turning one off needs no work: the rows simply stop rendering.
+    const gained = (inlineMedia && !previous?.[0]) || (linkPreviews && !previous?.[1]);
+    if (!gained) return;
+    primePreviews(
+      messages.value.map((m) => m.text as string | null | undefined),
+      { inlineMedia, linkPreviews },
+    );
+  },
+);
+
 // Watch the messages array shape so we can react to:
 //   - prepend (older history): pin the OLD first row's viewport position.
 //   - replace (wholesale snapshot): snap to bottom.
@@ -2084,9 +2220,17 @@ watch(
    own buffer + unread badge already. */
 .line.highlight {
   background: color-mix(in srgb, var(--warn) 12%, transparent);
+  /* A link-preview card inside a highlighted row needs a WARM panel: the neutral grey one
+     reads as a foreign object dropped onto the tint. Re-tinted rather than lightened, one
+     step further into the highlight than the row itself, so it still reads as raised.
+     Custom properties inherit through scoped styles, so overriding the token here is enough
+     — MessageAttachment needs no knowledge that highlights exist. */
+  --embed-bg: color-mix(in srgb, var(--warn) 24%, var(--bg));
 }
 .message-list:not(.compact) .line.highlight.alt {
   background: color-mix(in srgb, var(--warn) 18%, transparent);
+  /* Matched the alt row's stronger tint, so the panel stays a step above it. */
+  --embed-bg: color-mix(in srgb, var(--warn) 30%, var(--bg));
 }
 .line.scroll-target {
   animation: scroll-target-pulse 1.5s ease-out;
