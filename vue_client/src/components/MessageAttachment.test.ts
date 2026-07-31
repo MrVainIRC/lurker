@@ -474,6 +474,32 @@ describe('MessageAttachments — atomic reveal', () => {
     expect(wrapper.find('.filmstrip').exists()).toBe(true);
   });
 
+  it('survives an unrelated settings write while a URL is back in flight', async () => {
+    // ⚠⚠ `urls` is a computed that allocates a fresh array every evaluation, and it re-evaluates
+    // on ANY settings write, because the store replaces `values` wholesale. Watching the array
+    // IDENTITY therefore fired the re-gate on a byte-identical URL list — so toggling the channel
+    // list, or a highlight sound, or a cross-device sync, re-derived `revealed` from a `settled`
+    // that can legitimately be false and made a strip vanish mid-read. That is the same shrink
+    // the latch exists to prevent, reintroduced by the line meant to scope it.
+    resolved.set(img(1).url, img(1));
+    resolved.set(img(2).url, img(2));
+    seedSettings();
+    const wrapper = mount(MessageAttachments, { props: { text: TWO } });
+    expect(wrapper.find('.filmstrip').exists()).toBe(true);
+
+    // A cache eviction plus a repost re-primes a URL against a fresh null ref, so `settled` goes
+    // false again under a latch that is holding the strip on screen.
+    setInFlight(img(2).url);
+    // ...and now something entirely unrelated writes a setting.
+    useSettingsStore().values = {
+      ...useSettingsStore().values,
+      'chat.highlight_sound.enabled': true,
+    };
+    await nextTick();
+
+    expect(wrapper.find('.filmstrip').exists()).toBe(true);
+  });
+
   it('closes the gate again when a settings flip grows the URL set', async () => {
     // ⚠ The one path that changes `urls` WITHOUT remounting: `/set` from the composer, or a
     // settings sync from another device. A latch scoped to the component's lifetime stays open,
@@ -535,61 +561,6 @@ describe('MessageAttachment — a box that does not depend on bytes', () => {
     const strip = mount(MessageAttachment, { props: { preview: unmeasured, inStrip: true } });
     expect(strip.find('img').classes()).not.toContain('no-dims');
     expect(strip.find('img').classes()).toContain('strip-item');
-  });
-
-  it('keeps the reserved attributes when the bytes never arrive, and asks for a re-pin', async () => {
-    // A rotated session secret invalidates outstanding proxy tokens, and an origin can die
-    // between resolve and render. The attributes must survive it — they are what reserve the box.
-    //
-    // ⚠ And `measured` is emitted, which is NOT symmetry for its own sake. After this change a
-    // successful load grows nothing (attributes or `.no-dims` already sized the box), so `@error`
-    // is the one image event left that can still move a row: a failed image stops being a
-    // replaced element and what the UA falls back to varies by engine. Silence here meant neither
-    // MessageList compensation path was reachable, with `overflow-anchor: none` ruling out the
-    // browser's own.
-    const wrapper = mount(MessageAttachment, { props: { preview: IMAGE } });
-    await wrapper.find('img').trigger('error');
-    expect(wrapper.find('img').classes()).toContain('failed');
-    expect(wrapper.emitted('measured')).toHaveLength(1);
-    expect(wrapper.find('img').attributes('width')).toBe('800');
-    expect(wrapper.find('img').attributes('height')).toBe('600');
-  });
-
-  it('stops being a control once its bytes are known to be gone', async () => {
-    // ⚠ A failed image kept `role="button"`, `tabindex="0"` and `aria-label="Open image: a.png"`
-    // over bytes that are not coming. A screen reader announced a button onto an empty panel, and
-    // activating it opened the viewer — which independently re-fetched the same dead URL and
-    // landed on its own failure card. The only way to discover the failure was to click through
-    // to a second one.
-    const wrapper = mount(MessageAttachment, { props: { preview: IMAGE } });
-    expect(wrapper.find('img').attributes('role')).toBe('button');
-
-    await wrapper.find('img').trigger('error');
-
-    expect(wrapper.find('img').attributes('role')).toBeUndefined();
-    expect(wrapper.find('img').attributes('tabindex')).toBeUndefined();
-    // ⚠ And it gains a name, because `alt=""` is only right while the image is decoration. Once
-    // it has failed, the empty panel IS the information.
-    expect(wrapper.find('img').attributes('alt')).toBe('Image unavailable');
-    await wrapper.find('img').trigger('click');
-    expect(wrapper.emitted('activate')).toBeUndefined();
-  });
-
-  it('clears the failure when a re-ask delivers a fresh source', async () => {
-    // ⚠ `forgetForRetry` and `runReask` re-deliver a recovered answer into the SAME ref with a
-    // freshly minted proxy token, and the row is keyed on the URL — so Vue patches this component
-    // rather than remounting it. A write-once latch kept the failure fill painted over an image
-    // that had since loaded, visible through any transparent PNG and in the letterbox bars.
-    const wrapper = mount(MessageAttachment, { props: { preview: IMAGE } });
-    await wrapper.find('img').trigger('error');
-    expect(wrapper.find('img').classes()).toContain('failed');
-
-    await wrapper.setProps({
-      preview: preview({ ...IMAGE, src: '/api/link-preview/media/fresh' }),
-    });
-
-    expect(wrapper.find('img').classes()).not.toContain('failed');
-    expect(wrapper.find('img').attributes('role')).toBe('button');
   });
 });
 

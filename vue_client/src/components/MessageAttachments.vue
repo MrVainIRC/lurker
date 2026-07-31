@@ -152,9 +152,19 @@ watch(
 // was already open and the new images paint one at a time — the piecemeal render this gate
 // exists to prevent, arriving by the one path that never remounts. Re-deriving from `settled`
 // closes the gate again until the new set is complete.
-watch(urls, () => {
-  revealed.value = settled.value;
-});
+// ⚠⚠ Keyed on the CONTENTS, not the array. `urls` is a computed that allocates a fresh array on
+// every evaluation, and it re-evaluates whenever `toggles` does — which is on ANY settings write,
+// because the store replaces `values` wholesale. So watching the array identity fired this on an
+// unrelated toggle (the channel-list chevron, a highlight sound, a cross-device sync) with a
+// byte-identical URL list, and re-derived `revealed` from a `settled` that can legitimately be
+// false — making a strip that was on screen vanish mid-read. That is the same shrink the latch
+// above exists to prevent, reintroduced by the line meant to scope it.
+watch(
+  () => urls.value.join('\n'),
+  () => {
+    revealed.value = settled.value;
+  },
+);
 
 /**
  * Previews that are resolved AND allowed by the settings.

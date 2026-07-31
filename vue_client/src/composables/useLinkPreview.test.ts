@@ -11,7 +11,7 @@ import {
   resetLinkPreviewCache,
 } from './useLinkPreview.js';
 import * as apiModule from '../api.js';
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
 
 const BOTH = { inlineMedia: true, linkPreviews: true };
 
@@ -365,6 +365,37 @@ describe('is an answer still coming?', () => {
     expect(usePreviewsSettled(urls('https://e.test/never-primed')).value).toBe(true);
   });
 
+  it('says SETTLED when a transport failure puts a URL back in play, with no value to show', async () => {
+    // ⚠⚠ THE FAIL-OPEN CASE, and the one the gate got wrong. `forgetForRetry` runs for every URL
+    // in a slice whose POST threw and for every URL the server omitted from a 200 — leaving a
+    // null value AND a `retry` entry. Counting that as pending hid the whole message's attachment
+    // block, cached siblings included, for the entire 15s→5min ladder and indefinitely while the
+    // server kept failing: one 502 during a deploy blanked every message sharing its batch.
+    //
+    // ⚠ This is also the ONLY test that can observe `usePreviewsSettled`'s `pendingRevision` read.
+    // Every other transition in this file moves an entry ref too, and a ref read makes the
+    // computed reactive by itself. Here the ref is null before and null after — only the pending
+    // set moves — so a SUBSCRIBED computed (which is what the component's `watch` creates) never
+    // re-evaluates without that line.
+    respond = () => {
+      throw new Error('502');
+    };
+    const settledRef = usePreviewsSettled(urls('https://e.test/broken'));
+
+    // ⚠ Subscribe AFTER priming, so the first value observed is `false`. Subscribing before means
+    // the immediate call records `true` (nothing is pending yet), the assertion at the end reads
+    // `true` whatever happened in between, and the test passes against every mutation.
+    primePreviews(['https://e.test/broken'], BOTH);
+    const seen: boolean[] = [];
+    watch(settledRef, (v) => seen.push(v), { immediate: true });
+    expect(seen).toEqual([false]);
+
+    await settle();
+
+    expect(useLinkPreview('https://e.test/broken').value).toBeNull();
+    expect(seen.at(-1)).toBe(true);
+  });
+
   it('says SETTLED for a failure awaiting a re-ask, rather than holding the message', async () => {
     // A transient refusal has an ANSWER; the re-ask may be minutes out. Treating a queued re-ask
     // as pending would hide a whole message on the strength of one saturated fetch.
@@ -374,5 +405,35 @@ describe('is an answer still coming?', () => {
     await settle();
     expect(useLinkPreview('https://e.test/transient').value?.status).toBe('unavailable');
     expect(settledRef.value).toBe(true);
+  });
+});
+
+describe('a resolve that never answers', () => {
+  // ⚠⚠ `api()` is a bare `fetch` with no signal and no timeout, so a dead NAT mapping or a proxy
+  // that accepts and never replies leaves the promise pending forever — and `flush` awaits its
+  // slices sequentially, so one hung POST also strands every later slice. Before the reveal gate
+  // that cost a missing card; with it, every message holding one of those URLs renders NO
+  // attachments, permanently. A gate that must fail open cannot be built on a request that never
+  // settles.
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const tick = (ms: number) => vi.advanceTimersByTimeAsync(ms);
+
+  it('gives up on a hung request and reports the URL settled', async () => {
+    respond = () => new Promise(() => {});
+    const settledRef = usePreviewsSettled(ref(['https://e.test/hung']));
+    primePreviews(['https://e.test/hung'], BOTH);
+    const seen: boolean[] = [];
+    watch(settledRef, (v) => seen.push(v), { immediate: true });
+
+    await tick(60);
+    expect(seen.at(-1)).toBe(false);
+
+    // Past RESOLVE_TIMEOUT_MS. The URL goes back in play through the same `forgetForRetry` path a
+    // transport error takes, which is what makes it settled rather than merely un-asked.
+    await tick(46_000);
+
+    expect(seen.at(-1)).toBe(true);
   });
 });

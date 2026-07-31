@@ -11,21 +11,20 @@
   <img
     v-if="preview.kind === 'image' && preview.src"
     class="inline-image"
-    :class="{ 'strip-item': inStrip, 'no-dims': !inStrip && !hasDimensions, failed }"
+    :class="{ 'strip-item': inStrip, 'no-dims': !inStrip && !hasDimensions }"
     :src="preview.src"
     :width="preview.thumbWidth || undefined"
     :height="preview.thumbHeight || undefined"
-    :alt="failed ? 'Image unavailable' : ''"
+    alt=""
     loading="lazy"
     decoding="async"
-    :role="interactive ? 'button' : undefined"
-    :tabindex="interactive ? 0 : undefined"
-    :aria-label="interactive ? imageLabel : undefined"
+    :role="viewerEnabled ? 'button' : undefined"
+    :tabindex="viewerEnabled ? 0 : undefined"
+    :aria-label="viewerEnabled ? imageLabel : undefined"
     @click="onImageClick"
     @keydown.enter.prevent="activate"
     @keydown.space.prevent="activate"
-    @load="onImageLoad"
-    @error="onImageError"
+    @load="$emit('measured')"
   />
   <!-- ⚠ `@loadedmetadata` matters more here than the image's `@load` does. The server measures
        dimensions for images only, so a video has NO width/height to reserve a box with and lays
@@ -158,57 +157,26 @@ const isVideo = computed(() => props.preview.kind === 'video-embed' && !!props.p
 const hasDimensions = computed(() => !!props.preview.thumbWidth && !!props.preview.thumbHeight);
 
 /**
- * The bytes didn't arrive.
+ * ⚠⚠ THERE IS DELIBERATELY NO `@error` HANDLING, and that is a decision rather than an omission.
  *
- * A proxy token that no longer verifies (the session secret was rotated), an origin that has
- * since died.
+ * A version of this component tracked a `failed` flag to paint a panel fill instead of the UA's
+ * broken-image glyph. Measured in three engines, it made things worse rather than better:
  *
- * ⚠ RESET when the source changes, and that isn't hypothetical: `forgetForRetry` and `runReask`
- * deliberately re-deliver a recovered answer into the SAME ref object (useLinkPreview) with a
- * freshly minted proxy token, and the row is keyed on `item.url` so Vue patches the existing
- * component rather than remounting it. A write-once latch would keep the failure fill painted
- * over an image that had since loaded — visible through any transparent PNG and in the
- * `contain` letterbox bars. MediaViewerModal does the same reset for the same reason.
+ *   - Setting a non-empty `alt` on failure re-triggers frame construction in Gecko and DROPS the
+ *     attribute-derived aspect ratio, collapsing a measured 240px box to an 18px text line —
+ *     222px of uncompensated shrink that plain `alt=""` does not suffer. The old shape held 240px
+ *     in Blink, WebKit and Gecko alike.
+ *   - The reset that was supposed to clear the flag could never fire: `mintProxyToken` is an HMAC
+ *     over the URL, so a re-delivered answer carries a byte-identical `src` and the watch on it
+ *     never runs. And an `ok` preview is never re-asked at all, so the flag was permanent — a
+ *     two-second network blip greyed out every inline image for the life of the row.
+ *   - Dropping `role`/`tabindex` on failure removed them from an element that may currently HOLD
+ *     focus, dumping a keyboard user back to `<body>` mid-strip.
+ *
+ * The byte-independence rule this file serves is already satisfied without any of it: the
+ * width/height attributes survive a failed load, and `.no-dims` pins the one shape that has none.
+ * A broken-image glyph in a correctly-sized box is a smaller problem than every one of the above.
  */
-const failed = ref(false);
-watch(
-  () => props.preview.src,
-  () => {
-    failed.value = false;
-  },
-);
-
-function onImageLoad(): void {
-  // A late success after a failure — see the reset above; the `src` may not have changed if the
-  // origin merely recovered.
-  failed.value = false;
-  emit('measured');
-}
-
-/**
- * ⚠⚠ `measured` is emitted here too, and this is the event that can now actually move the row.
- *
- * After this change a successful `@load` grows nothing — every rendered inline image has either
- * the server's width/height or `.no-dims`'s fixed box. A FAILURE is different: the UA stops
- * treating the element as a replaced box, and what it falls back to varies by engine. Emitting
- * lets `MessageList` re-pin, which is all the compensation available for something we only learn
- * about after it has happened.
- */
-function onImageError(): void {
-  failed.value = true;
-  emit('measured');
-}
-
-/**
- * Whether this image is a control.
- *
- * ⚠ NOT `viewerEnabled` alone. A failed image kept `role="button"`, `tabindex="0"` and
- * `aria-label="Open image: a.png"` over bytes known to be gone — so a screen reader announced a
- * button onto an empty panel, and activating it opened the viewer, which independently re-fetched
- * the same dead URL and landed on its own failure card. The only way to discover the failure was
- * to click through to a second one.
- */
-const interactive = computed(() => viewerEnabled.value && !failed.value);
 
 function play(): void {
   playing.value = true;
@@ -251,7 +219,7 @@ const imageLabel = computed(() => {
  * in the row: no viewer, no sheet, nothing.
  */
 function onImageClick(e: MouseEvent): void {
-  if (!interactive.value) return;
+  if (!viewerEnabled.value) return;
   e.stopPropagation();
   emit('activate');
 }
@@ -259,7 +227,7 @@ function onImageClick(e: MouseEvent): void {
 /** Keyboard equivalent. An element advertising `cursor: pointer` and a `button` role has to be
  *  reachable without one — matching RenderSegments, MircColorPicker and SuggestionStrip. */
 function activate(): void {
-  if (!interactive.value) return;
+  if (!viewerEnabled.value) return;
   emit('activate');
 }
 </script>
@@ -302,12 +270,6 @@ function activate(): void {
   object-fit: scale-down;
   /* And a fill, so the reserved box reads as a placeholder rather than as a hole punched in the
      conversation — `loading="lazy"` means it can sit empty until the row nears the viewport. */
-  background: var(--embed-bg);
-}
-/* Paint for a load that failed: the panel fill a card uses, instead of the UA's broken-image
-   glyph. ⚠ The BOX is not this rule's business — see `onImageError`, which emits `measured`
-   because a failed image stops being a replaced element and what the UA falls back to varies. */
-.inline-image.failed {
   background: var(--embed-bg);
 }
 /* Only advertises a click when a click does something — the viewer is opt-out. */

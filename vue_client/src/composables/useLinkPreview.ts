@@ -90,6 +90,39 @@ const MAX_BATCH = 20;
  */
 const FLUSH_MS = 24;
 
+/**
+ * Ceiling on one resolve round trip, client side.
+ *
+ * ⚠⚠ Not belt-and-braces. `api()` is a bare `fetch` with no signal and no timeout, so a dead NAT
+ * mapping, a sleeping laptop or a proxy that accepts and never answers leaves the promise pending
+ * FOREVER — and `flush` awaits its slices sequentially, so one hung POST also strands every later
+ * slice with no request ever sent. Before the reveal gate that cost a missing card; with it, every
+ * message holding one of those URLs renders no attachments at all, permanently. The gate must
+ * fail open, and a request that never settles is the one way it cannot.
+ *
+ * Generous against the server's own budget (10s of queue wait plus a 30s resolve deadline, all
+ * answered as one `Promise.all`), so this only fires when the round trip is genuinely stuck
+ * rather than merely slow. Losing the race puts the slice back in play through the same
+ * `forgetForRetry` path a transport error takes.
+ */
+const RESOLVE_TIMEOUT_MS = 45_000;
+
+function withTimeout<T>(work: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('resolve timed out')), RESOLVE_TIMEOUT_MS);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err as Error);
+      },
+    );
+  });
+}
+
 async function flush(): Promise<void> {
   flushTimer = null;
   const urls = [...queue];
@@ -99,10 +132,12 @@ async function flush(): Promise<void> {
   for (let i = 0; i < urls.length; i += MAX_BATCH) {
     const slice = urls.slice(i, i + MAX_BATCH);
     try {
-      const res = await api<{ previews: LinkPreview[] }>('/api/link-preview/resolve', {
-        method: 'POST',
-        body: { urls: slice },
-      });
+      const res = await withTimeout(
+        api<{ previews: LinkPreview[] }>('/api/link-preview/resolve', {
+          method: 'POST',
+          body: { urls: slice },
+        }),
+      );
       const answered = new Set<string>();
       for (const preview of res.previews ?? []) {
         const entry = cache.get(preview.url);
@@ -253,6 +288,10 @@ function runReask(): void {
     // way nobody is holding a ref for it, so there is nothing to re-ask on behalf of.
     if (!cache.has(url)) {
       retry.delete(url);
+      // ⚠ Bumped, because this IS a pending->settled transition. The `continue` skips `queued`,
+      // so without it every `usePreviewsSettled` keeps its cached `false` and a message's block
+      // stays hidden until some unrelated bump happens along.
+      pendingRevision.value++;
       continue;
     }
     // Parked as in-flight rather than deleted, and the difference is the whole backoff: the
@@ -279,14 +318,17 @@ function runReask(): void {
  */
 const MAX_CACHE_ENTRIES = 2000;
 
-function evictIfNeeded(): void {
+function evictIfNeeded(): boolean {
+  let evicted = false;
   while (cache.size > MAX_CACHE_ENTRIES) {
     const oldest = cache.keys().next().value;
     if (oldest === undefined) break;
     cache.delete(oldest);
     asked.delete(oldest);
     retry.delete(oldest);
+    evicted = true;
   }
+  return evicted;
 }
 
 /** Drop entries whose server-side TTL has lapsed, so they can be asked about again.
@@ -341,10 +383,26 @@ export function primePreviews(
     }
   }
   if (queued && flushTimer === null) flushTimer = setTimeout(() => void flush(), FLUSH_MS);
-  evictIfNeeded();
-  // ⚠ Unconditional, not gated on `queued`. `dropIfExpired` and `evictIfNeeded` both remove URLs
-  // from `asked`, which changes whether an answer is expected without anything being queued.
-  pendingRevision.value++;
+  const evicted = evictIfNeeded();
+  // ⚠ CONDITIONAL, and that matters more than it looks. This runs for every live message, whether
+  // or not it carries a URL, and every mounted `MessageAttachments` is an eager subscriber to a
+  // computed that reads this ref — so an unconditional bump made one ordinary line of channel
+  // chatter refresh 100-200 computeds that all re-derive `true === true`. MessageList hoists
+  // `previewsActive` out of its rows for the same reason, against a colder trigger than this one.
+  //
+  // `dropIfExpired` is deliberately NOT a reason to bump: it only touches a URL whose ref already
+  // has a value, `previewPending` short-circuits on that, and the same loop iteration re-queues it
+  // and sets `queued` anyway.
+  //
+  // ⚠ NO TEST GUARDS THIS CONDITION, and that is stated rather than papered over. Reverting it to
+  // an unconditional bump changes no observable behaviour — the computed re-evaluates to the same
+  // value, so a `watch` never fires — it only burns the work. A test would have to count
+  // evaluations from outside the computed, which nothing here can do.
+  if (queued || evicted) pendingRevision.value++;
+  // ⚠ Eviction can OPEN a reveal gate — it makes a URL non-pending without any answer arriving —
+  // so the block paints with nothing having bumped `previewRevision`. That happens during a
+  // history-page ingest, which is exactly when a scrolled-up reader is being anchored.
+  if (evicted) previewRevision.value++;
 }
 
 /**
@@ -384,17 +442,30 @@ const pendingRevision = ref(0);
 /**
  * Whether an answer is still expected for `url`.
  *
- * A URL that carries a value has settled, whatever that value says. A URL nobody ever primed is
- * NOT pending — that's the divergence case, and answering `false` is what makes it render
- * immediately (as nothing) rather than stall a whole message forever.
+ * ⚠⚠ THIS PREDICATE FAILS OPEN, deliberately and in every branch. Its consumer withholds a whole
+ * message's attachment block while it answers true, so every "not sure" it returns turns a
+ * partial failure into a blank message — a strictly worse outcome than the layout shift the gate
+ * exists to prevent. Only a request we are actively waiting on counts as pending.
  *
- * ⚠ A short-TTL failure awaiting a re-ask counts as SETTLED, not pending: it has an answer, and
- * the re-ask may be up to five minutes out. Holding a message's block for that would be far worse
- * than the growth a recovery causes — see the residual noted in `MessageAttachments`.
+ *   - carries a value          → settled, whatever the value says
+ *   - nobody ever primed it    → settled. The divergence case: a permanently-null ref must render
+ *                                as nothing NOW rather than stall the message forever.
+ *   - waiting on a re-ask      → SETTLED, and this is the branch that matters most. `retry` holds
+ *                                two different states — a short-TTL `unavailable` (has a value)
+ *                                and a URL put back in play by `forgetForRetry` after a transport
+ *                                failure or an omitted answer (value still null). Counting the
+ *                                second as pending hid the block for the entire 15s→5min backoff
+ *                                ladder, and indefinitely while a server kept failing: one 502
+ *                                during a deploy blanked the attachments of every message that
+ *                                shared a batch with it, cached siblings included.
+ *   - queued or in flight      → pending, bounded by RESOLVE_TIMEOUT_MS below.
  */
 function previewPending(url: string): boolean {
   if (cache.get(url)?.value != null) return false;
-  return queue.has(url) || asked.has(url) || retry.has(url);
+  // Before `queue`/`asked`, not after: `runReask` re-queues a URL it is retrying, so the retry
+  // state has to win or a recovery attempt would re-hide a block that is already on screen.
+  if (retry.has(url)) return false;
+  return queue.has(url) || asked.has(url);
 }
 
 /**
@@ -405,14 +476,13 @@ function previewPending(url: string): boolean {
  */
 export function usePreviewsSettled(urls: Ref<readonly string[]>): ComputedRef<boolean> {
   return computed(() => {
+    // ⚠ Load-bearing, and not obviously so. `previewPending` reads plain Sets and Maps, so this
+    // is the computed's ONLY dependency on the pending set — without it a subscribed computed
+    // (which `watch(settled, ...)` creates) never re-evaluates when a URL merely leaves the queue
+    // without its ref changing, e.g. the transport-failure path above.
     void pendingRevision.value;
     return urls.value.every((url) => !previewPending(url));
   });
-}
-
-/** Test-only: observe the pending set without reaching into module state. */
-export function isPreviewPending(url: string): boolean {
-  return previewPending(url);
 }
 
 /** Test-only: drop everything so a suite starts from a known state. */
