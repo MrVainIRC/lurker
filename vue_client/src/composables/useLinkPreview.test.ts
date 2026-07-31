@@ -4,8 +4,14 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { primePreviews, useLinkPreview, resetLinkPreviewCache } from './useLinkPreview.js';
+import {
+  primePreviews,
+  useLinkPreview,
+  usePreviewsSettled,
+  resetLinkPreviewCache,
+} from './useLinkPreview.js';
 import * as apiModule from '../api.js';
+import { ref } from 'vue';
 
 const BOTH = { inlineMedia: true, linkPreviews: true };
 
@@ -319,5 +325,54 @@ describe('re-asking after expiresAt', () => {
     await tick(20_000);
     expect(posted).toHaveLength(2);
     expect(useLinkPreview('https://e.test/ghost').value?.status).toBe('ok');
+  });
+});
+
+describe('is an answer still coming?', () => {
+  // ⚠⚠ The distinction the reveal gate in `MessageAttachments` rests on. That component holds a
+  // message's whole attachment block back until every URL in it has settled, so it has to tell
+  // "in flight" apart from "nobody ever asked" — and only this module knows. Its own suite mocks
+  // `usePreviewsSettled`, so this is the ONLY place the real rule is exercised.
+  //
+  // The gate's first version guessed with a 1500ms timer instead. The guess was wrong by more
+  // than an order of magnitude (the server allows 10s of queue wait plus a 30s resolve deadline
+  // per URL, answered as one `Promise.all` over the slice), so it fired on any cold link and
+  // revealed a partial set — re-creating the very arrangement flip it existed to prevent.
+
+  const urls = (...list: string[]) => ref(list);
+
+  it('says NOT SETTLED while a primed URL is still in flight', async () => {
+    let release: (() => void) | undefined;
+    respond = (list) =>
+      new Promise((resolve) => {
+        release = () => resolve(okFor(list));
+      });
+
+    const settledRef = usePreviewsSettled(urls('https://e.test/slow'));
+    primePreviews(['https://e.test/slow'], BOTH);
+    await settle();
+    expect(settledRef.value).toBe(false);
+
+    release?.();
+    await settle();
+    expect(settledRef.value).toBe(true);
+  });
+
+  it('says SETTLED for a URL nobody ever primed', () => {
+    // ⚠ The property that makes the gate safe. `useLinkPreview` hands back a permanently-null ref
+    // for an unprimed URL, so a gate of "every entry has a value" would blank that message for
+    // the life of the tab. Not in flight means not coming, so render now.
+    expect(usePreviewsSettled(urls('https://e.test/never-primed')).value).toBe(true);
+  });
+
+  it('says SETTLED for a failure awaiting a re-ask, rather than holding the message', async () => {
+    // A transient refusal has an ANSWER; the re-ask may be minutes out. Treating a queued re-ask
+    // as pending would hide a whole message on the strength of one saturated fetch.
+    respond = transientFor;
+    const settledRef = usePreviewsSettled(urls('https://e.test/transient'));
+    primePreviews(['https://e.test/transient'], BOTH);
+    await settle();
+    expect(useLinkPreview('https://e.test/transient').value?.status).toBe('unavailable');
+    expect(settledRef.value).toBe(true);
   });
 });

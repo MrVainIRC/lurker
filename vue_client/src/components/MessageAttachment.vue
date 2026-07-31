@@ -15,17 +15,17 @@
     :src="preview.src"
     :width="preview.thumbWidth || undefined"
     :height="preview.thumbHeight || undefined"
-    alt=""
+    :alt="failed ? 'Image unavailable' : ''"
     loading="lazy"
     decoding="async"
-    :role="viewerEnabled ? 'button' : undefined"
-    :tabindex="viewerEnabled ? 0 : undefined"
-    :aria-label="viewerEnabled ? imageLabel : undefined"
+    :role="interactive ? 'button' : undefined"
+    :tabindex="interactive ? 0 : undefined"
+    :aria-label="interactive ? imageLabel : undefined"
     @click="onImageClick"
     @keydown.enter.prevent="activate"
     @keydown.space.prevent="activate"
-    @load="$emit('measured')"
-    @error="failed = true"
+    @load="onImageLoad"
+    @error="onImageError"
   />
   <!-- ⚠ `@loadedmetadata` matters more here than the image's `@load` does. The server measures
        dimensions for images only, so a video has NO width/height to reserve a box with and lays
@@ -121,7 +121,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import type { LinkPreview } from '../composables/useLinkPreview.js';
 import { useSettingsStore } from '../stores/settings.js';
 
@@ -161,11 +161,54 @@ const hasDimensions = computed(() => !!props.preview.thumbWidth && !!props.previ
  * The bytes didn't arrive.
  *
  * A proxy token that no longer verifies (the session secret was rotated), an origin that has
- * since died. Only affects PAINT: the reserved box is a function of the width/height attributes
- * and `.no-dims`, both of which survive a failed load, so this never changes the row's height —
- * it swaps the UA's broken-image glyph for the same panel fill a card uses.
+ * since died.
+ *
+ * ⚠ RESET when the source changes, and that isn't hypothetical: `forgetForRetry` and `runReask`
+ * deliberately re-deliver a recovered answer into the SAME ref object (useLinkPreview) with a
+ * freshly minted proxy token, and the row is keyed on `item.url` so Vue patches the existing
+ * component rather than remounting it. A write-once latch would keep the failure fill painted
+ * over an image that had since loaded — visible through any transparent PNG and in the
+ * `contain` letterbox bars. MediaViewerModal does the same reset for the same reason.
  */
 const failed = ref(false);
+watch(
+  () => props.preview.src,
+  () => {
+    failed.value = false;
+  },
+);
+
+function onImageLoad(): void {
+  // A late success after a failure — see the reset above; the `src` may not have changed if the
+  // origin merely recovered.
+  failed.value = false;
+  emit('measured');
+}
+
+/**
+ * ⚠⚠ `measured` is emitted here too, and this is the event that can now actually move the row.
+ *
+ * After this change a successful `@load` grows nothing — every rendered inline image has either
+ * the server's width/height or `.no-dims`'s fixed box. A FAILURE is different: the UA stops
+ * treating the element as a replaced box, and what it falls back to varies by engine. Emitting
+ * lets `MessageList` re-pin, which is all the compensation available for something we only learn
+ * about after it has happened.
+ */
+function onImageError(): void {
+  failed.value = true;
+  emit('measured');
+}
+
+/**
+ * Whether this image is a control.
+ *
+ * ⚠ NOT `viewerEnabled` alone. A failed image kept `role="button"`, `tabindex="0"` and
+ * `aria-label="Open image: a.png"` over bytes known to be gone — so a screen reader announced a
+ * button onto an empty panel, and activating it opened the viewer, which independently re-fetched
+ * the same dead URL and landed on its own failure card. The only way to discover the failure was
+ * to click through to a second one.
+ */
+const interactive = computed(() => viewerEnabled.value && !failed.value);
 
 function play(): void {
   playing.value = true;
@@ -208,7 +251,7 @@ const imageLabel = computed(() => {
  * in the row: no viewer, no sheet, nothing.
  */
 function onImageClick(e: MouseEvent): void {
-  if (!viewerEnabled.value) return;
+  if (!interactive.value) return;
   e.stopPropagation();
   emit('activate');
 }
@@ -216,7 +259,7 @@ function onImageClick(e: MouseEvent): void {
 /** Keyboard equivalent. An element advertising `cursor: pointer` and a `button` role has to be
  *  reachable without one — matching RenderSegments, MircColorPicker and SuggestionStrip. */
 function activate(): void {
-  if (!viewerEnabled.value) return;
+  if (!interactive.value) return;
   emit('activate');
 }
 </script>
@@ -250,9 +293,20 @@ function activate(): void {
    NOT applied in a strip: the row already fixes the height there (see `.strip-item`). */
 .inline-image.no-dims {
   height: 240px;
+  /* ⚠ `scale-down`, NOT `contain`. `contain` scales UP to fill the box, so an unmeasured 16x16
+     favicon.ico — sharp decodes jpeg/png/webp/tiff/gif/svg/heif/raw, so ico and bmp arrive as
+     `kind: 'image'` with null dimensions — rendered at 240x240 and 15x blurry. `scale-down` takes
+     the smaller of `none` and `contain`, so a small image stays its own size inside the box.
+     The box is still 240px tall, which is the price of a height that's knowable before the bytes:
+     empty space around a rare small image, rather than a jump on every one. */
+  object-fit: scale-down;
+  /* And a fill, so the reserved box reads as a placeholder rather than as a hole punched in the
+     conversation — `loading="lazy"` means it can sit empty until the row nears the viewport. */
+  background: var(--embed-bg);
 }
-/* A failed load keeps whatever box was reserved — the attributes and `.no-dims` both survive it —
-   so this is paint only: the panel fill a card uses, instead of the UA's broken-image glyph. */
+/* Paint for a load that failed: the panel fill a card uses, instead of the UA's broken-image
+   glyph. ⚠ The BOX is not this rule's business — see `onImageError`, which emits `measured`
+   because a failed image stops being a replaced element and what the UA falls back to varies. */
 .inline-image.failed {
   background: var(--embed-bg);
 }

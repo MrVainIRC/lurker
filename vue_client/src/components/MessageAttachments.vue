@@ -40,13 +40,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, useTemplateRef, watch } from 'vue';
 import { useSettingsStore } from '../stores/settings.js';
 import { useConfigStore } from '../stores/config.js';
 import { previewableUrls, MAX_CARDS_PER_MESSAGE } from '../utils/previewUrls.js';
 import {
   useLinkPreview,
-  previewRevision,
+  usePreviewsSettled,
   type LinkPreview,
 } from '../composables/useLinkPreview.js';
 import { useMediaViewer } from '../composables/useMediaViewer.js';
@@ -112,63 +112,49 @@ const entries = computed(() => urls.value.map((url) => useLinkPreview(url)));
 // What this deliberately does NOT cost: a preview's own descriptor arrives atomically with the
 // decision to render it, so there is no earlier layout for it to disturb. `STRIP_PORTRAIT` stays,
 // and a lone image keeps `object-fit: contain` at its natural aspect.
-const allResolved = computed(() => entries.value.every((entry) => entry.value !== null));
+//
+// Two residuals, both deliberate, both stated so a later reader doesn't take them for oversights:
+//
+//   1. A short-TTL failure that RECOVERS on a re-ask grows the block, and can re-arrange it (one
+//      image becoming two is a strip). Holding the gate for it instead would hide a whole message
+//      for up to five minutes on the strength of one saturated fetch, which is far worse. The
+//      growth goes through `previewRevision`, so it is compensated; only its arrangement isn't.
+//   2. A message mixing an image with a slow PAGE link shows nothing until the page answers, and
+//      that can be tens of seconds. The page URL cannot be excluded from the gate: an
+//      extension-less URL might itself resolve as an image and belong in the arrangement, so
+//      "what could render" is not knowable before the answer. This is the trade atomic reveal
+//      makes — late but stable, rather than early and re-arranging.
+//
+// ⚠⚠ Asked, never timed. The first version of this gate revealed on a 1500ms deadline, on the
+// reasoning that a message's URLs all land in one batch "~24ms after ingest" — which was the
+// coalescing debounce (`FLUSH_MS`) mistaken for the round trip. The server allows 10s of queue
+// wait plus a 30s resolve deadline per URL and answers a slice with one `Promise.all`, so the
+// deadline fired on any cold link and revealed a PARTIAL set: a lone image that then became a
+// filmstrip when the straggler landed, which is verbatim the defect above. `usePreviewsSettled`
+// asks the module that actually knows, so there is no latency to guess at and no partial reveal
+// to recover from.
+const settled = usePreviewsSettled(urls);
 
-/**
- * How long to wait for the stragglers before showing what we have.
- *
- * ⚠⚠ NOT a nicety — this is the safety net, and the gate above is unsafe without it.
- * `useLinkPreview` returns a PERMANENTLY null ref for a URL nobody primed, so any divergence
- * between what this component treats as previewable and what the priming path actually asked
- * about would mean the message shows nothing for the life of the tab — strictly worse than the
- * partial render this replaces. Both sides call the same `previewableUrls`, so they should not
- * diverge; this is what makes "should not" survive being wrong.
- *
- * Long enough that the normal case never sees it (everything in one message lands in one batch,
- * ~24ms after ingest), short enough that a real straggler doesn't read as a broken message.
- */
-const REVEAL_DEADLINE_MS = 1500;
-
+// Latched, so a URL re-entering the queue (a re-ask after a transient failure) cannot HIDE a
+// block that is already on screen — a shrink disturbs a reader exactly as much as a growth.
 const revealed = ref(false);
-let revealTimer: ReturnType<typeof setTimeout> | null = null;
-
-function clearRevealTimer(): void {
-  if (revealTimer === null) return;
-  clearTimeout(revealTimer);
-  revealTimer = null;
-}
-
-// Latched: once shown, stay shown. A straggler arriving after a deadline reveal then appends,
-// which is a growth event — accepted, because it can only happen on the deadline path.
 watch(
-  allResolved,
+  settled,
   (ok) => {
-    if (!ok) return;
-    clearRevealTimer();
-    revealed.value = true;
+    if (ok) revealed.value = true;
   },
   { immediate: true },
 );
 
-onMounted(() => {
-  // ⚠ Only armed when the gate is unsatisfied AT MOUNT. Scrolling into history mounts rows whose
-  // previews resolved long ago; those reveal synchronously through the watcher above and must
-  // not pay for a timer apiece.
-  if (revealed.value) return;
-  revealTimer = setTimeout(() => {
-    revealTimer = null;
-    // ⚠⚠ BEFORE the flag, and this ordering is load-bearing. MessageList re-pins by watching
-    // `previewRevision`, which only bumps when a BATCH lands — a reveal fired by this timer
-    // would otherwise grow the row with nothing watching, and the growth would be uncompensated
-    // for a scrolled-up reader. Bumping first puts the pre-flush watcher (a lower scheduler id,
-    // since MessageList is the parent) ahead of this component's re-render, which is what lets
-    // it measure the anchor BEFORE the block appears.
-    previewRevision.value++;
-    revealed.value = true;
-  }, REVEAL_DEADLINE_MS);
+// ⚠ The latch is scoped to the CURRENT url set, not to the component's lifetime. Switching
+// `chat.inline_media.enabled` on from the composer or from another device re-primes without
+// remounting anything (see useSocket's `wirePreviewToggles`), so `urls` grows under a latch that
+// was already open and the new images paint one at a time — the piecemeal render this gate
+// exists to prevent, arriving by the one path that never remounts. Re-deriving from `settled`
+// closes the gate again until the new set is complete.
+watch(urls, () => {
+  revealed.value = settled.value;
 });
-
-onBeforeUnmount(clearRevealTimer);
 
 /**
  * Previews that are resolved AND allowed by the settings.

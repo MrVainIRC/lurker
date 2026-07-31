@@ -26,7 +26,7 @@
 //   - `queue` dedupes across a TICK. A history page arrives with fifty rows; they become one
 //     POST rather than fifty.
 
-import { ref, type Ref } from 'vue';
+import { computed, ref, type ComputedRef, type Ref } from 'vue';
 import { api } from '../api.js';
 import { previewableUrls, type PreviewToggles } from '../utils/previewUrls.js';
 
@@ -103,18 +103,13 @@ async function flush(): Promise<void> {
         method: 'POST',
         body: { urls: slice },
       });
-      let changed = false;
       const answered = new Set<string>();
       for (const preview of res.previews ?? []) {
         const entry = cache.get(preview.url);
-        // Only an `ok` preview renders anything, so only an `ok` preview can change a row's
-        // height — bumping the revision for a batch of `unavailable` answers would make the
-        // list re-pin for no reason.
         if (entry) {
           answered.add(preview.url);
           entry.value = preview;
           if (preview.status === 'ok') {
-            changed = true;
             retry.delete(preview.url);
           } else {
             armReask(preview.url, Date.parse(preview.expiresAt ?? ''));
@@ -128,7 +123,16 @@ async function flush(): Promise<void> {
       // `retry` entry exists so nothing re-asks it, and `dropIfExpired` returns early because a
       // null value has no `expiresAt`. Permanently blank, from a response that looked fine.
       for (const url of slice) if (!answered.has(url)) forgetForRetry(url);
-      if (changed) previewRevision.value++;
+      // ⚠⚠ Any ANSWER bumps this, not only an `ok` one. This used to be `if (changed)`, guarded by
+      // a comment reading "only an `ok` preview renders anything, so only an `ok` preview can
+      // change a row's height" — which stopped being true when the reveal gate landed.
+      // `MessageAttachments` holds a message's whole block back until every URL in it has settled,
+      // so an `unavailable` is very often the answer that COMPLETES that gate and paints the
+      // block: growth out of a batch containing no `ok` at all, with nothing telling the list to
+      // re-pin. The cost of the wider condition is one no-op re-pin per all-unavailable batch —
+      // per BATCH, not per row — which is the cheaper side of the trade by a wide margin.
+      if (answered.size > 0) previewRevision.value++;
+      pendingRevision.value++;
       scheduleReask();
     } catch {
       // A failed resolve leaves the ref null, which renders as "no preview" — the same as a
@@ -137,6 +141,7 @@ async function flush(): Promise<void> {
       // than the missing card. Every URL in the slice is put back in play; none of them got an
       // answer, so none of them has a verdict to remember.
       for (const url of slice) forgetForRetry(url);
+      pendingRevision.value++;
       scheduleReask();
     }
   }
@@ -261,6 +266,7 @@ function runReask(): void {
     queued = true;
   }
   if (queued && flushTimer === null) flushTimer = setTimeout(() => void flush(), FLUSH_MS);
+  if (queued) pendingRevision.value++;
   scheduleReask();
 }
 
@@ -336,6 +342,9 @@ export function primePreviews(
   }
   if (queued && flushTimer === null) flushTimer = setTimeout(() => void flush(), FLUSH_MS);
   evictIfNeeded();
+  // ⚠ Unconditional, not gated on `queued`. `dropIfExpired` and `evictIfNeeded` both remove URLs
+  // from `asked`, which changes whether an answer is expected without anything being queued.
+  pendingRevision.value++;
 }
 
 /**
@@ -349,9 +358,67 @@ export function useLinkPreview(url: string): Ref<LinkPreview | null> {
   return entryFor(url);
 }
 
+// ─── Is an answer still coming? ───────────────────────────────────────────────
+//
+// `MessageAttachments` holds a message's whole attachment block back until every URL in it has
+// settled, so that its arrangement is decided once instead of re-deciding as siblings trickle in.
+// That gate needs to tell "still in flight" apart from "will never come", and this module is the
+// only thing that knows the difference — `asked`, `queue` and `retry` ARE that knowledge.
+//
+// ⚠⚠ The first version of the gate guessed instead, with a 1500ms timer. The guess was wrong by
+// more than an order of magnitude: `FLUSH_MS` is the coalescing debounce before the POST is sent,
+// not the round trip, and the server allows MAX_QUEUE_WAIT_MS (10s) plus RESOLVE_DEADLINE_MS
+// (30s) per URL while `/resolve` answers with a `Promise.all` over the whole slice. So the
+// deadline fired routinely on any cold link, revealing a partial set — which re-created the exact
+// arrangement flip the gate exists to remove, 1.5s later. Asking beats guessing.
+
+/**
+ * Bumped whenever a URL enters or leaves the set awaiting an answer.
+ *
+ * `queue`, `asked` and `retry` are plain collections and deliberately stay that way — they're
+ * touched on hot paths and nothing should re-render because a Set gained a member. This counter
+ * is the one reactive handle onto them, so a consumer reads it to know when to look again.
+ */
+const pendingRevision = ref(0);
+
+/**
+ * Whether an answer is still expected for `url`.
+ *
+ * A URL that carries a value has settled, whatever that value says. A URL nobody ever primed is
+ * NOT pending — that's the divergence case, and answering `false` is what makes it render
+ * immediately (as nothing) rather than stall a whole message forever.
+ *
+ * ⚠ A short-TTL failure awaiting a re-ask counts as SETTLED, not pending: it has an answer, and
+ * the re-ask may be up to five minutes out. Holding a message's block for that would be far worse
+ * than the growth a recovery causes — see the residual noted in `MessageAttachments`.
+ */
+function previewPending(url: string): boolean {
+  if (cache.get(url)?.value != null) return false;
+  return queue.has(url) || asked.has(url) || retry.has(url);
+}
+
+/**
+ * Reactive "every one of these URLs has settled".
+ *
+ * The `pendingRevision` read is what makes it reactive, and it lives HERE rather than at the call
+ * site so that the one fragile line sits next to the state it depends on.
+ */
+export function usePreviewsSettled(urls: Ref<readonly string[]>): ComputedRef<boolean> {
+  return computed(() => {
+    void pendingRevision.value;
+    return urls.value.every((url) => !previewPending(url));
+  });
+}
+
+/** Test-only: observe the pending set without reaching into module state. */
+export function isPreviewPending(url: string): boolean {
+  return previewPending(url);
+}
+
 /** Test-only: drop everything so a suite starts from a known state. */
 export function resetLinkPreviewCache(): void {
   previewRevision.value = 0;
+  pendingRevision.value = 0;
   cache.clear();
   asked.clear();
   retry.clear();
