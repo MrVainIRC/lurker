@@ -11,7 +11,7 @@
 // ⚠ What's mocked is the POLICY, never the mechanism. Express, the token, the throttles, the
 // pool, safeRequest, the pinned lookup and the pipe are all shipping code.
 
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Express } from 'express';
@@ -34,6 +34,8 @@ type Handler = (req: http.IncomingMessage, res: http.ServerResponse) => void;
 let handler: Handler;
 let origin: http.Server;
 let base: string;
+/** How many times the ORIGIN was actually asked — the whole point of the hold. */
+let originHits = 0;
 
 /** A token for a path on the live origin, reached through `localhost` so the pinned lookup runs. */
 const tokenFor = (path: string): string => mintProxyToken(`${base}${path}`);
@@ -47,7 +49,10 @@ beforeAll(async () => {
   app = createTestApp({ '/api/link-preview': router });
   agent = await createAuthedAgent(app, alice.id);
 
-  origin = http.createServer((req, res) => handler(req, res));
+  origin = http.createServer((req, res) => {
+    originHits++;
+    handler(req, res);
+  });
   await new Promise<void>((resolve) => origin.listen(0, '127.0.0.1', resolve));
   base = `http://localhost:${(origin.address() as AddressInfo).port}`;
 });
@@ -351,5 +356,72 @@ describe('range advertisement', () => {
     const res = await agent.get(`/api/link-preview/media/${tokenFor('/dupehdr.mp4')}`);
     expect(res.status).toBe(200);
     expect(res.headers['accept-ranges']).toBe('bytes');
+  });
+});
+
+describe('a rate-limiting origin', () => {
+  // ⚠⚠ FROM A REAL FAILURE ON A LIVE INSTANCE. `opengraph.githubassets.com` — where
+  // every GitHub link's og:image lives — advertises a budget of 100 in
+  // `x-ratelimit-*`. A channel with a run of GitHub links spends it in one burst
+  // from the instance's single IP, and every image on that host went permanently
+  // blank: the 429 was reported to the browser as 404, which an <img> treats as a
+  // final answer and never re-asks.
+
+  beforeEach(async () => {
+    const { resetCooldownsForTests } = await import('../utils/originCooldown.js');
+    resetCooldownsForTests();
+    originHits = 0;
+  });
+
+  it('reports a 429 as 503 with Retry-After, not as a 404', async () => {
+    handler = (_req, res) => {
+      res.writeHead(429, { 'retry-after': '42' });
+      res.end();
+    };
+    const res = await agent.get(`/api/link-preview/media/${tokenFor('/limited.png')}`);
+    // ⚠ THE assertion. 404 is what an <img> caches as "this does not exist"; 503
+    // leaves the door open for the reload that will succeed a minute later.
+    expect(res.status).toBe(503);
+    expect(res.headers['retry-after']).toBe('42');
+  });
+
+  it('stops asking a host that just refused, until its window passes', async () => {
+    handler = (_req, res) => {
+      res.writeHead(429, { 'retry-after': '60' });
+      res.end();
+    };
+    // Different images, same host — which is exactly the shape of a channel full
+    // of GitHub links.
+    const first = await agent.get(`/api/link-preview/media/${tokenFor('/a.png')}`);
+    expect(first.status).toBe(503);
+    expect(originHits).toBe(1);
+
+    for (const p of ['/b.png', '/c.png', '/d.png']) {
+      const res = await agent.get(`/api/link-preview/media/${tokenFor(p)}`);
+      expect(res.status).toBe(503);
+    }
+    // ⚠⚠ THE POINT. One request went out; the rest were answered from the hold.
+    // Without it each of those spends another unit of a budget that is already
+    // exhausted, so it can never recover — the failure sustains itself.
+    expect(originHits).toBe(1);
+  });
+
+  it('keeps reporting a 404 as a 404', async () => {
+    // ⚠ "Not now" and "not ever" must stay distinguishable. A genuinely missing
+    // image is a fact about that URL, and an <img> that stops asking is correct.
+    handler = (_req, res) => {
+      res.writeHead(404);
+      res.end();
+    };
+    const res = await agent.get(`/api/link-preview/media/${tokenFor('/gone.png')}`);
+    expect(res.status).toBe(404);
+
+    // ...and a permanent failure must NOT bench the host for everything else.
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'image/png', 'content-length': String(PNG.length) });
+      res.end(PNG);
+    };
+    const ok = await agent.get(`/api/link-preview/media/${tokenFor('/fine.png')}`);
+    expect(ok.status).toBe(200);
   });
 });

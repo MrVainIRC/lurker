@@ -35,6 +35,7 @@ import {
 import { verifyProxyToken } from '../services/mediaProxyToken.js';
 import { normalizeUrl, safeRequest } from '../services/linkFetch.js';
 import { previewsEnabled } from '../utils/previews.js';
+import { cooldownRemaining, isTransientStatus, noteRefusal } from '../utils/originCooldown.js';
 import { SlotPool } from '../utils/slotPool.js';
 
 const router = Router();
@@ -250,6 +251,28 @@ router.get(
     const isRange = typeof req.headers.range === 'string' && req.headers.range !== '';
     const cacheKey = byteCacheKey(url.toString());
 
+    // ⚠⚠ A host that just rate-limited us is not asked again until it says we may.
+    // Measured on a real instance: `opengraph.githubassets.com` — where every
+    // GitHub link's og:image lives — advertises a budget of 100 in `x-ratelimit-*`,
+    // and a channel with a run of GitHub links spends it in one burst from the
+    // instance's single IP. Without this, every later view of every one of those
+    // images went out and asked again, so the budget never recovered.
+    //
+    // ⚠ Checked BEFORE the pool, deliberately, unlike the cache read below. The
+    // whole point is to spend nothing — not a slot, not a socket, not a DNS
+    // lookup — on a request we already know the answer to. The cache read is
+    // inside the pool because a hit costs memory; this costs a map lookup.
+    //
+    // ⚠ 503, never 404. Same reasoning the saturation branch spells out: an <img>
+    // treats 404 as permanent and never re-asks, so reporting a temporary refusal
+    // that way turns a minute of rate limiting into a blank image forever.
+    const cooling = cooldownRemaining(url.hostname);
+    if (cooling > 0) {
+      res.set('Retry-After', String(cooling));
+      res.status(503).end();
+      return;
+    }
+
     if (!(await mediaPool.acquire())) {
       // Saturated, not broken. 503 + Retry-After so a media element backs off and retries,
       // rather than 404, which an <img> treats as a permanent verdict and never re-asks.
@@ -362,9 +385,31 @@ router.get(
       const ok = upstream.status === 200 || upstream.status === 206;
       if (!ok || !proxyableContentType(upstream.contentType)) {
         upstream.stream.destroy();
-        res.status(404).end();
+        // ⚠⚠ "Not now" and "not ever" are different answers, and collapsing them
+        // into 404 is what made a GitHub rate limit look like a missing image.
+        // An <img> treats 404 as a permanent verdict — the browser never re-asks,
+        // so a minute of 429s became a blank card that no reload could repair.
+        // ⚠ Only the STATUS gets this treatment. A content type we refuse to proxy
+        // is a fact about the URL and stays a 404 however many times it is asked.
+        if (ok || !isTransientStatus(upstream.status)) {
+          res.status(404).end();
+          return;
+        }
+        // The host's own instruction is preferred over any guess we could make —
+        // `Retry-After` in either legal form, else `x-ratelimit-reset`.
+        noteRefusal(url.hostname, upstream.headers);
+        res.set('Retry-After', String(cooldownRemaining(url.hostname) || 60));
+        res.status(503).end();
         return;
       }
+      // ⚠⚠ NOTHING clears the hold on success, and that is deliberate — an earlier
+      // version called `noteSuccess` here and it was both dead and harmful. Dead,
+      // because an active hold short-circuits above and no fetch can reach this
+      // line while one is armed. Harmful, because the one interleaving that DOES
+      // reach it is the burst this exists to damp: two dozen requests go out
+      // together, several are refused and arm the hold, and a single success then
+      // tears it down before it can stop anything. The hold expires on its own
+      // clock, which is short by design.
       // ⚠ Per-KIND cap. The single 8 MB ceiling was named for images and silently applied to
       // everything, so a 30 MB mp4 rendered inline was streamed to 8 MB and then had both ends
       // destroyed — the <video> died with a network error partway through, and since the
