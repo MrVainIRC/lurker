@@ -6,11 +6,10 @@
 // backing up their volume is already backing this up — and losing it costs a
 // re-fetch, not data.
 
-import crypto from 'crypto';
-import fsSync from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
 import { cachedBytes, coldestCached, forget } from '../../db/previewCache.js';
+import { openTempFile } from './tempFile.js';
 import type { LocalCacheConfig } from './config.js';
 
 /**
@@ -70,87 +69,28 @@ export async function openLocalWrite(
   key: string,
 ): Promise<LocalWriter | null> {
   const target = objectPath(cfg, key);
-  // ⚠⚠ RANDOM, not pid+timestamp. Nothing dedupes the byte path — `mediaPool`
-  // bounds concurrency, not identity — so several writes of the SAME key can be in
-  // flight at once. Two in the same millisecond shared a temp path, and a write
-  // truncates only at open: the shorter one left the longer body's tail in place
-  // and published a file matching NEITHER, under a row recording the shorter
-  // length. Reproduced with 4 MB and 1 MB bodies while this was pid+timestamp.
-  const tmp = `${target}.${crypto.randomUUID()}.tmp`;
-  let handle: fsSync.WriteStream;
-  try {
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    handle = fsSync.createWriteStream(tmp);
-  } catch {
-    return null;
-  }
-  // A write error (ENOSPC, EROFS) must not become an unhandled 'error' event and
-  // take the process down; it is recorded and turns commit into a no-op.
-  let broken = false;
-  handle.on('error', () => {
-    broken = true;
-  });
-
-  let done = false;
-  /**
-   * ⚠⚠ Waits on `close`, NOT on `end`'s callback.
-   *
-   * `writable.end(cb)` attaches its callback to `finish`, which a stream that
-   * ERRORS never reaches — node's own docs say the callback "may or may not" be
-   * called on error. So on ENOSPC or EROFS, which is precisely the state a cache
-   * ceiling exists for, the promise never settled: `commit()` and `abort()` hung
-   * forever, the descriptor and the temp file stayed stranded, and the store
-   * decision was never reached. `close` fires on both paths.
-   *
-   * ⚠ The already-closed check is not belt-and-braces. A stream destroyed by an
-   * earlier error has emitted `close` before we ever get here, and a listener
-   * added afterwards waits for an event that has been and gone.
-   */
-  const closeStream = () =>
-    new Promise<void>((resolve) => {
-      if (handle.closed || handle.destroyed) {
-        resolve();
-        return;
-      }
-      handle.once('close', () => resolve());
-      handle.end();
-    });
+  const staged = await openTempFile(path.dirname(target), key);
+  if (!staged) return null;
 
   return {
     write(chunk: Buffer): void {
-      if (done || broken) return;
-      // Backpressure is deliberately not awaited: the response is already being
-      // piped to the reader and must not wait on our disk. The stream's own buffer
-      // bounds this at the transfer's cap, which is what the memory fix is about.
-      handle.write(chunk);
+      staged.write(chunk);
     },
     async commit(): Promise<boolean> {
-      if (done) return false;
-      done = true;
-      await closeStream();
-      if (broken) {
-        await fs.unlink(tmp).catch(() => {});
-        return false;
-      }
+      if (!(await staged.close())) return false;
       try {
         // `rename` within a directory is atomic, so a concurrent read sees either
         // nothing (a miss, which re-fetches) or the whole object — never a prefix,
         // which would be served as a truncated image and held for a day.
-        await fs.rename(tmp, target);
+        await fs.rename(staged.path, target);
         return true;
       } catch {
-        await fs.unlink(tmp).catch(() => {});
+        await fs.unlink(staged.path).catch(() => {});
         return false;
       }
     },
     async abort(): Promise<void> {
-      if (done) return;
-      done = true;
-      await closeStream();
-      // ⚠ The temp file is OURS. Left behind it is invisible to the index and
-      // therefore to eviction — bytes on the volume nothing counts and nothing can
-      // reclaim.
-      await fs.unlink(tmp).catch(() => {});
+      await staged.discard();
     },
   };
 }

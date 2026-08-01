@@ -39,6 +39,9 @@ import {
   type PreviewKind,
 } from '../db/linkPreviews.js';
 import { mintProxyToken } from './mediaProxyToken.js';
+// ⚠ From `previewCache/s3.js`, not `previewCache/index.js`. The index imports this
+// module for `kindForContentType`, so reaching back through it would close a cycle.
+import { publicByteUrl } from './previewCache/s3.js';
 
 /** Clamps, applied server-side so no client has to think about them and no
  *  client can be surprised by a 40 KB og:description. */
@@ -690,7 +693,23 @@ export function toDescriptor(record: PreviewRecord): PreviewDescriptor {
   }
 
   if (record.imageUrl) {
-    const proxied = `/api/link-preview/media/${mintProxyToken(record.imageUrl)}`;
+    // ⚠⚠ A CACHED object is served from its own public URL, and only the mint site
+    // knows that. `src`/`thumb` are opaque to every client — nothing constructs one,
+    // nothing parses one — so substituting a CDN URL for a proxy path here is
+    // invisible on the wire and costs no protocol change, no version bump and no
+    // client release. It is also the reason the byte cache has no redirect: a 302
+    // would spend a round trip through the cell to say what this already knows, and
+    // would hand a third-party host whatever `Authorization` header the client had
+    // set on the original request.
+    //
+    // ⚠ The fallback is the whole design. `publicByteUrl` answers null for anything
+    // it is not certain of — cache off, `local` mode, no row, a row past its age
+    // bound — and null means the proxy path, which works in every one of those
+    // states. The FIRST reader of an image always takes it, because nothing is
+    // cached until that request streams through and populates the cache.
+    const proxied =
+      publicByteUrl(record.imageUrl) ??
+      `/api/link-preview/media/${mintProxyToken(record.imageUrl)}`;
     // For direct media the bytes ARE the content (`src`); for a page they're
     // decoration on a card (`thumb`). Same proxy, different slot, so a client
     // never has to re-derive which one it's looking at from `kind`.

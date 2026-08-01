@@ -20,16 +20,39 @@
 // requests for one object. Buffering 64 MB per miss would trade the bandwidth this
 // feature saves for memory it cannot bound.
 
-import crypto from 'crypto';
-import { lookupCached, recordCached, forget } from '../../db/previewCache.js';
-import { kindForContentType } from '../linkPreview.js';
-import { resolveCacheConfig, type CacheConfig } from './config.js';
+import {
+  expiredCached,
+  foreignCached,
+  lookupCached,
+  recordCached,
+  forget,
+} from '../../db/previewCache.js';
+import { kindForContentType, MAX_IMAGE_PROXY_BYTES } from '../linkPreview.js';
+import { cacheConfig, cacheEnabled, expired, MAX_AGE_MS } from './config.js';
 import { evictLocal, objectPath, openLocalWrite, readLocal, removeLocal } from './local.js';
+import { openS3Write, readS3, removeS3, type S3Writer } from './s3.js';
 
 export type { CacheConfig, CacheMode } from './config.js';
 export { objectPath };
+// ⚠ Re-exported rather than defined here. They live in `config.ts` because
+// `toDescriptor` needs `publicByteUrl`, and this module imports the resolver for
+// `kindForContentType` — so anything the resolver has to reach must sit BELOW that
+// import or the two modules form a cycle. Callers still see one surface.
+export { byteCacheKey, cacheConfig, cacheEnabled, resetCacheConfigForTests } from './config.js';
+export { publicByteUrl } from './s3.js';
 
-/** Served from bytes we hold. The only hit shape `local` can produce. */
+/**
+ * Served from bytes we hold.
+ *
+ * ⚠ The ONLY hit shape, for every backend, and deliberately so. An earlier `s3`
+ * draft added a `redirect` hit and had the route 302 to the CDN — which meant the
+ * route grew a second response path that the whole security-header story had to be
+ * re-derived for, and which forwarded `Authorization` into the CDN's logs on any
+ * client that sets it by hand. Sending a client to the CDN is now a decision made
+ * at DESCRIPTOR-MINT time (`publicByteUrl`), where it costs no redirect and no
+ * second response shape; by the time a request reaches the proxy, the only useful
+ * answer is bytes.
+ */
 export interface BufferHit {
   kind: 'buffer';
   body: Buffer;
@@ -45,65 +68,61 @@ export interface StoreWriter {
 }
 
 /**
- * How long a cached object may be served before it is re-fetched.
+ * Drop index rows whose objects are past the age bound. Returns how many went.
  *
- * ⚠ Deliberately the same seven days as `link_previews`' OK_TTL. The two caches
- * describe the same URL, and letting the bytes outlive the metadata means an image
- * that changed at a stable address — an avatar, a `latest.png` — is served from
- * disk long after the record for it was re-resolved. Eviction is by PRESSURE, so
- * without an age bound the staleness window is unbounded; before this cache
- * existed it was a day.
+ * ⚠ `local` reclaims by PRESSURE (eviction against a size ceiling) and repairs on
+ * READ, so its rows are already bounded and this is hygiene. `s3` has neither: no
+ * ceiling, and — now that a hit is served from a URL the cell never sees fetched —
+ * far fewer reads to repair anything on. Without a sweep its index grows for the
+ * life of the instance, and every stale row is one `publicByteUrl` might mint from
+ * the moment it passes the bound. This is `sweepExpiredPreviews()`'s job, for the
+ * table `link_previews` does not cover.
+ *
+ * ⚠ Bounded per pass, like eviction, so a long-neglected instance drains over
+ * several hours instead of making one tick pay for all of it.
  */
-const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const SWEEP_BATCH = 500;
 
-/**
- * The cache key for one URL's BYTES.
- *
- * ⚠⚠ Its own digest, deliberately NOT `db/linkPreviews.ts`'s `urlHash`. That one
- * folds in `RESOLVER_VERSION`, a counter whose entire job is to invalidate
- * METADATA when the resolver would produce a different record — it has already
- * been bumped for a WebP/GIF *dimension* change, and its docblock actively invites
- * more. Sharing it would mean a routine metadata bump silently discards every
- * cached byte on the instance and re-fetches every image at once, from a diff that
- * never mentions this module and a reviewer who has no reason to look here. The
- * identity of a cached picture is its URL, and nothing else.
- *
- * ⚠ Canonicalised the way `urlHash` does — fragment stripped — so `#a` and `#b` of
- * one image share an object rather than being fetched and stored twice.
- */
-export function byteCacheKey(url: string): string {
-  let key: string;
+export async function sweepPreviewCache(): Promise<number> {
   try {
-    const canonical = new URL(url);
-    canonical.hash = '';
-    key = canonical.toString();
+    const cfg = cacheConfig();
+    if (cfg.mode === 'off') return 0;
+
+    const cutoff = new Date(Date.now() - MAX_AGE_MS).toISOString();
+    let swept = 0;
+    for (const entry of expiredCached(cfg.mode, cutoff, SWEEP_BATCH)) {
+      // ⚠ Bytes first, row second, and the row only for what actually went — the
+      // other order leaves an object nothing remembers. `s3` deliberately does NOT
+      // delete: retention there is a bucket lifecycle rule the operator owns, and
+      // issuing a DELETE per expired row would be one billed API call each to
+      // duplicate work the bucket is already doing.
+      if (cfg.mode === 'local' && !(await removeLocal(cfg, entry.key))) continue;
+      forget(entry.key);
+      swept++;
+    }
+
+    // ⚠⚠ Rows from a backend that is no longer configured, which nothing else ever
+    // revisits. `lookup` drops a foreign row only when a request asks for that
+    // exact key — and after a mode switch nothing does, because the descriptor
+    // never mints for a backend that is not current. Left alone they are rows for
+    // bytes that are unreachable by construction, kept for the life of the
+    // instance.
+    //
+    // ⚠ The ROW only, never the bytes, and the asymmetry is deliberate: this
+    // process holds the configuration for the CURRENT backend and nothing else, so
+    // it cannot know where a `local` row's file lived or which bucket an `s3` row's
+    // object is in. Guessing a path from the current config would delete whatever
+    // happened to sit at that path. Switching modes therefore leaves the old
+    // backend's bytes for the operator to remove — one directory, documented in
+    // .env.example as safe to delete, or one bucket prefix.
+    for (const entry of foreignCached(cfg.mode, SWEEP_BATCH)) {
+      forget(entry.key);
+      swept++;
+    }
+    return swept;
   } catch {
-    key = url.replace(/#[\s\S]*$/, '');
+    return 0;
   }
-  return crypto.createHash('sha256').update(`bytes-v1|${key}`).digest('hex');
-}
-
-/**
- * ⚠ Resolved ONCE per process, not per request.
- *
- * The config comes from the environment, which cannot change under a running
- * process, and re-reading it per byte request would re-run the validation — and
- * re-log its warnings — on the hottest path this feature has.
- */
-let cached: CacheConfig | null = null;
-
-export function cacheConfig(): CacheConfig {
-  cached ??= resolveCacheConfig();
-  return cached;
-}
-
-/** Test seam: drop the memoised config so the next call re-reads the environment. */
-export function resetCacheConfigForTests(): void {
-  cached = null;
-}
-
-export function cacheEnabled(): boolean {
-  return cacheConfig().mode !== 'off';
 }
 
 /**
@@ -149,7 +168,7 @@ export function cacheable(contentType: string | undefined, isRangeRequest: boole
 export async function lookup(key: string): Promise<CacheHit | null> {
   try {
     const cfg = cacheConfig();
-    if (cfg.mode !== 'local') return null;
+    if (cfg.mode === 'off') return null;
 
     const entry = lookupCached(key);
     if (!entry) return null;
@@ -167,27 +186,42 @@ export async function lookup(key: string): Promise<CacheHit | null> {
     // immutable`, long after the metadata row has re-resolved. Before the cache
     // existed the staleness window was a day; unbounded is a regression, not a
     // feature. Matched to the metadata cache's own OK_TTL so the two agree.
-    if (Date.now() - Date.parse(entry.createdAt) > MAX_AGE_MS) {
-      if (await removeLocal(cfg, key)) forget(key);
+    //
+    // ⚠⚠ It is also what keeps `s3` HONEST, and there it is load-bearing rather
+    // than merely tidy. A stored object is deleted by a bucket lifecycle rule the
+    // cell does not run and cannot observe; the row would otherwise outlive it and
+    // `publicByteUrl` would keep minting a CDN URL that 404s — for every user, with
+    // no request reaching us to notice. Seven days against a lifecycle rule of 30
+    // is the margin that makes the row provably the shorter-lived of the two.
+    if (expired(entry.createdAt)) {
+      if (cfg.mode !== 'local' || (await removeLocal(cfg, key))) forget(key);
       return null;
     }
 
-    const read = await readLocal(cfg, key);
-    // ⚠⚠ Only a GENUINELY MISSING file forgets its row. `readLocal` used to collapse
-    // every errno to null, so a transient EMFILE — 24 concurrent reads is within
-    // this pool's own budget — or an EACCES after a permissions change deleted the
-    // index row while the object stayed on disk. That is an orphan eviction can
-    // never count and lookup can never find, in a module whose whole premise is
-    // that the index is how we know what exists. Any other error is just a miss.
+    const read =
+      cfg.mode === 'local'
+        ? await readLocal(cfg, key)
+        : await readS3(cfg, key, MAX_IMAGE_PROXY_BYTES);
+    // ⚠⚠ Only a GENUINELY MISSING object forgets its row. `readLocal` used to
+    // collapse every errno to null, so a transient EMFILE — 24 concurrent reads is
+    // within this pool's own budget — or an EACCES after a permissions change
+    // deleted the index row while the object stayed on disk. That is an orphan
+    // eviction can never count and lookup can never find, in a module whose whole
+    // premise is that the index is how we know what exists. Any other error is just
+    // a miss. `readS3` draws the same line at a 404: a 403 or a timeout must not be
+    // read as "the lifecycle rule took it".
     if (read.kind === 'missing') {
       forget(key);
       return null;
     }
     if (read.kind === 'error') return null;
     if (read.body.length !== entry.size) {
-      // ⚠ The row is dropped only if the bad file actually went with it — otherwise
-      // we would forget an object that is still on the volume.
-      if (await removeLocal(cfg, key)) forget(key);
+      // ⚠ For `local` the row is dropped only if the bad file actually went with it —
+      // otherwise we would forget an object that is still on the volume. For `s3` a
+      // length disagreement means the key holds bytes we did not put there, so the
+      // row is wrong either way; the object is left alone because it is not ours to
+      // assume, and the next store re-PUTs and re-records it.
+      if (cfg.mode !== 'local' || (await removeLocal(cfg, key))) forget(key);
       return null;
     }
     return { kind: 'buffer', body: read.body, contentType: entry.contentType };
@@ -267,13 +301,35 @@ export async function store(key: string, body: Buffer, contentType: string): Pro
 export async function beginStore(key: string, expected: number): Promise<StoreWriter | null> {
   try {
     const cfg = cacheConfig();
-    if (cfg.mode !== 'local') return null;
+    if (cfg.mode === 'off') return null;
 
-    if (expected > cfg.maxBytes) return null;
+    // ⚠ The ceiling and the eviction pass are `local`'s alone. A bucket has no
+    // fixed size to stay under and its retention is a lifecycle rule the cell does
+    // not run — deliberately, per LINK_PREVIEWS_CACHE_PLAN.md, which declines to
+    // build an abuse ceiling and watches bucket size instead.
+    if (cfg.mode === 'local') {
+      if (expected > cfg.maxBytes) return null;
+      await evictLocal(cfg, expected);
+    }
 
-    await evictLocal(cfg, expected);
-    const writer = await openLocalWrite(cfg, key);
-    if (!writer) return null;
+    // ⚠ Adapted to one shape here rather than by widening `LocalWriter`. The two
+    // backends genuinely differ: a file has no metadata, so `local` carries the
+    // content type in the index row alone, while `s3` must put it ON the object
+    // where a browser reading the object directly will see it.
+    let writer: S3Writer;
+    if (cfg.mode === 'local') {
+      const local = await openLocalWrite(cfg, key);
+      if (!local) return null;
+      writer = {
+        write: (chunk) => local.write(chunk),
+        commit: () => local.commit(),
+        abort: () => local.abort(),
+      };
+    } else {
+      const remote = await openS3Write(cfg, key);
+      if (!remote) return null;
+      writer = remote;
+    }
 
     let size = 0;
     return {
@@ -294,12 +350,17 @@ export async function beginStore(key: string, expected: number): Promise<StoreWr
             await writer.abort();
             return false;
           }
-          if (!(await writer.commit())) return false;
+          if (!(await writer.commit(contentType))) return false;
           try {
             recordCached({ key, backend: cfg.mode, contentType, size });
           } catch {
             // The bytes landed but the index did not, so nothing could find them.
-            await removeLocal(cfg, key);
+            // ⚠ For `s3` this matters MORE than for `local`, not less: an unindexed
+            // file is dead weight on a volume the operator can see and reclaim, but
+            // an unindexed object is dead weight they are billed for until a
+            // lifecycle rule they may not have set gets round to it.
+            if (cfg.mode === 'local') await removeLocal(cfg, key);
+            else await removeS3(cfg, key);
             return false;
           }
           return true;

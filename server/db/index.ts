@@ -715,6 +715,18 @@ function migrate() {
     -- (No backticks in here: this is inside a JS template literal.)
     CREATE INDEX IF NOT EXISTS idx_preview_cache_evict
       ON preview_cache(backend, last_access, created_at, size);
+    -- ⚠⚠ A SECOND index, for the age sweep, because the eviction one cannot serve
+    -- it. That one leads (backend, last_access), so a query filtering
+    -- created_at < ? and ordering by created_at gets
+    -- "SEARCH ... (backend=?) + USE TEMP B-TREE FOR ORDER BY" — it reads and sorts
+    -- EVERY row for the backend before LIMIT can discard any of them. Harmless for
+    -- local, whose row count is bounded by its size ceiling; not harmless for s3,
+    -- which has no ceiling and no eviction by design and so grows for the life of
+    -- the instance. This runs hourly on the one shared connection that also serves
+    -- WebSocket fan-out and IRC sockets, which is the stall the comment above is
+    -- about. With this index the same query is a range SEARCH and stops at LIMIT.
+    CREATE INDEX IF NOT EXISTS idx_preview_cache_age
+      ON preview_cache(backend, created_at);
 
     -- RPE2E end-to-end-encryption keyring (issue #382). Secrets — the identity
     -- private key and the session keys — are stored as secretCrypto envelopes
