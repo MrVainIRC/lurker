@@ -92,9 +92,28 @@ export async function openLocalWrite(
   });
 
   let done = false;
+  /**
+   * ⚠⚠ Waits on `close`, NOT on `end`'s callback.
+   *
+   * `writable.end(cb)` attaches its callback to `finish`, which a stream that
+   * ERRORS never reaches — node's own docs say the callback "may or may not" be
+   * called on error. So on ENOSPC or EROFS, which is precisely the state a cache
+   * ceiling exists for, the promise never settled: `commit()` and `abort()` hung
+   * forever, the descriptor and the temp file stayed stranded, and the store
+   * decision was never reached. `close` fires on both paths.
+   *
+   * ⚠ The already-closed check is not belt-and-braces. A stream destroyed by an
+   * earlier error has emitted `close` before we ever get here, and a listener
+   * added afterwards waits for an event that has been and gone.
+   */
   const closeStream = () =>
     new Promise<void>((resolve) => {
-      handle.end(() => resolve());
+      if (handle.closed || handle.destroyed) {
+        resolve();
+        return;
+      }
+      handle.once('close', () => resolve());
+      handle.end();
     });
 
   return {

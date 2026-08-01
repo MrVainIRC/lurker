@@ -143,6 +143,68 @@ describe('preview byte cache — local', () => {
     expect(await mod.lookup('1'.repeat(64))).not.toBeNull();
   });
 
+  it('settles rather than hanging when the write stream errors', async () => {
+    // A write stream that fails at open (ENOTDIR here — the shard directory is
+    // replaced by a FILE, which fails the same way for everyone on every platform)
+    // must settle and store nothing, rather than leaving the caller waiting.
+    //
+    // ⚠ HONEST SCOPE: this does NOT distinguish `handle.end(cb)` from waiting on
+    // `close`, which is what the implementation was changed to. Node's docs say
+    // end's callback "may or may not" be called when a stream errors, and `close`
+    // is the event that always fires — but on this runtime the callback did fire
+    // for every errno reachable from here, so the mutation stays green. The change
+    // is defensive against documented uncertainty, not against a reproduced hang,
+    // and saying so is better than a test comment implying otherwise.
+    const key = 'c'.repeat(64);
+    const cfg = mod.cacheConfig();
+    if (cfg.mode !== 'local') throw new Error('unreachable');
+    const shard = path.dirname(mod.objectPath(cfg, key));
+    fs.mkdirSync(cfg.dir, { recursive: true });
+    fs.writeFileSync(shard, 'not a directory');
+
+    try {
+      // ⚠ The timeout is the assertion. Before the fix this never resolved at all,
+      // and a hanging promise reads as a passing test right up until the suite
+      // times out with no useful message.
+      const settled = await Promise.race([
+        mod.store(key, bytes(64), 'image/png'),
+        new Promise<'HUNG'>((r) => setTimeout(() => r('HUNG'), 3000)),
+      ]);
+      expect(settled).toBe(false);
+      expect(dbmod.countCached()).toBe(0);
+    } finally {
+      fs.rmSync(shard, { force: true });
+    }
+  });
+
+  it('stores timestamps as ISO-8601 with Z, which is what Date.parse needs', async () => {
+    // ⚠⚠ MEASURED, not stylistic. `datetime('now')` yields "YYYY-MM-DD HH:MM:SS",
+    // which is not ISO — so V8 parses it as LOCAL time. Verified on this machine:
+    // SQLite stored 08:01:12 (UTC) and `Date.parse` read it back as 15:01:12Z, a
+    // seven-hour skew straight into the age bound below. It is also the format
+    // `link_previews` already uses (NOW_ISO), because ISO-with-Z is
+    // lexicographically ordered and so compares correctly as TEXT in SQL.
+    //
+    // ⚠ The age test below CANNOT see this: it backdates by eight days against a
+    // seven-day TTL, and no timezone offset is large enough to flip that. The format
+    // is the thing to assert.
+    const key = '5'.repeat(64);
+    await mod.store(key, bytes(32), 'image/png');
+    const { default: db } = await import('../../db/index.js');
+    const row = db
+      .prepare<[string], { created_at: string; last_access: string }>(
+        'SELECT created_at, last_access FROM preview_cache WHERE cache_key = ?',
+      )
+      .get(key);
+    const ISO_Z = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+    // ⚠ The raw value, not a labelled one — a prefix defeats the `^` anchor and the
+    // pattern then matches anything ending in a timestamp. (It did, briefly.)
+    expect(row?.created_at).toMatch(ISO_Z);
+    expect(row?.last_access).toMatch(ISO_Z);
+    // ...and it round-trips to the instant it actually was, within a minute.
+    expect(Math.abs(Date.now() - Date.parse(row!.created_at))).toBeLessThan(60_000);
+  });
+
   it('stops serving an entry once it is older than the metadata TTL', async () => {
     // ⚠ Eviction is by PRESSURE, so without an age bound an image at a stable
     // address that changed underneath us — an avatar, a `latest.png` — is served

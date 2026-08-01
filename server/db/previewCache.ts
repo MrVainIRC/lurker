@@ -15,6 +15,7 @@
 // row rather than failing the request. See `forget`.
 
 import db from './index.js';
+import { NOW_ISO } from './linkPreviews.js';
 
 // ⚠ Hoisted, as every other db/ module does. `db.prepare()` re-parses the SQL on
 // each call, and these run on the byte path — once per cache hit and twice per
@@ -23,8 +24,8 @@ const SELECT_ENTRY = db.prepare<[string], Row>(
   `SELECT cache_key, backend, content_type, size, created_at FROM preview_cache WHERE cache_key = ?`,
 );
 const TOUCH_ENTRY = db.prepare<[string]>(
-  `UPDATE preview_cache SET last_access = datetime('now')
-    WHERE cache_key = ? AND last_access <= datetime('now', '-1 hour')`,
+  `UPDATE preview_cache SET last_access = ${NOW_ISO}
+    WHERE cache_key = ? AND last_access <= strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 hour')`,
 );
 const UPSERT_ENTRY = db.prepare<[string, string, string, number]>(
   `INSERT INTO preview_cache (cache_key, backend, content_type, size)
@@ -33,7 +34,7 @@ const UPSERT_ENTRY = db.prepare<[string, string, string, number]>(
      backend = excluded.backend,
      content_type = excluded.content_type,
      size = excluded.size,
-     last_access = datetime('now')`,
+     last_access = ${NOW_ISO}`,
 );
 const DELETE_ENTRY = db.prepare<[string]>(`DELETE FROM preview_cache WHERE cache_key = ?`);
 const SUM_BYTES = db.prepare<[string], { total: number | null }>(

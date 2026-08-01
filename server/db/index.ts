@@ -62,7 +62,7 @@ function migrate() {
     CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
       user_id INTEGER NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       expires_at TEXT NOT NULL,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
@@ -82,7 +82,7 @@ function migrate() {
       realname TEXT,
       server_password TEXT,
       autoconnect INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_networks_user ON networks(user_id);
@@ -110,7 +110,7 @@ function migrate() {
       state TEXT NOT NULL DEFAULT 'open',
       autojoin INTEGER NOT NULL DEFAULT 0,
       key TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       closed_at TEXT,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE
@@ -200,7 +200,7 @@ function migrate() {
       case_sensitive INTEGER NOT NULL DEFAULT 0,
       enabled INTEGER NOT NULL DEFAULT 1,
       auto_managed INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_highlight_rules_user ON highlight_rules(user_id);
@@ -225,7 +225,7 @@ function migrate() {
       auth TEXT NOT NULL,
       user_agent TEXT,
       enabled INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
@@ -242,7 +242,7 @@ function migrate() {
       network_id INTEGER NOT NULL,
       target TEXT NOT NULL,
       text TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE
     );
@@ -255,7 +255,7 @@ function migrate() {
       expires_at TEXT,
       used_by_user_id INTEGER,
       used_at TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (used_by_user_id) REFERENCES users(id) ON DELETE SET NULL
     );
@@ -272,7 +272,7 @@ function migrate() {
       device_type TEXT,
       backed_up INTEGER NOT NULL DEFAULT 0,
       label TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       last_used_at TEXT,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
@@ -319,7 +319,7 @@ function migrate() {
       width INTEGER,
       height INTEGER,
       thumbnail BLOB,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_upload_history_user
@@ -368,7 +368,7 @@ function migrate() {
       crc_actual TEXT,
       crc_status TEXT,
       error TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       completed_at TEXT,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -404,7 +404,7 @@ function migrate() {
       network_id INTEGER NOT NULL,
       target TEXT NOT NULL,
       position INTEGER NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       PRIMARY KEY (user_id, network_id, target),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE
@@ -482,7 +482,7 @@ function migrate() {
       levels TEXT NOT NULL DEFAULT 'ALL',
       is_except INTEGER NOT NULL DEFAULT 0,
       expires_at TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE
     );
@@ -517,7 +517,7 @@ function migrate() {
       network_id INTEGER NOT NULL,
       nick TEXT NOT NULL COLLATE NOCASE,
       pattern TEXT NOT NULL DEFAULT '',
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       PRIMARY KEY (user_id, network_id, nick),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE
@@ -537,7 +537,7 @@ function migrate() {
       user_id INTEGER NOT NULL,
       display_name TEXT NOT NULL,
       notify_online INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_contacts_user ON contacts(user_id);
@@ -563,7 +563,7 @@ function migrate() {
     CREATE TABLE IF NOT EXISTS user_bookmarks (
       user_id INTEGER NOT NULL,
       message_id INTEGER NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       PRIMARY KEY (user_id, message_id),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
@@ -582,7 +582,7 @@ function migrate() {
       name TEXT NOT NULL,
       token_hash TEXT NOT NULL UNIQUE,
       scope TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       last_used_at TEXT,
       revoked_at TEXT,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -611,7 +611,7 @@ function migrate() {
       byte_size INTEGER,
       token TEXT NOT NULL,
       error TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       started_at TEXT,
       completed_at TEXT,
       expires_at TEXT,
@@ -696,8 +696,15 @@ function migrate() {
       backend TEXT NOT NULL,
       content_type TEXT NOT NULL,
       size INTEGER NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      last_access TEXT NOT NULL DEFAULT (datetime('now'))
+      -- ⚠ ISO-8601 WITH Z, not datetime('now'). Two reasons, and the second is a
+      -- measured bug: this column is read back into Date.parse, and
+      -- "YYYY-MM-DD HH:MM:SS" is not ISO, so V8 parses it as LOCAL time — stored
+      -- 08:01:12 UTC came back as 15:01:12Z on a UTC-7 machine, skewing the age
+      -- bound by the operator's offset. It is also what link_previews already
+      -- stores (see NOW_ISO there), because ISO-with-Z is lexicographically
+      -- ordered and so compares correctly as TEXT in SQL.
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      last_access TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
     -- ⚠ COMPOSITE, and COVERING. Both eviction reads filter on backend and order by
     -- last_access, so an index on last_access alone still scans — and the size
@@ -831,7 +838,7 @@ function migrate() {
       offered_to_users INTEGER NOT NULL DEFAULT 0,
       locked INTEGER NOT NULL DEFAULT 0,
       is_default INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE
     );
@@ -870,7 +877,7 @@ function migrate() {
       channels_json TEXT NOT NULL DEFAULT '[]',
       enabled INTEGER NOT NULL DEFAULT 1,
       position INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
@@ -1304,7 +1311,7 @@ if (schemaVersion < 1) {
           case_sensitive INTEGER NOT NULL DEFAULT 0,
           enabled INTEGER NOT NULL DEFAULT 1,
           auto_managed INTEGER NOT NULL DEFAULT 0,
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
       `);
@@ -1433,7 +1440,7 @@ if (schemaVersion < 5) {
           width INTEGER,
           height INTEGER,
           thumbnail BLOB,
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
       `);
@@ -1574,7 +1581,7 @@ if (schemaVersion < 10) {
           levels TEXT NOT NULL DEFAULT 'ALL',
           is_except INTEGER NOT NULL DEFAULT 0,
           expires_at TEXT,
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
           FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE
         )
@@ -1626,7 +1633,7 @@ if (schemaVersion < 11) {
           levels TEXT NOT NULL DEFAULT 'ALL',
           is_except INTEGER NOT NULL DEFAULT 0,
           expires_at TEXT,
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
           FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE
         )
@@ -1747,7 +1754,7 @@ try {
           auth TEXT,
           user_agent TEXT,
           enabled INTEGER NOT NULL DEFAULT 1,
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
           last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
           fail_count INTEGER NOT NULL DEFAULT 0,
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -1801,7 +1808,7 @@ try {
           case_sensitive INTEGER NOT NULL DEFAULT 0,
           enabled INTEGER NOT NULL DEFAULT 1,
           auto_managed INTEGER NOT NULL DEFAULT 0,
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
       `);
