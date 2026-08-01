@@ -51,6 +51,9 @@ let bucketRejects = false;
 /** Flip to serve reads without a Content-Length, as a proxy in front of a bucket
  *  (or MinIO/Garage under some configurations) will. */
 let bucketOmitsLength = false;
+/** Flip to answer reads with headers promising a huge body, and then send nothing
+ *  — a bucket or proxy that accepts the request and stalls. */
+let bucketStallsAfterHeaders = false;
 
 let bucket: http.Server;
 let bucketBase: string;
@@ -108,6 +111,17 @@ beforeAll(async () => {
         return;
       }
       if (req.method === 'GET') {
+        if (bucketStallsAfterHeaders) {
+          // Headers promising far more than the cap, then silence. Nothing ends
+          // this response; the client has to decide to walk away.
+          res.writeHead(200, { 'content-type': 'image/png', 'content-length': '999999999' });
+          // ⚠ FLUSHED. node holds headers until the first write or `end()`, so
+          // without this the stub sends nothing at all — the client blocks waiting
+          // for a status line and `fetch` never resolves, which is a different
+          // stall from the one under test and would pass for the wrong reason.
+          res.flushHeaders();
+          return;
+        }
         const held = objects.get(req.url || '');
         if (!held) {
           res.writeHead(404).end('no such key');
@@ -167,6 +181,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((resolve) => origin.close(() => resolve()));
+  // ⚠ Sockets first. A stalled response from the test below is still open, and
+  // `close()` alone waits for it — the suite would hang on teardown rather than on
+  // the assertion.
+  bucket.closeAllConnections();
   await new Promise<void>((resolve) => bucket.close(() => resolve()));
   for (const k of Object.keys(process.env)) {
     if (k.startsWith('LURKER_PREVIEW_CACHE')) delete process.env[k];
@@ -184,6 +202,7 @@ beforeEach(async () => {
   objects = new Map();
   bucketRejects = false;
   bucketOmitsLength = false;
+  bucketStallsAfterHeaders = false;
   const { default: db } = await import('../db/index.js');
   db.prepare('DELETE FROM preview_cache').run();
 });
@@ -465,6 +484,36 @@ describe('resource bounds and diagnostics', () => {
     // ⚠ THE assertion: the bucket read was declined, so the ORIGIN was asked again.
     // Without the guard this is 1 — served from a body nothing had bounded.
     expect(originHits).toBe(2);
+  });
+
+  it('walks away from an over-cap body instead of reading it to discard it', async () => {
+    // ⚠⚠ `res.text()` was being used to "drain" these responses so undici would
+    // release the socket. It does release it — by BUFFERING THE WHOLE BODY, which in
+    // this branch is the exact thing the size guard just refused. The guard
+    // announced the body was too big to hold and then held it. (Copilot.)
+    //
+    // ⚠ THE ASSERTION IS THE CLOCK, and it is what makes this deterministic rather
+    // than a memory measurement. The stub sends headers promising ~1 GB and then
+    // sends nothing at all: cancelling the body returns at once, while reading it
+    // blocks until the 30 s request timeout — well past vitest's 5 s default, so the
+    // old behaviour fails rather than merely being slower.
+    servePng();
+    const token = tokenFor('/stalling-bucket.png');
+    await agent.get(`/api/link-preview/media/${token}`);
+    await whenStoresSettle();
+    expect(originHits).toBe(1);
+
+    bucketStallsAfterHeaders = true;
+    const started = Date.now();
+    const after = await agent.get(`/api/link-preview/media/${token}`);
+    const elapsed = Date.now() - started;
+
+    // The reader is still served — from the origin, because the bucket read was
+    // declined rather than waited on.
+    expect(after.status).toBe(200);
+    expect(Buffer.from(after.body).equals(PNG)).toBe(true);
+    expect(originHits).toBe(2);
+    expect(`${elapsed < 3000 ? 'prompt' : 'blocked'}`).toBe('prompt');
   });
 
   it('sweeps rows left behind by a backend that is no longer configured', async () => {

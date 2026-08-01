@@ -139,6 +139,28 @@ function warnOnce(message: string): void {
   console.warn(`[preview-cache] ${message}`);
 }
 
+/**
+ * Let go of a response we are not going to read.
+ *
+ * ⚠⚠ CANCEL, never `res.text()`. Undici keeps the connection alive for an unread
+ * body, so it does have to be dealt with — but reading it to discard it buffers
+ * the whole thing, which is unbounded by protocol on an error path and is
+ * precisely backwards in the oversize branch, where the guard would announce that
+ * a body is too large to hold and then hold it. It is also not merely wasteful: a
+ * bucket that sends headers and then stalls makes `text()` block for the full
+ * request timeout, inside a `mediaPool` slot, for bytes nobody wants. Cancelling
+ * releases the socket without reading a byte. (Copilot.)
+ */
+async function discard(res: Response): Promise<void> {
+  try {
+    await res.body?.cancel();
+  } catch {
+    // Already consumed, already errored, or no body at all — the connection is
+    // going away regardless, and this is cleanup on a path that is already
+    // returning a failure.
+  }
+}
+
 /** Where a reader is sent. Public by construction — that is the point of the mode. */
 export function publicUrl(cfg: S3CacheConfig, key: string): string {
   return `${cfg.publicBaseUrl}/${objectKey(cfg, key)}`;
@@ -237,13 +259,11 @@ export async function readS3(cfg: S3CacheConfig, key: string, maxBytes: number):
       signal: AbortSignal.timeout(30_000),
     });
     if (res.status === 404) {
-      // ⚠ Body drained rather than left dangling: undici keeps the socket alive
-      // for an unread response body.
-      await res.text().catch(() => '');
+      await discard(res);
       return { kind: 'missing' };
     }
     if (!res.ok) {
-      await res.text().catch(() => '');
+      await discard(res);
       return { kind: 'error' };
     }
     // ⚠⚠ Bounded before reading, not after — and an ABSENT length is declined, not
@@ -256,7 +276,11 @@ export async function readS3(cfg: S3CacheConfig, key: string, maxBytes: number):
     const raw = res.headers.get('content-length');
     const declared = raw === null ? Number.NaN : Number(raw);
     if (!Number.isFinite(declared) || declared > maxBytes) {
-      await res.text().catch(() => '');
+      // ⚠⚠ CANCELLED, not read. `res.text()` here would buffer the very body this
+      // branch exists to refuse — the guard would announce the response is too big
+      // to hold and then hold it. Worse, against a bucket that sends headers and
+      // stalls it blocks for the full 30 s timeout inside a `mediaPool` slot.
+      await discard(res);
       return { kind: 'error' };
     }
     const body = Buffer.from(await res.arrayBuffer());
@@ -295,7 +319,7 @@ export async function removeS3(cfg: S3CacheConfig, key: string): Promise<boolean
       headers: signed.headers,
       signal: AbortSignal.timeout(30_000),
     });
-    await res.text().catch(() => '');
+    await discard(res);
     return res.ok;
   } catch {
     return false;
