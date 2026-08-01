@@ -66,16 +66,6 @@ export const FAIL_TTL_MS = 60 * 60 * 1000;
  * URL anyone had already pasted. From outside a process that is indistinguishable from the
  * feature never having worked, which is how it gets reported.
  *
- * ⚠ Live example, deliberately left unfixed here rather than fixed in passing: **#697** taught
- * `imageDimensions` to measure WebP and GIF headers sharp refuses to read, so `kind: 'image'`
- * rows now carry dimensions where they stored null — a different record, and no bump was taken
- * with it. Every such row cached before it is still a live hit with no dimensions, so the client
- * reserves `.dim-reserve` instead of the picture's own aspect: the exact QA report #697 was
- * merged to fix. `imageDimensions` has one call site and it is `kind === 'image'` only
- * (`linkPreview.ts:501`), so the affected set is `kind='image' AND image_width IS NULL` — which
- * a targeted migration can clear without orphaning the other kinds. That choice belongs to
- * whoever fixes it; it is recorded here so the next reader does not have to rediscover it.
- *
  * Say what changed on the line below.
  *
  *   v1 — initial.
@@ -85,8 +75,21 @@ export const FAIL_TTL_MS = 60 * 60 * 1000;
  *        rows into `ok` ones, which is precisely what this counter is for — and the `urlHash`
  *        rewrite in the same change is NOT a substitute, because it produces byte-identical
  *        hashes for canonically-spelled URLs and so orphans none of the affected rows.
+ *   v3 — #697 taught `imageDimensions` to measure WebP and GIF headers sharp refuses to read, so
+ *        `kind: 'image'` rows now carry dimensions where they stored null. ⚠ Owed by that change
+ *        and not taken with it: every such row cached before it is still a live hit with no
+ *        dimensions, so `toDescriptor` omits `thumbWidth`, the client reserves `.dim-reserve`
+ *        instead of the picture's own aspect, and the QA report #697 was merged to fix ("solo
+ *        .webp renders with the fallback placeholder, .png doesn't") is still true for every one
+ *        of them. A different record for the same input, with no change of verdict — exactly the
+ *        case the rule above was widened to cover, which is how it was found.
+ *
+ *        ⚠ Taken as a full bump rather than the narrower `kind='image' AND image_width IS NULL`
+ *        a targeted migration could use, because the blunt cost is not a cost here: link
+ *        previews have not shipped to anyone, so there is no cache in the world worth keeping.
+ *        A later bump against a live fleet should weigh that predicate instead.
  */
-const RESOLVER_VERSION = 2;
+const RESOLVER_VERSION = 3;
 
 /**
  * Cache key: the requested URL, scoped to the resolver version.
