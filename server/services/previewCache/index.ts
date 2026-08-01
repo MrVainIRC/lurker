@@ -28,6 +28,7 @@ import {
   forget,
 } from '../../db/previewCache.js';
 import { kindForContentType, MAX_IMAGE_PROXY_BYTES } from '../linkPreview.js';
+import { imageSignatureOf, SIGNATURE_BYTES } from '../../utils/imageSignature.js';
 import { cacheConfig, cacheEnabled, expired, MAX_AGE_MS } from './config.js';
 import { evictLocal, objectPath, openLocalWrite, readLocal, removeLocal } from './local.js';
 import { openS3Write, readS3, removeS3, type S3Writer } from './s3.js';
@@ -332,8 +333,34 @@ export async function beginStore(key: string, expected: number): Promise<StoreWr
     }
 
     let size = 0;
+    // ⚠ The first bytes are kept so `commit` can ask what they actually ARE. Only
+    // `SIGNATURE_BYTES` of them: a signature is a fixed-offset fact, so there is
+    // nothing to gain from holding more, and this runs per store on a path whose
+    // whole design is to keep bytes out of the heap.
+    const head: Buffer[] = [];
+    let headLen = 0;
     return {
       write(chunk: Buffer): void {
+        if (headLen < SIGNATURE_BYTES) {
+          // ⚠⚠ COPIED, not a view. `subarray` shares the chunk's backing
+          // ArrayBuffer, so keeping a 16-byte view of a 64 KB network chunk pins
+          // the whole 64 KB until `commit` — which is after the entire body has
+          // streamed. In a module whose stated purpose is keeping bytes out of the
+          // heap, that is the bug wearing the fix's clothes: bounded by the store
+          // ceilings, but retained for the full life of every store, for nothing.
+          // (Copilot.)
+          //
+          // ⚠ NO TEST, deliberately, and this note is the substitute. `head` is
+          // closure state, so asserting it would need a seam that exists only to be
+          // asserted — and `byteLength` reports 16 either way, so the giveaway is
+          // the backing store, which is not reachable from outside. Verified once by
+          // hand instead: a 16-byte `subarray` of a 64 KB chunk reports
+          // `buffer.byteLength` 65536 and `view.buffer === chunk.buffer`; the
+          // `Buffer.from` copy reports 8192 and shares nothing.
+          const want = Buffer.from(chunk.subarray(0, SIGNATURE_BYTES - headLen));
+          head.push(want);
+          headLen += want.length;
+        }
         size += chunk.length;
         writer.write(chunk);
       },
@@ -347,6 +374,25 @@ export async function beginStore(key: string, expected: number): Promise<StoreWr
           // the leak `openLocalWrite`'s own comment says the design must not have,
           // reached through the one exit that skipped the cleanup. (Copilot.)
           if (size === 0) {
+            await writer.abort();
+            return false;
+          }
+          // ⚠⚠ THE CONTENT TYPE IS A CLAIM, and until this check nothing tested
+          // it. `cacheable` asks `kindForContentType`, which reads the header the
+          // ORIGIN sent — so an origin someone else controls answers
+          // `Content-Type: image/png` with an HTML document and we would keep the
+          // bytes, then serve them back under our own name with
+          // `Content-Disposition: inline`. The URL is minted to the poster's own
+          // client, so getting it to a victim is not a hurdle.
+          //
+          // ⚠ This is where it belongs rather than in either backend: it is a fact
+          // about the BYTES, identical for a file, a bucket and the hosted dropper,
+          // and putting it here means a backend cannot be added without it.
+          //
+          // ⚠ An unrecognised format is REFUSED, so a future image format stops
+          // being cached until it is listed. That is the safe direction — the proxy
+          // still serves it, so the failure is "no saving", not "no picture".
+          if (!imageSignatureOf(Buffer.concat(head))) {
             await writer.abort();
             return false;
           }

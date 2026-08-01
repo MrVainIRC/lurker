@@ -323,4 +323,91 @@ describe('the byte cache, end to end', () => {
     expect(Buffer.from(after.body).equals(PNG)).toBe(true);
     expect(originHits).toBe(2);
   });
+
+  it('refuses to cache a document served as an image, but still serves the reader', async () => {
+    // ⚠⚠ The attack this closes. `cacheable` asks `kindForContentType`, which reads
+    // the header the ORIGIN sent — so an origin under someone else's control answers
+    // `Content-Type: image/png` with an HTML document and, before the signature
+    // check, we kept those bytes and served them back under our own name with
+    // `Content-Disposition: inline`. The URL is minted to the poster's own client,
+    // so handing it to a victim is not a hurdle.
+    const HTML = Buffer.from('<!DOCTYPE html><html><script>alert(1)</script></html>', 'utf8');
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'image/png', 'content-length': String(HTML.length) });
+      res.end(HTML);
+    };
+    const token = tokenFor('/not-really.png');
+    const res = await agent.get(`/api/link-preview/media/${token}`);
+    // ⚠ The reader is NOT failed. This is a cache gate, not a content filter — the
+    // proxy has always passed these bytes through with `nosniff` and a CSP sandbox
+    // on them, and changing that is a different decision from declining to KEEP
+    // them. Failing here would be a behaviour change for every uncached instance.
+    expect(res.status).toBe(200);
+    await whenStoresSettle();
+    expect(countCached()).toBe(0);
+
+    // ...and nothing was left on disk either, since the writer was aborted rather
+    // than merely un-recorded.
+    const dir = process.env.LURKER_PREVIEW_CACHE_DIR!;
+    const stray: string[] = [];
+    if (fs.existsSync(dir)) {
+      for (const shard of fs.readdirSync(dir)) {
+        for (const f of fs.readdirSync(path.join(dir, shard))) stray.push(f);
+      }
+    }
+    expect(stray).toEqual([]);
+  });
+
+  it('still caches a real image whose content type the origin got wrong', async () => {
+    // ⚠ The gate asks "are these bytes an image at all", NOT "do they match the
+    // declared subtype". Origins mislabel real images routinely, browsers decode by
+    // magic bytes regardless, and refusing those would cost hit rate to fix nothing.
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'image/jpeg', 'content-length': String(PNG.length) });
+      res.end(PNG); // actually a PNG
+    };
+    const token = tokenFor('/mislabelled.png');
+    await agent.get(`/api/link-preview/media/${token}`);
+    await whenStoresSettle();
+    expect(countCached()).toBe(1);
+
+    const second = await agent.get(`/api/link-preview/media/${token}`);
+    expect(originHits).toBe(1);
+    expect(Buffer.from(second.body).equals(PNG)).toBe(true);
+    // ⚠ Served back with what the ORIGIN said, not with the sniffed type: the
+    // uncached path passes the origin's header through untouched, so correcting it
+    // only when cached would make the first and second loads disagree.
+    expect(second.headers['content-type']).toBe('image/jpeg');
+  });
+
+  it('assembles the signature from a header that arrives one byte at a time', async () => {
+    // ⚠ The header is not guaranteed to be in the first chunk. A slow origin, a
+    // proxy, or TCP itself can split it anywhere — and the accumulator that stitches
+    // it back together is the kind of index arithmetic that is wrong by one and
+    // still passes every single-chunk test. A PNG signature is 8 bytes, so dribbling
+    // guarantees it spans several.
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'image/png', 'content-length': String(PNG.length) });
+      let i = 0;
+      const tick = (): void => {
+        if (i >= PNG.length) {
+          res.end();
+          return;
+        }
+        res.write(PNG.subarray(i, i + 1));
+        i++;
+        setImmediate(tick);
+      };
+      tick();
+    };
+    const token = tokenFor('/dribbled.png');
+    const first = await agent.get(`/api/link-preview/media/${token}`);
+    expect(first.status).toBe(200);
+    expect(Buffer.from(first.body).equals(PNG)).toBe(true);
+    await whenStoresSettle();
+    // ⚠ It must be CACHED — a gate that cannot reassemble a split header would
+    // silently refuse every slow origin, which reads as "caching does not work"
+    // rather than as a bug.
+    expect(countCached()).toBe(1);
+  });
 });

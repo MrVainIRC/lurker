@@ -61,7 +61,23 @@ beforeEach(async () => {
   mod.resetCacheConfigForTests();
 });
 
-const bytes = (n: number, fill = 0x61) => Buffer.alloc(n, fill);
+/**
+ * `n` bytes that are actually shaped like an image.
+ *
+ * ⚠ The filler used to be the whole buffer, and every test here passed with bodies
+ * that were just repeated 'a'. The store path now asks what the bytes ARE — a
+ * Content-Type is the origin's claim, and an origin someone else controls will
+ * answer `image/png` for an HTML document — so a fixture that is not an image is
+ * correctly refused. Real signature, exact length, filler behind it: the tests
+ * below care about SIZES (ceilings, eviction, truncation), and this keeps those
+ * arithmetic while making the fixture honest about what it always stood for.
+ */
+const bytes = (n: number, fill = 0x61) => {
+  const buf = Buffer.alloc(n, fill);
+  PNG_SIGNATURE.copy(buf, 0, 0, Math.min(PNG_SIGNATURE.length, n));
+  return buf;
+};
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 describe('preview byte cache — local', () => {
   it('stores bytes and gives them back verbatim', async () => {
