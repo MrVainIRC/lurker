@@ -77,6 +77,23 @@ export function noteRefusal(
   headers: Record<string, string | string[] | undefined>,
   now = Date.now(),
 ): void {
+  // ⚠⚠ Expired entries are swept HERE, not only when their own host is asked
+  // about again. `cooldownRemaining` deletes lazily and only for the host it was
+  // handed, so a host that refuses once and is never linked again keeps its entry
+  // for the life of the process — and these processes run for months. (Copilot.)
+  //
+  // ⚠ The sweep is what gives this a real bound rather than a smaller leak. Size
+  // becomes proportional to refusals within one window instead of to every host
+  // that has ever failed: `mediaThrottle` caps byte requests at 300/min and
+  // MAX_COOLDOWN_MS is ten minutes, so the map cannot exceed a few thousand
+  // entries however long the process lives or how hard anyone leans on it.
+  //
+  // ⚠ On refusal rather than on a timer, because refusals are the rare path — an
+  // O(n) pass here costs microseconds and needs no interval to own, unref, or
+  // remember to clear in tests.
+  for (const [seen, until] of cooldowns) {
+    if (until <= now) cooldowns.delete(seen);
+  }
   const wait = retryAfterMs(headers, now) ?? DEFAULT_COOLDOWN_MS;
   cooldowns.set(host, now + Math.min(wait, MAX_COOLDOWN_MS));
 }
@@ -117,4 +134,10 @@ function retryAfterMs(
 /** Test seam. */
 export function resetCooldownsForTests(): void {
   cooldowns.clear();
+}
+
+/** Test seam: the sweep is invisible from the outside, since an expired entry and
+ *  an absent one answer identically. */
+export function cooldownCountForTests(): number {
+  return cooldowns.size;
 }

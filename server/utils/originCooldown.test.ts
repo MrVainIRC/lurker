@@ -3,6 +3,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
+  cooldownCountForTests,
   cooldownRemaining,
   isTransientStatus,
   noteRefusal,
@@ -86,6 +87,34 @@ describe('cooldowns', () => {
     // reads as "cool down for no time at all" and hides the refusal.
     noteRefusal('stale.example', { 'x-ratelimit-reset': String((NOW - 5000) / 1000) }, NOW);
     expect(cooldownRemaining('stale.example', NOW)).toBe(60);
+  });
+
+  it('sweeps expired entries instead of remembering every host that ever failed', () => {
+    // ⚠⚠ `cooldownRemaining` deletes lazily and only for the host it is handed, so
+    // a one-off refusal from a host nobody links again would sit in the map for the
+    // life of the process — and these run for months. (Copilot.)
+    for (let i = 0; i < 500; i++) {
+      noteRefusal(`host-${i}.example`, { 'retry-after': '30' }, NOW);
+    }
+    expect(cooldownCountForTests()).toBe(500);
+
+    // Nobody ever asks about those hosts again. A refusal from a DIFFERENT host,
+    // after their windows lapse, is what collects them.
+    noteRefusal('later.example', { 'retry-after': '30' }, NOW + 31_000);
+    expect(cooldownCountForTests()).toBe(1);
+  });
+
+  it('keeps entries that have not expired yet', () => {
+    // ⚠ The sweep must not be a `clear()` in disguise — a live hold on another host
+    // is the whole point of the map, and dropping it would re-open the flood this
+    // module exists to stop.
+    noteRefusal('long.example', { 'retry-after': '300' }, NOW);
+    noteRefusal('short.example', { 'retry-after': '10' }, NOW);
+    noteRefusal('trigger.example', { 'retry-after': '30' }, NOW + 11_000);
+
+    expect(cooldownRemaining('long.example', NOW + 11_000)).toBe(289);
+    expect(cooldownRemaining('short.example', NOW + 11_000)).toBe(0);
+    expect(cooldownCountForTests()).toBe(2);
   });
 
   it('takes a repeated refusal as the new deadline', () => {
