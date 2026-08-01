@@ -281,6 +281,34 @@ describe('the byte cache, end to end', () => {
     expect(Buffer.from(second.body).equals(PNG)).toBe(true);
   });
 
+  it('leaves no temp file behind when the origin sends an empty body', async () => {
+    // ⚠⚠ A 200 with `Content-Length: 0` is framed, complete and cacheable-looking —
+    // it just has nothing in it. The commit path declined it without closing or
+    // aborting the writer, so the stream's fd stayed open and its `.tmp` stayed on
+    // disk: one leaked descriptor and one orphaned file PER REQUEST, invisible to
+    // eviction because the index never learned about them, and nothing sweeps the
+    // shard directories. Repeatable by any origin serving an empty image.
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'image/png', 'content-length': '0' });
+      res.end();
+    };
+    const token = tokenFor('/empty.png');
+    await agent.get(`/api/link-preview/media/${token}`);
+    await whenStoresSettle();
+
+    expect(countCached()).toBe(0);
+    // ⚠ The assertion that bites. countCached() is 0 whether or not the temp file
+    // was cleaned up — the leak is only visible on disk.
+    const dir = process.env.LURKER_PREVIEW_CACHE_DIR!;
+    const stray: string[] = [];
+    if (fs.existsSync(dir)) {
+      for (const shard of fs.readdirSync(dir)) {
+        for (const f of fs.readdirSync(path.join(dir, shard))) stray.push(f);
+      }
+    }
+    expect(stray).toEqual([]);
+  });
+
   it('re-fetches, rather than failing, when the cached file is deleted underneath it', async () => {
     servePng();
     const token = tokenFor('/vanishing.png');

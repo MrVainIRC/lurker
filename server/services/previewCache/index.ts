@@ -283,7 +283,18 @@ export async function beginStore(key: string, expected: number): Promise<StoreWr
       },
       async commit(contentType: string): Promise<boolean> {
         try {
-          if (size === 0 || !(await writer.commit())) return false;
+          // ⚠⚠ An empty body is ABORTED, not just declined. Returning false here
+          // without touching the writer left its stream open and its temp file on
+          // disk — one leaked fd and one orphaned `.tmp` per request, from an origin
+          // answering 200 with `Content-Length: 0`, which nothing sweeps and which
+          // eviction cannot see because the index never learned about it. Exactly
+          // the leak `openLocalWrite`'s own comment says the design must not have,
+          // reached through the one exit that skipped the cleanup. (Copilot.)
+          if (size === 0) {
+            await writer.abort();
+            return false;
+          }
+          if (!(await writer.commit())) return false;
           try {
             recordCached({ key, backend: cfg.mode, contentType, size });
           } catch {
