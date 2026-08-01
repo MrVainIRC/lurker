@@ -35,11 +35,20 @@ export const OK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const FAIL_TTL_MS = 60 * 60 * 1000;
 
 /**
- * Bumped whenever the resolver's LOGIC changes in a way that could turn a previous
- * `unavailable` into an `ok`.
+ * Bumped whenever the resolver would produce a DIFFERENT RECORD for the same input.
  *
  * Folded into the cache key, so a bump orphans every old row rather than requiring a schema
  * change or a manual flush — the expiry sweep collects them in its own time.
+ *
+ * ⚠ It is a BLUNT instrument, and worth costing before reaching for it. It orphans every row of
+ * every kind, not the affected ones, so the whole table is re-fetched from its origins; with
+ * `MAX_CONCURRENT` at 20 instance-wide and a 10 s queue wait, a busy first load after deploy can
+ * hand back `unavailable` for links that would have been cache hits, and those wait out the
+ * re-ask ladder. And it reaches a running client slowly: previews resolve at message INGEST and
+ * an `ok` entry is never re-asked before its own `expiresAt`, so an open tab keeps rendering
+ * what it already has until a reload — a bump is not a push. Where the affected rows are
+ * describable by a predicate, a one-shot boot migration (`db/migrateEventMode.ts` and its
+ * siblings) targets them without disturbing anything else.
  *
  * This is not hypothetical bookkeeping. During development the YouTube fix was invisible for
  * an hour after it shipped, because the previous code had already cached
@@ -48,9 +57,16 @@ export const FAIL_TTL_MS = 60 * 60 * 1000;
  *
  * ⚠ Starts at 1, deliberately, even though the resolver was rewritten several times before
  * this point: the table has never existed in a release, so there are no v0 rows anywhere to
- * orphan and a higher number would only imply a version somebody ran. Bump it when a change
- * to the resolver could turn a stored `unavailable` into an `ok` — a new provider, a parser
- * fix, a relaxed content-type — and say what changed on the line below.
+ * orphan and a higher number would only imply a version somebody ran.
+ *
+ * ⚠⚠ A DIFFERENT RECORD, not only a different VERDICT. This said "could turn a stored
+ * `unavailable` into an `ok`" for two versions, and that reads as the whole test when it is only
+ * the loudest case: a change that fills in a FIELD leaves every affected row a perfectly good
+ * `ok`, so nothing looks stale anywhere and the new value is simply missing for a week on every
+ * URL anyone had already pasted. From outside a process that is indistinguishable from the
+ * feature never having worked, which is how it gets reported.
+ *
+ * Say what changed on the line below.
  *
  *   v1 — initial.
  *   v2 — a video embed survives a page with no title and no image (a rate-limited provider
@@ -59,8 +75,21 @@ export const FAIL_TTL_MS = 60 * 60 * 1000;
  *        rows into `ok` ones, which is precisely what this counter is for — and the `urlHash`
  *        rewrite in the same change is NOT a substitute, because it produces byte-identical
  *        hashes for canonically-spelled URLs and so orphans none of the affected rows.
+ *   v3 — #697 taught `imageDimensions` to measure WebP and GIF headers sharp refuses to read, so
+ *        `kind: 'image'` rows now carry dimensions where they stored null. ⚠ Owed by that change
+ *        and not taken with it: every such row cached before it is still a live hit with no
+ *        dimensions, so `toDescriptor` omits `thumbWidth`, the client reserves `.dim-reserve`
+ *        instead of the picture's own aspect, and the QA report #697 was merged to fix ("solo
+ *        .webp renders with the fallback placeholder, .png doesn't") is still true for every one
+ *        of them. A different record for the same input, with no change of verdict — exactly the
+ *        case the rule above was widened to cover, which is how it was found.
+ *
+ *        ⚠ Taken as a full bump rather than the narrower `kind='image' AND image_width IS NULL`
+ *        a targeted migration could use, because the blunt cost is not a cost here: link
+ *        previews have not shipped to anyone, so there is no cache in the world worth keeping.
+ *        A later bump against a live fleet should weigh that predicate instead.
  */
-const RESOLVER_VERSION = 2;
+const RESOLVER_VERSION = 3;
 
 /**
  * Cache key: the requested URL, scoped to the resolver version.

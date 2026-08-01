@@ -31,6 +31,18 @@ function raw(width: number, height: number, channels: 3 | 4) {
 // suite shared a machine with another, so it passed alone and failed in the full run. Every size
 // here still exceeds the 64 KB truncation cap once encoded from noise, which is the only property
 // the fixtures need.
+//
+// ⚠⚠ Shrinking them was not enough, and could not have been. It lowered the PROBABILITY of that
+// failure without touching its cause, so the same test timed out again in CI on an unrelated PR
+// — `gif 1234x567`, one word of client CSS away from the previous green run. Measured on an idle
+// machine faster than any CI runner: that case alone costs ~1.6s of the 5s budget, and vitest
+// runs 244 test files across parallel workers on 2-4 vCPUs, so contention of 3x is ordinary
+// rather than exceptional. A margin that small is not a margin.
+//
+// The timeout below is the actual fix: this suite asserts CORRECTNESS and makes no claim about
+// speed, so a generous bound costs nothing when it passes and removes a load-dependent false
+// failure that no one can reproduce on demand. Shrinking the fixtures further is not available
+// — every size has to out-run the 64 KB cap to be a fixture at all.
 const SIZES: Array<[number, number]> = [
   [1, 1],
   [16383, 3],
@@ -62,7 +74,9 @@ describe('dimensionsFromHeader agrees with sharp, from a truncated buffer', () =
             height: truth.height,
           });
         }
-      });
+        // ⚠ The third argument is the per-test timeout, and it is load insurance rather than an
+        // admission that anything here is slow. See the note on SIZES above.
+      }, 30_000);
     }
   }
 });

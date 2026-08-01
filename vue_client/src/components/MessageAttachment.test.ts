@@ -132,7 +132,22 @@ describe('MessageAttachment — video embed', () => {
     const wrapper = mount(MessageAttachment, { props: { preview: YOUTUBE } });
     expect(wrapper.find('.card').exists()).toBe(true);
     expect(wrapper.text()).toContain('PAPA NUGS');
-    expect(wrapper.text()).toContain('YouTube');
+    // ⚠ ...and NOT the site or author. `siteName` and `author` stay on the wire — iOS may want
+    // them, and the hostname fallback is computed server-side — but the web card doesn't spend a
+    // line on naming a URL that is already in the message a word above it.
+    expect(wrapper.text()).not.toContain('YouTube');
+    expect(wrapper.text()).not.toContain('Maslow Unknown');
+  });
+
+  it('gives a video the player box whatever shape its thumbnail is', () => {
+    // ⚠ The layout rule below is about SHARE IMAGES. A video's box is the player's geometry —
+    // an iframe replaces it — so a square oEmbed thumbnail must not talk it into the small
+    // square, which would leave the play control in a 72px box and the video effectively gone.
+    const wrapper = mount(MessageAttachment, {
+      props: { preview: preview({ ...YOUTUBE, thumbWidth: 480, thumbHeight: 480 }) },
+    });
+    expect(wrapper.find('.card-media .card-play').exists()).toBe(true);
+    expect(wrapper.find('.card-thumb').exists()).toBe(false);
   });
 
   it('shows the play facade, and NOT an iframe, before any click', () => {
@@ -146,6 +161,22 @@ describe('MessageAttachment — video embed', () => {
     const wrapper = mount(MessageAttachment, { props: { preview: YOUTUBE } });
     await wrapper.find('.card-play').trigger('click');
     expect(wrapper.find('iframe').attributes('src')).toContain('youtube-nocookie.com');
+  });
+
+  it('sends the origin to the player, because no-referrer breaks every video', async () => {
+    // ⚠⚠ This looks like a privacy REGRESSION and is the opposite: it is what makes the player
+    // work at all. YouTube's embedded player validates the embedding page from the `Referer`
+    // header, and `referrerpolicy="no-referrer"` — which this shipped with — meant every video
+    // answered "Error 153, Video player configuration error" instead of playing. Proven by A/B:
+    // two iframes, same embed URL, same `allow`, differing only in this attribute.
+    //
+    // So the assertion is on the exact value, not on "some policy is set". `origin` sends
+    // `scheme://host` and never the path, and the property that does the real privacy work is
+    // the facade — nothing reaches the video host until the reader presses play, which the two
+    // tests above guard.
+    const wrapper = mount(MessageAttachment, { props: { preview: YOUTUBE } });
+    await wrapper.find('.card-play').trigger('click');
+    expect(wrapper.find('iframe').attributes('referrerpolicy')).toBe('origin');
   });
 
   it('points the thumbnail at our proxy, never at the origin', () => {
@@ -165,9 +196,187 @@ describe('MessageAttachment — video embed', () => {
     expect(wrapper.find('.card').exists()).toBe(true);
     expect(wrapper.find('.card-play').exists()).toBe(false);
     expect(wrapper.find('iframe').exists()).toBe(false);
-    // The thumbnail survives, in its small right-aligned form.
+    // The thumbnail survives — as an ordinary page card's image, and YOUTUBE declares no
+    // dimensions, so it takes the small square. See the layout suite below.
     expect(wrapper.find('.card-thumb').attributes('src')).toBe('/api/link-preview/media/tok');
     expect(wrapper.find('.card-title').attributes('href')).toBe(YOUTUBE.url);
+  });
+
+  it('keeps the box, and the play control, for a video with no thumbnail at all', () => {
+    // ⚠ The box is gated on `isVideo` alone and must stay that way: an oEmbed reply carrying a
+    // title but no thumbnail_url (or an og:image `normalizeUrl` refused) leaves `thumb` undefined
+    // with `embedUrl` set. Gating the block on the thumbnail instead put the card in a state with
+    // no branch true at all — a title, and a video that could never be played.
+    const wrapper = mount(MessageAttachment, {
+      props: { preview: preview({ ...YOUTUBE, thumb: undefined }) },
+    });
+    expect(wrapper.find('.card-media').exists()).toBe(true);
+    expect(wrapper.find('.card-play').exists()).toBe(true);
+    expect(wrapper.find('.card-thumb-wide').exists()).toBe(false);
+  });
+
+  it('names the degraded embed record the server deliberately stores', () => {
+    // ⚠ `pageRecord` keeps a video embed that has NO title, no description and no thumbnail —
+    // the provider oEmbed call was rate-limited and the scrape found nothing past the 512 KB
+    // cap — because the play affordance is real content. It gives that record the FAILURE ttl
+    // for the same reason, describing it in so many words as one whose "whole visible content
+    // is the hostname". So the client has to actually render a hostname: without the `heading`
+    // fallback this was a wordless black 16:9 box with a ▶ and no way to reach the page.
+    const wrapper = mount(MessageAttachment, {
+      props: {
+        preview: preview({
+          url: 'https://www.youtube.com/watch?v=abc123',
+          kind: 'video-embed',
+          siteName: 'www.youtube.com',
+          embedUrl: 'https://www.youtube-nocookie.com/embed/abc123',
+        }),
+      },
+    });
+    expect(wrapper.find('.card-play').exists()).toBe(true);
+    expect(wrapper.find('a.card-title').text()).toBe('www.youtube.com');
+    expect(wrapper.find('a.card-title').attributes('href')).toBe(
+      'https://www.youtube.com/watch?v=abc123',
+    );
+    // ⚠ ...and the CONTROL is named from the same string. It read `Play ${preview.title ?? 'video'}`
+    // — so on the one record this whole fallback exists for, every play button in the buffer was
+    // called "Play video", which is the identical-names defect `imageLabel` was written to avoid.
+    expect(wrapper.find('.card-play').attributes('aria-label')).toBe('Play www.youtube.com');
+  });
+});
+
+describe('MessageAttachment — the two card shapes', () => {
+  beforeEach(() => seedSettings());
+
+  // #692 items 2 and 3. A card is a small square beside its text, or text on its own.
+  //
+  // ⚠⚠ A THIRD shape — the landscape band under the text, Discord's large embed — was built and
+  // removed after looking at it on real links. Its tests are gone with it, but the property they
+  // were really guarding survives here: whatever shape a card takes, it must take it from the
+  // DESCRIPTOR and not from the image. Measuring the picture on load would make the layout depend
+  // on bytes, so every card would lay out once and re-arrange on decode (R1).
+  //
+  // ⚠ The LINE BUDGET half of #692 (title 2, description 3) is pure CSS with no class binding to
+  // observe, and happy-dom applies no stylesheet — so there is deliberately no test for it here
+  // rather than one that would stay green with every clamp deleted.
+
+  const page = (over: Partial<LinkPreview> = {}) =>
+    preview({
+      url: 'https://news.example/article',
+      kind: 'page',
+      title: 'A headline',
+      description: 'A standfirst.',
+      thumb: '/api/link-preview/media/tokP',
+      ...over,
+    });
+
+  it('puts the image beside the text as a small square, whatever shape it is', () => {
+    // ⚠ The dimensions here are GitHub's real 1200x600 — a landscape share image, and once the
+    // trigger for the band. They must change nothing now: a shape that varies per link is
+    // exactly what was removed, and a descriptor field nothing reads is the easiest thing in the
+    // world to start reading again by accident.
+    const wide = mount(MessageAttachment, {
+      props: { preview: page({ thumbWidth: 1200, thumbHeight: 600 }) },
+    });
+    const square = mount(MessageAttachment, {
+      props: { preview: page({ thumbWidth: 512, thumbHeight: 512 }) },
+    });
+    const undeclared = mount(MessageAttachment, { props: { preview: page() } });
+
+    for (const wrapper of [wide, square, undeclared]) {
+      expect(wrapper.find('.card-thumb').attributes('src')).toBe('/api/link-preview/media/tokP');
+      // Not the player's box either, which is the only ratio-reserved block left.
+      expect(wrapper.find('.card-media').exists()).toBe(false);
+      // Text leads, in source order — nothing is re-ordered visually.
+      const kids = [...wrapper.find('.card').element.children].map((el) => el.className);
+      expect(kids).toEqual(['card-text', 'card-thumb']);
+    }
+  });
+
+  it('degrades to text only when the card has no image', () => {
+    // ⚠ `pageRecord` returns ok on a title OR an image, so this is an ordinary answer and not an
+    // edge case. Reserving the square regardless would leave an empty box beside the text —
+    // furniture for a picture that is never coming.
+    const wrapper = mount(MessageAttachment, { props: { preview: page({ thumb: undefined }) } });
+    expect(wrapper.find('.card').exists()).toBe(true);
+    expect(wrapper.text()).toContain('A headline');
+    expect(wrapper.find('.card-thumb').exists()).toBe(false);
+  });
+
+  it('is never empty, never nameless, and never without a link', () => {
+    // ⚠⚠ The regression this suite exists for now. `pageRecord` returns ok on a title OR an
+    // image, so a titleless card is an ordinary answer — and with the heading gated on `title`,
+    // each of these rendered as a tinted panel with NO anchor: a preview that goes nowhere,
+    // looks finished, and reads to a screen reader as an empty div, because the thumbnail is
+    // `alt=""`. The last one rendered as literally `<div class="card"></div>`.
+    //
+    // Reachable, not theoretical: `pageRecord` deliberately stores ok records with title,
+    // description and imageUrl all null (the `!embed` clause), and `toDescriptor` downgrades
+    // such a row to `kind: 'page'` whenever `isEmbeddableOrigin` refuses its cached embedUrl.
+    // ⚠⚠ The `siteName` rung is the one PRODUCTION ACTUALLY TAKES, and an earlier version of this
+    // test could not see it: every fixture omitted `siteName`, so deleting that rung outright
+    // left the suite green (mutation-checked). `pageRecord` sets
+    // `providerName || og:site_name || url.hostname` on EVERY ok record, so a real titleless card
+    // always has one — and dropping the rung would silently downgrade "The Guardian" to
+    // "www.theguardian.com" everywhere with nothing red. The value here is deliberately NOT equal
+    // to the URL's host, or it could not tell the two rungs apart.
+    const cases = [
+      [
+        'an image, no title, real site name',
+        page({ title: undefined, siteName: 'Example News' }),
+        'Example News',
+      ],
+      ['a description and no title', page({ title: undefined }), 'news.example'],
+      [
+        'nothing at all',
+        preview({ url: 'https://news.example/article', kind: 'page' }),
+        'news.example',
+      ],
+      // ⚠ The URL rung must spell a host the way the SERVER spells it. `pageRecord` clamps
+      // `url.hostname`, and `URL.host` — which this used — appends the port, so one site was
+      // named `nas.local` or `nas.local:8096` depending on which rung fired. A non-default port
+      // is ordinary on exactly the self-hosted and LAN links this client is for. (Copilot found
+      // it; two `/code-review max` rounds did not.)
+      [
+        'a non-default port',
+        preview({ url: 'https://nas.local:8096/share/x', kind: 'page' }),
+        'nas.local',
+      ],
+    ] as const;
+
+    for (const [what, p, expected] of cases) {
+      const wrapper = mount(MessageAttachment, { props: { preview: p } });
+      const link = wrapper.find('a.card-title');
+      // ⚠ `${what}` in the assertion, not just in a comment: four mounts in one test otherwise
+      // report an anonymous failure and the reader has to count them.
+      expect(`${what}: ${link.exists()}`).toBe(`${what}: true`);
+      // ⚠ Against the case's OWN url. Hardcoded, this asserted the fixture rather than the
+      // component, and a case carrying a different URL failed on the wrong line.
+      expect(`${what}: ${link.attributes('href')}`).toBe(`${what}: ${p.url}`);
+      expect(`${what}: ${link.text()}`).toBe(`${what}: ${expected}`);
+    }
+  });
+
+  it('prefers the page title over the fallback, so the host shows up nowhere', () => {
+    // The other direction, and the reason `heading` is not the site line returning: when a page
+    // HAS a title that is the whole heading, and the hostname appears in no part of the card.
+    const wrapper = mount(MessageAttachment, { props: { preview: page() } });
+    expect(wrapper.find('a.card-title').text()).toBe('A headline');
+    expect(wrapper.text()).not.toContain('news.example');
+  });
+
+  it('keeps a video card a COLUMN, or its text collapses to nothing', () => {
+    // ⚠⚠ The one load-bearing class binding here, and it had no guard: deleting
+    // `:class="{ 'card-video': isVideo }"` left the whole suite green.
+    //
+    // Losing it does not merely re-arrange the card, it DELETES the text. `.card` stays a row;
+    // `.card-text` is `flex: 1` (basis 0%) while `.card-media` carries `width: 100%` (basis =
+    // the entire content box), so the bases already fill the line and the text resolves to 0px
+    // wide — title and description vanish behind their own `overflow: hidden`, silently.
+    const wrapper = mount(MessageAttachment, { props: { preview: YOUTUBE } });
+    expect(wrapper.find('.card').classes()).toContain('card-video');
+    // ...and a page card must NOT get it, or its thumbnail drops below the text.
+    const card = mount(MessageAttachment, { props: { preview: page() } });
+    expect(card.find('.card').classes()).not.toContain('card-video');
   });
 });
 
