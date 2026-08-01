@@ -48,6 +48,9 @@ let puts: Put[] = [];
 let objects = new Map<string, { body: Buffer; contentType: string }>();
 /** Flip to make every write fail, without changing anything else. */
 let bucketRejects = false;
+/** Flip to serve reads without a Content-Length, as a proxy in front of a bucket
+ *  (or MinIO/Garage under some configurations) will. */
+let bucketOmitsLength = false;
 
 let bucket: http.Server;
 let bucketBase: string;
@@ -108,6 +111,12 @@ beforeAll(async () => {
         const held = objects.get(req.url || '');
         if (!held) {
           res.writeHead(404).end('no such key');
+          return;
+        }
+        if (bucketOmitsLength) {
+          // No content-length and no explicit framing → node sends it chunked.
+          res.writeHead(200, { 'content-type': held.contentType });
+          res.end(held.body);
           return;
         }
         res.writeHead(200, {
@@ -174,6 +183,7 @@ beforeEach(async () => {
   puts = [];
   objects = new Map();
   bucketRejects = false;
+  bucketOmitsLength = false;
   const { default: db } = await import('../db/index.js');
   db.prepare('DELETE FROM preview_cache').run();
 });
@@ -402,5 +412,101 @@ describe('the s3 byte cache, end to end', () => {
     await whenStoresSettle();
     expect(countCached()).toBe(0);
     expect(puts.some((p) => p.method === 'PUT')).toBe(false);
+  });
+});
+
+describe('resource bounds and diagnostics', () => {
+  it('declines a store rather than queueing when too many are already in flight', async () => {
+    // ⚠⚠ `mediaPool`'s 24 slots do NOT cover this. The route calls `commit` without
+    // awaiting — so a slow bucket cannot hold a reader's response open — and gives
+    // its pool slot back on the response's `close` at the same moment. The hash and
+    // the PUT therefore run outside the pool for up to 60 s, each pinning a staged
+    // file and a socket. One session at the route's own rate limit would otherwise
+    // accumulate hundreds of both.
+    const { openS3Write, storesInFlightForTests } = await import('../services/previewCache/s3.js');
+    const { cacheConfig } = await import('../services/previewCache/index.js');
+    const cfg = cacheConfig();
+    if (cfg.mode !== 's3') throw new Error('unreachable');
+
+    const opened = [];
+    for (let i = 0; i < 16; i++) {
+      const w = await openS3Write(cfg, `bound-${i}`);
+      expect(`writer ${i}: ${w ? 'open' : 'refused'}`).toBe(`writer ${i}: open`);
+      opened.push(w!);
+    }
+    expect(storesInFlightForTests()).toBe(16);
+    // ⚠ The 17th is REFUSED, not queued — a queue would bound sockets and not files.
+    expect(await openS3Write(cfg, 'bound-over')).toBeNull();
+
+    // ...and the ceiling is released, not leaked, so the next request can store.
+    for (const w of opened) await w.abort();
+    expect(storesInFlightForTests()).toBe(0);
+    const after = await openS3Write(cfg, 'bound-after');
+    expect(after).not.toBeNull();
+    await after!.abort();
+  });
+
+  it('declines a bucket read that arrives without a Content-Length', async () => {
+    // ⚠⚠ `headers.get()` answers null when the header is absent and `Number(null)`
+    // is 0 — finite, and under any cap. So a `Number.isFinite` test alone waves
+    // through exactly the responses it cannot bound, and `arrayBuffer()` pulls the
+    // whole body into the heap inside a `mediaPool` slot. Declining costs a
+    // re-fetch, which is what a cache miss already is.
+    servePng();
+    const token = tokenFor('/unframed-read.png');
+    await agent.get(`/api/link-preview/media/${token}`);
+    await whenStoresSettle();
+    expect(originHits).toBe(1);
+
+    bucketOmitsLength = true;
+    const after = await agent.get(`/api/link-preview/media/${token}`);
+    expect(after.status).toBe(200);
+    expect(Buffer.from(after.body).equals(PNG)).toBe(true);
+    // ⚠ THE assertion: the bucket read was declined, so the ORIGIN was asked again.
+    // Without the guard this is 1 — served from a body nothing had bounded.
+    expect(originHits).toBe(2);
+  });
+
+  it('sweeps rows left behind by a backend that is no longer configured', async () => {
+    // ⚠ `lookup` forgets a foreign row only if a request asks for that exact key,
+    // and after a mode switch nothing ever does — the descriptor never mints for a
+    // backend that is not current. Without this the table keeps rows for bytes that
+    // are unreachable by construction, for the life of the instance.
+    const { sweepPreviewCache } = await import('../services/previewCache/index.js');
+    const { recordCached, countCached } = await import('../db/previewCache.js');
+
+    recordCached({ key: 'leftover-local', backend: 'local', contentType: 'image/png', size: 10 });
+    recordCached({ key: 'current-s3', backend: 's3', contentType: 'image/png', size: 10 });
+    expect(countCached()).toBe(2);
+
+    await sweepPreviewCache();
+    // The foreign row goes; the current backend's fresh row stays.
+    expect(countCached()).toBe(1);
+  });
+
+  it('says something when the bucket refuses every store, instead of failing silently', async () => {
+    // ⚠ Config validation proves the five env vars are PRESENT, nothing more. A
+    // wrong secret, a policy denial or a typo'd bucket name all resolve to a
+    // working-looking `s3` mode where every store fails and nothing is ever logged —
+    // an operator with no thread to pull. "Never a failure path" is about not
+    // breaking the request, not about staying silent.
+    const { resetWarnThrottleForTests } = await import('../services/previewCache/s3.js');
+    // ⚠ The throttle is global and a minute long, so an earlier test in this file
+    // silences this one. That is the throttle working — an operator whose bucket is
+    // misconfigured wants one line a minute, not one per image — but it makes the
+    // assertion order-dependent unless the window is cleared first. Found by this
+    // test failing for exactly that reason.
+    resetWarnThrottleForTests();
+    const warns: string[] = [];
+    const spy = vi.spyOn(console, 'warn').mockImplementation((m) => void warns.push(String(m)));
+    try {
+      bucketRejects = true;
+      servePng();
+      await agent.get(`/api/link-preview/media/${tokenFor('/loud.png')}`);
+      await whenStoresSettle();
+      expect(warns.some((w) => w.includes('[preview-cache]') && w.includes('403'))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

@@ -49,6 +49,10 @@ const EXPIRED = db.prepare<[string, string, number], Row>(
   `SELECT cache_key, backend, content_type, size, created_at FROM preview_cache
     WHERE backend = ? AND created_at < ? ORDER BY created_at ASC LIMIT ?`,
 );
+const FOREIGN = db.prepare<[string, number], Row>(
+  `SELECT cache_key, backend, content_type, size, created_at FROM preview_cache
+    WHERE backend <> ? LIMIT ?`,
+);
 
 export interface CacheEntry {
   key: string;
@@ -168,6 +172,25 @@ export function coldestCached(backend: string, limit: number): CacheEntry[] {
  */
 export function expiredCached(backend: string, cutoffIso: string, limit: number): CacheEntry[] {
   return EXPIRED.all(backend, cutoffIso, limit).map((row) => ({
+    key: row.cache_key,
+    backend: row.backend,
+    contentType: row.content_type,
+    size: row.size,
+    createdAt: row.created_at,
+  }));
+}
+
+/**
+ * Rows belonging to a backend that is no longer the configured one.
+ *
+ * ⚠ An operator who switches `local` → `s3` leaves every old row behind, and
+ * nothing else revisits them: `lookup` forgets a foreign row only if a request
+ * happens to ask for that exact key, which for a mode nobody is using never
+ * happens. Left alone the table keeps rows forever for bytes that are unreachable
+ * by construction.
+ */
+export function foreignCached(backend: string, limit: number): CacheEntry[] {
+  return FOREIGN.all(backend, limit).map((row) => ({
     key: row.cache_key,
     backend: row.backend,
     contentType: row.content_type,

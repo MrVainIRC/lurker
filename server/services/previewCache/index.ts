@@ -20,7 +20,13 @@
 // requests for one object. Buffering 64 MB per miss would trade the bandwidth this
 // feature saves for memory it cannot bound.
 
-import { expiredCached, lookupCached, recordCached, forget } from '../../db/previewCache.js';
+import {
+  expiredCached,
+  foreignCached,
+  lookupCached,
+  recordCached,
+  forget,
+} from '../../db/previewCache.js';
 import { kindForContentType, MAX_IMAGE_PROXY_BYTES } from '../linkPreview.js';
 import { cacheConfig, cacheEnabled, expired, MAX_AGE_MS } from './config.js';
 import { evictLocal, objectPath, openLocalWrite, readLocal, removeLocal } from './local.js';
@@ -91,6 +97,25 @@ export async function sweepPreviewCache(): Promise<number> {
       // issuing a DELETE per expired row would be one billed API call each to
       // duplicate work the bucket is already doing.
       if (cfg.mode === 'local' && !(await removeLocal(cfg, entry.key))) continue;
+      forget(entry.key);
+      swept++;
+    }
+
+    // ⚠⚠ Rows from a backend that is no longer configured, which nothing else ever
+    // revisits. `lookup` drops a foreign row only when a request asks for that
+    // exact key — and after a mode switch nothing does, because the descriptor
+    // never mints for a backend that is not current. Left alone they are rows for
+    // bytes that are unreachable by construction, kept for the life of the
+    // instance.
+    //
+    // ⚠ The ROW only, never the bytes, and the asymmetry is deliberate: this
+    // process holds the configuration for the CURRENT backend and nothing else, so
+    // it cannot know where a `local` row's file lived or which bucket an `s3` row's
+    // object is in. Guessing a path from the current config would delete whatever
+    // happened to sit at that path. Switching modes therefore leaves the old
+    // backend's bytes for the operator to remove — one directory, documented in
+    // .env.example as safe to delete, or one bucket prefix.
+    for (const entry of foreignCached(cfg.mode, SWEEP_BATCH)) {
       forget(entry.key);
       swept++;
     }

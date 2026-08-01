@@ -72,6 +72,49 @@ const OBJECT_CACHE_CONTROL = 'public, max-age=86400';
  *  proxy sends, and one of the three that object storage will actually replay. */
 const OBJECT_CONTENT_DISPOSITION = 'inline';
 
+/**
+ * Stores whose bytes are still moving — staged, hashing, or mid-PUT.
+ *
+ * ⚠ Module state rather than a field on the config, because the config is a plain
+ * value that is re-resolved by tests and the bound has to survive that. One
+ * process, one bucket, one ceiling.
+ */
+let storesInFlight = 0;
+/** Generous next to `mediaPool`'s 24, because these are meant to be short — the
+ *  ceiling is a backstop against a stalled bucket, not a throughput knob. */
+const MAX_STORES_IN_FLIGHT = 16;
+
+/** Test seam: the bound is invisible from outside until it bites. */
+export function storesInFlightForTests(): number {
+  return storesInFlight;
+}
+
+/**
+ * ⚠ A cache is not a failure path, but a cache that fails FOREVER and SILENTLY is
+ * an operator support burden. Config validation only proves the five env vars are
+ * present — a wrong secret, a bucket policy denial, a typo'd bucket name or a
+ * scheme-less endpoint all resolve to a working-looking `s3` mode where every
+ * store fails, nothing populates, and no line is ever logged. `local` at least
+ * leaves errno-shaped evidence on the volume.
+ *
+ * ⚠ Throttled to once a minute, and deliberately not per-key: the failure mode
+ * this exists for is EVERY store failing, so an unthrottled warning would be one
+ * line per image request in the log of a server that is otherwise fine.
+ */
+let lastWarnAt = 0;
+
+/** Test seam: the throttle is global, so one test warning silences the next. */
+export function resetWarnThrottleForTests(): void {
+  lastWarnAt = 0;
+}
+
+function warnOnce(message: string): void {
+  const now = Date.now();
+  if (now - lastWarnAt < 60_000) return;
+  lastWarnAt = now;
+  console.warn(`[preview-cache] ${message}`);
+}
+
 /** Where a reader is sent. Public by construction — that is the point of the mode. */
 export function publicUrl(cfg: S3CacheConfig, key: string): string {
   return `${cfg.publicBaseUrl}/${objectKey(cfg, key)}`;
@@ -179,11 +222,16 @@ export async function readS3(cfg: S3CacheConfig, key: string, maxBytes: number):
       await res.text().catch(() => '');
       return { kind: 'error' };
     }
-    // ⚠ Bounded before reading, not after. An object larger than the cap cannot
-    // have been stored by us, so this is a bucket someone else is also writing to
-    // — a reason to decline, not a reason to pull it into the heap first.
-    const declared = Number(res.headers.get('content-length'));
-    if (Number.isFinite(declared) && declared > maxBytes) {
+    // ⚠⚠ Bounded before reading, not after — and an ABSENT length is declined, not
+    // waved through. `headers.get()` answers null when the header is missing and
+    // `Number(null)` is 0, which is finite and under any cap, so a `Number.isFinite`
+    // test alone passes exactly the responses it cannot bound: a chunked reply from
+    // a caching proxy in front of the bucket, or a large object someone else wrote
+    // to that key. `arrayBuffer()` would then pull the whole thing into the heap
+    // inside a `mediaPool` slot, which is what this guard exists to stop.
+    const raw = res.headers.get('content-length');
+    const declared = raw === null ? Number.NaN : Number(raw);
+    if (!Number.isFinite(declared) || declared > maxBytes) {
       await res.text().catch(() => '');
       return { kind: 'error' };
     }
@@ -252,15 +300,42 @@ export interface S3Writer {
  * `uploadProviders/multipart.ts` exists at all.
  */
 export async function openS3Write(cfg: S3CacheConfig, key: string): Promise<S3Writer | null> {
+  // ⚠⚠ ITS OWN BOUND, because `mediaPool`'s does not reach this far. The route
+  // calls `commit` without awaiting it — deliberately, so a slow bucket cannot
+  // hold a reader's response open — and hands its pool slot back on the response's
+  // `close` at the same moment. The hash pass and the PUT therefore run entirely
+  // OUTSIDE the 24 slots, for up to `putSource`'s 60 s timeout, each one pinning a
+  // staged file and an outbound socket. Without this, one authenticated session at
+  // the route's own rate limit accumulates hundreds of staged files (gigabytes in
+  // a directory nothing sweeps for `s3`) and hundreds of simultaneous sockets, in
+  // the process running every tenant's IRC connections.
+  //
+  // ⚠ DECLINED at the ceiling, never queued. A queue would bound the sockets and
+  // not the files, and would make an already-slow bucket slower still; declining
+  // is free, because the reader has their bytes and all that is lost is the saving
+  // on the next read.
+  if (storesInFlight >= MAX_STORES_IN_FLIGHT) return null;
+
   const staged = await openTempFile(cfg.stagingDir, key);
   if (!staged) return null;
+
+  storesInFlight++;
+  let settled = false;
+  const settle = (): void => {
+    if (settled) return;
+    settled = true;
+    storesInFlight--;
+  };
 
   return {
     write(chunk: Buffer): void {
       staged.write(chunk);
     },
     async commit(contentType: string): Promise<boolean> {
-      if (!(await staged.close())) return false;
+      if (!(await staged.close())) {
+        settle();
+        return false;
+      }
       try {
         const { size } = await fs.stat(staged.path);
         const source = fileSource(staged.path, size);
@@ -286,18 +361,23 @@ export async function openS3Write(cfg: S3CacheConfig, key: string): Promise<S3Wr
         // stalled PUT per miss, each holding its payload, in the process running
         // every tenant's IRC connections — an OOM reachable from a config typo.
         const resp = await putSource(signed.url, source, { headers: signed.headers });
-        return resp.status >= 200 && resp.status < 300;
-      } catch {
+        if (resp.status >= 200 && resp.status < 300) return true;
+        warnOnce(`bucket refused a store: ${resp.status} ${resp.text.slice(0, 200)}`);
+        return false;
+      } catch (err) {
+        warnOnce(`store failed: ${(err as Error)?.message ?? err}`);
         return false;
       } finally {
         // ⚠ ALWAYS, on every exit. The staging file is ours and nothing else knows
         // it exists — not the index, not eviction — so a leak here is bytes on the
         // volume that no later pass can find.
         await fs.unlink(staged.path).catch(() => {});
+        settle();
       }
     },
     async abort(): Promise<void> {
       await staged.discard();
+      settle();
     },
   };
 }
