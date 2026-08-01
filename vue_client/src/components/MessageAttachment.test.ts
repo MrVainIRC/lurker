@@ -331,15 +331,27 @@ describe('MessageAttachment — the two card shapes', () => {
         preview({ url: 'https://news.example/article', kind: 'page' }),
         'news.example',
       ],
+      // ⚠ The URL rung must spell a host the way the SERVER spells it. `pageRecord` clamps
+      // `url.hostname`, and `URL.host` — which this used — appends the port, so one site was
+      // named `nas.local` or `nas.local:8096` depending on which rung fired. A non-default port
+      // is ordinary on exactly the self-hosted and LAN links this client is for. (Copilot found
+      // it; two `/code-review max` rounds did not.)
+      [
+        'a non-default port',
+        preview({ url: 'https://nas.local:8096/share/x', kind: 'page' }),
+        'nas.local',
+      ],
     ] as const;
 
     for (const [what, p, expected] of cases) {
       const wrapper = mount(MessageAttachment, { props: { preview: p } });
       const link = wrapper.find('a.card-title');
-      // ⚠ `${what}` in the assertion, not just in a comment: three mounts in one test otherwise
+      // ⚠ `${what}` in the assertion, not just in a comment: four mounts in one test otherwise
       // report an anonymous failure and the reader has to count them.
       expect(`${what}: ${link.exists()}`).toBe(`${what}: true`);
-      expect(`${what}: ${link.attributes('href')}`).toBe(`${what}: https://news.example/article`);
+      // ⚠ Against the case's OWN url. Hardcoded, this asserted the fixture rather than the
+      // component, and a case carrying a different URL failed on the wrong line.
+      expect(`${what}: ${link.attributes('href')}`).toBe(`${what}: ${p.url}`);
       expect(`${what}: ${link.text()}`).toBe(`${what}: ${expected}`);
     }
   });

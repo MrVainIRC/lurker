@@ -233,13 +233,20 @@ const isVideo = computed(() => props.preview.kind === 'video-embed' && !!props.p
  *
  * ⚠ This is NOT the site line coming back. There is no separate row for it — when a page has a
  * title, that is the whole heading and the hostname appears nowhere.
+ *
+ * ⚠ `hostname`, NOT `host`, and the difference is the PORT. This rung is a backstop for the
+ * server's own last resort, so it has to produce the same string the server would: `pageRecord`
+ * clamps `url.hostname`, and `host` appends `:8096` to it. Otherwise one card is named
+ * `nas.local` or `nas.local:8096` depending on which rung happened to fire — two spellings of one
+ * site, from the same URL, which is the disagreeing-parsers class this feature has a rule about.
+ * Self-hosted and LAN links are exactly where a non-default port is ordinary. (Copilot.)
  */
 const heading = computed(() => {
   const p = props.preview;
   if (p.title) return p.title;
   if (p.siteName) return p.siteName;
   try {
-    return new URL(p.url).host || p.url;
+    return new URL(p.url).hostname || p.url;
   } catch {
     // A URL that won't parse is still a string worth showing over an empty card.
     return p.url;
