@@ -17,6 +17,14 @@ import { requireAuth } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { RequestThrottle } from '../middleware/rateLimit.js';
 import {
+  byteCacheKey,
+  beginStore,
+  cacheEnabled,
+  cacheable,
+  lookup,
+  trackPendingStore,
+} from '../services/previewCache/index.js';
+import {
   resolvePreview,
   toDescriptor,
   proxyableContentType,
@@ -59,6 +67,32 @@ const resolveThrottle = new RequestThrottle({
  * day, so a re-scroll costs nothing) and far below what a loop does.
  */
 const mediaThrottle = new RequestThrottle({ windowMs: 60_000, maxRequests: 300 });
+
+/**
+ * The response headers every byte answer carries, live or cached.
+ *
+ * ⚠⚠ Extracted rather than duplicated, and that is the point. These are the
+ * security headers that keep a third party's bytes from being interpreted as
+ * anything but the media type we allowlisted, and the cache added a SECOND way to
+ * send a response body. Two copies would drift, and the copy that drifts is the
+ * one nobody looks at — a cached image served without `nosniff` is the same
+ * vulnerability as an uncached one, arrived at by omission.
+ */
+function applyMediaHeaders(res: Response, contentType: string): void {
+  res.setHeader('Content-Type', contentType);
+  // Belt and braces against the response being interpreted as anything other
+  // than the media type we just allowlisted.
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+  // No filename: it would come from a URL someone else controls.
+  res.setHeader('Content-Disposition', 'inline');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  // The token is a pure function of the URL, so a given token always denotes
+  // the same bytes — safe to cache hard, and it's what keeps a scroll through
+  // an image-heavy channel from re-proxying on every pass. `private` because
+  // the response travels over an authenticated session.
+  res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
+}
 
 /**
  * Byte fetches in flight across the whole instance.
@@ -206,6 +240,16 @@ router.get(
       return;
     }
 
+    // ⚠ The cache is consulted before the fetch, but NOT before the pool. An
+    // earlier version returned a hit ahead of `mediaPool.acquire()` on the
+    // reasoning that a hit does no outbound work — true of sockets and DNS, and
+    // inverted for memory. A hit reads the whole object into RSS, so bypassing the
+    // only concurrency bound let one session at the 300/min throttle ceiling park
+    // ~300 x 8 MB while the pool sat idle, and it got WORSE the warmer the cache
+    // was. The pool bounds a resource the cache also spends.
+    const isRange = typeof req.headers.range === 'string' && req.headers.range !== '';
+    const cacheKey = byteCacheKey(url.toString());
+
     if (!(await mediaPool.acquire())) {
       // Saturated, not broken. 503 + Retry-After so a media element backs off and retries,
       // rather than 404, which an <img> treats as a permanent verdict and never re-asks.
@@ -257,6 +301,22 @@ router.get(
     if (res.destroyed) {
       release();
       return;
+    }
+
+    // ⚠ Inside the pool, and after `release` is wired to the response's `close`, so
+    // a hit gives its slot back the same way a fetch does. `lookup` never throws —
+    // that is this module's headline promise, and it was a claim before it was true:
+    // `lookupCached` takes a WAL write lock for its `last_access` touch, and a
+    // SQLITE_BUSY thrown from here used to escape a `try` that had not opened yet
+    // and 500 an image request that would have succeeded with caching off.
+    if (cacheEnabled() && !isRange) {
+      const hit = await lookup(cacheKey);
+      if (hit) {
+        applyMediaHeaders(res, hit.contentType);
+        res.setHeader('Content-Length', String(hit.body.length));
+        res.status(200).end(hit.body);
+        return;
+      }
     }
 
     try {
@@ -329,19 +389,7 @@ router.get(
         return;
       }
 
-      res.setHeader('Content-Type', upstream.contentType);
-      // Belt and braces against the response being interpreted as anything other
-      // than the media type we just allowlisted.
-      res.setHeader('X-Content-Type-Options', 'nosniff');
-      res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
-      // No filename: it would come from a URL someone else controls.
-      res.setHeader('Content-Disposition', 'inline');
-      res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-      // The token is a pure function of the URL, so a given token always denotes
-      // the same bytes — safe to cache hard, and it's what keeps a scroll through
-      // an image-heavy channel from re-proxying on every pass. `private` because
-      // the response travels over an authenticated session.
-      res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
+      applyMediaHeaders(res, upstream.contentType);
 
       // Range plumbing, so a media element can seek. ⚠ Only claimed when the origin actually
       // demonstrated it: advertising `Accept-Ranges: bytes` for a source that ignores Range
@@ -371,6 +419,24 @@ router.get(
       }
       res.status(upstream.status === 206 ? 206 : 200);
 
+      // ⚠⚠ STREAMED to the cache, never buffered. Collecting the object first cost a
+      // copy in `chunks` plus a second at `Buffer.concat`, and the per-request 8 MB
+      // ceiling multiplied by mediaPool's 24 slots — ~192 MB steady state, ~384 MB
+      // transient, memory the uncached path never allocated, reachable by anyone
+      // authenticated opening 24 concurrent large images. The destination is a file,
+      // so there was never a reason for the bytes to sit in RSS on the way there.
+      //
+      // ⚠ `declared` when the origin gave one, the cap when it did not: the writer
+      // reserves room before the first byte, and under-reserving is how the ceiling
+      // gets crossed.
+      const wantCache = cacheable(upstream.contentType, isRange) && upstream.status !== 206;
+      const writer = wantCache
+        ? await beginStore(cacheKey, Number.isFinite(declared) ? declared : cap)
+        : null;
+      // Registered only once there is something to decide; settled on every exit
+      // below. Only a test waits on it — see `trackPendingStore`.
+      const settleDecision = writer ? trackPendingStore() : null;
+
       // Enforce the cap on bytes actually seen, not on the declared length — an
       // origin can omit Content-Length or lie about it.
       let sent = 0;
@@ -380,9 +446,58 @@ router.get(
         if (sent > cap) {
           stream.destroy();
           res.destroy();
+          return;
         }
+        writer?.write(chunk);
       });
       stream.on('error', () => res.destroy());
+
+      // ⚠⚠ `end` is what means "the origin sent a COMPLETE object", and it is the only
+      // thing that may authorise a store. A body cut short is still a stream of real
+      // bytes — cached, it becomes a permanently broken image served to everyone
+      // afterwards and held by their browsers for a day. `close` fires either way,
+      // which is why it cannot be the trigger, and why this is latched rather than
+      // inferred afterwards.
+      let ended = false;
+      stream.on('end', () => {
+        ended = true;
+      });
+
+      // ⚠ DECIDED on `close`, because that is the one event guaranteed to fire on
+      // every path — finished, destroyed by the cap, or aborted by the client — so
+      // the decision is always settled and never left dangling.
+      stream.on('close', () => {
+        if (!writer) return;
+        // ⚠⚠ THE BODY MUST BE FRAMED, and `ended` alone does not prove it. Node emits
+        // `end` — with `complete` true — for a body framed only by the connection
+        // closing, because to the protocol a closed connection IS the terminator: a
+        // truncated one is indistinguishable from a finished one. This route makes
+        // that the common case rather than an exotic one, since `linkFetch` runs its
+        // agents `keepAlive: false` and every request therefore carries
+        // `Connection: close` — exactly the condition RFC 7230 §3.3.3 lets an origin
+        // omit framing under.
+        //
+        // ⚠ Chunked counts as framed: a chunked body cut short does NOT emit `end` —
+        // node raises `aborted` and leaves `complete` false — so `ended` already
+        // proves completeness there. Requiring a Content-Length outright would have
+        // refused to cache every chunked origin, which is a great many of them, to
+        // fix a hazard chunked does not have.
+        const chunked = String(upstream!.headers['transfer-encoding'] ?? '')
+          .toLowerCase()
+          .includes('chunked');
+        const framed = chunked || (Number.isFinite(declared) && declared === sent);
+        if (!ended || !framed || sent > cap) {
+          void writer.abort().finally(() => settleDecision?.());
+          return;
+        }
+        // Deliberately not awaited: the reader already has their bytes, and a slow
+        // disk must not hold the response open. Failures are the cache's own problem
+        // — the writer swallows them and simply stays a miss.
+        void writer
+          .commit(upstream!.contentType)
+          .catch(() => {})
+          .finally(() => settleDecision?.());
+      });
       stream.pipe(res);
     } catch {
       // Blocked address, timeout, reset — all the same to a caller waiting on an
