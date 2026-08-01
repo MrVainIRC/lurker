@@ -31,21 +31,45 @@
 // The only design where all six survive is proxying the bytes, which is what
 // `local` does and what this mode exists to avoid.
 //
-// What makes that acceptable rather than merely accepted:
+// Taken one at a time, because they are NOT equally missed:
 //
-//   - Only ALLOWLISTED IMAGE types are ever stored. `cacheable()` asks
-//     `kindForContentType`, the one place `image/svg+xml` is refused — "a
-//     scripting format wearing a picture's clothes" — so the content class those
-//     three headers defend against never reaches the bucket. `nosniff` and the
-//     CSP sandbox are defending a door this mode does not open.
-//   - `Content-Type` IS stored, and set from the type we validated rather than
-//     from anything the origin asserted unchecked, so there is nothing generic or
-//     absent for a browser to sniff around in the first place.
-//   - CORP was protecting against hotlinking, a property this mode has already
-//     given up deliberately: a cached object is public for its retention window,
-//     the same way Slack's and Discord's are. See LINK_PREVIEWS_CACHE_PLAN.md.
+//   - CORP costs NOTHING, and calling it a concession was wrong. Its job is
+//     keeping a resource out of a hostile page's process (the Spectre-era
+//     COOP/COEP family); these objects are deliberately public, so there is
+//     nothing to isolate. And the proxy's own value, `same-origin`, would BREAK a
+//     CDN object — a page on the app origin embedding one is cross-origin by
+//     definition. The only workable value on a separate host is `cross-origin`,
+//     which is the permissive default. We could not have used it if we could set
+//     it.
+//   - `nosniff` is a SMALL loss. It matters most when the type is absent or
+//     generic (`text/plain`, `application/octet-stream`); a concrete `image/*` is
+//     stored here, and browsers do not sniff a document out of a declared image
+//     type on a top-level navigation. For an `<img>` load it is irrelevant
+//     either way — the decoder goes by magic bytes and a non-image just fails.
+//   - The CSP `sandbox` is the REAL loss of the three, and only for someone
+//     navigating DIRECTLY to an object URL: it forces an opaque origin with no
+//     script execution, so bytes a browser did decide to treat as a document
+//     stay inert. CSP on a subresource is otherwise ignored.
 //
-// An operator who wants the other three can add them at the CDN edge (Cloudflare
+// ⚠⚠ AND THE THING THAT ACTUALLY BOUNDS THIS IS NOT A HEADER. All three only
+// matter if non-image bytes can be stored under an image content type — and today
+// they can: `kindForContentType` tests the DECLARED type
+// (`contentType.startsWith('image/')`, with `image/svg+xml` refused) and nothing
+// on the byte path inspects the body. An origin under an attacker's control
+// serves `Content-Type: image/png` with an HTML body, and we cache it verbatim;
+// the URL is minted to their own client, so they can hand it to anyone.
+//
+// ⚠ An earlier version of this comment claimed the stored `Content-Type` was
+// "set from the type we validated rather than from anything the origin asserted
+// unchecked". That was not true — the allowlist validates the origin's CLAIM, not
+// the bytes — and it is the sort of false reassurance that stops the next person
+// looking. Validating the bytes at store time removes the whole class for every
+// backend at once, which is the right altitude and is tracked separately; until
+// then this is a real, if narrow, residual: content on the CDN origin rather than
+// the app origin, and Lurker's session cookie is host-only, so it is not a
+// session-theft path.
+//
+// An operator who wants the other two can add them at the CDN edge (Cloudflare
 // Transform Rules and equivalents do this), which is a deployment choice we can
 // document but cannot enforce from here.
 
