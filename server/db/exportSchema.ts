@@ -487,6 +487,15 @@ export const EXPORT_TABLES = Object.freeze({
       'has seen without adding anything they could not refetch',
   },
 
+  preview_cache: {
+    mode: 'skip',
+    reason:
+      'the index for the preview BYTE cache — url hashes, sizes and content types for ' +
+      'files held on disk or in a bucket. Derived from link_previews, which is skipped ' +
+      'for the same reason, and useless on a target instance whose cache directory or ' +
+      'bucket does not contain the objects it names',
+  },
+
   webauthn_credentials: {
     mode: 'skip',
     reason:

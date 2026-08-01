@@ -257,7 +257,10 @@ function clamp(value: string | undefined, max: number): string | null {
  * media scrubbing), and letting one in here would reintroduce the same hole
  * through a different door.
  */
-function kindForContentType(contentType: string): PreviewKind | null {
+/** ⚠ Exported so the byte cache can ask the SAME allowlist rather than keeping a
+ *  second copy. `image/svg+xml` is refused here and nowhere else, and a duplicated
+ *  rule is how it nearly got served under our own origin once already. */
+export function kindForContentType(contentType: string): PreviewKind | null {
   if (contentType === 'image/svg+xml') return null;
   if (contentType.startsWith('image/')) return 'image';
   if (contentType.startsWith('video/')) return 'video';

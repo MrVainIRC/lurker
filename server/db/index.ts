@@ -682,6 +682,30 @@ function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_link_previews_expires ON link_previews(expires_at);
 
+    -- Bookkeeping for the preview BYTE cache (issue #681). ⚠ Metadata only — the
+    -- bytes live on disk or in a bucket, never here. The DB is Litestream-replicated
+    -- to R2, so blobs in a table would continuously ship every cached image to object
+    -- storage, which is the expensive mistake that looks convenient at the time.
+    --
+    -- Existence lives here rather than being probed from the backend because the
+    -- point of the cache is to avoid a round trip: a HEAD to S3 on every byte request
+    -- would trade an origin fetch for a bucket fetch. It also gives the local backend its LRU
+    -- accounting for free — a SUM(size) and an ORDER BY beat a readdir and N stats.
+    CREATE TABLE IF NOT EXISTS preview_cache (
+      cache_key TEXT PRIMARY KEY,
+      backend TEXT NOT NULL,
+      content_type TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_access TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- ⚠ COMPOSITE, and covering the eviction query exactly. Both eviction reads
+    -- filter on backend and then order by last_access, so an index on last_access
+    -- alone still scans; these run synchronously on the one shared connection that
+    -- also serves WebSocket fan-out and IRC sockets, on the byte path.
+    CREATE INDEX IF NOT EXISTS idx_preview_cache_evict
+      ON preview_cache(backend, last_access, created_at);
+
     -- RPE2E end-to-end-encryption keyring (issue #382). Secrets — the identity
     -- private key and the session keys — are stored as secretCrypto envelopes
     -- (TEXT, the same lk1.* at-rest scheme as network credentials); public
