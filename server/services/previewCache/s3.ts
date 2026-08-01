@@ -54,7 +54,7 @@ import { peekCached } from '../../db/previewCache.js';
 import { fileSource, hashOf } from '../uploadProviders/source.js';
 import { putSource } from '../uploadProviders/multipart.js';
 import { signObjectRequest } from '../uploadProviders/s3.js';
-import { openTempFile } from './local.js';
+import { openTempFile } from './tempFile.js';
 import { byteCacheKey, cacheConfig, expired, type S3CacheConfig } from './config.js';
 
 /**
