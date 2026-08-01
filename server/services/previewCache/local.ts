@@ -65,21 +65,35 @@ export interface LocalWriter {
   abort(): Promise<void>;
 }
 
-export async function openLocalWrite(
-  cfg: LocalCacheConfig,
-  key: string,
-): Promise<LocalWriter | null> {
-  const target = objectPath(cfg, key);
+/**
+ * Bytes accumulating in a temp file, to be published or thrown away.
+ *
+ * ⚠ Extracted so the `s3` backend can stage through the same code rather than
+ * collecting an object in memory to PUT it. Both backends have the same problem —
+ * chunks arrive from a stream, the destination is not a heap buffer — and only
+ * the publish step differs: `local` renames, `s3` uploads and unlinks.
+ */
+export interface TempFile {
+  path: string;
+  write(chunk: Buffer): void;
+  /** Close, and report whether the bytes are intact. The file is the caller's to
+   *  move or delete afterwards; a `false` has already cleaned up. */
+  close(): Promise<boolean>;
+  /** Close and delete, whatever state it is in. Safe to call twice. */
+  discard(): Promise<void>;
+}
+
+export async function openTempFile(dir: string, name: string): Promise<TempFile | null> {
   // ⚠⚠ RANDOM, not pid+timestamp. Nothing dedupes the byte path — `mediaPool`
   // bounds concurrency, not identity — so several writes of the SAME key can be in
   // flight at once. Two in the same millisecond shared a temp path, and a write
   // truncates only at open: the shorter one left the longer body's tail in place
   // and published a file matching NEITHER, under a row recording the shorter
   // length. Reproduced with 4 MB and 1 MB bodies while this was pid+timestamp.
-  const tmp = `${target}.${crypto.randomUUID()}.tmp`;
+  const tmp = path.join(dir, `${name}.${crypto.randomUUID()}.tmp`);
   let handle: fsSync.WriteStream;
   try {
-    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.mkdir(dir, { recursive: true });
     handle = fsSync.createWriteStream(tmp);
   } catch {
     return null;
@@ -117,6 +131,7 @@ export async function openLocalWrite(
     });
 
   return {
+    path: tmp,
     write(chunk: Buffer): void {
       if (done || broken) return;
       // Backpressure is deliberately not awaited: the response is already being
@@ -124,7 +139,7 @@ export async function openLocalWrite(
       // bounds this at the transfer's cap, which is what the memory fix is about.
       handle.write(chunk);
     },
-    async commit(): Promise<boolean> {
+    async close(): Promise<boolean> {
       if (done) return false;
       done = true;
       await closeStream();
@@ -132,25 +147,48 @@ export async function openLocalWrite(
         await fs.unlink(tmp).catch(() => {});
         return false;
       }
-      try {
-        // `rename` within a directory is atomic, so a concurrent read sees either
-        // nothing (a miss, which re-fetches) or the whole object — never a prefix,
-        // which would be served as a truncated image and held for a day.
-        await fs.rename(tmp, target);
-        return true;
-      } catch {
-        await fs.unlink(tmp).catch(() => {});
-        return false;
-      }
+      return true;
     },
-    async abort(): Promise<void> {
-      if (done) return;
-      done = true;
-      await closeStream();
+    async discard(): Promise<void> {
+      if (!done) {
+        done = true;
+        await closeStream();
+      }
       // ⚠ The temp file is OURS. Left behind it is invisible to the index and
       // therefore to eviction — bytes on the volume nothing counts and nothing can
       // reclaim.
       await fs.unlink(tmp).catch(() => {});
+    },
+  };
+}
+
+export async function openLocalWrite(
+  cfg: LocalCacheConfig,
+  key: string,
+): Promise<LocalWriter | null> {
+  const target = objectPath(cfg, key);
+  const staged = await openTempFile(path.dirname(target), key);
+  if (!staged) return null;
+
+  return {
+    write(chunk: Buffer): void {
+      staged.write(chunk);
+    },
+    async commit(): Promise<boolean> {
+      if (!(await staged.close())) return false;
+      try {
+        // `rename` within a directory is atomic, so a concurrent read sees either
+        // nothing (a miss, which re-fetches) or the whole object — never a prefix,
+        // which would be served as a truncated image and held for a day.
+        await fs.rename(staged.path, target);
+        return true;
+      } catch {
+        await fs.unlink(staged.path).catch(() => {});
+        return false;
+      }
+    },
+    async abort(): Promise<void> {
+      await staged.discard();
     },
   };
 }

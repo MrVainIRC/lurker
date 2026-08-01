@@ -45,6 +45,10 @@ const COLDEST = db.prepare<[string, number], Row>(
     WHERE backend = ? ORDER BY last_access ASC, created_at ASC LIMIT ?`,
 );
 const COUNT_ALL = db.prepare<[], { n: number }>(`SELECT COUNT(*) AS n FROM preview_cache`);
+const EXPIRED = db.prepare<[string, string, number], Row>(
+  `SELECT cache_key, backend, content_type, size, created_at FROM preview_cache
+    WHERE backend = ? AND created_at < ? ORDER BY created_at ASC LIMIT ?`,
+);
 
 export interface CacheEntry {
   key: string;
@@ -87,6 +91,36 @@ export function lookupCached(key: string): CacheEntry | null {
   };
 }
 
+/**
+ * Look an object up WITHOUT marking it read.
+ *
+ * ⚠⚠ A separate function rather than a flag on `lookupCached`, because the two
+ * have opposite hot paths and getting it wrong is a write amplification bug. This
+ * one is called at DESCRIPTOR-MINT time — once per image per resolve, and once
+ * per image per row of a backlog snapshot when Part 2's `previewsForTexts` lands.
+ * `lookupCached`'s `last_access` touch is a WAL write on the one shared
+ * connection that also serves WebSocket fan-out and IRC sockets; firing it per
+ * row of a 500-row resume snapshot is precisely the shape of the event-loop
+ * starvation `SNAPSHOT_SLOW_MS` exists to catch.
+ *
+ * ⚠ Skipping the touch costs nothing in eviction accuracy, because minting is not
+ * reading: the browser fetches the object from the CDN and the cell never learns
+ * it happened. `last_access` is meaningful for `local`, which serves every byte
+ * itself, and is inherently approximate for `s3`, whose retention is a bucket
+ * lifecycle rule rather than an LRU.
+ */
+export function peekCached(key: string): CacheEntry | null {
+  const row = SELECT_ENTRY.get(key);
+  if (!row) return null;
+  return {
+    key: row.cache_key,
+    backend: row.backend,
+    contentType: row.content_type,
+    size: row.size,
+    createdAt: row.created_at,
+  };
+}
+
 /** Record a stored object. Upsert, because two readers can race the same miss. */
 export function recordCached(entry: Omit<CacheEntry, 'createdAt'>): void {
   UPSERT_ENTRY.run(entry.key, entry.backend, entry.contentType, entry.size);
@@ -113,6 +147,27 @@ export function cachedBytes(backend: string): number {
  */
 export function coldestCached(backend: string, limit: number): CacheEntry[] {
   return COLDEST.all(backend, limit).map((row) => ({
+    key: row.cache_key,
+    backend: row.backend,
+    contentType: row.content_type,
+    size: row.size,
+    createdAt: row.created_at,
+  }));
+}
+
+/**
+ * Entries stored before `cutoffIso`, oldest first.
+ *
+ * ⚠ Candidates rather than a DELETE, for the same reason `coldestCached` is: the
+ * row and the bytes live in different places and the caller has to remove the
+ * bytes first. A blanket `DELETE ... WHERE created_at < ?` would be one statement
+ * and would orphan every `local` file it forgot.
+ *
+ * ⚠ ISO strings compare correctly as TEXT — that is why `created_at` is stored
+ * ISO-with-Z rather than SQLite's `datetime('now')`. See the schema note.
+ */
+export function expiredCached(backend: string, cutoffIso: string, limit: number): CacheEntry[] {
+  return EXPIRED.all(backend, cutoffIso, limit).map((row) => ({
     key: row.cache_key,
     backend: row.backend,
     contentType: row.content_type,
