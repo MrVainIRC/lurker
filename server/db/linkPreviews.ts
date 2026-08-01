@@ -38,10 +38,17 @@ export const FAIL_TTL_MS = 60 * 60 * 1000;
  * Bumped whenever the resolver would produce a DIFFERENT RECORD for the same input.
  *
  * Folded into the cache key, so a bump orphans every old row rather than requiring a schema
- * change or a manual flush — the expiry sweep collects them in its own time. ⚠ It orphans them
- * ALL, not only the affected ones, so every previously-previewed URL is re-fetched from its
- * origin the next time somebody scrolls past it. That is the price of the mechanism and the
- * reason this is a deliberate edit rather than something derived from a file hash.
+ * change or a manual flush — the expiry sweep collects them in its own time.
+ *
+ * ⚠ It is a BLUNT instrument, and worth costing before reaching for it. It orphans every row of
+ * every kind, not the affected ones, so the whole table is re-fetched from its origins; with
+ * `MAX_CONCURRENT` at 20 instance-wide and a 10 s queue wait, a busy first load after deploy can
+ * hand back `unavailable` for links that would have been cache hits, and those wait out the
+ * re-ask ladder. And it reaches a running client slowly: previews resolve at message INGEST and
+ * an `ok` entry is never re-asked before its own `expiresAt`, so an open tab keeps rendering
+ * what it already has until a reload — a bump is not a push. Where the affected rows are
+ * describable by a predicate, a one-shot boot migration (`db/migrateEventMode.ts` and its
+ * siblings) targets them without disturbing anything else.
  *
  * This is not hypothetical bookkeeping. During development the YouTube fix was invisible for
  * an hour after it shipped, because the previous code had already cached
@@ -57,9 +64,19 @@ export const FAIL_TTL_MS = 60 * 60 * 1000;
  * the loudest case: a change that fills in a FIELD leaves every affected row a perfectly good
  * `ok`, so nothing looks stale anywhere and the new value is simply missing for a week on every
  * URL anyone had already pasted. From outside a process that is indistinguishable from the
- * feature never having worked, which is how it gets reported. v3 below is exactly that shape,
- * and it was already merged and live before anyone noticed the bump was owed. Say what changed
- * on the line below.
+ * feature never having worked, which is how it gets reported.
+ *
+ * ⚠ Live example, deliberately left unfixed here rather than fixed in passing: **#697** taught
+ * `imageDimensions` to measure WebP and GIF headers sharp refuses to read, so `kind: 'image'`
+ * rows now carry dimensions where they stored null — a different record, and no bump was taken
+ * with it. Every such row cached before it is still a live hit with no dimensions, so the client
+ * reserves `.dim-reserve` instead of the picture's own aspect: the exact QA report #697 was
+ * merged to fix. `imageDimensions` has one call site and it is `kind === 'image'` only
+ * (`linkPreview.ts:501`), so the affected set is `kind='image' AND image_width IS NULL` — which
+ * a targeted migration can clear without orphaning the other kinds. That choice belongs to
+ * whoever fixes it; it is recorded here so the next reader does not have to rediscover it.
+ *
+ * Say what changed on the line below.
  *
  *   v1 — initial.
  *   v2 — a video embed survives a page with no title and no image (a rate-limited provider
@@ -68,16 +85,8 @@ export const FAIL_TTL_MS = 60 * 60 * 1000;
  *        rows into `ok` ones, which is precisely what this counter is for — and the `urlHash`
  *        rewrite in the same change is NOT a substitute, because it produces byte-identical
  *        hashes for canonically-spelled URLs and so orphans none of the affected rows.
- *   v3 — #697: `imageDimensions` measures WebP and GIF headers sharp refuses to read, so those
- *        records now carry `imageWidth`/`imageHeight` where they stored null. ⚠ Owed by that
- *        change and not taken with it — every WebP or GIF over 64 KB previewed before it is
- *        still a live cache hit with no dimensions, so `toDescriptor` omits `thumbWidth`, the
- *        client reserves `.dim-reserve` instead of the picture's own aspect, and the QA report
- *        #697 was merged to fix ("solo .webp renders with the fallback placeholder, .png
- *        doesn't") is still true for every one of them. Verbatim the failure the rule above now
- *        describes, which is how it was found.
  */
-const RESOLVER_VERSION = 3;
+const RESOLVER_VERSION = 2;
 
 /**
  * Cache key: the requested URL, scoped to the resolver version.

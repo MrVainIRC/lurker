@@ -237,6 +237,10 @@ describe('MessageAttachment — video embed', () => {
     expect(wrapper.find('a.card-title').attributes('href')).toBe(
       'https://www.youtube.com/watch?v=abc123',
     );
+    // ⚠ ...and the CONTROL is named from the same string. It read `Play ${preview.title ?? 'video'}`
+    // — so on the one record this whole fallback exists for, every play button in the buffer was
+    // called "Play video", which is the identical-names defect `imageLabel` was written to avoid.
+    expect(wrapper.find('.card-play').attributes('aria-label')).toBe('Play www.youtube.com');
   });
 });
 
@@ -308,21 +312,35 @@ describe('MessageAttachment — the two card shapes', () => {
     // Reachable, not theoretical: `pageRecord` deliberately stores ok records with title,
     // description and imageUrl all null (the `!embed` clause), and `toDescriptor` downgrades
     // such a row to `kind: 'page'` whenever `isEmbeddableOrigin` refuses its cached embedUrl.
+    // ⚠⚠ The `siteName` rung is the one PRODUCTION ACTUALLY TAKES, and an earlier version of this
+    // test could not see it: every fixture omitted `siteName`, so deleting that rung outright
+    // left the suite green (mutation-checked). `pageRecord` sets
+    // `providerName || og:site_name || url.hostname` on EVERY ok record, so a real titleless card
+    // always has one — and dropping the rung would silently downgrade "The Guardian" to
+    // "www.theguardian.com" everywhere with nothing red. The value here is deliberately NOT equal
+    // to the URL's host, or it could not tell the two rungs apart.
     const cases = [
-      ['an image and no title', page({ title: undefined, description: undefined })],
-      ['a description and no title', page({ title: undefined })],
-      ['nothing at all', preview({ url: 'https://news.example/article', kind: 'page' })],
+      [
+        'an image, no title, real site name',
+        page({ title: undefined, siteName: 'Example News' }),
+        'Example News',
+      ],
+      ['a description and no title', page({ title: undefined }), 'news.example'],
+      [
+        'nothing at all',
+        preview({ url: 'https://news.example/article', kind: 'page' }),
+        'news.example',
+      ],
     ] as const;
 
-    for (const [what, p] of cases) {
+    for (const [what, p, expected] of cases) {
       const wrapper = mount(MessageAttachment, { props: { preview: p } });
       const link = wrapper.find('a.card-title');
       // ⚠ `${what}` in the assertion, not just in a comment: three mounts in one test otherwise
       // report an anonymous failure and the reader has to count them.
       expect(`${what}: ${link.exists()}`).toBe(`${what}: true`);
       expect(`${what}: ${link.attributes('href')}`).toBe(`${what}: https://news.example/article`);
-      // Falls back to the host, which is the one thing every card can always show.
-      expect(`${what}: ${link.text()}`).toBe(`${what}: news.example`);
+      expect(`${what}: ${link.text()}`).toBe(`${what}: ${expected}`);
     }
   });
 

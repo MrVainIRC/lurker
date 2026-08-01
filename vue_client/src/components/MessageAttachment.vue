@@ -83,10 +83,15 @@
          goes nowhere and names nothing still costs a card slot and a row of height.
          `heading` cannot be empty, so this element always exists and the card always links. -->
     <div class="card-text">
+      <!-- ⚠ No `:title`. A previous round added one so a clamped heading could still be read in
+           full, and it cost more than it bought: on a link whose title fits it is a tooltip
+           byte-identical to the text under it, and since a link takes its name from its content
+           the attribute falls through to the accessible DESCRIPTION and is announced twice. It
+           also does nothing where the clamp actually bites — the narrow viewport this card has a
+           media query for is the one with no hover at all. -->
       <a
         class="card-title"
         :href="preview.url"
-        :title="heading"
         target="_blank"
         rel="noreferrer noopener"
         @click.stop
@@ -120,27 +125,38 @@
            `scheme://host` — which for a self-hosted instance can itself be identifying. What is
            bought is the feature existing at all, and what is NOT given up is the path: never
            which channel, which buffer, or which message.
-           ⚠ `origin` rather than `strict-origin`, deliberately. They are byte-identical while
-           both EMBED_ORIGINS are https, and differ on an http page — where `strict-origin` sends
-           nothing and puts Error 153 straight back. Lurker is self-hosted and routinely reached
-           over plain http on a LAN, so the stricter value would break the case most likely to
-           hit it.
+           ⚠ `origin` rather than `strict-origin` because `origin` is the value the A/B actually
+           measured. An earlier version of this comment justified the choice by claiming they
+           differ on an http page, with `strict-origin` sending nothing — that is backwards.
+           Referrer Policy suppresses only on a DOWNGRADE (secure → insecure), and both
+           EMBED_ORIGINS are https, so an http LAN page framing them is an upgrade and the two
+           values are byte-identical in every configuration reachable today. `strict-origin` is
+           the safer default the moment a non-https embed origin is ever added; it is not adopted
+           here on the strength of a spec reading, because a spec reading is what produced the
+           sentence this one replaces.
            The privacy property doing the real work is the facade above: nothing at all is
            requested from the video host until the reader asks for it. -->
       <iframe
         v-if="playing"
+        ref="embedEl"
         class="card-embed"
         :src="preview.embedUrl"
-        title="Video player"
+        :title="`${heading} — video player`"
         allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
         referrerpolicy="origin"
         allowfullscreen
       ></iframe>
+      <!-- ⚠ Named from `heading`, not from `preview.title`. The record `heading` exists for — the
+           degraded embed with no title at all — is exactly the one whose control was called
+           "Play video", so two rate-limited YouTube links in a buffer presented two
+           identically-named buttons: the defect `imageLabel` is written to prevent, on the
+           element next to it. (`?? 'video'` also let a wire `title: ''` name it "Play ";
+           `heading`'s truthiness ladder falls through.) -->
       <button
         v-else
         type="button"
         class="card-play"
-        :aria-label="`Play ${preview.title ?? 'video'}`"
+        :aria-label="`Play ${heading}`"
         @click.stop="play"
       >
         <img
@@ -168,7 +184,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref, useTemplateRef } from 'vue';
 import type { LinkPreview } from '../composables/useLinkPreview.js';
 import { useSettingsStore } from '../stores/settings.js';
 
@@ -195,6 +211,7 @@ const emit = defineEmits<{ measured: []; activate: [] }>();
 
 const settings = useSettingsStore();
 const playing = ref(false);
+const embedEl = useTemplateRef<HTMLIFrameElement>('embedEl');
 
 const isVideo = computed(() => props.preview.kind === 'video-embed' && !!props.preview.embedUrl);
 
@@ -257,7 +274,7 @@ const heading = computed(() => {
  * Whether the server could measure this image.
  *
  * The `width`/`height` attributes are what reserve the box before any bytes arrive, so their
- * ABSENCE is the one case where an inline image's height depends on the decode — see `.no-dims`.
+ * ABSENCE is the one case where an inline image's height depends on the decode — see `.dim-reserve`.
  * `imageDimensions` fails legitimately and not rarely: an exotic format, or a header sharp can't
  * parse inside the 64 KB it reads.
  */
@@ -289,12 +306,26 @@ const needsReservedBox = computed(() => !props.inStrip && !hasDimensions.value);
  *     focus, dumping a keyboard user back to `<body>` mid-strip.
  *
  * The byte-independence rule this file serves is already satisfied without any of it: the
- * width/height attributes survive a failed load, and `.no-dims` pins the one shape that has none.
+ * width/height attributes survive a failed load, and `.dim-reserve` pins the one shape that has none.
  * A broken-image glyph in a correctly-sized box is a smaller problem than every one of the above.
  */
 
+/**
+ * Swap the facade for the real player.
+ *
+ * ⚠ The focus move is not a nicety. `v-if="playing"` unmounts the button that is
+ * `document.activeElement` at the moment a keyboard user presses Enter on it, so focus falls to
+ * `<body>` and the next Tab restarts at the top of the document — past every message above, and
+ * never reaching the player they just opened. This file already names that failure in so many
+ * words for a different case ("dumping a keyboard user back to `<body>` mid-strip"), which is
+ * how it was noticed here.
+ *
+ * `nextTick` because the iframe does not exist until the re-render, and `?.` because a card
+ * unmounted in the same tick (a re-render dropping the attachment) has nothing to focus.
+ */
 function play(): void {
   playing.value = true;
+  void nextTick(() => embedEl.value?.focus());
 }
 
 // The viewer is opt-out (chat.image_modal.enabled); when it's off, an inline image is just an
@@ -509,6 +540,16 @@ function activate(): void {
   font-weight: 600;
   text-decoration: none;
   overflow-wrap: anywhere;
+  /* ⚠⚠ Sized to its TEXT, not to the column. `-webkit-box` is block-level and this is a flex item
+     of a column that never set `align-items`, so the default `stretch` made the anchor span the
+     full width — and the anchor is now unconditional. On a card whose heading is a 12-character
+     hostname that is a few hundred pixels of blank navigation target: a tap there opens a new tab
+     (`target="_blank"`), and the row's own click never fires, which on touch is the only thing
+     that opens the message-actions sheet. Same defect class this file records twice already, at
+     the reserved-box wrapper and at `@click.stop`.
+     Shrink-to-fit does not weaken the clamp: the width resolves to min(max-content, available),
+     so a long heading still wraps at the column edge and still stops at two lines. */
+  align-self: flex-start;
   /* Two lines. ⚠ `-webkit-box` REPLACES `display: block` rather than joining it — clamping is a
      property of that box type, so an anchor left inline (or set to block) ignores the clamp
      silently. */
@@ -553,9 +594,19 @@ function activate(): void {
    geometry, not a presentation choice, and any other value letterboxes a real video inside its
    own player. The ratio lives on the wrapper so the box exists before the thumbnail's bytes do,
    which is the same byte-independence direct media gets from its width/height attributes. */
+/* ⚠⚠ `width: 100%` is scoped to the column, and the scoping is the guard. Unscoped, this rule
+   arms the sizing that DELETES the card's text: in a row, a basis of the whole content box beside
+   `.card-text`'s basis of 0% leaves the text at 0px wide, hidden behind its own `overflow`. What
+   disarmed it was a class binding, so every CSS-side way of losing the column — renaming
+   `.card-video`, dropping its `flex-direction`, a later media query, a future non-video card
+   wanting this box — kept the suite green while the title vanished. happy-dom applies no
+   stylesheet, so no test can ever observe that; expressing the dependency in the selector is what
+   makes it unlosable. */
+.card-video .card-media {
+  width: 100%;
+}
 .card-media {
   position: relative;
-  width: 100%;
   aspect-ratio: 16 / 9;
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -572,6 +623,12 @@ function activate(): void {
   cursor: pointer;
   position: relative;
 }
+/* ⚠ Drawn INSIDE the box. This button exactly fills `.card-media`, which is `overflow: hidden`,
+   so a UA focus ring — painted outside the border box — is clipped away entirely and a keyboard
+   user tabbing onto a video card sees nothing move before pressing Enter. */
+.card-play:focus-visible {
+  outline-offset: -3px;
+}
 .card-thumb-wide {
   width: 100%;
   height: 100%;
@@ -586,6 +643,12 @@ function activate(): void {
   height: 48px;
   border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--bg) 70%, transparent);
+  /* ⚠ The ring is what makes this a control when there is NO thumbnail. The fill is `--bg` at 70%
+     alpha and it sits on `.card-media`, which paints `--bg` — and 70%-alpha X over X is X, so on
+     a thumbnail-less video card (the degraded record, and a real state this suite mounts) the
+     pill was perfectly invisible and the ▶ floated bare on a flat rectangle. A border reads in
+     both cases: an edge here, a light rim against a photo. */
+  border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
   color: var(--fg);
   display: flex;
   align-items: center;
