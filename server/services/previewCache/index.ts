@@ -24,7 +24,7 @@ import crypto from 'crypto';
 import { lookupCached, recordCached, forget } from '../../db/previewCache.js';
 import { kindForContentType } from '../linkPreview.js';
 import { resolveCacheConfig, type CacheConfig } from './config.js';
-import { evictLocal, objectPath, readLocal, removeLocal, writeLocal } from './local.js';
+import { evictLocal, objectPath, openLocalWrite, readLocal, removeLocal } from './local.js';
 
 export type { CacheConfig, CacheMode } from './config.js';
 export { objectPath };
@@ -36,6 +36,25 @@ export interface BufferHit {
   contentType: string;
 }
 export type CacheHit = BufferHit;
+
+/** A store in progress. The route feeds it the bytes it is already streaming. */
+export interface StoreWriter {
+  write(chunk: Buffer): void;
+  commit(contentType: string): Promise<boolean>;
+  abort(): Promise<void>;
+}
+
+/**
+ * How long a cached object may be served before it is re-fetched.
+ *
+ * ⚠ Deliberately the same seven days as `link_previews`' OK_TTL. The two caches
+ * describe the same URL, and letting the bytes outlive the metadata means an image
+ * that changed at a stable address — an avatar, a `latest.png` — is served from
+ * disk long after the record for it was re-resolved. Eviction is by PRESSURE, so
+ * without an age bound the staleness window is unbounded; before this cache
+ * existed it was a day.
+ */
+const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * The cache key for one URL's BYTES.
@@ -120,7 +139,7 @@ export function cacheable(contentType: string | undefined, isRangeRequest: boole
  * forever, costing a failed read before the origin fetch that was going to happen
  * anyway, because nothing else ever revisits the row.
  *
- * ⚠⚠ The SIZE is checked, not just presence. `writeLocal` does not fsync before
+ * ⚠⚠ The SIZE is checked, not just presence. the writer does not fsync before
  * renaming, so a power loss or a killed container can leave a short file under a
  * row (WAL-durable) claiming the full length. `readFile` then succeeds, nothing
  * throws, and the stump is served with `max-age=86400, immutable` — a permanently
@@ -142,13 +161,36 @@ export async function lookup(key: string): Promise<CacheHit | null> {
       return null;
     }
 
-    const body = await readLocal(cfg, key);
-    if (!body || body.length !== entry.size) {
-      forget(key);
-      if (body) await removeLocal(cfg, key);
+    // ⚠ An AGE bound as well as a size one. Eviction is by pressure, so without this
+    // an entry at a stable URL that changes underneath it — an avatar, a
+    // `latest.png` — is served from disk indefinitely under `max-age=86400,
+    // immutable`, long after the metadata row has re-resolved. Before the cache
+    // existed the staleness window was a day; unbounded is a regression, not a
+    // feature. Matched to the metadata cache's own OK_TTL so the two agree.
+    if (Date.now() - Date.parse(entry.createdAt) > MAX_AGE_MS) {
+      if (await removeLocal(cfg, key)) forget(key);
       return null;
     }
-    return { kind: 'buffer', body, contentType: entry.contentType };
+
+    const read = await readLocal(cfg, key);
+    // ⚠⚠ Only a GENUINELY MISSING file forgets its row. `readLocal` used to collapse
+    // every errno to null, so a transient EMFILE — 24 concurrent reads is within
+    // this pool's own budget — or an EACCES after a permissions change deleted the
+    // index row while the object stayed on disk. That is an orphan eviction can
+    // never count and lookup can never find, in a module whose whole premise is
+    // that the index is how we know what exists. Any other error is just a miss.
+    if (read.kind === 'missing') {
+      forget(key);
+      return null;
+    }
+    if (read.kind === 'error') return null;
+    if (read.body.length !== entry.size) {
+      // ⚠ The row is dropped only if the bad file actually went with it — otherwise
+      // we would forget an object that is still on the volume.
+      if (await removeLocal(cfg, key)) forget(key);
+      return null;
+    }
+    return { kind: 'buffer', body: read.body, contentType: entry.contentType };
   } catch {
     return null;
   }
@@ -200,25 +242,65 @@ export function whenStoresSettle(): Promise<void> {
  * design cannot tolerate quietly.
  */
 export async function store(key: string, body: Buffer, contentType: string): Promise<boolean> {
+  const writer = await beginStore(key, body.length);
+  if (!writer) return false;
+  writer.write(body);
+  return writer.commit(contentType);
+}
+
+/**
+ * Begin storing an object whose bytes are still arriving.
+ *
+ * ⚠ Room is made HERE, before a byte is written, so the ceiling is never crossed
+ * and eviction is not gated on the success of the write it exists to enable —
+ * which is what made it unreachable on a full volume, the one time it matters.
+ * `expected` is the origin's declared length when it gave one, and the transfer
+ * cap when it did not: over-reserving by a few megabytes is cheap, and under-
+ * reserving is how the ceiling gets crossed.
+ *
+ * ⚠ An object LARGER than the whole ceiling is refused outright. Without that,
+ * `evictLocal` loops toward a total it can never reach, throws away up to a full
+ * batch of live entries, and stores the oversized object anyway — so a small
+ * ceiling with large images means every single store wipes the cache and the hit
+ * rate collapses to nothing.
+ */
+export async function beginStore(key: string, expected: number): Promise<StoreWriter | null> {
   try {
     const cfg = cacheConfig();
-    if (cfg.mode !== 'local') return false;
+    if (cfg.mode !== 'local') return null;
 
-    // ⚠ Room is made BEFORE the write, so the ceiling is never crossed and eviction
-    // is not gated on the success of the very write it exists to enable — which is
-    // what made it unreachable on a full volume, the one time it matters.
-    await evictLocal(cfg, body.length);
+    if (expected > cfg.maxBytes) return null;
 
-    if (!(await writeLocal(cfg, key, body))) return false;
-    try {
-      recordCached({ key, backend: cfg.mode, contentType, size: body.length });
-    } catch {
-      // The bytes landed but the index did not, so nothing could ever find them.
-      await removeLocal(cfg, key);
-      return false;
-    }
-    return true;
+    await evictLocal(cfg, expected);
+    const writer = await openLocalWrite(cfg, key);
+    if (!writer) return null;
+
+    let size = 0;
+    return {
+      write(chunk: Buffer): void {
+        size += chunk.length;
+        writer.write(chunk);
+      },
+      async commit(contentType: string): Promise<boolean> {
+        try {
+          if (size === 0 || !(await writer.commit())) return false;
+          try {
+            recordCached({ key, backend: cfg.mode, contentType, size });
+          } catch {
+            // The bytes landed but the index did not, so nothing could find them.
+            await removeLocal(cfg, key);
+            return false;
+          }
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      async abort(): Promise<void> {
+        await writer.abort().catch(() => {});
+      },
+    };
   } catch {
-    return false;
+    return null;
   }
 }

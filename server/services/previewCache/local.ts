@@ -7,6 +7,7 @@
 // re-fetch, not data.
 
 import crypto from 'crypto';
+import fsSync from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
 import { cachedBytes, coldestCached, forget } from '../../db/previewCache.js';
@@ -22,47 +23,117 @@ export function objectPath(cfg: LocalCacheConfig, key: string): string {
   return path.join(cfg.dir, key.slice(0, 2), key);
 }
 
-export async function readLocal(cfg: LocalCacheConfig, key: string): Promise<Buffer | null> {
+/**
+ * ⚠⚠ Distinguishes GONE from BROKEN, and the distinction is load-bearing.
+ *
+ * Both are a miss to the caller, so an earlier version collapsed every errno to
+ * null — and the caller then forgot the index row for all of them. A transient
+ * EMFILE (24 concurrent reads is within this pool's own budget) or an EACCES after
+ * a permissions change therefore deleted the row while the object stayed on disk:
+ * an orphan eviction can never count and lookup can never find, in a module whose
+ * whole premise is that the index is how we know what exists. Only ENOENT means
+ * the file is really gone.
+ */
+export type LocalRead = { kind: 'ok'; body: Buffer } | { kind: 'missing' } | { kind: 'error' };
+
+export async function readLocal(cfg: LocalCacheConfig, key: string): Promise<LocalRead> {
   try {
-    return await fs.readFile(objectPath(cfg, key));
-  } catch {
-    // ⚠ Any failure is a MISS, not an error. The index and the disk can disagree —
-    // a wiped volume, a half-written file, a permissions change — and every one of
-    // those should re-fetch from the origin rather than fail a request for an image.
-    return null;
+    return { kind: 'ok', body: await fs.readFile(objectPath(cfg, key)) };
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === 'ENOENT'
+      ? { kind: 'missing' }
+      : { kind: 'error' };
   }
 }
 
-export async function writeLocal(
+/**
+ * A write in progress: bytes go to a temp file and are published, or thrown away.
+ *
+ * ⚠⚠ STREAMED, never buffered. Collecting the object in memory first cost a full
+ * copy in `chunks` plus a second at `Buffer.concat`, and the per-request 8 MB
+ * ceiling multiplied by `mediaPool`'s 24 slots — ~192 MB steady state and ~384 MB
+ * transient, memory the uncached path never allocated at all, reachable by anyone
+ * authenticated opening 24 concurrent large images. The destination is a file
+ * either way, so there was never a reason for the bytes to sit in RSS on the way
+ * there.
+ */
+export interface LocalWriter {
+  write(chunk: Buffer): void;
+  /** Publish under the real key. Atomic — a reader sees all of it or none. */
+  commit(): Promise<boolean>;
+  /** Throw the partial file away. Safe to call twice. */
+  abort(): Promise<void>;
+}
+
+export async function openLocalWrite(
   cfg: LocalCacheConfig,
   key: string,
-  body: Buffer,
-): Promise<boolean> {
+): Promise<LocalWriter | null> {
   const target = objectPath(cfg, key);
   // ⚠⚠ RANDOM, not pid+timestamp. Nothing dedupes the byte path — `mediaPool`
-  // bounds concurrency, not identity, and the store is fired un-awaited — so
-  // several writes of the SAME key can be in flight at once. Two in the same
-  // millisecond shared a temp path, and `fs.writeFile` truncates only at open: the
-  // shorter write left the longer body's tail in place and published a file
-  // matching NEITHER body, under a row recording the shorter length. Reproduced
-  // with 4 MB and 1 MB bodies while this was pid+timestamp.
+  // bounds concurrency, not identity — so several writes of the SAME key can be in
+  // flight at once. Two in the same millisecond shared a temp path, and a write
+  // truncates only at open: the shorter one left the longer body's tail in place
+  // and published a file matching NEITHER, under a row recording the shorter
+  // length. Reproduced with 4 MB and 1 MB bodies while this was pid+timestamp.
   const tmp = `${target}.${crypto.randomUUID()}.tmp`;
+  let handle: fsSync.WriteStream;
   try {
     await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(tmp, body);
-    // `rename` within a directory is atomic, so a concurrent `readLocal` sees
-    // either nothing (a miss, which re-fetches) or the whole object — never a
-    // prefix, which would be served as a truncated image and held by a browser
-    // for a day.
-    await fs.rename(tmp, target);
-    return true;
+    handle = fsSync.createWriteStream(tmp);
   } catch {
-    // ⚠ The temp file is OURS to clean up. Left behind it is invisible to the
-    // index and therefore to eviction — bytes on the volume that nothing counts
-    // and nothing can ever reclaim.
-    await fs.unlink(tmp).catch(() => {});
-    return false;
+    return null;
   }
+  // A write error (ENOSPC, EROFS) must not become an unhandled 'error' event and
+  // take the process down; it is recorded and turns commit into a no-op.
+  let broken = false;
+  handle.on('error', () => {
+    broken = true;
+  });
+
+  let done = false;
+  const closeStream = () =>
+    new Promise<void>((resolve) => {
+      handle.end(() => resolve());
+    });
+
+  return {
+    write(chunk: Buffer): void {
+      if (done || broken) return;
+      // Backpressure is deliberately not awaited: the response is already being
+      // piped to the reader and must not wait on our disk. The stream's own buffer
+      // bounds this at the transfer's cap, which is what the memory fix is about.
+      handle.write(chunk);
+    },
+    async commit(): Promise<boolean> {
+      if (done) return false;
+      done = true;
+      await closeStream();
+      if (broken) {
+        await fs.unlink(tmp).catch(() => {});
+        return false;
+      }
+      try {
+        // `rename` within a directory is atomic, so a concurrent read sees either
+        // nothing (a miss, which re-fetches) or the whole object — never a prefix,
+        // which would be served as a truncated image and held for a day.
+        await fs.rename(tmp, target);
+        return true;
+      } catch {
+        await fs.unlink(tmp).catch(() => {});
+        return false;
+      }
+    },
+    async abort(): Promise<void> {
+      if (done) return;
+      done = true;
+      await closeStream();
+      // ⚠ The temp file is OURS. Left behind it is invisible to the index and
+      // therefore to eviction — bytes on the volume nothing counts and nothing can
+      // reclaim.
+      await fs.unlink(tmp).catch(() => {});
+    },
+  };
 }
 
 /**

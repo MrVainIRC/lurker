@@ -699,12 +699,15 @@ function migrate() {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       last_access TEXT NOT NULL DEFAULT (datetime('now'))
     );
-    -- ⚠ COMPOSITE, and covering the eviction query exactly. Both eviction reads
-    -- filter on backend and then order by last_access, so an index on last_access
-    -- alone still scans; these run synchronously on the one shared connection that
-    -- also serves WebSocket fan-out and IRC sockets, on the byte path.
+    -- ⚠ COMPOSITE, and COVERING. Both eviction reads filter on backend and order by
+    -- last_access, so an index on last_access alone still scans — and the size
+    -- column has to be in it too, or SUM(size) fetches every matching row from the
+    -- table instead of reading the index. These run synchronously on the one shared
+    -- connection that also serves WebSocket fan-out and IRC sockets, on the byte
+    -- path, so at a 2 GiB ceiling that is tens of thousands of row reads per store.
+    -- (No backticks in here: this is inside a JS template literal.)
     CREATE INDEX IF NOT EXISTS idx_preview_cache_evict
-      ON preview_cache(backend, last_access, created_at);
+      ON preview_cache(backend, last_access, created_at, size);
 
     -- RPE2E end-to-end-encryption keyring (issue #382). Secrets — the identity
     -- private key and the session keys — are stored as secretCrypto envelopes

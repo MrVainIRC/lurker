@@ -20,7 +20,7 @@ import db from './index.js';
 // each call, and these run on the byte path — once per cache hit and twice per
 // store. better-sqlite3 caches nothing for us.
 const SELECT_ENTRY = db.prepare<[string], Row>(
-  `SELECT cache_key, backend, content_type, size FROM preview_cache WHERE cache_key = ?`,
+  `SELECT cache_key, backend, content_type, size, created_at FROM preview_cache WHERE cache_key = ?`,
 );
 const TOUCH_ENTRY = db.prepare<[string]>(
   `UPDATE preview_cache SET last_access = datetime('now')
@@ -40,7 +40,7 @@ const SUM_BYTES = db.prepare<[string], { total: number | null }>(
   `SELECT SUM(size) AS total FROM preview_cache WHERE backend = ?`,
 );
 const COLDEST = db.prepare<[string, number], Row>(
-  `SELECT cache_key, backend, content_type, size FROM preview_cache
+  `SELECT cache_key, backend, content_type, size, created_at FROM preview_cache
     WHERE backend = ? ORDER BY last_access ASC, created_at ASC LIMIT ?`,
 );
 const COUNT_ALL = db.prepare<[], { n: number }>(`SELECT COUNT(*) AS n FROM preview_cache`);
@@ -50,6 +50,8 @@ export interface CacheEntry {
   backend: string;
   contentType: string;
   size: number;
+  /** When it was stored. Read by the age bound in the cache's `lookup`. */
+  createdAt: string;
 }
 
 interface Row {
@@ -57,6 +59,7 @@ interface Row {
   backend: string;
   content_type: string;
   size: number;
+  created_at: string;
 }
 
 /**
@@ -79,11 +82,12 @@ export function lookupCached(key: string): CacheEntry | null {
     backend: row.backend,
     contentType: row.content_type,
     size: row.size,
+    createdAt: row.created_at,
   };
 }
 
 /** Record a stored object. Upsert, because two readers can race the same miss. */
-export function recordCached(entry: CacheEntry): void {
+export function recordCached(entry: Omit<CacheEntry, 'createdAt'>): void {
   UPSERT_ENTRY.run(entry.key, entry.backend, entry.contentType, entry.size);
 }
 
@@ -112,6 +116,7 @@ export function coldestCached(backend: string, limit: number): CacheEntry[] {
     backend: row.backend,
     contentType: row.content_type,
     size: row.size,
+    createdAt: row.created_at,
   }));
 }
 

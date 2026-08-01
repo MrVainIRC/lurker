@@ -126,6 +126,71 @@ describe('preview byte cache — local', () => {
     expect(await mod.lookup('3'.repeat(64))).not.toBeNull();
   });
 
+  it('refuses an object bigger than the whole ceiling, without wiping the cache', async () => {
+    // ⚠⚠ `evictLocal` loops toward a total it can never reach when the incoming
+    // object alone exceeds the ceiling — so it throws away up to a full batch of
+    // LIVE entries and then stores the oversized object anyway. A small ceiling with
+    // large images therefore means every single store wipes the cache and the hit
+    // rate collapses to nothing, each miss paying a full eviction pass on the shared
+    // connection for the privilege.
+    await mod.store('1'.repeat(64), bytes(1024), 'image/png');
+    expect(dbmod.countCached()).toBe(1);
+
+    // The ceiling here is 2048; this is bigger than all of it.
+    expect(await mod.store('9'.repeat(64), bytes(4096), 'image/png')).toBe(false);
+
+    expect(dbmod.countCached()).toBe(1);
+    expect(await mod.lookup('1'.repeat(64))).not.toBeNull();
+  });
+
+  it('stops serving an entry once it is older than the metadata TTL', async () => {
+    // ⚠ Eviction is by PRESSURE, so without an age bound an image at a stable
+    // address that changed underneath us — an avatar, a `latest.png` — is served
+    // from disk indefinitely under `max-age=86400, immutable`, long after the
+    // metadata row for it has re-resolved. Before this cache existed the staleness
+    // window was a day; unbounded is a regression, not a feature.
+    const key = '7'.repeat(64);
+    await mod.store(key, bytes(64), 'image/png');
+    expect(await mod.lookup(key)).not.toBeNull();
+
+    const { default: db } = await import('../../db/index.js');
+    db.prepare(`UPDATE preview_cache SET created_at = datetime('now', '-8 days')`).run();
+
+    expect(await mod.lookup(key)).toBeNull();
+    // ...and it is cleared out rather than re-checked on every future request.
+    expect(dbmod.countCached()).toBe(0);
+    const cfg = mod.cacheConfig();
+    if (cfg.mode !== 'local') throw new Error('unreachable');
+    expect(fs.existsSync(mod.objectPath(cfg, key))).toBe(false);
+  });
+
+  it('keeps the index row when a read fails for a reason other than ENOENT', async () => {
+    // ⚠⚠ GONE and BROKEN are different. Both are a miss to the caller, so an earlier
+    // version collapsed every errno to null and the caller forgot the row for all of
+    // them — a transient EMFILE (24 concurrent reads is within this pool's own
+    // budget) or an EACCES after a permissions change would delete the index row
+    // while the object stayed on disk. That is an orphan eviction can never count
+    // and lookup can never find, in a module whose whole premise is that the index
+    // is how we know what exists.
+    //
+    // ⚠ EISDIR rather than chmod: a permissions test passes vacuously when the suite
+    // runs as root, which it does in plenty of containers. A directory where a file
+    // belongs fails the same way for everyone.
+    const key = '8'.repeat(64);
+    await mod.store(key, bytes(128), 'image/png');
+    const cfg = mod.cacheConfig();
+    if (cfg.mode !== 'local') throw new Error('unreachable');
+    const at = mod.objectPath(cfg, key);
+    fs.rmSync(at);
+    fs.mkdirSync(at);
+
+    expect(await mod.lookup(key)).toBeNull();
+    // The row SURVIVES: we could not read it, which is not the same as it being gone.
+    expect(dbmod.countCached()).toBe(1);
+
+    fs.rmdirSync(at);
+  });
+
   it('leaves no file behind for an entry it evicted', async () => {
     for (const n of ['1', '2', '3', '4']) await mod.store(n.repeat(64), bytes(1024), 'image/png');
     const onDisk: string[] = [];
@@ -153,7 +218,7 @@ describe('preview byte cache — local', () => {
   });
 
   it('MISSES a file that is present but the wrong size, and clears it out', async () => {
-    // ⚠⚠ `writeLocal` does not fsync before renaming, so a power loss or a killed
+    // ⚠⚠ The writer does not fsync before renaming, so a power loss or a killed
     // container can leave a short file under a row that claims the full length.
     // `readFile` succeeds, nothing throws, and the stump would be served with
     // `max-age=86400, immutable` — a permanently broken image every viewer holds for

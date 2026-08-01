@@ -18,10 +18,10 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import { RequestThrottle } from '../middleware/rateLimit.js';
 import {
   byteCacheKey,
+  beginStore,
   cacheEnabled,
   cacheable,
   lookup,
-  store,
   trackPendingStore,
 } from '../services/previewCache/index.js';
 import {
@@ -419,17 +419,23 @@ router.get(
       }
       res.status(upstream.status === 206 ? 206 : 200);
 
-      // ⚠ Tee'd into memory ONLY when this response is a cache candidate, and the
-      // predicate is the same one that decided whether to look. `cacheable` refuses
-      // anything but a whole-object image, so what accumulates here is bounded by
-      // MAX_IMAGE_PROXY_BYTES (8 MB) rather than by MAX_MEDIA_PROXY_BYTES (64 MB) —
-      // buffering a video to cache it would trade the bandwidth this saves for
-      // memory it cannot bound, per request, with no ceiling but the pool size.
-      const collecting = cacheable(upstream.contentType, isRange) && upstream.status !== 206;
-      const chunks: Buffer[] = [];
-      // Registered as soon as we commit to collecting, and settled on every exit
-      // below. Only a test waits on it; see `trackPendingStore`.
-      const settleDecision = collecting ? trackPendingStore() : null;
+      // ⚠⚠ STREAMED to the cache, never buffered. Collecting the object first cost a
+      // copy in `chunks` plus a second at `Buffer.concat`, and the per-request 8 MB
+      // ceiling multiplied by mediaPool's 24 slots — ~192 MB steady state, ~384 MB
+      // transient, memory the uncached path never allocated, reachable by anyone
+      // authenticated opening 24 concurrent large images. The destination is a file,
+      // so there was never a reason for the bytes to sit in RSS on the way there.
+      //
+      // ⚠ `declared` when the origin gave one, the cap when it did not: the writer
+      // reserves room before the first byte, and under-reserving is how the ceiling
+      // gets crossed.
+      const wantCache = cacheable(upstream.contentType, isRange) && upstream.status !== 206;
+      const writer = wantCache
+        ? await beginStore(cacheKey, Number.isFinite(declared) ? declared : cap)
+        : null;
+      // Registered only once there is something to decide; settled on every exit
+      // below. Only a test waits on it — see `trackPendingStore`.
+      const settleDecision = writer ? trackPendingStore() : null;
 
       // Enforce the cap on bytes actually seen, not on the declared length — an
       // origin can omit Content-Length or lie about it.
@@ -442,7 +448,7 @@ router.get(
           res.destroy();
           return;
         }
-        if (collecting) chunks.push(chunk);
+        writer?.write(chunk);
       });
       stream.on('error', () => res.destroy());
 
@@ -461,8 +467,7 @@ router.get(
       // every path — finished, destroyed by the cap, or aborted by the client — so
       // the decision is always settled and never left dangling.
       stream.on('close', () => {
-        if (!collecting) return;
-        const body = Buffer.concat(chunks);
+        if (!writer) return;
         // ⚠⚠ THE BODY MUST BE FRAMED, and `ended` alone does not prove it. Node emits
         // `end` — with `complete` true — for a body framed only by the connection
         // closing, because to the protocol a closed connection IS the terminator: a
@@ -472,12 +477,6 @@ router.get(
         // `Connection: close` — exactly the condition RFC 7230 §3.3.3 lets an origin
         // omit framing under.
         //
-        // The live path can afford the ambiguity — it serves the bad bytes once, to
-        // one viewer, and self-repairs on the next request. The cache cannot: it
-        // returns them to everyone thereafter under `max-age=86400, immutable`,
-        // eviction is by size rather than age, and the repair path only fires for a
-        // file that is MISSING. Refusing to cache an unframed body costs those
-        // origins a re-fetch; caching a half-image costs everyone a broken picture.
         // ⚠ Chunked counts as framed: a chunked body cut short does NOT emit `end` —
         // node raises `aborted` and leaves `complete` false — so `ended` already
         // proves completeness there. Requiring a Content-Length outright would have
@@ -487,14 +486,15 @@ router.get(
           .toLowerCase()
           .includes('chunked');
         const framed = chunked || (Number.isFinite(declared) && declared === sent);
-        if (!ended || !framed || sent > cap || body.length === 0) {
-          settleDecision?.();
+        if (!ended || !framed || sent > cap) {
+          void writer.abort().finally(() => settleDecision?.());
           return;
         }
         // Deliberately not awaited: the reader already has their bytes, and a slow
-        // bucket must not hold the response open. Failures are the cache's own
-        // problem — `store` swallows them and simply stays a miss.
-        void store(cacheKey, body, upstream!.contentType)
+        // disk must not hold the response open. Failures are the cache's own problem
+        // — the writer swallows them and simply stays a miss.
+        void writer
+          .commit(upstream!.contentType)
           .catch(() => {})
           .finally(() => settleDecision?.());
       });
