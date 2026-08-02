@@ -191,7 +191,10 @@ describe('importFromZipBuffer — roundtrip', () => {
     expect(bobRules[0].pattern).toBe('alice');
 
     const bobPins = db
-      .prepare('SELECT * FROM pinned_buffers WHERE user_id = ?')
+      .prepare(
+        `SELECT p.network_id, b.target FROM pinned_buffers p
+         JOIN buffers b ON b.id = p.buffer_id WHERE p.user_id = ?`,
+      )
       .all(bob.id) as Array<{ network_id: number; target: string }>;
     expect(bobPins.length).toBe(1);
     expect(bobPins[0].network_id).toBe(bobNets[0].id);

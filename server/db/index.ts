@@ -8,7 +8,13 @@ import path from 'path';
 import fs from 'fs';
 import { isNodeMode } from '../utils/edition.js';
 import { foldBufferCase } from './foldBufferCase.js';
-import { normalizeMessagesBufferIds, messagesBackfillDone } from './normalizeBuffers.js';
+import {
+  normalizeMessagesBufferIds,
+  messagesBackfillDone,
+  mintSentinelBuffers,
+  mintOrphanBuffersFromSatellites,
+  rebuildSatellitesToBufferId,
+} from './normalizeBuffers.js';
 import {
   seedUploaderConfig,
   reconcileBuiltInUploaders,
@@ -156,7 +162,6 @@ function migrate() {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE
     );
-    CREATE INDEX IF NOT EXISTS idx_buffer_reads_user ON buffer_reads(user_id);
 
     -- User-level self-presence state. /away applies across every IRC connection
     -- the user has, so the truth lives once per user. The completed-pair shape
@@ -459,7 +464,6 @@ function migrate() {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE
     );
-    CREATE INDEX IF NOT EXISTS idx_user_drafts_user ON user_drafts(user_id);
 
     -- Per-user ignore list, irssi-style (issue #301, scoping #350). network_id
     -- NULL = a global rule that applies on every network (the default); a real
@@ -1202,7 +1206,7 @@ ensureColumn('push_subscriptions', 'transport', "TEXT NOT NULL DEFAULT 'webpush'
 // Schema versioning lets us retire one-shot recovery blocks once every
 // production DB has run through them. Bump SCHEMA_VERSION when adding a new
 // recovery block, and delete blocks for versions far enough in the past.
-const SCHEMA_VERSION = 17;
+const SCHEMA_VERSION = 18;
 const schemaVersionRow = db
   .prepare(`SELECT value FROM app_meta WHERE key = 'schema_version'`)
   .get() as { value: string } | undefined;
@@ -1684,9 +1688,11 @@ if (schemaVersion < 11) {
 // Issue #359: fold the old display-only per-channel `muted` flag into the ignore
 // engine (see migrateMutedFold.ts). Runs after the ignored_masks rebuild above so
 // the table is in its final shape. Best-effort — a failure leaves muted=1 rows to
-// retry on the next boot.
+// retry on the next boot. Gated on the column: the v18 satellite rebuild (below)
+// drops `muted` outright — any lingering muted=1 rows were folded on an earlier
+// boot by this very call, which always precedes it.
 try {
-  foldMutedIntoIgnoreRules(db);
+  if (columnExists('channel_notify_settings', 'muted')) foldMutedIntoIgnoreRules(db);
 } catch (err) {
   // Log rather than swallow: the self-gating retry masks a deterministic bug as
   // a transient failure, so surface it or a broken fold vanishes silently.
@@ -2058,6 +2064,41 @@ if (schemaVersion < 16 && tableExists('channels')) {
   }
 }
 
+// --- v18: satellite tables onto buffer_id (#695) -----------------------------
+//
+// The six per-buffer view-state tables (read pointers, input history, pins,
+// nicklist toggles, notify flags, drafts) rebuild onto (user_id, buffer_id)
+// keys and lose their name columns entirely; see normalizeBuffers.ts for the
+// bodies and the case-twin merge policies. The e2e tables deliberately do NOT
+// join them — their `channel` is an IRC-side crypto-context string (DM
+// pseudochannels, peer-supplied names), not a buffer reference; see
+// bufferKeyedTables.ts 'wire-context'.
+//
+// Version + shape gated: the block re-runs harmlessly after a kill between
+// the transaction and the version bump (columnExists turns it into a no-op),
+// and the whole rebuild is ONE immediate transaction — these tables are
+// thousands of rows, so atomic-and-quick, with the write lock taken up front
+// (the Litestream deferred-BEGIN snapshot race, see the v16 block).
+if (schemaVersion < 18 && columnExists('buffer_reads', 'target')) {
+  mintSentinelBuffers(db);
+  mintOrphanBuffersFromSatellites(db, [
+    'buffer_reads',
+    'input_history',
+    'pinned_buffers',
+    'nicklist_collapsed',
+    'channel_notify_settings',
+    'user_drafts',
+  ]);
+  const rebuild = db.transaction(() => rebuildSatellitesToBufferId(db));
+  const prevFk = db.pragma('foreign_keys', { simple: true });
+  db.pragma('foreign_keys = OFF');
+  try {
+    rebuild.immediate();
+  } finally {
+    db.pragma(`foreign_keys = ${prevFk ? 'ON' : 'OFF'}`);
+  }
+}
+
 // Issue #510: seed the uploader data model — instance x0/catbox rows +
 // per-user conversion of existing uploads.* settings (self-host), or a single
 // locked hosted uploader from env + allow_user_defined=0 (hosted). Behavior is
@@ -2154,14 +2195,11 @@ db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_auto_rule_unique
 db.exec(`CREATE INDEX IF NOT EXISTS idx_ignored_masks_user_net
          ON ignored_masks(user_id, network_id)`);
 
-// #355 buffer_reads uniqueness: coalesced so a NULL network_id (the app-scoped
-// system buffer) dedupes on upsert; a plain composite index would treat NULL as
-// distinct. Created here (not in migrate()) so it survives the schemaVersion < 12
-// rebuild and applies to fresh installs alike. idx_buffer_reads_user is also
-// recreated since the rebuild drops it.
-db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_buffer_reads_key
-         ON buffer_reads(user_id, IFNULL(network_id, 0), target)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_buffer_reads_user ON buffer_reads(user_id)`);
+// (buffer_reads carries no extra indexes since the v18 rebuild: its
+// (user_id, buffer_id) PRIMARY KEY serves both the point lookups and the
+// per-user scans that idx_buffer_reads_key / idx_buffer_reads_user used to —
+// the coalesced-IFNULL uniqueness dance existed only because the name-keyed
+// composite treated a NULL network_id as distinct.)
 
 // #490: the push_subscriptions rebuild drops this with the table, and migrate()'s
 // CREATE already ran before it — so recreate here for both fresh and rebuilt

@@ -39,6 +39,10 @@ beforeAll(async () => {
     tls: true,
     nick: 'decorateuser',
   })!.id;
+  // Notify flags are buffer_id-keyed (schema 18) — the flag only exists for a
+  // registered buffer.
+  const { ensureExists } = await import('../db/buffers.js');
+  ensureExists(userId, networkId, '#lurker');
 });
 
 afterAll(() => {

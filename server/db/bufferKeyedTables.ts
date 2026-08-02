@@ -13,11 +13,24 @@
 // a single-row UPDATE.
 //
 // `status` records where each table is on that path:
-//   - 'buffer_id'  — normalized: keyed by a buffer_id FK to buffers(id).
-//   - 'pending'    — still name-keyed; scheduled for the satellite rebuild.
-//   - 'glob-list'  — a CSV of channel GLOBS that may span networks. These are
-//                    match patterns, not identities: they cannot reference a
-//                    buffer_id and deliberately do not follow renames.
+//   - 'buffer_id'    — normalized: keyed by a buffer_id FK to buffers(id).
+//   - 'pending'      — still name-keyed; scheduled for the satellite rebuild.
+//   - 'glob-list'    — a CSV of channel GLOBS that may span networks. These
+//                      are match patterns, not identities: they cannot
+//                      reference a buffer_id and deliberately do not follow
+//                      renames.
+//   - 'wire-context' — keyed by an IRC-side context string that only
+//                      COINCIDES with a buffer name sometimes. The e2e tables'
+//                      `channel` is the canonical case: it also holds
+//                      `@ident@host` DM pseudochannels (no buffer row exists
+//                      or should), the literal '@' from empty-handle call
+//                      sites, and peer-supplied names for channels this user
+//                      never joined. These live on the IRC side of the
+//                      name↔id boundary — like IrcConnection's in-memory maps
+//                      — and must NEVER grow a buffer_id (the drift test
+//                      enforces it). DM contexts are already rename-proof
+//                      (host-keyed); a channel rename starting a fresh crypto
+//                      context is correct, not a bug.
 //
 // The companion test introspects the live schema in BOTH directions, so this
 // list cannot silently drift from reality (its predecessor did exactly that:
@@ -25,7 +38,7 @@
 // and by 16 named two dropped tables). The test — not this comment — is what
 // keeps it honest.
 
-export type BufferTableStatus = 'buffer_id' | 'pending' | 'glob-list';
+export type BufferTableStatus = 'buffer_id' | 'pending' | 'glob-list' | 'wire-context';
 
 export interface BufferScopedTable {
   table: string;
@@ -63,49 +76,43 @@ export const BUFFER_SCOPED_TABLES: readonly BufferScopedTable[] = [
   },
   {
     table: 'buffer_reads',
-    status: 'pending',
-    targetColumn: 'target',
-    scope: ['user_id', 'network_id'],
-    note: 'read pointer + /clear marker',
+    status: 'buffer_id',
+    scope: ['user_id'],
+    note: 'read pointer + /clear marker; PK (user_id, buffer_id) since v18',
   },
   {
     table: 'input_history',
-    status: 'pending',
-    targetColumn: 'target',
-    scope: ['user_id', 'network_id'],
-    note: 'up-arrow input recall',
+    status: 'buffer_id',
+    scope: ['user_id'],
+    note: 'up-arrow input recall; buffer_id-keyed since v18',
   },
   {
     table: 'pinned_buffers',
-    status: 'pending',
-    targetColumn: 'target',
+    status: 'buffer_id',
     scope: ['user_id', 'network_id'],
-    note: 'sidebar pins; dense per-network position column',
+    note: 'sidebar pins; network_id kept — position density is per (user, network)',
   },
   {
     table: 'nicklist_collapsed',
-    status: 'pending',
-    targetColumn: 'target',
-    scope: ['user_id', 'network_id'],
-    note: 'per-channel nicklist toggle',
+    status: 'buffer_id',
+    scope: ['user_id'],
+    note: 'per-channel nicklist toggle; buffer_id-keyed since v18',
   },
   {
     table: 'channel_notify_settings',
-    status: 'pending',
-    targetColumn: 'target',
-    scope: ['user_id', 'network_id'],
-    note: 'notify_always',
+    status: 'buffer_id',
+    scope: ['user_id'],
+    note: "notify_always; the dead 'muted' column died in the v18 rebuild",
   },
   {
     table: 'user_drafts',
-    status: 'pending',
-    targetColumn: 'target',
-    scope: ['user_id', 'network_id'],
-    note: 'half-typed composer input',
+    status: 'buffer_id',
+    scope: ['user_id'],
+    note: 'half-typed composer input; buffer_id-keyed since v18',
   },
   {
     table: 'e2e_incoming_sessions',
-    status: 'pending',
+    status: 'wire-context',
     targetColumn: 'channel',
     caseInsensitive: true,
     scope: ['user_id', 'network_id'],
@@ -113,7 +120,7 @@ export const BUFFER_SCOPED_TABLES: readonly BufferScopedTable[] = [
   },
   {
     table: 'e2e_outgoing_sessions',
-    status: 'pending',
+    status: 'wire-context',
     targetColumn: 'channel',
     caseInsensitive: true,
     scope: ['user_id', 'network_id'],
@@ -121,7 +128,7 @@ export const BUFFER_SCOPED_TABLES: readonly BufferScopedTable[] = [
   },
   {
     table: 'e2e_channel_config',
-    status: 'pending',
+    status: 'wire-context',
     targetColumn: 'channel',
     caseInsensitive: true,
     scope: ['user_id', 'network_id'],
@@ -129,7 +136,7 @@ export const BUFFER_SCOPED_TABLES: readonly BufferScopedTable[] = [
   },
   {
     table: 'e2e_outgoing_recipients',
-    status: 'pending',
+    status: 'wire-context',
     targetColumn: 'channel',
     caseInsensitive: true,
     scope: ['user_id', 'network_id'],
@@ -137,12 +144,12 @@ export const BUFFER_SCOPED_TABLES: readonly BufferScopedTable[] = [
   },
   {
     table: 'e2e_autotrust',
-    status: 'pending',
+    status: 'wire-context',
     targetColumn: 'scope',
     excludeValues: ['global'],
     caseInsensitive: true,
     scope: ['user_id', 'network_id'],
-    note: "auto-trust rule; 'global' sentinel becomes buffer_id NULL at rebuild",
+    note: "auto-trust rule; scope is 'global' or a channel context string, never an id",
   },
   {
     table: 'highlight_rules',

@@ -161,10 +161,14 @@ describe('schemaVersion 16 — buffers backfill', () => {
       )
       .all() as Array<{ target: string }>;
     expect(msgTargets.map((r) => r.target)).toEqual(['#Chatty']);
-    // …and moved the stray-cased read pointer with it, so the exact-target
-    // read-state lookup still resolves against the registry's canonical name.
+    // …and moved the stray-cased read pointer with it — post-v18 the pointer
+    // is id-keyed, so it resolves through the registry row the fold chose.
     const reads = db
-      .prepare(`SELECT target, last_read_message_id AS lr FROM buffer_reads WHERE network_id = 10`)
+      .prepare(
+        `SELECT b.target AS target, r.last_read_message_id AS lr
+         FROM buffer_reads r JOIN buffers b ON b.id = r.buffer_id
+         WHERE b.network_id = 10`,
+      )
       .all() as Array<{ target: string; lr: number }>;
     expect(reads).toEqual([{ target: '#Chatty', lr: 2 }]);
   });
