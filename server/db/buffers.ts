@@ -190,7 +190,7 @@ const stateStmt = db.prepare(`
 `);
 
 const listStatesForUserStmt = db.prepare(`
-  SELECT network_id, target, target_folded, state FROM buffers
+  SELECT id, network_id, target, target_folded, state FROM buffers
   WHERE user_id = ? ORDER BY network_id, target_folded
 `);
 
@@ -212,6 +212,7 @@ export function getState(
 
 /** One sidebar-shaped row per buffer (no key, no decryption) — the walk's fuel. */
 export interface BufferStateRow {
+  id: number;
   networkId: number | null;
   target: string;
   targetFolded: string;
@@ -221,12 +222,14 @@ export interface BufferStateRow {
 export function listStatesForUser(userId: number): BufferStateRow[] {
   return (
     listStatesForUserStmt.all(userId) as Array<{
+      id: number;
       network_id: number | null;
       target: string;
       target_folded: string;
       state: BufferState;
     }>
   ).map((r) => ({
+    id: r.id,
     networkId: r.network_id,
     target: r.target,
     targetFolded: r.target_folded,

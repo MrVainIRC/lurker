@@ -22,6 +22,7 @@ import type { PageUnit } from '../../shared/eventFilter.js';
 interface MessageRow {
   id: number;
   network_id: number;
+  buffer_id: number;
   target: string;
   time: string;
   type: string;
@@ -50,6 +51,10 @@ interface MessageRowWithNetwork extends MessageRow {
 export interface MessageEvent {
   id: number;
   networkId: number;
+  // buffers(id) the row belongs to — always present on rows read from the
+  // table; optional because a handful of synthetic events (wsHub's
+  // not-connected warnings) are decorated without ever being persisted.
+  bufferId?: number;
   target: string;
   time: string;
   type: string;
@@ -139,7 +144,11 @@ const insertStmt = db.prepare(`
 
 const altByIdStmt = db.prepare(`SELECT alt FROM messages WHERE id = ?`);
 
-export function insertMessage(row: MessageInput): { id: number | bigint; alt: boolean } {
+export function insertMessage(row: MessageInput): {
+  id: number | bigint;
+  alt: boolean;
+  bufferId: number;
+} {
   // Resolved (or defensively minted) BEFORE the insert: a row that went in
   // with buffer_id NULL would be invisible to every id-keyed read forever.
   const bufferId = resolveOrMintForInsert(row.networkId, row.target);
@@ -171,7 +180,9 @@ export function insertMessage(row: MessageInput): { id: number | bigint; alt: bo
   });
   const id = result.lastInsertRowid;
   const altRow = altByIdStmt.get(id) as { alt: number } | undefined;
-  return { id, alt: altRow?.alt === 1 };
+  // bufferId returned so the live publish path can stamp it onto the enriched
+  // event without a second resolve — the wire's `irc` frames carry it.
+  return { id, alt: altRow?.alt === 1, bufferId };
 }
 
 // Whether the owning user has bookmarked a row, computed per row rather than
@@ -205,6 +216,7 @@ function rowToEvent(row: MessageRow): MessageEvent {
   const event: MessageEvent = {
     id: row.id,
     networkId: row.network_id,
+    bufferId: row.buffer_id,
     target: row.target,
     time: row.time,
     type: row.type,

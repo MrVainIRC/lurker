@@ -151,6 +151,16 @@ describe('buildBufferBacklog', () => {
     expect(buildBufferBacklog(userId, networkId, 'carol').joined).toBe(true);
   });
 
+  it('carries the buffer id on the frame AND on every event row (the wire directory)', () => {
+    seed('#idcarrier', 'hello');
+    const frame = buildBufferBacklog(userId, networkId, '#idcarrier');
+    const row = buffers.getBuffer(userId, networkId, '#idcarrier')!;
+    expect(frame.bufferId).toBe(row.id);
+    for (const e of frame.events as Array<{ bufferId?: number }>) {
+      expect(e.bufferId).toBe(row.id);
+    }
+  });
+
   it('says hasMoreOlder:false for an empty buffer so the hydrate is not read as a shell', () => {
     // The frame answers `open-buffer` — a client's ONE hydrate of this buffer.
     // Omitting the field left `events:[]` indistinguishable from a shell
@@ -358,6 +368,17 @@ describe('buildBufferShell', () => {
     // joined is caller-supplied (online membership vs offline parted).
     expect(shell.joined).toBe(true);
     expect(buildBufferShell(userId, networkId, '#shellchan', false).joined).toBe(false);
+  });
+
+  it('resolves its own bufferId, or takes a precomputed one without a lookup', () => {
+    seed('#shellid', 'x');
+    const row = buffers.getBuffer(userId, networkId, '#shellid')!;
+    expect(buildBufferShell(userId, networkId, '#shellid', true).bufferId).toBe(row.id);
+    // The snapshot walk passes the id it already holds; null is the defensive
+    // no-row contract and must pass through untouched, not be re-resolved.
+    expect(buildBufferShell(userId, networkId, '#shellid', true, { bufferId: null }).bufferId).toBe(
+      null,
+    );
   });
 });
 

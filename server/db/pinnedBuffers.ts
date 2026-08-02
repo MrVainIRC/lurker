@@ -61,6 +61,22 @@ export function listPinnedForUserNetwork(userId: number, networkId: number): str
   );
 }
 
+const listWithIdsStmt = db.prepare(`
+  SELECT p.buffer_id AS bufferId, b.target AS target
+  FROM pinned_buffers p JOIN buffers b ON b.id = p.buffer_id
+  WHERE p.user_id = ? AND p.network_id = ?
+  ORDER BY p.position ASC, b.target ASC
+`);
+
+/** The pinned set with both wire representations — the pins-changed frame
+ *  ships `pinned` (names) and `pinnedIds` (parallel-indexed buffer ids). */
+export function listPinnedWithIds(
+  userId: number,
+  networkId: number,
+): Array<{ bufferId: number; target: string }> {
+  return listWithIdsStmt.all(userId, networkId) as Array<{ bufferId: number; target: string }>;
+}
+
 export function listPinnedForUser(userId: number): Map<number, string[]> {
   const byNetwork = new Map<number, string[]>();
   for (const row of listForUserStmt.all(userId) as Array<{
