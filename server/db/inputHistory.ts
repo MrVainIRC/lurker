@@ -2,12 +2,15 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import db from './index.js';
-import { resolveBufferIdByNetwork } from './bufferResolve.js';
+import { resolveBuffer } from './bufferResolve.js';
 
 // Keyed (user_id, buffer_id) since schema 18. Signatures unchanged — callers
-// hold names; resolution happens here. A miss on add is a silent drop (input
-// history for a buffer that doesn't exist has nowhere to live and nothing to
-// replay it), matching the old behavior of rows nothing would ever read.
+// hold names; resolution happens here, scoped to the CALLER's userId (not
+// derived from the network) so a mismatched (userId, networkId) pair can
+// never write rows referencing another user's buffers — the satellite FK
+// points at buffers(id) alone, so ownership is this layer's job. A miss on
+// add is a silent drop (input history for a buffer that doesn't exist has
+// nowhere to live and nothing to replay it).
 
 const insertStmt = db.prepare(`
   INSERT INTO input_history (user_id, buffer_id, text)
@@ -22,9 +25,9 @@ const listRecentStmt = db.prepare(`
 `);
 
 export function addEntry(userId: number, networkId: number, target: string, text: string): void {
-  const bufferId = resolveBufferIdByNetwork(networkId, target);
-  if (bufferId === undefined) return;
-  insertStmt.run(userId, bufferId, text);
+  const buffer = resolveBuffer(userId, networkId, target);
+  if (!buffer) return;
+  insertStmt.run(userId, buffer.id, text);
 }
 
 // Returns the `limit` most recent entries, oldest-first — the order the client
@@ -36,9 +39,9 @@ export function listRecent(
   target: string,
   limit = 200,
 ): string[] {
-  const bufferId = resolveBufferIdByNetwork(networkId, target);
-  if (bufferId === undefined) return [];
-  return (listRecentStmt.all(userId, bufferId, limit) as Array<{ text: string }>)
+  const buffer = resolveBuffer(userId, networkId, target);
+  if (!buffer) return [];
+  return (listRecentStmt.all(userId, buffer.id, limit) as Array<{ text: string }>)
     .map((row) => row.text)
     .toReversed();
 }

@@ -8,7 +8,7 @@
 // database (the function takes its db handle) rather than running against the
 // live migrated schema, where the column is unrepresentable.
 
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -21,6 +21,8 @@ afterAll(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
 
 let db: Database.Database;
 let n = 0;
+
+afterEach(() => db.close());
 
 beforeEach(() => {
   db = new Database(path.join(tmpDir, `t${n++}.db`));

@@ -12,7 +12,7 @@
 //   - the whole pass is idempotent once the done-flag is set,
 //   - the SQL-side fold is the JS rule (Unicode), not SQLite lower() (ASCII).
 
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -31,6 +31,8 @@ afterAll(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
 
 let db: Database.Database;
 let n = 0;
+
+afterEach(() => db.close());
 
 function freshDb(): Database.Database {
   const d = new Database(path.join(tmpDir, `t${n++}.db`));

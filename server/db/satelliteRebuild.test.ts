@@ -154,11 +154,15 @@ beforeAll(async () => {
       (102, 1, 10, ':server:10', ':server:10', 'server', 'open'),
       (103, 1, NULL, ':system:', ':system:', 'system', 'open');
 
-    -- Case twins across the satellites, plus sentinel pointers.
+    -- Case twins across the satellites, plus sentinel pointers. The '#Chan'
+    -- pair carries markers on BOTH twins, with the FURTHER boundary paired
+    -- with the EARLIER timestamp — the shape that catches a merge pairing one
+    -- twin's boundary with the other's cleared_at (independent MAXes would
+    -- produce boundary 40 + timestamp 2026-03-01, an impossible row).
     INSERT INTO buffer_reads (user_id, network_id, target, last_read_message_id,
                               cleared_before_message_id, cleared_at) VALUES
-      (1, 10, '#Chan', 50, NULL, NULL),
-      (1, 10, '#chan', 90, 40, '2026-01-01T00:00:00Z'),  -- twin: further pointer + marker
+      (1, 10, '#Chan', 50, 25, '2026-03-01T00:00:00Z'),
+      (1, 10, '#chan', 90, 40, '2026-01-01T00:00:00Z'),  -- twin: further pointer + boundary
       (1, 10, ':server:10', 7, NULL, NULL),
       (1, NULL, ':system:', 3, NULL, NULL),
       (1, 10, '#vanished', 12, NULL, NULL);              -- no registry row: minted closed
@@ -216,9 +220,11 @@ describe('schema 18 — satellite rebuild', () => {
     }
   });
 
-  it('merges read-pointer case twins: furthest pointer, max clear marker', async () => {
+  it('merges read-pointer case twins: furthest pointer, winning boundary KEEPS ITS OWN timestamp', async () => {
     const { getReadState, getClearedState } = await import('./bufferReads.js');
     expect(getReadState(1, 10, '#CHAN')).toBe(90);
+    // Boundary 40 wins (further than 25), and its cleared_at rides with it —
+    // NOT the other twin's later 2026-03-01 timestamp.
     expect(getClearedState(1, 10, '#chan')).toEqual({
       clearedBeforeId: 40,
       clearedAt: '2026-01-01T00:00:00Z',

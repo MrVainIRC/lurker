@@ -366,13 +366,27 @@ export function rebuildSatellitesToBufferId(db: Database): void {
       FOREIGN KEY (buffer_id) REFERENCES buffers(id) ON DELETE CASCADE
     );
   `);
+  // cleared_at must ride with the row that WINS the boundary merge — two
+  // independent MAX()es could pair one twin's boundary with the other's
+  // timestamp, an impossible state /clear-undo would then mis-render (the old
+  // fold's CASE did exactly this pairing). FIRST_VALUE over the boundary
+  // ordering stamps every row in the group with the winner's cleared_at, and
+  // the outer MAX() then reads that constant. A cleared_at never exists
+  // without its boundary (setClearedState writes or nulls them together), so
+  // the no-marker group stays NULL.
   db.exec(`
     INSERT INTO buffer_reads_new
       (user_id, buffer_id, last_read_message_id, updated_at, cleared_before_message_id, cleared_at)
     SELECT user_id, bid, MAX(last_read_message_id), MAX(updated_at),
-           MAX(cleared_before_message_id), MAX(cleared_at)
-    FROM (SELECT r.*, ${satelliteResolveSql('r')} AS bid FROM buffer_reads r)
-    WHERE bid IS NOT NULL
+           MAX(cleared_before_message_id), MAX(win_cleared_at)
+    FROM (
+      SELECT *, FIRST_VALUE(cleared_at) OVER (
+        PARTITION BY user_id, bid
+        ORDER BY COALESCE(cleared_before_message_id, 0) DESC
+      ) AS win_cleared_at
+      FROM (SELECT r.*, ${satelliteResolveSql('r')} AS bid FROM buffer_reads r)
+      WHERE bid IS NOT NULL
+    )
     GROUP BY user_id, bid
   `);
   db.exec(`DROP TABLE buffer_reads`);
