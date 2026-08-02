@@ -104,6 +104,35 @@ export const useDraftStore = defineStore('drafts', {
       this.clearTimer(k);
       pending.delete(k);
     },
+    // Lifecycle hooks (lib/bufferLifecycle.ts). rekey moves the body AND the
+    // module-level debounce bookkeeping — a pending flush keyed by the dead
+    // name would otherwise fire a draft-set for a buffer the server just
+    // renamed away.
+    dropBuffer(networkId: number | string | null, target: string) {
+      if (networkId == null) return;
+      this.drop(networkId, target);
+    },
+    rekeyBuffer(networkId: number | string | null, from: string, to: string) {
+      if (networkId == null) return;
+      const fromKey = key(networkId, from);
+      const toKey = key(networkId, to);
+      if (this.drafts[fromKey] != null) {
+        this.drafts[toKey] = this.drafts[fromKey];
+        delete this.drafts[fromKey];
+      }
+      if (pending.has(fromKey)) {
+        pending.delete(fromKey);
+        pending.set(toKey, { networkId, target: to });
+      }
+      const timer = flushTimers.get(fromKey);
+      if (timer) {
+        // Re-arm under the new key rather than moving the old timeout: its
+        // closure captured the OLD name and would flush to it.
+        clearTimeout(timer);
+        flushTimers.delete(fromKey);
+        this.scheduleFlush(networkId, to);
+      }
+    },
     // Beacon path used on tab close: ship every un-flushed buffer in one POST
     // since a WS send may already be in teardown. Returns whether anything
     // was actually queued — the sendBeacon return is best-effort either way.

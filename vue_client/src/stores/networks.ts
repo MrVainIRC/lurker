@@ -156,6 +156,18 @@ export const useNetworksStore = defineStore('networks', {
       if (useAuthStore().isPaused) return;
       await api(`/api/networks/${id}/reconnect`, { method: 'POST' });
     },
+    // Lifecycle hooks (lib/bufferLifecycle.ts): the active pointer follows a
+    // rename and clears on a close.
+    dropBuffer(networkId: number | string | null, target: string) {
+      const k = networkId == null ? target : `${networkId}::${target}`;
+      if (this.activeKey === k) this.activeKey = null;
+    },
+    rekeyBuffer(networkId: number | string | null, from: string, to: string) {
+      const fromKey = networkId == null ? from : `${networkId}::${from}`;
+      if (this.activeKey === fromKey) {
+        this.activeKey = networkId == null ? to : `${networkId}::${to}`;
+      }
+    },
     setActive(networkId: number | string | null, target: string) {
       // The app-scoped system buffer (#355) has no network — it keys on the bare
       // sentinel target, matching the buffers store's key() helper.

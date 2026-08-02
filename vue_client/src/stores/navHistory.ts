@@ -59,6 +59,22 @@ export const useNavHistoryStore = defineStore('navHistory', {
     // Re-activate a recorded key through the same path the original click took,
     // so the hop runs all the usual activation side effects (read pointer,
     // refetch, presence probe).
+    // Lifecycle hooks (lib/bufferLifecycle.ts). The trail keeps its shape:
+    // dropped entries are filtered with the cursor clamped, renames substitute
+    // in place so back/forward still lands on the same buffer.
+    dropBuffer(networkId: number | string | null, target: string) {
+      const k = networkId == null ? target : `${networkId}::${target}`;
+      const removedBeforeCursor = this.stack
+        .slice(0, this.index + 1)
+        .filter((x: string) => x === k).length;
+      this.stack = this.stack.filter((x: string) => x !== k);
+      this.index = Math.min(Math.max(this.index - removedBeforeCursor, -1), this.stack.length - 1);
+    },
+    rekeyBuffer(networkId: number | string | null, from: string, to: string) {
+      const fromKey = networkId == null ? from : `${networkId}::${from}`;
+      const toKey = networkId == null ? to : `${networkId}::${to}`;
+      this.stack = this.stack.map((x: string) => (x === fromKey ? toKey : x));
+    },
     go(activeKey: string) {
       if (activeKey === FRIENDS_KEY) {
         useFriendsStore().open();

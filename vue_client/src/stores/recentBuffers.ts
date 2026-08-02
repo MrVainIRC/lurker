@@ -23,5 +23,15 @@ export const useRecentBuffersStore = defineStore('recentBuffers', {
     record(activeKey: string) {
       recordRecent(this, activeKey);
     },
+    // Lifecycle hooks (lib/bufferLifecycle.ts). Keys are activeKey strings.
+    dropBuffer(networkId: number | string | null, target: string) {
+      const k = networkId == null ? target : `${networkId}::${target}`;
+      this.keys = this.keys.filter((x: string) => x !== k);
+    },
+    rekeyBuffer(networkId: number | string | null, from: string, to: string) {
+      const fromKey = networkId == null ? from : `${networkId}::${from}`;
+      const toKey = networkId == null ? to : `${networkId}::${to}`;
+      this.keys = this.keys.map((x: string) => (x === fromKey ? toKey : x));
+    },
   },
 });

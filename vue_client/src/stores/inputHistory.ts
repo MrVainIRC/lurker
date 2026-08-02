@@ -34,5 +34,18 @@ export const useInputHistoryStore = defineStore('inputHistory', {
     drop(networkId: number | string, target: string) {
       delete this.history[key(networkId, target)];
     },
+    // Lifecycle hooks (lib/bufferLifecycle.ts).
+    dropBuffer(networkId: number | string | null, target: string) {
+      if (networkId == null) return;
+      this.drop(networkId, target);
+    },
+    rekeyBuffer(networkId: number | string | null, from: string, to: string) {
+      if (networkId == null) return;
+      const fromKey = key(networkId, from);
+      if (this.history[fromKey]) {
+        this.history[key(networkId, to)] = this.history[fromKey];
+        delete this.history[fromKey];
+      }
+    },
   },
 });

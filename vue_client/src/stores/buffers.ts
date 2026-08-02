@@ -61,6 +61,27 @@ function joinKey(networkId: number | string, channel: string) {
 const pendingOpens = new Map<string, ReturnType<typeof setTimeout>>();
 const PENDING_OPEN_TIMEOUT = 10000;
 
+// bufferId → storage key. The id fast path for frame application: a frame
+// carrying a known bufferId resolves to its buffer even when the NAME
+// disagrees (a rename raced the frame), which string keys alone cannot do.
+// Module-level like typingTimers — cleared by resetTimers() on logout and
+// pruned by drop().
+const keyById = new Map<number, string>();
+
+/** The storage key for a server buffer id, when we've learned it. */
+export function bufferKeyForId(bufferId: number): string | undefined {
+  return keyById.get(bufferId);
+}
+
+/** The server id for (networkId, target), when we've learned it — the verb
+ *  send-sites attach this so the server can address by id (undefined keys are
+ *  dropped by JSON.stringify, so unknown ids simply omit the field). */
+export function idFor(networkId: number | string | null, target: string): number | undefined {
+  const store = useBuffersStore();
+  const k = resolveExistingKey(store.buffers, networkId, target);
+  return k ? store.buffers[k].id : undefined;
+}
+
 // Monotonic token tagged onto each loadAround / reattachToLive request. The
 // response handler drops slices whose token has been superseded (e.g. user
 // clicked a second jump while the first was in flight, or reattached before
@@ -182,6 +203,11 @@ function deriveKind(networkId: number | null, target: string): BufferKind {
 }
 
 export interface Buffer {
+  // The server's stable buffer id (buffers.id on the wire, schema 17+).
+  // Undefined until the first id-carrying frame lands — a buffer created
+  // optimistically (typing /join, opening a DM) has no id until the server
+  // answers. Never changes once learned; a rename keeps it (that's the point).
+  id?: number;
   // null == app-scoped (the system buffer); a real id for every IRC buffer.
   networkId: number | null;
   kind: BufferKind;
@@ -312,16 +338,39 @@ function ensureBuffer(
   state: { buffers: Record<string, Buffer> },
   networkId: number | string | null,
   target: string,
+  bufferId?: number | null,
 ): Buffer {
+  // Id fast path first: a frame carrying a bufferId we know resolves to that
+  // buffer even if the name disagrees (rename/casing races) — the id is the
+  // identity, the name is an attribute (CLIENT_PROTOCOL §5.2).
+  if (typeof bufferId === 'number') {
+    const known = keyById.get(bufferId);
+    if (known && state.buffers[known]) return state.buffers[known];
+  }
   // Resolve case-insensitively before creating: a DM/channel already open under
   // a different casing is the same buffer (#327), so reuse it rather than fork a
   // second entry. Only materialize when nothing exists under any casing — and
   // then under the target's own casing, so the first writer's case is canonical.
   const existing = resolveExistingKey(state.buffers, networkId, target);
-  if (existing) return state.buffers[existing];
+  if (existing) {
+    recordBufferId(state.buffers[existing], existing, bufferId);
+    return state.buffers[existing];
+  }
   const k = bufferKey(networkId, target);
   state.buffers[k] = makeBuffer(networkId, target);
+  recordBufferId(state.buffers[k], k, bufferId);
   return state.buffers[k];
+}
+
+/** Learn (or confirm) a buffer's server id. First id wins; the server never
+ *  reassigns one, so a conflicting id on the same key means the entry was
+ *  re-minted server-side — adopt the new id and drop the stale index entry. */
+function recordBufferId(buf: Buffer, key: string, bufferId?: number | null): void {
+  if (typeof bufferId !== 'number') return;
+  if (buf.id === bufferId && keyById.get(bufferId) === key) return;
+  if (buf.id !== undefined && buf.id !== bufferId) keyById.delete(buf.id);
+  buf.id = bufferId;
+  keyById.set(bufferId, key);
 }
 
 export const useBuffersStore = defineStore('buffers', {
@@ -414,12 +463,17 @@ export const useBuffersStore = defineStore('buffers', {
       },
   },
   actions: {
-    ensure(networkId: number | string, target: string) {
-      return ensureBuffer(this, networkId, target);
+    ensure(networkId: number | string, target: string, bufferId?: number | null) {
+      return ensureBuffer(this, networkId, target, bufferId);
     },
     pushMessage(event: BufferMessage) {
       if (!event.target) return false;
-      const buf = ensureBuffer(this, event.networkId, event.target);
+      const buf = ensureBuffer(
+        this,
+        event.networkId,
+        event.target,
+        typeof event.bufferId === 'number' ? event.bufferId : undefined,
+      );
       // Detached: the user is reading a historical slice that doesn't include
       // the live tail. Drop the event so nothing materializes inside the
       // slice, and bump the badge so the StatusBar "Return to present" button
@@ -483,6 +537,7 @@ export const useBuffersStore = defineStore('buffers', {
             buf.lastReadId = event.id;
             socketSend({
               type: 'mark-read',
+              bufferId: buf.id,
               networkId: buf.networkId,
               target: buf.target,
               messageId: event.id,
@@ -507,9 +562,9 @@ export const useBuffersStore = defineStore('buffers', {
       speakers: SpeakerEntry[] | undefined,
       readState: any,
       joined: boolean | undefined,
-      opts: { reset?: boolean; hasMoreOlder?: boolean } = {},
+      opts: { reset?: boolean; hasMoreOlder?: boolean; bufferId?: number | null } = {},
     ) {
-      const buf = ensureBuffer(this, networkId, target);
+      const buf = ensureBuffer(this, networkId, target, opts.bufferId);
       // Detached: snapshot resume during detach is a no-op. The gap-fill
       // events would land at id values inside or past the detached slice and
       // either corrupt its boundaries or get conflated with paged-in history.
@@ -694,6 +749,7 @@ export const useBuffersStore = defineStore('buffers', {
         mode: 'around',
         networkId,
         target,
+        bufferId: buf.id,
         anchorId,
         token,
         limit: halfLimit,
@@ -753,6 +809,7 @@ export const useBuffersStore = defineStore('buffers', {
         mode: 'latest',
         networkId,
         target,
+        bufferId: buf.id,
         token,
         limit,
         // This is the hydrate — the fetch that fills the FIRST screenful, and so
@@ -828,6 +885,9 @@ export const useBuffersStore = defineStore('buffers', {
         type: 'open-buffer',
         networkId,
         target,
+        // Present only when the buffer already exists locally — the id form
+        // addresses an existing row; minting/JOINing is inherently name-first.
+        bufferId: idFor(networkId, target),
         // The reply re-seeds history for a since-closed buffer, so it's a first
         // screenful like any other hydrate (§8).
         countBy: historyCountBy(),
@@ -895,6 +955,7 @@ export const useBuffersStore = defineStore('buffers', {
         buf.lastReadId = lastId;
         socketSend({
           type: 'mark-read',
+          bufferId: buf.id,
           networkId,
           target,
           messageId: lastId,
@@ -1052,13 +1113,55 @@ export const useBuffersStore = defineStore('buffers', {
           typingTimers.delete(k);
         }
       }
+      if (buf.id !== undefined) keyById.delete(buf.id);
       delete this.buffers[bufKey];
+    },
+    // Lifecycle hooks (lib/bufferLifecycle.ts). This store must be swept
+    // FIRST — the others may resolve through it.
+    dropBuffer(networkId: number | string | null, target: string) {
+      if (networkId == null) return; // the system buffer is permanent
+      this.drop(networkId, target);
+    },
+    // Move the entry to its new name, keeping the same Buffer object (and
+    // therefore its id — a rename never changes identity). If an entry
+    // already exists under the destination (the server announced a merge and
+    // the frames raced), the destination wins and the source is dropped —
+    // matching the server's source-survives merge from the other side.
+    rekeyBuffer(networkId: number | string | null, from: string, to: string) {
+      if (networkId == null) return;
+      const fromKey = resolveExistingKey(this.buffers, networkId, from);
+      if (!fromKey) return;
+      const toKey = bufferKey(networkId, to);
+      if (fromKey === toKey) return;
+      if (this.buffers[toKey]) {
+        this.drop(networkId, from);
+        return;
+      }
+      const buf = this.buffers[fromKey];
+      // Move typing timers to the new composite prefix — their keys embed the
+      // canonical target.
+      const oldPrefix = `${buf.networkId}::${buf.target}::`;
+      const newPrefix = `${buf.networkId}::${to}::`;
+      const moved: Array<[string, ReturnType<typeof setTimeout>]> = [];
+      for (const [k, id] of typingTimers) {
+        if (k.startsWith(oldPrefix)) moved.push([k, id]);
+      }
+      for (const [k, id] of moved) {
+        typingTimers.delete(k);
+        typingTimers.set(newPrefix + k.slice(oldPrefix.length), id);
+      }
+      buf.target = to;
+      buf.kind = deriveKind(buf.networkId, to);
+      this.buffers[toKey] = buf;
+      delete this.buffers[fromKey];
+      if (buf.id !== undefined) keyById.set(buf.id, toKey);
     },
     // Called from useSessionReset before $reset(). The state reset will wipe
     // every buffer (and therefore every typing indicator), but the
     // module-level Map of pending setTimeouts isn't part of Pinia state —
     // clear it explicitly so timers don't linger after logout.
     resetTimers() {
+      keyById.clear();
       for (const id of typingTimers.values()) clearTimeout(id);
       typingTimers.clear();
       for (const id of pendingJoins.values()) clearTimeout(id);
@@ -1221,12 +1324,12 @@ export const useBuffersStore = defineStore('buffers', {
     // boundary id). Best-effort send; the server's fan-out echoes back and
     // applyClearedState moves the local mirror to the authoritative value.
     clearBuffer(networkId: number | string, target: string) {
-      socketSend({ type: 'clear-buffer', networkId, target });
+      socketSend({ type: 'clear-buffer', networkId, target, bufferId: idFor(networkId, target) });
     },
     // Drop the /clear marker so hidden messages reappear. Fired by the
     // "Show earlier messages" affordance on the divider and by `/clear off`.
     unclearBuffer(networkId: number | string, target: string) {
-      socketSend({ type: 'unclear-buffer', networkId, target });
+      socketSend({ type: 'unclear-buffer', networkId, target, bufferId: idFor(networkId, target) });
     },
     // Switch to a buffer. We mark the entered buffer read on focus-IN (not
     // on focus-OUT of the previous one) so that a tab close / reload / lost
@@ -1299,6 +1402,7 @@ export const useBuffersStore = defineStore('buffers', {
           buf.lastReadId = lastId;
           socketSend({
             type: 'mark-read',
+            bufferId: buf.id,
             networkId,
             target: canonTarget,
             messageId: lastId,
