@@ -74,3 +74,42 @@ export function bufferRenamed(networkId: number | string | null, from: string, t
   const canonicalFrom = canonicalTarget(networkId, from);
   for (const get of participants) get().rekeyBuffer(networkId, canonicalFrom, to);
 }
+
+/**
+ * The full `buffer-renamed` frame contract (docs §9.7): the buffer keeps its
+ * id and adopts the new name; on a merge the ABSORBED buffer (the one that
+ * already held the new name — `mergedFromBufferId`) is dropped everywhere
+ * first, so the rename lands with no collision and the destination-wins
+ * fallbacks in the rekey hooks never fire on an announced merge. A merged
+ * buffer's history interleaves two message streams server-side, so the local
+ * slice is wiped and flagged for a fresh hydrate rather than guessed at —
+ * the read-state / pins / draft corrections ride in right behind the frame.
+ * Following the active buffer is free: networks.rekeyBuffer moves activeKey.
+ */
+export function applyBufferRenamed(payload: {
+  networkId: number | string | null;
+  from: string;
+  to: string;
+  bufferId?: number | null;
+  merged?: boolean;
+}): void {
+  const { networkId, from, to, bufferId, merged } = payload;
+  if (merged) bufferClosed(networkId, to);
+  bufferRenamed(networkId, from, to);
+  const buffers = useBuffersStore();
+  const buf = buffers.findByTarget(networkId, to);
+  if (!buf) return;
+  // Learn/confirm the id under the new key (also heals the case where the
+  // rename raced ahead of the burst and we never knew the id).
+  if (typeof bufferId === 'number' && networkId != null) buffers.ensure(networkId, to, bufferId);
+  if (merged && !buf.detached) {
+    buf.messages = [];
+    buf.oldestId = null;
+    buf.newestId = null;
+    buf.hasMoreOlder = true;
+    // The shell flag routes it through the ordinary hydration reconciler —
+    // activate() (or useBufferHydration, if it's already active) fetches the
+    // merged latest slice exactly like a fresh-connect shell.
+    buf.unseeded = true;
+  }
+}

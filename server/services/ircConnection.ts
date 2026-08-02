@@ -4,6 +4,7 @@
 import IRC, { ircLineParser } from 'irc-framework';
 import type { Client as IrcClient } from 'irc-framework';
 import { insertMessage, hasMessageForTarget, hasConversationForTarget } from '../db/messages.js';
+import { renameBuffer as renameDmBuffer } from '../db/renameBuffer.js';
 import type { Network } from '../db/networks.js';
 import {
   isClosed as isBufferClosed,
@@ -2214,6 +2215,7 @@ export class IrcConnection {
       if (!isSelfNick) {
         this.markPeerEvent(eventNick, 'offline');
         this.markPeerEvent(eventNewNick, 'online');
+        this.renameDmForNickChange(eventNick, eventNewNick, userhost, event.time);
       }
     });
 
@@ -2901,6 +2903,94 @@ export class IrcConnection {
   }
 
   // ---- presence watch list (shared MONITOR + peer_presence_state rails) ----
+  // weechat/irssi parity (#695): the DM buffer follows the person through a
+  // /nick. The rename itself is one registry UPDATE (db/renameBuffer);
+  // in-memory per-target state and the MONITOR watch re-key alongside; the
+  // announcement rides publishEphemeral to wsHub, which fans the
+  // buffer-renamed frame (plus merge follow-ups) to every device. The
+  // "is now known as" row is persisted AFTER the rename so it lands under
+  // the buffer's new name — both clients already render type:'nick' rows,
+  // so the DM shows the same line a shared channel does.
+  //
+  // Closed DMs rename too: their history should follow the person, and a
+  // rename never reopens (state carries over; a merge takes the open state
+  // if EITHER side was open — see renameBuffer).
+  //
+  // Deliberately unconditional (no setting): weechat and irssi both do this
+  // without asking. irssi's user@host re-identification (renaming when the
+  // peer RECONNECTS under a new nick, no NICK seen) is out of scope — see
+  // ROADMAP.
+  private renameDmForNickChange(
+    oldNick: string,
+    newNick: string,
+    userhost: string | null,
+    time: unknown,
+  ): void {
+    let result;
+    try {
+      const row = getBuffer(this.network.user_id, this.network.id, oldNick);
+      if (!row || row.kind !== 'dm') return;
+      result = renameDmBuffer(this.network.user_id, this.network.id, oldNick, newNick);
+    } catch (e) {
+      console.warn('[nick] DM rename failed:', (e as Error)?.message || e);
+      return;
+    }
+    if (!result?.renamed) return;
+    const oldLower = oldNick.toLowerCase();
+    const newLower = newNick.toLowerCase();
+    if (oldLower !== newLower) {
+      // Per-target in-memory state follows the buffer. Each map is keyed by
+      // the folded target; leaving an entry behind resurrects the exact bug
+      // class renameChannel's comment catalogues (a stale can't-speak-here
+      // flag, a leaked one-shot WHO suppression, a stranded CTCP queue).
+      if (this.unsendableTargets.delete(oldLower)) this.unsendableTargets.add(newLower);
+      const lastSend = this.lastUserSendAt.get(oldLower);
+      if (lastSend !== undefined) {
+        this.lastUserSendAt.delete(oldLower);
+        this.lastUserSendAt.set(newLower, lastSend);
+      }
+      if (this.autoWhoTargets.delete(oldLower)) this.autoWhoTargets.add(newLower);
+      const ctcpQueue = this.ctcpOutstanding.get(oldLower);
+      if (ctcpQueue) {
+        this.ctcpOutstanding.delete(oldLower);
+        this.ctcpOutstanding.set(newLower, ctcpQueue);
+      }
+      const hint = this.e2eHintAt.get(oldLower);
+      if (hint !== undefined) {
+        this.e2eHintAt.delete(oldLower);
+        this.e2eHintAt.set(newLower, hint);
+      }
+      // MONITOR follows the person: untrack first so the shared-watch
+      // refcount can't strand the old nick, then watch the new one — the
+      // renamed DM's presence dot stays live instead of going stale until
+      // the next reconnect.
+      this.untrackDmPeer(oldNick);
+      this.trackDmPeer(newNick);
+    }
+    this.publishEphemeral({
+      type: 'buffer-renamed',
+      target: result.to,
+      from: result.from,
+      to: result.to,
+      bufferId: result.bufferId,
+      merged: result.merged,
+      ...(result.mergedFromBufferId != null
+        ? { mergedFromBufferId: result.mergedFromBufferId }
+        : {}),
+      draftChanged: result.draftChanged,
+    });
+    // The DM's own "x is now known as y" line — same row shape the channel
+    // loop above persists, no new renderer work anywhere.
+    this.publish({
+      type: 'nick',
+      target: result.to,
+      nick: oldNick,
+      newNick,
+      userhost,
+      time,
+    });
+  }
+
   // trackDmPeer/trackFriend (and their untrackers) are thin wrappers over the
   // reference-counted helpers below: the wire watch and the DB row are added on
   // the first reason and removed on the last, so a nick held by both roles is

@@ -2533,3 +2533,103 @@ describe('join echo, forwarded joins (470), and un-partable channels (442)', () 
     expect(getBuffer(conn.network.user_id, conn.network.id, '#apple')?.autojoin).toBe(false);
   });
 });
+
+// #695: a DM buffer follows its peer through /nick (weechat/irssi parity).
+describe('DM rename on peer NICK', () => {
+  function connFor(name: string) {
+    const network = createNetwork(1, {
+      name,
+      host: 'irc.example.test',
+      port: 6697,
+      tls: 1,
+      trusted_certificates: 1,
+      nick: 'me',
+      username: null,
+      realname: null,
+      server_password: null,
+      autoconnect: 0,
+      sasl_account: null,
+      sasl_password: null,
+      connect_commands: null,
+    })!;
+    const conn = new IrcConnection({ network, onEvent: () => {} });
+    conn.client.user.nick = 'me';
+    const published: Array<Record<string, unknown>> = [];
+    conn.publish = vi.fn<(event: unknown) => void>((e) => {
+      published.push(e as Record<string, unknown>);
+    }) as typeof conn.publish;
+    conn.publishEphemeral = vi.fn<(event: unknown) => void>((e) => {
+      published.push(e as Record<string, unknown>);
+    }) as typeof conn.publishEphemeral;
+    return { conn, network, published };
+  }
+
+  it('renames the DM row, announces it, and persists the "known as" line under the NEW name', async () => {
+    const { conn, network, published } = connFor('dmrename');
+    const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
+    ensureOpen(network.user_id, network.id, 'bob', { kind: 'dm' });
+    const id = get(network.user_id, network.id, 'bob')!.id;
+
+    conn.client.emit('nick', { nick: 'bob', new_nick: 'bob_away' });
+
+    // The registry row kept its id and adopted the new name.
+    expect(get(network.user_id, network.id, 'bob')).toBeUndefined();
+    expect(get(network.user_id, network.id, 'bob_away')?.id).toBe(id);
+    // The announcement, then the DM's own nick row — in that order, so the
+    // row lands under the buffer's new name.
+    const renamed = published.find((e) => e.type === 'buffer-renamed');
+    expect(renamed).toMatchObject({ from: 'bob', to: 'bob_away', bufferId: id, merged: false });
+    const nickRow = published.find((e) => e.type === 'nick' && e.target === 'bob_away');
+    expect(nickRow).toMatchObject({ nick: 'bob', newNick: 'bob_away' });
+    expect(published.indexOf(renamed!)).toBeLessThan(published.indexOf(nickRow!));
+  });
+
+  it('a collision merges source-survives and announces the absorbed id', async () => {
+    const { conn, network, published } = connFor('dmrename-merge');
+    const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
+    ensureOpen(network.user_id, network.id, 'stale_carol', { kind: 'dm' });
+    const absorbedId = get(network.user_id, network.id, 'stale_carol')!.id;
+    ensureOpen(network.user_id, network.id, 'carol', { kind: 'dm' });
+    const liveId = get(network.user_id, network.id, 'carol')!.id;
+
+    conn.client.emit('nick', { nick: 'carol', new_nick: 'stale_carol' });
+
+    expect(get(network.user_id, network.id, 'stale_carol')?.id).toBe(liveId);
+    expect(published.find((e) => e.type === 'buffer-renamed')).toMatchObject({
+      bufferId: liveId,
+      merged: true,
+      mergedFromBufferId: absorbedId,
+    });
+  });
+
+  it('a closed DM renames too, without reopening', async () => {
+    const { conn, network } = connFor('dmrename-closed');
+    const { ensureOpen, close, getBuffer: get } = await import('../db/buffers.js');
+    ensureOpen(network.user_id, network.id, 'ghost', { kind: 'dm' });
+    close(network.user_id, network.id, 'ghost');
+
+    conn.client.emit('nick', { nick: 'ghost', new_nick: 'phantom' });
+
+    expect(get(network.user_id, network.id, 'phantom')?.state).toBe('closed');
+  });
+
+  it('no DM row means no rename and no announcement', async () => {
+    const { conn, network, published } = connFor('dmrename-none');
+    conn.client.emit('nick', { nick: 'stranger', new_nick: 'stranger2' });
+    const { getBuffer: get } = await import('../db/buffers.js');
+    expect(get(network.user_id, network.id, 'stranger2')).toBeUndefined();
+    expect(published.find((e) => e.type === 'buffer-renamed')).toBeUndefined();
+  });
+
+  it('our own /nick never renames a buffer', async () => {
+    const { conn, network, published } = connFor('dmrename-self');
+    const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
+    // Pathological but possible: a DM buffer named like our own nick.
+    ensureOpen(network.user_id, network.id, 'me', { kind: 'dm' });
+
+    conn.client.emit('nick', { nick: 'me', new_nick: 'me2' });
+
+    expect(get(network.user_id, network.id, 'me')).toBeDefined();
+    expect(published.find((e) => e.type === 'buffer-renamed')).toBeUndefined();
+  });
+});

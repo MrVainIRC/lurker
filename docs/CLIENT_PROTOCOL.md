@@ -630,6 +630,7 @@ a v1 client.
 | `send-result`                                                                                                                                                            | `clientId, ok, error?`                                                                                                                                                                                                                                                | Ack for `send`/`action`/`notice`                                                                                                                          |
 | `buffer-opened` / `buffer-closed` / `buffer-reopened`                                                                                                                    | `networkId, target, bufferId?` (absent only on the ack for a channel still being JOINed — no row yet)                                                                                                                                                                 | Buffer lifecycle (§9.1). `buffer-opened` is an ack to the socket that asked **and** a fan-out to the user's other devices — only focus on your own (§4.3) |
 | `buffer-cleared`                                                                                                                                                         | `networkId, target, bufferId, clearedBeforeId, clearedAt`                                                                                                                                                                                                             | `/clear` marker                                                                                                                                           |
+| `buffer-renamed`                                                                                                                                                         | `networkId, from, to, bufferId, merged, mergedFromBufferId?` — see §9.7                                                                                                                                                                                               | A buffer changed names (same id): DM follows a peer's NICK                                                                                                |
 | `pins-changed`                                                                                                                                                           | `networkId, pinned[], pinnedIds[]` (parallel-indexed: `pinnedIds[i]` is `pinned[i]`'s buffer)                                                                                                                                                                         | Authoritative pin order                                                                                                                                   |
 | `nicklist-collapsed-changed` / `channel-notify-changed`                                                                                                                  | `networkId, target, bufferId, …`                                                                                                                                                                                                                                      | View-state sync                                                                                                                                           |
 | `draft-updated` / `input-history-added` / `bookmark-updated` / `nick-note-updated` / `relay-bot-updated` / `contact-updated` / `contact-deleted` / `ignore-list-updated` | various                                                                                                                                                                                                                                                               | Multi-device view-state fan-out                                                                                                                           |
@@ -948,6 +949,54 @@ remove, `kick`→remove `kicked`, `nick`→rename (`chghost` renders only; its
 nicklist patch arrives separately as `member-update`).
 
 ---
+
+### 9.7 Renames keep a buffer's identity
+
+**Emitted today for DM buffers following a peer's `/nick`** (weechat/irssi
+parity); channel renames (`draft/channel-rename`) will reuse the same frame.
+
+```jsonc
+{
+  "kind": "buffer-renamed",
+  "networkId": 4,
+  "from": "alice", // canonical pre-rename name (registry casing)
+  "to": "alice_away", // authoritative new name — key off THIS
+  "bufferId": 42, // the SURVIVING buffer; its id did not change
+  "merged": false,
+  "mergedFromBufferId": 17, // present iff merged: the absorbed, now-deleted id
+}
+```
+
+The contract, in the order a client should apply it:
+
+- **The id never changes.** `bufferId` is the same id this buffer has always
+  had; only the name moved. A client keying state by id has almost nothing to
+  do; a client keying by name rekeys `from → to` in every store holding
+  per-buffer state (the web client does this with one registry sweep —
+  `lib/bufferLifecycle.ts`).
+- **`merged: true` means another buffer was absorbed.** A row already held
+  the new name (a stale DM under the peer's old nick, usually). The SOURCE
+  survives — the live conversation keeps its id — and `mergedFromBufferId`
+  names the absorbed buffer: drop it everywhere first, then apply the rename;
+  done in that order there is no key collision. The merged history
+  interleaves server-side, so wipe the local slice and re-hydrate rather
+  than guessing at the interleave.
+- **Corrections ride behind a merge.** `read-state`, `pins-changed`, and (when
+  the surviving draft changed) `draft-updated` frames follow immediately —
+  the merge changed those server-side and an idle buffer would never
+  otherwise learn.
+- **Key off `to`, never a name you predicted**, and follow the active buffer:
+  a rename of the buffer the user is reading is the same buffer, not a
+  navigation.
+- The frame reaches **every** socket including whichever device's action
+  caused it — it describes a fact, not an instruction.
+- The DM also receives an ordinary persisted `type:'nick'` row ("x is now
+  known as y"), AFTER the rename, so it renders under the new name with the
+  same code path channel nick rows use.
+- What deliberately does NOT follow a rename: highlight/ignore rules scoped
+  to the old name (glob patterns, possibly cross-network), and e2e crypto
+  contexts (wire-keyed; a DM context keys on the peer's host and is already
+  rename-proof).
 
 ## 10. HTTP API reference
 

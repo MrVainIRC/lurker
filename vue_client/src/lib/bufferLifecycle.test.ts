@@ -14,7 +14,7 @@ vi.mock('../composables/useSocket.js', () => ({
   socketSend: vi.fn<() => boolean>(() => true),
 }));
 
-import { bufferClosed, bufferRenamed } from './bufferLifecycle.js';
+import { bufferClosed, bufferRenamed, applyBufferRenamed } from './bufferLifecycle.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { useNetworksStore } from '../stores/networks.js';
 import { useNavHistoryStore } from '../stores/navHistory.js';
@@ -160,5 +160,54 @@ describe('rename collisions: destination wins everywhere', () => {
     // Nothing remains under the old name anywhere.
     expect(KEY in useDraftStore().drafts).toBe(false);
     expect(useBuffersStore().buffers[KEY]).toBeUndefined();
+  });
+});
+
+describe('applyBufferRenamed — the full frame contract', () => {
+  it('plain rename: moves everything, learns the id, keeps the slice', () => {
+    seedEverything();
+    const buf = useBuffersStore().buffers[KEY]!;
+    buf.messages.push({ id: 1, networkId: NET, target: TARGET, type: 'message' });
+
+    applyBufferRenamed({ networkId: NET, from: TARGET, to: '#fresh', bufferId: 42 });
+
+    const moved = useBuffersStore().buffers[`${NET}::#fresh`]!;
+    expect(moved.id).toBe(42);
+    expect(moved.messages).toHaveLength(1); // no merge — history is untouched
+    expect(useNetworksStore().activeKey).toBe(`${NET}::#fresh`);
+  });
+
+  it('merge: drops the absorbed buffer everywhere FIRST, then renames with no collision', () => {
+    seedEverything();
+    // The absorbed side: a stale buffer already holding the new name, with
+    // state scattered across stores.
+    const ABSORBED = '#stale';
+    useBuffersStore().ensure(NET, ABSORBED, 99);
+    useDraftStore().drafts[`${NET}::${ABSORBED}`] = 'stale draft';
+    usePinsStore().byNetwork[NET] = [TARGET, ABSORBED];
+    const live = useBuffersStore().buffers[KEY]!;
+    live.messages.push({ id: 5, networkId: NET, target: TARGET, type: 'message' });
+
+    applyBufferRenamed({
+      networkId: NET,
+      from: TARGET,
+      to: ABSORBED,
+      bufferId: 42,
+      merged: true,
+    });
+
+    const survivor = useBuffersStore().buffers[`${NET}::${ABSORBED}`]!;
+    // The LIVE buffer survived under the new name — id 42, not the stale 99.
+    expect(survivor.id).toBe(42);
+    // Merged history interleaves server-side: the slice is wiped and flagged
+    // for a fresh hydrate instead of guessed at.
+    expect(survivor.messages).toHaveLength(0);
+    expect(survivor.unseeded).toBe(true);
+    expect(survivor.hasMoreOlder).toBe(true);
+    // The stale buffer's satellite state is gone, not inherited; the live
+    // buffer's own state moved in (destination-wins never fired — the
+    // absorbed side was swept before the rename landed).
+    expect(useDraftStore().drafts[`${NET}::${ABSORBED}`]).toBe('half-typed');
+    expect(usePinsStore().byNetwork[NET]).toEqual([ABSORBED]);
   });
 });
