@@ -1577,6 +1577,22 @@ function scrollToBottom() {
   el.scrollTop = el.scrollHeight;
 }
 
+// Unclearing resets the buffer to the latest chat (the store trims the slice
+// to the newest page) — land the viewport there too. Without this the scroll
+// stays wherever the "Show earlier messages" button was, which after the trim
+// is an arbitrary spot above the tail.
+watch(
+  () => buffer.value?.clearedBeforeId,
+  async (next, prev) => {
+    if ((prev ?? 0) > 0 && (next ?? 0) === 0 && !buffer.value?.detached) {
+      stickToBottom.value = true;
+      setStuckToBottom(true);
+      await nextTick();
+      scrollToBottom();
+    }
+  },
+);
+
 // Away/back markers are emitted from awayState, not from messages.value, so
 // the messages-array watcher below doesn't see them. When the user flips
 // state while pinned to the bottom, follow the new divider down — same
