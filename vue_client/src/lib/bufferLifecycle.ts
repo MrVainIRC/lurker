@@ -52,14 +52,25 @@ const participants: Array<() => BufferLifecycleParticipant> = [
   () => useChannelNotifyStore(),
 ];
 
+// Most participants key exact `${networkId}::${target}` strings, but the
+// server can hand us a divergently-cased name (#289/#327). The buffers store
+// resolves case-insensitively — so resolve through it ONCE and sweep every
+// other store with the canonical casing its keys were built from.
+function canonicalTarget(networkId: number | string | null, target: string): string {
+  return useBuffersStore().findByTarget(networkId, target)?.target ?? target;
+}
+
 /** The buffer is gone (buffer-closed): sweep every participating store. */
 export function bufferClosed(networkId: number | string | null, target: string): void {
-  for (const get of participants) get().dropBuffer(networkId, target);
+  const canonical = canonicalTarget(networkId, target);
+  for (const get of participants) get().dropBuffer(networkId, canonical);
 }
 
 /** The buffer changed names (buffer-renamed, same id): rekey every
- *  participating store. The buffers store itself must be rekeyed FIRST — the
- *  other stores' hooks may resolve through it. */
+ *  participating store. The buffers store is first in the participant list —
+ *  it must move before the others, and `from` is canonicalized BEFORE it does
+ *  (afterward the old name no longer resolves). */
 export function bufferRenamed(networkId: number | string | null, from: string, to: string): void {
-  for (const get of participants) get().rekeyBuffer(networkId, from, to);
+  const canonicalFrom = canonicalTarget(networkId, from);
+  for (const get of participants) get().rekeyBuffer(networkId, canonicalFrom, to);
 }

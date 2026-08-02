@@ -1433,6 +1433,16 @@ function requestMoreHistory() {
   // via fan-out, defeating prependHistory's prepend semantics and creating a
   // visible duplicate. Wait until there's at least one message to anchor on.
   if (!before) return;
+  // /clear boundary: in live view every row with id <= clearedBeforeId is
+  // hidden by the render filter, so a page fetched past the boundary can
+  // never add a VISIBLE row — but ensureViewportFilled's recursion can't see
+  // that: the viewport never fills, so it vacuums the buffer's entire
+  // history into memory one invisible page at a time, and "Show earlier
+  // messages" then renders the whole pile (plus a link-preview mount per
+  // URL) in one frame. Stop at the boundary; unclearing re-enables paging
+  // through the normal scroll path. Detached views ignore the clear filter
+  // (jump-to-message must land on its row), so they page freely.
+  if (!buf.detached && buf.clearedBeforeId > 0 && Number(before) <= buf.clearedBeforeId) return;
   buffers.setLoadingHistory(buf.networkId, buf.target, true);
   socketSend({
     type: 'history',

@@ -51,9 +51,13 @@ export const usePinsStore = defineStore('pins', {
     rekeyBuffer(networkId: number | string | null, from: string, to: string) {
       if (networkId == null) return;
       const list = this.byNetwork[networkId];
-      if (list?.includes(from)) {
-        this.byNetwork[networkId] = list.map((t) => (t === from ? to : t));
-      }
+      if (!list?.includes(from)) return;
+      // Destination wins on a rename/merge collision (matching the buffers
+      // store): if `to` is already pinned, mapping `from` onto it would
+      // duplicate the entry — drop the source pin instead.
+      this.byNetwork[networkId] = list.includes(to)
+        ? list.filter((t) => t !== from)
+        : list.map((t) => (t === from ? to : t));
     },
   },
 });

@@ -31,7 +31,11 @@ export const useRecentBuffersStore = defineStore('recentBuffers', {
     rekeyBuffer(networkId: number | string | null, from: string, to: string) {
       const fromKey = networkId == null ? from : `${networkId}::${from}`;
       const toKey = networkId == null ? to : `${networkId}::${to}`;
-      this.keys = this.keys.map((x: string) => (x === fromKey ? toKey : x));
+      // MRU entries are unique; on a merge collision the destination keeps
+      // its own recency slot and the source entry just disappears.
+      this.keys = this.keys.includes(toKey)
+        ? this.keys.filter((x: string) => x !== fromKey)
+        : this.keys.map((x: string) => (x === fromKey ? toKey : x));
     },
   },
 });

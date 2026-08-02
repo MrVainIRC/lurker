@@ -123,3 +123,42 @@ describe('bufferRenamed', () => {
     expect(buf.target).toBe('#reborn');
   });
 });
+
+describe('divergent casing reaches every store, not just buffers', () => {
+  it('sweeps exact-string-keyed stores using the canonical casing', () => {
+    // The buffers store resolves closes case-insensitively, but drafts/pins/
+    // trails key EXACT strings built from the canonical casing — a raw-cased
+    // sweep would clear the buffer and leak everything else.
+    seedEverything();
+    bufferClosed(NET, '#LIFECYCLE');
+    expect(KEY in useDraftStore().drafts).toBe(false);
+    expect(usePinsStore().byNetwork[NET]).toEqual(['#other']);
+    expect(useRecentBuffersStore().keys).toEqual([`${NET}::#other`]);
+  });
+});
+
+describe('rename collisions: destination wins everywhere', () => {
+  it('drops the source entry instead of clobbering or duplicating', () => {
+    seedEverything();
+    const DEST = '#other';
+    // Give the destination its own state so a clobber is detectable.
+    useDraftStore().drafts[`${NET}::${DEST}`] = 'dest draft';
+    useNicklistCollapseStore().byNetwork[NET]![DEST] = false;
+    useChannelNotifyStore().byNetwork[NET]![DEST] = { notifyAlways: false };
+    useInputHistoryStore().seed(NET, DEST, ['dest line']);
+    useRecentBuffersStore().keys = [KEY, `${NET}::${DEST}`];
+
+    bufferRenamed(NET, TARGET, DEST);
+
+    expect(useDraftStore().drafts[`${NET}::${DEST}`]).toBe('dest draft');
+    expect(useNicklistCollapseStore().byNetwork[NET]![DEST]).toBe(false);
+    expect(useChannelNotifyStore().byNetwork[NET]![DEST]).toEqual({ notifyAlways: false });
+    expect(useInputHistoryStore().forBuffer(NET, DEST)).toEqual(['dest line']);
+    // Pins/MRU keep ONE entry for the destination, in its own slot.
+    expect(usePinsStore().byNetwork[NET]).toEqual([DEST]);
+    expect(useRecentBuffersStore().keys).toEqual([`${NET}::${DEST}`]);
+    // Nothing remains under the old name anywhere.
+    expect(KEY in useDraftStore().drafts).toBe(false);
+    expect(useBuffersStore().buffers[KEY]).toBeUndefined();
+  });
+});

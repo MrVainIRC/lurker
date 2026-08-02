@@ -1007,3 +1007,42 @@ describe('open-buffer focus correlation', () => {
     expect(store.claimPendingOpen(1, '#stale')).toBe(false);
   });
 });
+
+describe('applyClearedState — unclearing resets to the latest page', () => {
+  it('trims the in-memory slice and re-arms the upward pager', async () => {
+    const { setActivePinia, createPinia } = await import('pinia');
+    setActivePinia(createPinia());
+    const { useBuffersStore } = await import('./buffers.js');
+    const store = useBuffersStore();
+    const buf = store.ensure(1, '#deep');
+    // Simulate the pile a cleared-state session can accumulate.
+    for (let i = 1; i <= 500; i++) {
+      buf.messages.push({ id: i, networkId: 1, target: '#deep', type: 'message' });
+    }
+    buf.clearedBeforeId = 450;
+    buf.hasMoreOlder = false;
+
+    store.applyClearedState(1, '#deep', { clearedBeforeId: 0, clearedAt: null });
+
+    // The buffer comes back as "latest chat", not an archaeology dig: one
+    // standard page, with older history reachable through the normal pager.
+    expect(buf.messages.length).toBe(200);
+    expect(buf.messages[0].id).toBe(301);
+    expect(buf.hasMoreOlder).toBe(true);
+    expect(buf.clearedBeforeId).toBe(0);
+  });
+
+  it('a clear (not an unclear) never trims', async () => {
+    const { setActivePinia, createPinia } = await import('pinia');
+    setActivePinia(createPinia());
+    const { useBuffersStore } = await import('./buffers.js');
+    const store = useBuffersStore();
+    const buf = store.ensure(1, '#keep');
+    for (let i = 1; i <= 300; i++) {
+      buf.messages.push({ id: i, networkId: 1, target: '#keep', type: 'message' });
+    }
+    store.applyClearedState(1, '#keep', { clearedBeforeId: 300, clearedAt: 'now' });
+    expect(buf.messages.length).toBe(300);
+    expect(buf.clearedBeforeId).toBe(300);
+  });
+});

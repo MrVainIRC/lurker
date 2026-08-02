@@ -42,10 +42,12 @@ export const useInputHistoryStore = defineStore('inputHistory', {
     rekeyBuffer(networkId: number | string | null, from: string, to: string) {
       if (networkId == null) return;
       const fromKey = key(networkId, from);
-      if (this.history[fromKey]) {
-        this.history[key(networkId, to)] = this.history[fromKey];
-        delete this.history[fromKey];
-      }
+      const toKey = key(networkId, to);
+      if (!this.history[fromKey]) return;
+      // Destination wins on a merge collision; the source mirror is dropped
+      // (the server's merged slice re-seeds on next open anyway).
+      if (!this.history[toKey]) this.history[toKey] = this.history[fromKey];
+      delete this.history[fromKey];
     },
   },
 });

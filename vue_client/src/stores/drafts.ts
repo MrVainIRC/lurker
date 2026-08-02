@@ -116,6 +116,23 @@ export const useDraftStore = defineStore('drafts', {
       if (networkId == null) return;
       const fromKey = key(networkId, from);
       const toKey = key(networkId, to);
+      // Destination wins on a merge collision: if the destination buffer has
+      // ANY local draft state (body, pending flush, armed timer), the
+      // source's is dropped rather than clobbering what the user typed there
+      // — mirroring the server's merge (survivor's non-empty draft wins).
+      const destHasState =
+        this.drafts[toKey] != null || pending.has(toKey) || flushTimers.has(toKey);
+      const fromTimer = flushTimers.get(fromKey);
+      if (fromTimer) {
+        // Never move the old timeout: its closure captured the OLD name.
+        clearTimeout(fromTimer);
+        flushTimers.delete(fromKey);
+      }
+      if (destHasState) {
+        delete this.drafts[fromKey];
+        pending.delete(fromKey);
+        return;
+      }
       if (this.drafts[fromKey] != null) {
         this.drafts[toKey] = this.drafts[fromKey];
         delete this.drafts[fromKey];
@@ -124,14 +141,7 @@ export const useDraftStore = defineStore('drafts', {
         pending.delete(fromKey);
         pending.set(toKey, { networkId, target: to });
       }
-      const timer = flushTimers.get(fromKey);
-      if (timer) {
-        // Re-arm under the new key rather than moving the old timeout: its
-        // closure captured the OLD name and would flush to it.
-        clearTimeout(timer);
-        flushTimers.delete(fromKey);
-        this.scheduleFlush(networkId, to);
-      }
+      if (fromTimer) this.scheduleFlush(networkId, to);
     },
     // Beacon path used on tab close: ship every un-flushed buffer in one POST
     // since a WS send may already be in teardown. Returns whether anything

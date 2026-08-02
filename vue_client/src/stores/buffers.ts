@@ -1317,8 +1317,26 @@ export const useBuffersStore = defineStore('buffers', {
     // that doesn't carry read-state fields doesn't blank them out.
     applyClearedState(networkId: number | string, target: string, payload: any) {
       const buf = ensureBuffer(this, networkId, target);
+      const wasCleared = buf.clearedBeforeId > 0;
       buf.clearedBeforeId = Number(payload?.clearedBeforeId) || 0;
       buf.clearedAt = payload?.clearedAt || null;
+      // UNCLEAR resets the buffer to the latest chat, it doesn't excavate.
+      // Whatever hidden rows accumulated in memory during the cleared state
+      // (up to a full page from before the clear) would otherwise all render
+      // at once — the user asked for their buffer back, not an archaeology
+      // dig. Trim to the newest standard page, flag that older history
+      // exists, and let the ordinary scroll pager re-fetch on demand. Local
+      // trim only — no refetch — so the multi-tab fan-out costs nothing.
+      // Detached views ignore the clear filter entirely and keep their slice.
+      if (wasCleared && buf.clearedBeforeId === 0 && !buf.detached) {
+        const KEEP = 200; // one standard backlog page (server's latest slice)
+        if (buf.messages.length > KEEP) {
+          buf.messages = buf.messages.slice(-KEEP);
+          buf.hasMoreOlder = true;
+        }
+        buf.oldestId = null;
+        buf.newestId = null;
+      }
     },
     // /clear: anchor the marker at the current tail (server picks the exact
     // boundary id). Best-effort send; the server's fan-out echoes back and

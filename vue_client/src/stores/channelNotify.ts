@@ -80,10 +80,10 @@ export const useChannelNotifyStore = defineStore('channelNotify', {
     rekeyBuffer(networkId: number | string | null, from: string, to: string) {
       if (networkId == null) return;
       const map = this.byNetwork[networkId];
-      if (map && from in map) {
-        map[to] = map[from];
-        delete map[from];
-      }
+      if (!map || !(from in map)) return;
+      // Destination wins on a merge collision.
+      if (!(to in map)) map[to] = map[from];
+      delete map[from];
     },
   },
 });
