@@ -184,3 +184,55 @@ describe('listPinnedForUser', () => {
 // reshapes pinned_buffers), and its SQL cannot execute against the buffer_id
 // schema. The migration path itself is covered by the v15-fixture migration
 // tests.
+
+describe('listPinnedWithIds — the pins-changed dual payload', () => {
+  it('stays parallel-indexed with the name list across pin/unpin/reorder', async () => {
+    const grace = createUser('pin-grace');
+    const netG = mkNet(grace.id, 'g');
+    for (const t of ['#one', '#two', '#three']) ensureBuffer(grace.id, netG!.id, t);
+    pinned.pinBuffer(grace.id, netG!.id, '#one');
+    pinned.pinBuffer(grace.id, netG!.id, '#two');
+    pinned.pinBuffer(grace.id, netG!.id, '#three');
+
+    const buffers = await import('./buffers.js');
+    const check = () => {
+      // The two wire arrays are one read: names in position order, and each
+      // row's id must be the id of the SAME-INDEX name — the property the
+      // pins-changed frame's parallel-indexing contract rests on.
+      const rows = pinned.listPinnedWithIds(grace.id, netG!.id);
+      expect(rows.map((r) => r.target)).toEqual(
+        pinned.listPinnedForUserNetwork(grace.id, netG!.id),
+      );
+      for (const row of rows) {
+        expect(buffers.getBuffer(grace.id, netG!.id, row.target)!.id).toBe(row.bufferId);
+      }
+    };
+
+    check();
+    pinned.reorderPins(grace.id, netG!.id, ['#three', '#one', '#two']);
+    check();
+    pinned.unpinBuffer(grace.id, netG!.id, '#one');
+    check();
+    expect(pinned.listPinnedForUserNetwork(grace.id, netG!.id)).toEqual(['#three', '#two']);
+  });
+});
+
+describe('pinsChangedFrame (wsHub)', () => {
+  it('ships pinned[] and pinnedIds[] parallel-indexed from one read', async () => {
+    const henry = createUser('pin-henry');
+    const netH = mkNet(henry.id, 'h');
+    for (const t of ['#a', '#b']) ensureBuffer(henry.id, netH!.id, t);
+    pinned.pinBuffer(henry.id, netH!.id, '#a');
+    pinned.pinBuffer(henry.id, netH!.id, '#b');
+
+    const { pinsChangedFrame } = await import('../services/wsHub.js');
+    const buffers = await import('./buffers.js');
+    const frame = pinsChangedFrame(henry.id, netH!.id);
+    expect(frame.kind).toBe('pins-changed');
+    expect(frame.pinned).toEqual(['#a', '#b']);
+    expect(frame.pinnedIds).toEqual([
+      buffers.getBuffer(henry.id, netH!.id, '#a')!.id,
+      buffers.getBuffer(henry.id, netH!.id, '#b')!.id,
+    ]);
+  });
+});

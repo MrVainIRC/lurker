@@ -898,8 +898,8 @@ these signals:
 
 Prefer `bufferId` wherever a frame carries it — it is fold-proof and (soon)
 rename-proof (§5.2). When matching by name: fold targets with ASCII lowercase;
-sentinels (`:server:`, `:system:`) exact-match; first-seen casing is
-display-canonical (§5.2).
+sentinels (`:server:<networkId>`, `:system:`) exact-match; first-seen casing
+is display-canonical (§5.2).
 
 ### 9.3 Sending: no optimistic rendering
 

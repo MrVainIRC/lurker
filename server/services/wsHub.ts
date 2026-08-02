@@ -1197,7 +1197,7 @@ export function buildOfflineBacklogFrames(
 
 // The pins-changed frame's dual payload: `pinned` (names, the original wire
 // shape) and `pinnedIds` (parallel-indexed buffer ids) from one read.
-function pinsChangedFrame(userId: number, networkId: number): WsPayload {
+export function pinsChangedFrame(userId: number, networkId: number): WsPayload {
   const rows = listPinnedWithIds(userId, networkId);
   return {
     kind: 'pins-changed',
@@ -1734,18 +1734,23 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
   // counts are now." Used by mark-read echo and by the live IRC-event fan-out
   // below — the client doesn't increment locally anymore, so this is the
   // only source of badge state.
+  // `bufferId` is threaded from callers that already hold it (the live pipe's
+  // decorated event, an id-addressed mark-read) — this runs per countable
+  // event, so the resolve is a fallback, not a habit.
   function broadcastReadState(
     userId: number,
     networkId: number | null,
     target: string,
     lastReadId: number,
+    bufferId?: number | null,
   ): void {
     const counts = computeUnreadFor(userId, networkId, target, lastReadId);
     fanOut(userId, {
       kind: 'read-state',
       networkId,
       target,
-      bufferId: resolveBuffer(userId, networkId, target)?.id ?? null,
+      bufferId:
+        bufferId !== undefined ? bufferId : (resolveBuffer(userId, networkId, target)?.id ?? null),
       lastReadId: counts.lastReadId,
       unread: counts.unread,
       highlights: counts.highlights,
@@ -1938,7 +1943,13 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
       typeCountsForUnread(decorated.target, decorated.type)
     ) {
       const lastReadId = getReadState(eventUserId, decorated.networkId, decorated.target);
-      broadcastReadState(eventUserId, decorated.networkId, decorated.target, lastReadId);
+      broadcastReadState(
+        eventUserId,
+        decorated.networkId,
+        decorated.target,
+        lastReadId,
+        (decorated as { bufferId?: number }).bufferId ?? null,
+      );
     }
 
     if (event.type === 'chanlist-end' && event.networkId) {
@@ -2879,7 +2890,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
             : Number(msg.networkId);
         if (networkId !== null && !networkId) break;
         const lastReadId = setReadState(userId, networkId, target, requested);
-        broadcastReadState(userId, networkId, target, lastReadId);
+        broadcastReadState(userId, networkId, target, lastReadId, addr?.bufferId);
         break;
       }
       case 'clear-buffer': {
