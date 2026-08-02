@@ -206,3 +206,16 @@ describe('the retired tables really are retired', () => {
     expect(live.has('closed_buffers')).toBe(false);
   });
 });
+
+describe('the dead muted column stays dead', () => {
+  it('is not resurrected by any every-boot ensureColumn', () => {
+    // The v18 rebuild dropped channel_notify_settings.muted, but an ungated
+    // ensureColumn used to RE-ADD it on the next boot — which re-armed the
+    // muted→ignore fold against a table whose network_id no longer exists
+    // (a warn on every startup). This pins the gate.
+    const cols = (
+      db.prepare(`PRAGMA table_info(channel_notify_settings)`).all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    expect(cols).not.toContain('muted');
+  });
+});

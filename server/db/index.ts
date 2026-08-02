@@ -977,7 +977,16 @@ ensureColumn('peer_presence_state', 'away_message', 'TEXT');
 // notifications too). The column is retained (always written 0) so older images
 // still satisfy the schema; the boot migration below converts any lingering
 // muted=1 rows into ignore rules. No new code reads or sets it.
-ensureColumn('channel_notify_settings', 'muted', 'INTEGER NOT NULL DEFAULT 0');
+// Only while the table is still name-keyed (pre-v18 shape): the v18 rebuild
+// drops `muted` for good, and an ungated ensureColumn here would RE-ADD it on
+// every later boot — which then re-arms the muted→ignore fold below against a
+// table whose network_id no longer exists (a warn on every startup). The
+// elif self-heals databases bitten by the window where that happened.
+if (columnExists('channel_notify_settings', 'target')) {
+  ensureColumn('channel_notify_settings', 'muted', 'INTEGER NOT NULL DEFAULT 0');
+} else if (columnExists('channel_notify_settings', 'muted')) {
+  db.exec(`ALTER TABLE channel_notify_settings DROP COLUMN muted`);
+}
 
 ensureColumn('messages', 'extra', 'TEXT');
 // nick!user@host of the sender, captured at ingest so client-side hostmask

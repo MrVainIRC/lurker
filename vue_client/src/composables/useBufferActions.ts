@@ -11,6 +11,9 @@ import { useNotifyLadder } from './useNotifyLadder.js';
 import { socketSend } from './useSocket.js';
 
 export interface BufferLike {
+  // The server's stable buffer id, when the caller's store entry has learned
+  // it (stores/buffers.ts Buffer.id) — attached to buffer-addressed verbs.
+  id?: number;
   // null for the app-scoped system buffer (issue #355); buildItems bails on it
   // since every menu action is network-scoped.
   networkId: number | null;
@@ -102,7 +105,8 @@ export function useBufferActions(): BufferActionsAPI {
       {
         label: `Close ${kind}`,
         icon: 'fa-solid fa-xmark',
-        onClick: () => socketSend({ type: 'close-buffer', networkId, target: buf.target }),
+        onClick: () =>
+          socketSend({ type: 'close-buffer', networkId, target: buf.target, bufferId: buf.id }),
       },
     );
     return items;

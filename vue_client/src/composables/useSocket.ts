@@ -12,6 +12,7 @@ import { previewableEventTexts } from '../utils/previewEvents.js';
 import { useConfigStore } from '../stores/config.js';
 import { useHighlightRulesStore } from '../stores/highlightRules.js';
 import { useInputHistoryStore } from '../stores/inputHistory.js';
+import { bufferClosed } from '../lib/bufferLifecycle.js';
 import { useDraftStore } from '../stores/drafts.js';
 import { useChanlistStore } from '../stores/chanlist.js';
 import { useSearchStore } from '../stores/search.js';
@@ -588,7 +589,9 @@ function applyBacklog(payload: any): void {
     payload.joined,
     // reset: the resume gap overflowed the server cap, so `events` is a fresh
     // latest slice meant to replace the buffer rather than gap-fill onto it.
-    { reset: !!payload.reset, hasMoreOlder: payload.hasMoreOlder },
+    // bufferId: the burst doubles as the id directory (§5.2) — this is where
+    // the client learns each buffer's stable id.
+    { reset: !!payload.reset, hasMoreOlder: payload.hasMoreOlder, bufferId: payload.bufferId },
   );
   if (payload.inputHistory) {
     const inputHistory = useInputHistoryStore();
@@ -722,20 +725,12 @@ function handleMessage(raw: string): void {
     return;
   }
   if (payload.kind === 'buffer-closed') {
-    const networks = useNetworksStore();
-    const buffers = useBuffersStore();
-    const inputHistory = useInputHistoryStore();
-    const drafts = useDraftStore();
-    const closedKey = `${payload.networkId}::${payload.target}`;
-    if (networks.activeKey === closedKey) networks.activeKey = null;
-    buffers.drop(payload.networkId, payload.target);
-    // History rows survive on the server (re-seeded if the buffer reopens);
-    // we just drop the in-memory mirror so it doesn't go stale.
-    inputHistory.drop(payload.networkId, payload.target);
-    // Drafts for a closed buffer are cleared server-side too (wsHub's
-    // close-buffer handler). Mirror that locally so a future reopen starts
-    // empty rather than restoring the pre-close draft.
-    drafts.drop(payload.networkId, payload.target);
+    // ONE sweep over every store holding per-buffer state (the registry in
+    // lib/bufferLifecycle.ts). The old inline version cleaned exactly four
+    // stores and leaked the rest — pins, nicklist toggles, notify flags,
+    // nav/recent trails all kept entries for a buffer nothing would reference
+    // again.
+    bufferClosed(payload.networkId, payload.target);
     return;
   }
   if (payload.kind === 'input-history-added') {
