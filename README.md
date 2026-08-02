@@ -47,25 +47,19 @@ curl -O https://raw.githubusercontent.com/amiantos/lurker/main/docker-compose.ym
 docker compose up -d
 ```
 
-Then open <http://localhost:8015> and create your admin account.
+Then open <http://localhost:8015> and create your admin account. See [SELF_HOSTING.md](docs/SELF_HOSTING.md) for the full guide.
 
-See [SELF_HOSTING.md](docs/SELF_HOSTING.md) for the full guide.
-
-## Lurker.Chat Managed Hosting
-
-Don't want to run a server yourself? **[Lurker.Chat](https://lurker.chat)** is official managed hosting — **$5/mo**, with a 14-day money-back guarantee.
-
-## Deploy on DigitalOcean
-
-You can get Lurker up and running on your own DigitalOcean droplet in minutes. Step-by-step instructions are in **[docs/digitalocean.md](docs/digitalocean.md)**.
-
-## Manual Install (without Docker)
+## Manual Install
 
 ```bash
 npm run install:all
 npm run client:build
 npm start
 ```
+
+## Lurker.Chat Managed Hosting
+
+Don't want to run a server yourself? **[Lurker.Chat](https://lurker.chat)** is official managed hosting — **$5/mo**, with a 14-day money-back guarantee.
 
 # Documentation
 
@@ -74,8 +68,6 @@ npm start
 # Community
 
 - Chat in **#lurker** on [Libera.Chat](https://libera.chat).
-- Discuss Lurker and read my devlog over on [The Eye of Providence](https://discuss.bradroot.me/tags/c/projects/13/lurker/39).
-- Say hi — I'm **amiantos** on Libera.Chat and [MansionNET](https://inthemansion.com).
 
 # License
 
