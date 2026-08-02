@@ -103,15 +103,16 @@ export function mintOrphanBuffersFromMessages(db: Database): number {
   for (const { networkId, target } of distinct) {
     const owner = userByNetwork.get(networkId) as { userId: number } | undefined;
     if (!owner) continue; // orphaned network row; the FK would reject the mint
+    // ':'-prefixed strays (a sentinel casing variant, a ':server:<foreignId>'
+    // from a legacy import) are NOT minted: a ':' row the walk skips and
+    // nothing can open would be a hidden buffer stranding its history. The
+    // backfill maps these onto the network's canonical `:server:` sentinel
+    // instead — the same coalescing the live insert path applies — so
+    // imported server-console history becomes reachable rather than hidden.
+    if (target.startsWith(':')) continue;
     const folded = target.toLowerCase();
     if (exists.get(owner.userId, networkId, folded)) continue;
-    // ':'-prefixed strays (a sentinel casing variant, a corrupt import) are
-    // minted as 'server' so kindForTarget's channel/dm split never claims them.
-    const kind = target.startsWith(':')
-      ? 'server'
-      : '#&+!'.includes(target[0] ?? '')
-        ? 'channel'
-        : 'dm';
+    const kind = '#&+!'.includes(target[0] ?? '') ? 'channel' : 'dm';
     minted += insert.run(owner.userId, networkId, target, folded, kind).changes;
   }
   return minted;
@@ -165,12 +166,23 @@ export function backfillMessagesBufferId(
   let updated = 0;
   let chunks = 0;
 
+  // COALESCE second arm: any ':'-prefixed target that doesn't resolve on its
+  // own name (a ':server:<foreignId>' stray from a legacy import) lands on the
+  // network's canonical `:server:` sentinel — the same coalescing the live
+  // insert path applies, and the reason the orphan mint skips ':' targets
+  // (a minted ':' row would be hidden from the walk and unopenable, stranding
+  // its history). The canonical target ':server:<netId>' resolves via the
+  // FIRST arm, since the sentinel row's own folded name matches it.
   const updateStmt = db.prepare(
-    `UPDATE messages SET buffer_id = (
-       SELECT b.id FROM buffers b
-       WHERE b.user_id = (SELECT n.user_id FROM networks n WHERE n.id = messages.network_id)
-         AND IFNULL(b.network_id, 0) = messages.network_id
-         AND b.target_folded = ${FOLD_FN}(messages.target)
+    `UPDATE messages SET buffer_id = COALESCE(
+       (SELECT b.id FROM buffers b
+        WHERE b.user_id = (SELECT n.user_id FROM networks n WHERE n.id = messages.network_id)
+          AND IFNULL(b.network_id, 0) = messages.network_id
+          AND b.target_folded = ${FOLD_FN}(messages.target)),
+       CASE WHEN messages.target LIKE ':%' THEN
+         (SELECT b.id FROM buffers b
+          WHERE b.network_id = messages.network_id AND b.kind = 'server')
+       END
      )
      WHERE id > ? AND id <= ? AND buffer_id IS NULL`,
   );

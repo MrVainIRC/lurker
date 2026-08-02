@@ -112,7 +112,8 @@ beforeAll(async () => {
       (103, 2, 20, '#other',  '#other',  'channel', 'open');
 
     -- History: stray casings that must fold onto the registry rows, a target
-    -- with NO registry row (orphan), and :server: sentinel rows.
+    -- with NO registry row (orphan), the network's own :server: target, and a
+    -- FOREIGN-numbered :server: stray (the shape a legacy import leaves).
     INSERT INTO messages (id, network_id, target, time, type, nick, text) VALUES
       (1, 10, '#Chatty',  '2026-01-01T00:00:00Z', 'message', 'x', 'a'),
       (2, 10, '#chatty',  '2026-01-01T00:01:00Z', 'message', 'x', 'stray case'),
@@ -120,7 +121,8 @@ beforeAll(async () => {
       (4, 10, '#ÄRGER',   '2026-01-01T00:03:00Z', 'message', 'x', 'unicode stray case'),
       (5, 10, '#orphan',  '2026-01-01T00:04:00Z', 'message', 'x', 'no registry row'),
       (6, 10, ':server:10', '2026-01-01T00:05:00Z', 'notice', NULL, 'motd'),
-      (7, 20, '#other',   '2026-01-01T00:06:00Z', 'message', 'y', 'd');
+      (7, 20, '#other',   '2026-01-01T00:06:00Z', 'message', 'y', 'd'),
+      (8, 10, ':server:99', '2026-01-01T00:07:00Z', 'notice', NULL, 'imported console line');
   `);
   raw.close();
 
@@ -209,6 +211,22 @@ describe('schema 17 — messages.buffer_id backfill', () => {
       .prepare(`SELECT kind FROM buffers WHERE network_id = 20 AND target = ':server:20'`)
       .get() as { kind: string } | undefined;
     expect(server20?.kind).toBe('server');
+  });
+
+  it('coalesces a foreign-numbered :server: stray into the canonical sentinel, minting no hidden row', () => {
+    // ':server:99' on network 10: the walk skips ':'-prefixed registry rows
+    // and nothing can open one, so minting it would strand its history in a
+    // hidden buffer. Instead the backfill maps it onto the network's own
+    // server console — the same coalescing the live insert path applies —
+    // which makes imported console history reachable.
+    const server10 = db
+      .prepare(`SELECT id FROM buffers WHERE network_id = 10 AND kind = 'server'`)
+      .get() as { id: number };
+    expect(bufferIdOf(8)).toBe(server10.id);
+    const strayRows = db
+      .prepare(`SELECT COUNT(*) AS n FROM buffers WHERE target = ':server:99'`)
+      .get() as { n: number };
+    expect(strayRows.n).toBe(0);
   });
 
   it('swaps the index generation: buf indexes in, name-keyed out', () => {

@@ -172,14 +172,33 @@ describe('mints', () => {
     db.exec(`
       INSERT INTO messages (network_id, target) VALUES (10, '#chan');
       INSERT INTO messages (network_id, target) VALUES (10, 'Stray');
+      INSERT INTO messages (network_id, target) VALUES (10, ':server:99');
     `);
     const minted = mintOrphanBuffersFromMessages(db);
-    expect(minted).toBe(1); // '#chan' already had a row
+    // '#chan' already had a row; ':server:99' is deliberately skipped — a
+    // minted ':' row would be hidden from the walk and unopenable, so the
+    // backfill coalesces those onto the canonical sentinel instead.
+    expect(minted).toBe(1);
     const row = db
       .prepare(`SELECT kind, state FROM buffers WHERE target_folded = 'stray'`)
       .get() as { kind: string; state: string };
     expect(row.kind).toBe('dm');
     expect(row.state).toBe('closed');
+    expect(db.prepare(`SELECT 1 FROM buffers WHERE target = ':server:99'`).get()).toBe(undefined);
+  });
+
+  it('the backfill coalesces :server: strays onto the canonical sentinel', () => {
+    mintSentinelBuffers(db);
+    db.exec(`INSERT INTO messages (network_id, target) VALUES (10, ':server:77')`);
+    const result = backfillMessagesBufferId(db, {});
+    expect(result.complete).toBe(true);
+    const mapped = db
+      .prepare(
+        `SELECT b.target AS t FROM messages m JOIN buffers b ON b.id = m.buffer_id
+         WHERE m.target = ':server:77'`,
+      )
+      .get() as { t: string };
+    expect(mapped.t).toBe(':server:10');
   });
 
   it('normalizeMessagesBufferIds resolves rows minted after a first pass', () => {
