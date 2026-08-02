@@ -98,15 +98,44 @@ describe('registry accuracy (registry → schema)', () => {
   });
 
   it("keeps 'pending' entries honest: their name column is still the key", () => {
-    // When the satellite rebuild flips a table to buffer_id, its registry
-    // entry must flip in the same PR — a 'pending' table that has grown a
-    // buffer_id (or lost its name column) is an undeclared migration.
+    // When a rebuild flips a table to buffer_id, its registry entry must flip
+    // in the same PR — a 'pending' table that has grown a buffer_id (or lost
+    // its name column) is an undeclared migration.
     const wrong: string[] = [];
     for (const t of PENDING_BUFFER_TABLES) {
       const names = new Set(columns(t.table).map((c) => c.name));
       if (names.has('buffer_id')) wrong.push(`${t.table}: has buffer_id but declared pending`);
       if (t.targetColumn && !names.has(t.targetColumn)) {
         wrong.push(`${t.table}: declared pending but ${t.targetColumn} is gone`);
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it("keeps 'wire-context' tables on the IRC side of the boundary", () => {
+    // These key on protocol context strings (e2e `@ident@host` pseudochannels,
+    // peer-supplied channel names), which only sometimes coincide with buffer
+    // names — a buffer_id here would be a category error. If one legitimately
+    // needs normalizing someday, that is a design decision to record in the
+    // registry, not a column to slip in.
+    const wrong: string[] = [];
+    for (const t of BUFFER_SCOPED_TABLES.filter((x) => x.status === 'wire-context')) {
+      const names = new Set(columns(t.table).map((c) => c.name));
+      if (names.has('buffer_id')) wrong.push(`${t.table}: wire-context table grew a buffer_id`);
+      if (t.targetColumn && !names.has(t.targetColumn)) {
+        wrong.push(`${t.table}: context column ${t.targetColumn} is gone`);
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it('the rebuilt view-state tables carry no name column at all', () => {
+    // The whole point of v18: for these, the name lives in `buffers` alone.
+    const wrong: string[] = [];
+    for (const t of BUFFER_SCOPED_TABLES.filter((x) => x.status === 'buffer_id' && !x.tombstone)) {
+      const names = new Set(columns(t.table).map((c) => c.name));
+      for (const shaped of BUFFER_TARGET_COLUMN_NAMES) {
+        if (names.has(shaped)) wrong.push(`${t.table}.${shaped}`);
       }
     }
     expect(wrong).toEqual([]);

@@ -17,7 +17,12 @@
 // EXPORT_FORMAT_VERSION when changing the file layout in a way that older
 // importers can't tolerate.
 
-export const EXPORT_FORMAT_VERSION = 1;
+// v2 (schema 18): the per-buffer view-state tables carry `buffer_id` (rekeyed
+// through the archive's own `buffers` rows) instead of (network_id, target),
+// and channel_notify_settings dropped its dead `muted` column. v1 archives
+// still import — the importer derives buffer_id from their name columns — but
+// a v1 SERVER rejects a v2 archive as format_too_new, deliberately.
+export const EXPORT_FORMAT_VERSION = 2;
 
 // `encryptedColumns` (declared per-table below) lists columns holding secrets
 // that are encrypted at rest on hosted cells (see server/utils/secretCrypto.ts).
@@ -219,7 +224,7 @@ export const EXPORT_TABLES = Object.freeze({
     // (last_read_message_id is NOT NULL — no anchor, no row).
     fkRekey: {
       user_id: 'users',
-      network_id: 'networks',
+      buffer_id: 'buffers',
       last_read_message_id: 'messages',
       cleared_before_message_id: 'messages',
     },
@@ -230,8 +235,7 @@ export const EXPORT_TABLES = Object.freeze({
     fkRekeyNullable: ['cleared_before_message_id'],
     columns: [
       'user_id',
-      'network_id',
-      'target',
+      'buffer_id',
       'last_read_message_id',
       'updated_at',
       'cleared_before_message_id',
@@ -289,8 +293,8 @@ export const EXPORT_TABLES = Object.freeze({
     scope: 'user_id',
     section: 'data',
     pk: 'id',
-    fkRekey: { user_id: 'users', network_id: 'networks' },
-    columns: ['id', 'user_id', 'network_id', 'target', 'text', 'created_at'],
+    fkRekey: { user_id: 'users', buffer_id: 'buffers' },
+    columns: ['id', 'user_id', 'buffer_id', 'text', 'created_at'],
   },
 
   upload_history: {
@@ -350,32 +354,32 @@ export const EXPORT_TABLES = Object.freeze({
     mode: 'export',
     scope: 'user_id',
     section: 'data',
-    fkRekey: { user_id: 'users', network_id: 'networks' },
-    columns: ['user_id', 'network_id', 'target', 'position', 'created_at'],
+    fkRekey: { user_id: 'users', buffer_id: 'buffers', network_id: 'networks' },
+    columns: ['user_id', 'buffer_id', 'network_id', 'position', 'created_at'],
   },
 
   nicklist_collapsed: {
     mode: 'export',
     scope: 'user_id',
     section: 'data',
-    fkRekey: { user_id: 'users', network_id: 'networks' },
-    columns: ['user_id', 'network_id', 'target', 'collapsed'],
+    fkRekey: { user_id: 'users', buffer_id: 'buffers' },
+    columns: ['user_id', 'buffer_id', 'collapsed'],
   },
 
   channel_notify_settings: {
     mode: 'export',
     scope: 'user_id',
     section: 'data',
-    fkRekey: { user_id: 'users', network_id: 'networks' },
-    columns: ['user_id', 'network_id', 'target', 'notify_always', 'muted', 'updated_at'],
+    fkRekey: { user_id: 'users', buffer_id: 'buffers' },
+    columns: ['user_id', 'buffer_id', 'notify_always', 'updated_at'],
   },
 
   user_drafts: {
     mode: 'export',
     scope: 'user_id',
     section: 'data',
-    fkRekey: { user_id: 'users', network_id: 'networks' },
-    columns: ['user_id', 'network_id', 'target', 'body', 'updated_at'],
+    fkRekey: { user_id: 'users', buffer_id: 'buffers' },
+    columns: ['user_id', 'buffer_id', 'body', 'updated_at'],
   },
 
   ignored_masks: {

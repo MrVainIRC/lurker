@@ -31,7 +31,13 @@ import type { Statement, RunResult } from 'better-sqlite3';
 import db from '../db/index.js';
 import { EXPORT_TABLES, EXPORT_FORMAT_VERSION, IMPORT_ORDER } from '../db/exportSchema.js';
 import { encryptSecret } from '../utils/secretCrypto.js';
-import { importRow as importBufferRow, reopen as reopenBuffer } from '../db/buffers.js';
+import {
+  importRow as importBufferRow,
+  reopen as reopenBuffer,
+  ensureServerBuffer,
+  ensureSystemBuffer,
+} from '../db/buffers.js';
+import { resolveBuffer } from '../db/bufferResolve.js';
 import { listBufferTargets, hasMessageForTarget } from '../db/messages.js';
 import { resolveOrMintForInsert } from '../db/bufferResolve.js';
 import { migrateSmartFilterToEventMode } from '../db/migrateEventMode.js';
@@ -180,6 +186,34 @@ function dependsOnMessages(def: ExportTableDefFull): boolean {
   return !!(def.fkRekey && Object.values(def.fkRekey).includes('messages'));
 }
 
+// The buffer_id-keyed view-state tables (schema 18). Only these get the
+// v1-archive name→id derivation below.
+const SATELLITE_BUFFER_TABLES = new Set([
+  'buffer_reads',
+  'input_history',
+  'pinned_buffers',
+  'nicklist_collapsed',
+  'channel_notify_settings',
+  'user_drafts',
+]);
+
+/** Resolve an archive row's (networkId, target) — already mapped to THIS
+ *  install's network id — to a buffer id. Sentinel targets mint/attach to
+ *  this install's own consoles. */
+function resolveArchiveBufferId(
+  userId: number,
+  networkId: number | null,
+  target: string,
+): number | undefined {
+  if (!target) return undefined;
+  if (target.startsWith(':')) {
+    if (networkId == null || target === ':system:') return ensureSystemBuffer(userId).id;
+    return ensureServerBuffer(networkId)?.id;
+  }
+  if (networkId == null) return undefined;
+  return resolveBuffer(userId, networkId, target)?.id;
+}
+
 // Insert all rows of one data.json table, building its id map for FK rekeying.
 // Caller runs this inside a transaction.
 function insertTable(
@@ -216,6 +250,26 @@ function insertTable(
       // network id, which nothing on this install will ever ask for. The
       // target install mints its own sentinels on first use.
       if (String(row.target ?? '').startsWith(':')) continue;
+    }
+
+    // v1-archive fallback for the buffer_id-keyed view-state tables: pre-v2
+    // rows carry (network_id, target) instead of buffer_id. Derive it against
+    // the already-imported registry (Phase A puts `buffers` before all of
+    // these) — the old network id maps through idMaps.networks explicitly,
+    // since most of these tables no longer declare network_id as a column.
+    // ':'-prefixed targets route to this install's own sentinels, which is
+    // strictly better than v1-era behavior: an archived server-console read
+    // pointer used to strand under ':server:<oldNetId>'; now it lands on the
+    // network's real console. Unresolvable rows drop, same as any unmapped FK.
+    if (SATELLITE_BUFFER_TABLES.has(table) && row.buffer_id === undefined) {
+      const target = typeof original.target === 'string' ? original.target : '';
+      const oldNet = original.network_id;
+      const mappedNet =
+        oldNet == null ? null : (idMaps.networks?.get(oldNet) as number | undefined);
+      if (oldNet != null && mappedNet === undefined) continue; // network wasn't imported
+      row.buffer_id = resolveArchiveBufferId(targetUserId, mappedNet ?? null, target);
+      if (row.buffer_id === undefined) continue;
+      if (table === 'pinned_buffers' && row.network_id == null) row.network_id = mappedNet;
     }
 
     // Export carries at-rest secrets (network passwords, +k channel keys) as

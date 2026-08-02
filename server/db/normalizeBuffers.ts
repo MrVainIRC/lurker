@@ -254,6 +254,277 @@ export function normalizeMessagesBufferIds(
   return result;
 }
 
+// --- v18: satellite rebuild -------------------------------------------------
+
+/** The resolve expression shared by every satellite rebuild's SELECT: the
+ *  ordinary folded lookup, then (for ':'-prefixed targets only) the row's
+ *  sentinel — the user's system console when the row is app-scoped, the
+ *  network's server console otherwise. Same coalescing as the v17 messages
+ *  backfill. `r` is the source-table alias; requires the fold function to be
+ *  registered and sentinels minted. */
+function satelliteResolveSql(r: string): string {
+  return `COALESCE(
+    (SELECT b.id FROM buffers b
+      WHERE b.user_id = ${r}.user_id
+        AND IFNULL(b.network_id, 0) = IFNULL(${r}.network_id, 0)
+        AND b.target_folded = ${FOLD_FN}(${r}.target)),
+    CASE WHEN ${r}.target LIKE ':%' THEN
+      CASE WHEN ${r}.network_id IS NULL THEN
+        (SELECT bs.id FROM buffers bs WHERE bs.user_id = ${r}.user_id AND bs.kind = 'system')
+      ELSE
+        (SELECT bn.id FROM buffers bn WHERE bn.network_id = ${r}.network_id AND bn.kind = 'server')
+      END
+    END
+  )`;
+}
+
+/**
+ * Mint CLOSED buffers rows for satellite targets that resolve to nothing —
+ * same policy and shape as the messages orphan mint: user view-state for a
+ * buffer the registry forgot must not be dropped when a hidden row preserves
+ * it. ':'-prefixed targets are skipped (they coalesce onto sentinels).
+ */
+export function mintOrphanBuffersFromSatellites(db: Database, tables: readonly string[]): number {
+  const insert = db.prepare(
+    `INSERT INTO buffers (user_id, network_id, target, target_folded, kind, state, autojoin, key)
+     VALUES (?, ?, ?, ?, ?, 'closed', 0, NULL)
+     ON CONFLICT(user_id, IFNULL(network_id, 0), target_folded) DO NOTHING`,
+  );
+  const networkExists = db.prepare(`SELECT 1 FROM networks WHERE id = ?`);
+  let minted = 0;
+  for (const table of tables) {
+    const rows = db
+      .prepare(
+        `SELECT DISTINCT r.user_id AS userId, r.network_id AS networkId, r.target AS target
+         FROM ${table} r
+         WHERE ${satelliteResolveSql('r')} IS NULL`,
+      )
+      .all() as Array<{ userId: number; networkId: number | null; target: string }>;
+    for (const { userId, networkId, target } of rows) {
+      if (target.startsWith(':')) continue;
+      if (networkId != null && !networkExists.get(networkId)) continue; // FK would reject
+      const kind = '#&+!'.includes(target[0] ?? '') ? 'channel' : 'dm';
+      minted += insert.run(userId, networkId, target, target.toLowerCase(), kind).changes;
+    }
+  }
+  return minted;
+}
+
+/**
+ * The v18 cutover body: rebuild the six view-state satellites onto
+ * (user_id, buffer_id) keys, dropping their name columns. One synchronous
+ * transaction — the tables are small (thousands of rows, not millions), so
+ * atomic-and-quick is the right shape; the caller wraps it `.immediate()`
+ * with foreign_keys OFF (the established rebuild pattern).
+ *
+ * Case-twin merges: the old binary-collated PKs let `#Chan` and `#chan`
+ * coexist; both resolve to one buffer_id now, so each table declares a merge
+ * policy — furthest read pointer / max cleared marker (mirrors what
+ * foldBufferCase did), earliest pin slot, latest draft, MAX for booleans.
+ * Where a policy needs "the rest of that row's columns", the SELECT uses
+ * SQLite's documented single-aggregate bare-column rule (min/max queries pull
+ * bare columns from the winning row — same device as listSpeakers).
+ *
+ * Rows whose target resolves to nothing even after the orphan mint (an
+ * orphaned network id, garbage) are DROPPED — they are view-state pointers
+ * with no buffer to point at — and the count is logged, never silent.
+ */
+export function rebuildSatellitesToBufferId(db: Database): void {
+  registerFoldFunction(db);
+
+  const dropped = (table: string): number =>
+    (
+      db
+        .prepare(`SELECT COUNT(*) AS n FROM ${table} r WHERE ${satelliteResolveSql('r')} IS NULL`)
+        .get() as { n: number }
+    ).n;
+  for (const table of [
+    'buffer_reads',
+    'input_history',
+    'pinned_buffers',
+    'nicklist_collapsed',
+    'channel_notify_settings',
+    'user_drafts',
+  ]) {
+    const n = dropped(table);
+    if (n > 0) {
+      console.warn(`[db] v18: dropping ${n} ${table} row(s) whose buffer cannot be resolved`);
+    }
+  }
+
+  // buffer_reads — merge policy: furthest read pointer, max cleared marker.
+  db.exec(`
+    CREATE TABLE buffer_reads_new (
+      user_id INTEGER NOT NULL,
+      buffer_id INTEGER NOT NULL,
+      last_read_message_id INTEGER NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      cleared_before_message_id INTEGER,
+      cleared_at TEXT,
+      PRIMARY KEY (user_id, buffer_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (buffer_id) REFERENCES buffers(id) ON DELETE CASCADE
+    );
+  `);
+  // cleared_at must ride with the row that WINS the boundary merge — two
+  // independent MAX()es could pair one twin's boundary with the other's
+  // timestamp, an impossible state /clear-undo would then mis-render (the old
+  // fold's CASE did exactly this pairing). FIRST_VALUE over the boundary
+  // ordering stamps every row in the group with the winner's cleared_at, and
+  // the outer MAX() then reads that constant. A cleared_at never exists
+  // without its boundary (setClearedState writes or nulls them together), so
+  // the no-marker group stays NULL.
+  db.exec(`
+    INSERT INTO buffer_reads_new
+      (user_id, buffer_id, last_read_message_id, updated_at, cleared_before_message_id, cleared_at)
+    SELECT user_id, bid, MAX(last_read_message_id), MAX(updated_at),
+           MAX(cleared_before_message_id), MAX(win_cleared_at)
+    FROM (
+      SELECT *, FIRST_VALUE(cleared_at) OVER (
+        PARTITION BY user_id, bid
+        ORDER BY COALESCE(cleared_before_message_id, 0) DESC
+      ) AS win_cleared_at
+      FROM (SELECT r.*, ${satelliteResolveSql('r')} AS bid FROM buffer_reads r)
+      WHERE bid IS NOT NULL
+    )
+    GROUP BY user_id, bid
+  `);
+  db.exec(`DROP TABLE buffer_reads`);
+  db.exec(`ALTER TABLE buffer_reads_new RENAME TO buffer_reads`);
+
+  // input_history — ids preserved (ordering key + export pk); no dedupe
+  // needed, the surrogate id was the PK.
+  db.exec(`
+    CREATE TABLE input_history_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      buffer_id INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (buffer_id) REFERENCES buffers(id) ON DELETE CASCADE
+    );
+  `);
+  db.exec(`
+    INSERT INTO input_history_new (id, user_id, buffer_id, text, created_at)
+    SELECT id, user_id, bid, text, created_at
+    FROM (SELECT r.*, ${satelliteResolveSql('r')} AS bid FROM input_history r)
+    WHERE bid IS NOT NULL
+  `);
+  db.exec(`DROP TABLE input_history`);
+  db.exec(`ALTER TABLE input_history_new RENAME TO input_history`);
+  db.exec(`CREATE INDEX idx_input_history_buffer
+           ON input_history(user_id, buffer_id, id DESC)`);
+
+  // pinned_buffers — earliest slot wins for a case twin (single MIN aggregate;
+  // network_id/created_at ride from that row), then positions re-densified per
+  // (user, network) since a merge can leave holes.
+  db.exec(`
+    CREATE TABLE pinned_buffers_new (
+      user_id INTEGER NOT NULL,
+      buffer_id INTEGER NOT NULL,
+      network_id INTEGER NOT NULL,
+      position INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, buffer_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (buffer_id) REFERENCES buffers(id) ON DELETE CASCADE,
+      FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE
+    );
+  `);
+  db.exec(`
+    INSERT INTO pinned_buffers_new (user_id, buffer_id, network_id, position, created_at)
+    SELECT user_id, bid, network_id, MIN(position), created_at
+    FROM (SELECT r.*, ${satelliteResolveSql('r')} AS bid FROM pinned_buffers r)
+    WHERE bid IS NOT NULL
+    GROUP BY user_id, bid
+  `);
+  db.exec(`DROP TABLE pinned_buffers`);
+  db.exec(`ALTER TABLE pinned_buffers_new RENAME TO pinned_buffers`);
+  db.exec(`
+    UPDATE pinned_buffers SET position = (
+      SELECT rn - 1 FROM (
+        SELECT p2.buffer_id AS bid2,
+               ROW_NUMBER() OVER (
+                 PARTITION BY p2.user_id, p2.network_id ORDER BY p2.position, p2.buffer_id
+               ) AS rn
+        FROM pinned_buffers p2
+        WHERE p2.user_id = pinned_buffers.user_id AND p2.network_id = pinned_buffers.network_id
+      ) WHERE bid2 = pinned_buffers.buffer_id
+    )
+  `);
+  db.exec(`CREATE INDEX idx_pinned_buffers_user_net
+           ON pinned_buffers(user_id, network_id, position)`);
+
+  // nicklist_collapsed — MAX(collapsed): if any case twin was collapsed, stay
+  // collapsed.
+  db.exec(`
+    CREATE TABLE nicklist_collapsed_new (
+      user_id INTEGER NOT NULL,
+      buffer_id INTEGER NOT NULL,
+      collapsed INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (user_id, buffer_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (buffer_id) REFERENCES buffers(id) ON DELETE CASCADE
+    );
+  `);
+  db.exec(`
+    INSERT INTO nicklist_collapsed_new (user_id, buffer_id, collapsed)
+    SELECT user_id, bid, MAX(collapsed)
+    FROM (SELECT r.*, ${satelliteResolveSql('r')} AS bid FROM nicklist_collapsed r)
+    WHERE bid IS NOT NULL
+    GROUP BY user_id, bid
+  `);
+  db.exec(`DROP TABLE nicklist_collapsed`);
+  db.exec(`ALTER TABLE nicklist_collapsed_new RENAME TO nicklist_collapsed`);
+
+  // channel_notify_settings — MAX(notify_always); the dead `muted` column
+  // (written 0 since the /ignore unification, #359) dies here.
+  db.exec(`
+    CREATE TABLE channel_notify_settings_new (
+      user_id INTEGER NOT NULL,
+      buffer_id INTEGER NOT NULL,
+      notify_always INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, buffer_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (buffer_id) REFERENCES buffers(id) ON DELETE CASCADE
+    );
+  `);
+  db.exec(`
+    INSERT INTO channel_notify_settings_new (user_id, buffer_id, notify_always, updated_at)
+    SELECT user_id, bid, MAX(notify_always), updated_at
+    FROM (SELECT r.*, ${satelliteResolveSql('r')} AS bid FROM channel_notify_settings r)
+    WHERE bid IS NOT NULL
+    GROUP BY user_id, bid
+  `);
+  db.exec(`DROP TABLE channel_notify_settings`);
+  db.exec(`ALTER TABLE channel_notify_settings_new RENAME TO channel_notify_settings`);
+
+  // user_drafts — the LATEST draft wins (single MAX(updated_at); body rides
+  // from that row).
+  db.exec(`
+    CREATE TABLE user_drafts_new (
+      user_id INTEGER NOT NULL,
+      buffer_id INTEGER NOT NULL,
+      body TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, buffer_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (buffer_id) REFERENCES buffers(id) ON DELETE CASCADE
+    );
+  `);
+  db.exec(`
+    INSERT INTO user_drafts_new (user_id, buffer_id, body, updated_at)
+    SELECT user_id, bid, body, MAX(updated_at)
+    FROM (SELECT r.*, ${satelliteResolveSql('r')} AS bid FROM user_drafts r)
+    WHERE bid IS NOT NULL
+    GROUP BY user_id, bid
+  `);
+  db.exec(`DROP TABLE user_drafts`);
+  db.exec(`ALTER TABLE user_drafts_new RENAME TO user_drafts`);
+}
+
 function getMeta(db: Database, key: string): string | undefined {
   return (
     db.prepare(`SELECT value FROM app_meta WHERE key = ?`).get(key) as { value: string } | undefined
