@@ -520,7 +520,9 @@ describe('planChannelRejoins', () => {
 
     ircManager.partChannel(user.id, net.id, '#never-heard-of');
 
-    expect(buffers.listForNetwork(net.id)).toHaveLength(0);
+    // The network's `:server:` sentinel row (minted at network creation,
+    // schema 17) is the only row — no channel was conjured.
+    expect(buffers.listForNetwork(net.id).filter((b) => b.kind !== 'server')).toHaveLength(0);
     expect(conn.client.part).toHaveBeenCalledWith('#never-heard-of', undefined);
   });
 

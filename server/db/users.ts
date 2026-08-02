@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import db from './index.js';
+import { ensureSystemBuffer } from './buffers.js';
 import { nonConformingReason } from '../../shared/username.js';
 
 /** User account roles. The first registered user is promoted to 'admin'. */
@@ -86,6 +87,10 @@ export function createUser(username: string, { role = 'user' }: { role?: UserRol
   const info = db.prepare('INSERT INTO users (username, role) VALUES (?, ?)').run(username, role);
   const user = findUserById(info.lastInsertRowid);
   if (!user) throw new Error('createUser: row missing immediately after insert');
+  // The app-scoped system buffer is a real registry row (kind 'system',
+  // schema 17) that everything else — read pointers, the connect walk —
+  // resolves by id, so it's minted with the account rather than lazily.
+  ensureSystemBuffer(user.id);
   return user;
 }
 

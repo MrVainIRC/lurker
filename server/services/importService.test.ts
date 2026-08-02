@@ -1078,8 +1078,19 @@ describe('importFromZipBuffer — end-to-end equivalence', () => {
       if (table === 'users') continue;
 
       const anyDef = def as unknown as AnyTableDef;
-      const aliceRows = rowsFor(alice.id, table, anyDef);
-      const bobRows = rowsFor(bob.id, table, anyDef);
+      let aliceRows = rowsFor(alice.id, table, anyDef);
+      let bobRows = rowsFor(bob.id, table, anyDef);
+
+      // Sentinel buffer rows (:system:, :server:<id>) are install-local
+      // fixtures, excluded from the archive on export and minted by each
+      // install for itself (alice's exist for her networks; bob's imported
+      // networks mint theirs on first use) — so equivalence is over the real
+      // buffers only.
+      if (table === 'buffers') {
+        const real = (r: Record<string, unknown>) => !String(r.target).startsWith(':');
+        aliceRows = aliceRows.filter(real);
+        bobRows = bobRows.filter(real);
+      }
 
       // Count parity first — catches missing inserts before we get into
       // payload comparisons (the payload diff would also catch it, but the

@@ -2375,14 +2375,21 @@ describe('join echo, forwarded joins (470), and un-partable channels (442)', () 
     expect(row?.key).toBe('hunter2');
   });
 
-  it("someone else's join mints nothing", () => {
+  it("someone else's join grants no autojoin and no key", () => {
     const conn = makeConn('echo-other');
     conn.client.user.nick = 'me';
     conn.upsertChannel('#chan');
 
     conn.client.emit('join', { channel: '#chan', nick: 'stranger' });
 
-    expect(getBuffer(conn.network.user_id, conn.network.id, '#chan')).toBeUndefined();
+    // Persisting the join event materializes the row (schema 17: the mint the
+    // wsHub live filter used to perform moved to the insert itself), but the
+    // property this test guards is unchanged: only the SELF echo is a join
+    // confirmation, so a stranger's join must not turn the channel into a
+    // rejoin carrier.
+    const row = getBuffer(conn.network.user_id, conn.network.id, '#chan');
+    expect(row?.autojoin).toBe(false);
+    expect(row?.key).toBe(null);
   });
 
   it('470 deletes a history-less pre-existing row even when the server relays a different case', () => {
@@ -2491,14 +2498,18 @@ describe('join echo, forwarded joins (470), and un-partable channels (442)', () 
   it('442 for a channel with no row does not conjure one', () => {
     // Correcting state must not CREATE it: a typo'd /part answered with 442
     // used to leave a phantom channels row behind. setAutojoin is update-only,
-    // so the registry stays empty.
+    // so no channel row appears. (The error line itself persists into the
+    // server buffer, which as of schema 17 mints the `:server:` sentinel row —
+    // a real, deliberately-kinded fixture, not the phantom this test guards.)
     const conn = makeConn('notonchan-phantom');
     conn.client.emit('irc error', {
       error: 'not_on_channel',
       channel: '#never-joined',
       reason: "You're not on that channel",
     });
-    expect(listBufferRowsForNetwork(conn.network.id)).toHaveLength(0);
+    expect(
+      listBufferRowsForNetwork(conn.network.id).filter((b) => b.kind !== 'server'),
+    ).toHaveLength(0);
   });
 
   it('442 corrects a stale autojoin row even when the channel is not in the joined set', () => {

@@ -2,8 +2,21 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import db from './index.js';
+import {
+  foldTargetFor,
+  resolveBufferIdByNetwork,
+  resolveOrMintForInsert,
+} from './bufferResolve.js';
 import { countsTowardPage } from '../../shared/eventFilter.js';
 import type { PageUnit } from '../../shared/eventFilter.js';
+
+// Buffer identity is buffers.id as of schema 17: every predicate in this file
+// filters on `buffer_id`, and `target` is written at insert as an observation
+// (the name the network used at that moment) but never read as a key. The
+// exported signatures still take (networkId, target) — callers hold names —
+// so each entry point resolves name → id exactly once, up front, through
+// bufferResolve. A resolution miss means "no such buffer": empty results,
+// false, zero — the same shape an unknown name produced before.
 
 /** A raw row from the `messages` table. */
 interface MessageRow {
@@ -109,13 +122,13 @@ export interface MaxIdByBufferRow {
 // Non-striped types pass through with alt=0; the value is meaningless for them
 // and the client never reads it.
 const insertStmt = db.prepare(`
-  INSERT INTO messages (network_id, target, time, type, nick, text, kind, self, extra, matched_rule_id, userhost, from_ignored, mirrored, notable, msgid, alt)
+  INSERT INTO messages (network_id, buffer_id, target, time, type, nick, text, kind, self, extra, matched_rule_id, userhost, from_ignored, mirrored, notable, msgid, alt)
   VALUES (
-    @networkId, @target, @time, @type, @nick, @text, @kind, @self, @extra, @matchedRuleId, @userhost, @fromIgnored, @mirrored, @notable, @msgid,
+    @networkId, @bufferId, @target, @time, @type, @nick, @text, @kind, @self, @extra, @matchedRuleId, @userhost, @fromIgnored, @mirrored, @notable, @msgid,
     CASE WHEN @type IN ('message', 'action', 'notice')
          THEN 1 - COALESCE(
            (SELECT alt FROM messages
-             WHERE network_id = @networkId AND target = @target
+             WHERE buffer_id = @bufferId
                AND type IN ('message', 'action', 'notice')
              ORDER BY id DESC LIMIT 1),
            1)
@@ -127,8 +140,17 @@ const insertStmt = db.prepare(`
 const altByIdStmt = db.prepare(`SELECT alt FROM messages WHERE id = ?`);
 
 export function insertMessage(row: MessageInput): { id: number | bigint; alt: boolean } {
+  // Resolved (or defensively minted) BEFORE the insert: a row that went in
+  // with buffer_id NULL would be invisible to every id-keyed read forever.
+  const bufferId = resolveOrMintForInsert(row.networkId, row.target);
+  if (bufferId === undefined) {
+    // Only reachable for a networkId that doesn't exist — the network FK
+    // would reject the insert anyway; fail with a clearer message.
+    throw new Error(`insertMessage: cannot resolve a buffer for network ${row.networkId}`);
+  }
   const result = insertStmt.run({
     networkId: row.networkId,
+    bufferId,
     target: row.target,
     time: row.time,
     type: row.type,
@@ -225,21 +247,30 @@ function rowToEvent(row: MessageRow): MessageEvent {
 export function listMessages(
   networkId: number,
   target: string,
+  opts: { before?: number; afterId?: number; limit?: number } = {},
+): MessageEvent[] {
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  if (bufferId === undefined) return [];
+  return listMessagesById(bufferId, opts);
+}
+
+function listMessagesById(
+  bufferId: number,
   { before, afterId, limit = 50 }: { before?: number; afterId?: number; limit?: number } = {},
 ): MessageEvent[] {
   if (afterId) {
     const rows = db
       .prepare(
-        `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE network_id = ? AND target = ? AND id > ?
+        `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE buffer_id = ? AND id > ?
        ORDER BY id ASC LIMIT ?`,
       )
-      .all(networkId, target, afterId, limit) as MessageRow[];
+      .all(bufferId, afterId, limit) as MessageRow[];
     return rows.map(rowToEvent);
   }
   const sql = before
-    ? `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE network_id = ? AND target = ? AND id < ? ORDER BY id DESC LIMIT ?`
-    : `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE network_id = ? AND target = ? ORDER BY id DESC LIMIT ?`;
-  const params = before ? [networkId, target, before, limit] : [networkId, target, limit];
+    ? `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE buffer_id = ? AND id < ? ORDER BY id DESC LIMIT ?`
+    : `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE buffer_id = ? ORDER BY id DESC LIMIT ?`;
+  const params = before ? [bufferId, before, limit] : [bufferId, limit];
   const rows = db.prepare(sql).all(...params) as MessageRow[];
   return rows.map(rowToEvent).toReversed();
 }
@@ -309,25 +340,35 @@ export function listMessagesCounted(
   networkId: number,
   target: string,
   unit: PageUnit,
+  opts: PageOptions = {},
+): MessageEvent[] {
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  if (bufferId === undefined) return [];
+  return listMessagesCountedById(bufferId, unit, opts);
+}
+
+function listMessagesCountedById(
+  bufferId: number,
+  unit: PageUnit,
   { before, afterId, limit = 100, maxScan = RENDERABLE_MAX_SCAN }: PageOptions = {},
 ): MessageEvent[] {
   // 'event' counts every stored row, which is precisely what the plain cursor
   // pager already does — no scan pass needed.
-  if (unit === 'event') return listMessages(networkId, target, { before, afterId, limit });
+  if (unit === 'event') return listMessagesById(bufferId, { before, afterId, limit });
 
   const forward = afterId != null && afterId > 0;
 
   // Step 1: walk out from the cursor and stop at whichever comes first — the
   // `limit`-th COUNTING row, or `maxScan` rows.
   const scanSql = forward
-    ? `SELECT id, type FROM messages WHERE network_id = ? AND target = ? AND id > ? ORDER BY id ASC LIMIT ?`
+    ? `SELECT id, type FROM messages WHERE buffer_id = ? AND id > ? ORDER BY id ASC LIMIT ?`
     : before
-      ? `SELECT id, type FROM messages WHERE network_id = ? AND target = ? AND id < ? ORDER BY id DESC LIMIT ?`
-      : `SELECT id, type FROM messages WHERE network_id = ? AND target = ? ORDER BY id DESC LIMIT ?`;
+      ? `SELECT id, type FROM messages WHERE buffer_id = ? AND id < ? ORDER BY id DESC LIMIT ?`
+      : `SELECT id, type FROM messages WHERE buffer_id = ? ORDER BY id DESC LIMIT ?`;
   const cursor = forward ? afterId : before;
   const scanParams: Array<number | string> = cursor
-    ? [networkId, target, cursor, maxScan]
-    : [networkId, target, maxScan];
+    ? [bufferId, cursor, maxScan]
+    : [bufferId, maxScan];
   const scanned = db.prepare(scanSql).all(...scanParams) as Array<{ id: number; type: string }>;
   if (scanned.length === 0) return [];
 
@@ -346,8 +387,8 @@ export function listMessagesCounted(
   }
 
   // Step 2: ship the whole contiguous range, noise included.
-  const conds = ['network_id = ?', 'target = ?'];
-  const params: Array<number | string> = [networkId, target];
+  const conds = ['buffer_id = ?'];
+  const params: Array<number | string> = [bufferId];
   if (forward) {
     conds.push('id > ?', 'id <= ?');
     params.push(afterId as number, boundary);
@@ -386,19 +427,23 @@ export function listMessagesAround(
 ):
   | { events: MessageEvent[]; hasMoreOlder: boolean; hasMoreNewer: boolean }
   | { events: []; hasMoreOlder: false; hasMoreNewer: false; anchorMissing: true } {
-  const anchorRow = db
-    .prepare(
-      `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE id = ? AND network_id = ? AND target = ?`,
-    )
-    .get(anchorId, networkId, target) as MessageRow | undefined;
-  if (!anchorRow) {
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  const anchorRow =
+    bufferId === undefined
+      ? undefined
+      : (db
+          .prepare(
+            `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE id = ? AND buffer_id = ?`,
+          )
+          .get(anchorId, bufferId) as MessageRow | undefined);
+  if (bufferId === undefined || !anchorRow) {
     return { events: [], hasMoreOlder: false, hasMoreNewer: false, anchorMissing: true };
   }
-  const older = listMessagesCounted(networkId, target, countBy, {
+  const older = listMessagesCountedById(bufferId, countBy, {
     before: anchorId,
     limit: halfLimit,
   });
-  const newer = listMessagesCounted(networkId, target, countBy, {
+  const newer = listMessagesCountedById(bufferId, countBy, {
     afterId: anchorId,
     limit: halfLimit,
   });
@@ -407,33 +452,35 @@ export function listMessagesAround(
   const newestId = events[events.length - 1].id as number;
   return {
     events,
-    hasMoreOlder: hasOlderThan(networkId, target, oldestId),
-    hasMoreNewer: hasNewerThan(networkId, target, newestId),
+    hasMoreOlder: hasOlderThanById(bufferId, oldestId),
+    hasMoreNewer: hasNewerThanById(bufferId, newestId),
   };
 }
 
 // Cheap edge-exists probes for the around/before/after handlers. Using a
 // LIMIT 1 EXISTS-shaped query (rather than COUNT(*)) keeps this O(index seek)
 // regardless of how much history is in the buffer.
-function hasOlderThan(networkId: number, target: string, id: number): boolean {
+function hasOlderThanById(bufferId: number, id: number): boolean {
   return !!db
-    .prepare(`SELECT 1 FROM messages WHERE network_id = ? AND target = ? AND id < ? LIMIT 1`)
-    .get(networkId, target, id);
+    .prepare(`SELECT 1 FROM messages WHERE buffer_id = ? AND id < ? LIMIT 1`)
+    .get(bufferId, id);
 }
 
-function hasNewerThan(networkId: number, target: string, id: number): boolean {
+function hasNewerThanById(bufferId: number, id: number): boolean {
   return !!db
-    .prepare(`SELECT 1 FROM messages WHERE network_id = ? AND target = ? AND id > ? LIMIT 1`)
-    .get(networkId, target, id);
+    .prepare(`SELECT 1 FROM messages WHERE buffer_id = ? AND id > ? LIMIT 1`)
+    .get(bufferId, id);
 }
 
 // Public wrappers so wsHub can compute hasMoreOlder/Newer for the 'before',
 // 'after', and 'latest' modes without re-declaring the SQL there.
 export function hasOlderRow(networkId: number, target: string, id: number): boolean {
-  return hasOlderThan(networkId, target, id);
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  return bufferId === undefined ? false : hasOlderThanById(bufferId, id);
 }
 export function hasNewerRow(networkId: number, target: string, id: number): boolean {
-  return hasNewerThan(networkId, target, id);
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  return bufferId === undefined ? false : hasNewerThanById(bufferId, id);
 }
 
 // Are there MORE than `count` rows newer than `afterId` in this buffer? Answers
@@ -454,15 +501,17 @@ export function hasMoreThan(
   afterId: number,
   count: number,
 ): boolean {
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  if (bufferId === undefined) return false;
   return !!db
     .prepare(
       `SELECT 1 FROM (
          SELECT id FROM messages
-         WHERE network_id = ? AND target = ? AND id > ?
+         WHERE buffer_id = ? AND id > ?
          ORDER BY id ASC LIMIT 1 OFFSET ?
        )`,
     )
-    .get(networkId, target, afterId, count);
+    .get(bufferId, afterId, count);
 }
 
 // --- IRCv3 draft/chathistory window queries --------------------------------
@@ -473,7 +522,11 @@ export function hasMoreThan(
 // netsplit's QUITs must not come back as an empty batch — that would make a
 // client think it reached the start of history and stop paging). Matches what
 // playbackLines will actually emit onto the wire.
-const CHATHISTORY_MSG_FILTER = `type IN ('message', 'action', 'notice') AND mirrored = 0 AND text IS NOT NULL AND text != ''`;
+const chathistoryMsgFilter = (alias = '') => {
+  const p = alias ? `${alias}.` : '';
+  return `${p}type IN ('message', 'action', 'notice') AND ${p}mirrored = 0 AND ${p}text IS NOT NULL AND ${p}text != ''`;
+};
+const CHATHISTORY_MSG_FILTER = chathistoryMsgFilter();
 
 // Windowed history fetch for CHATHISTORY. `lower`/`upper` are exclusive ISO time
 // bounds (null = unbounded on that side). `newestFirst` takes the `limit` from
@@ -495,8 +548,10 @@ export function loadHistoryWindow(
   limit: number,
   { newestFirst = false }: { newestFirst?: boolean } = {},
 ): MessageEvent[] {
-  const conds = ['network_id = ?', 'target = ?', CHATHISTORY_MSG_FILTER];
-  const params: (string | number)[] = [networkId, target];
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  if (bufferId === undefined) return [];
+  const conds = ['buffer_id = ?', CHATHISTORY_MSG_FILTER];
+  const params: (string | number)[] = [bufferId];
   if (lower !== null) {
     conds.push('time > ?');
     params.push(lower);
@@ -528,15 +583,20 @@ export function listActiveTargetsInWindow(
   limit: number,
 ): BufferSummary[] {
   const [lo, hi] = isoA <= isoB ? [isoA, isoB] : [isoB, isoA];
+  // Grouped by buffer_id and named from the registry row, so the summary
+  // carries the canonical casing rather than whichever casing the window's
+  // rows happened to arrive under. Sentinels are excluded by kind — the
+  // registry's classification, not a name-shape LIKE.
   return db
     .prepare(
-      `SELECT target, MAX(time) AS lastMessageAt
-         FROM messages
-        WHERE network_id = ?
-          AND target NOT LIKE ':server:%'
-          AND ${CHATHISTORY_MSG_FILTER}
-          AND time > ? AND time < ?
-        GROUP BY target
+      `SELECT b.target AS target, MAX(m.time) AS lastMessageAt
+         FROM messages m
+         JOIN buffers b ON b.id = m.buffer_id
+        WHERE b.network_id = ?
+          AND b.kind NOT IN ('server', 'system')
+          AND ${chathistoryMsgFilter('m')}
+          AND m.time > ? AND m.time < ?
+        GROUP BY b.id
         ORDER BY lastMessageAt DESC
         LIMIT ?`,
     )
@@ -555,62 +615,55 @@ export function listRecentForBuffers(
   return out;
 }
 
-// Distinct buffer targets (channels/DMs/:server:) that have history on a network
-// — the sidebar's buffer list. Called several times per connect snapshot (per
-// network, in the online loop / offline frames / app-badge total), so it's on
-// the hot path — hence the module-scoped prepared statement.
-//
-// A plain `SELECT DISTINCT target` visits EVERY message row: SQLite reads the
-// whole (network_id, target, id) index and de-dupes in the output rather than
-// seeking past duplicate targets, so it scaled with the network's ENTIRE history
-// and was the dominant snapshot cost on a deep buffer. This is a recursive "loose
-// index scan" (skip-scan): it seeks to the smallest target, then repeatedly to
-// the next target strictly greater, so it's O(distinct targets) index seeks — a
-// ~75x speedup measured on 50k rows / 8 targets, and far more on real history.
-//
-// The `IS NOT NULL` guards are LOAD-BEARING, not defensive: `min(target)` returns
-// NULL for a network with no messages, and the recursive subquery returns NULL
-// once no larger target exists — that NULL sentinel is what terminates the
-// recursion (via `WHERE t.target IS NOT NULL`) and is filtered from the output.
+// Distinct buffer targets (channels/DMs/:server:) that have history on a
+// network — the sidebar's buffer list. Enumerated from the registry with an
+// existence probe per row: O(buffers) index seeks against the head of each
+// buffer's idx_messages_buf_unread run. This retires the recursive skip-scan
+// workaround that used to live here — the loose-index-scan CTE existed only
+// because "which buffers exist" had to be derived from the messages table.
 const listBufferTargetsStmt = db.prepare(`
-  WITH RECURSIVE t(target) AS (
-    SELECT min(target) FROM messages WHERE network_id = ?
-    UNION ALL
-    SELECT (SELECT min(target) FROM messages WHERE network_id = ? AND target > t.target)
-    FROM t
-    WHERE t.target IS NOT NULL
-  )
-  SELECT target FROM t WHERE target IS NOT NULL ORDER BY target
+  SELECT target FROM buffers b
+  WHERE b.network_id = ?
+    AND EXISTS (SELECT 1 FROM messages m WHERE m.buffer_id = b.id)
+  ORDER BY target
 `);
 export function listBufferTargets(networkId: number): string[] {
-  return (listBufferTargetsStmt.all(networkId, networkId) as Array<{ target: string }>).map(
-    (r) => r.target,
-  );
+  return (listBufferTargetsStmt.all(networkId) as Array<{ target: string }>).map((r) => r.target);
 }
 
 // Per-(network, target) summary for the MCP list_buffers verb. Aggregates
-// every target that has at least one message, with the freshest message
-// timestamp. Pseudo-buffers (':server:*') are filtered at the SQL layer so
-// they never leak into the agent-facing surface; clients reach them via the
-// snapshot only.
+// every buffer that has at least one message, with the freshest message
+// timestamp. Sentinel buffers are filtered by kind so they never leak into
+// the agent-facing surface; clients reach them via the snapshot only.
 export function listBuffersForNetwork(networkId: number): BufferSummary[] {
   return db
     .prepare(
-      `SELECT target, MAX(time) AS lastMessageAt
-         FROM messages
-        WHERE network_id = ?
-          AND target NOT LIKE ':server:%'
-        GROUP BY target
+      `SELECT b.target AS target, MAX(m.time) AS lastMessageAt
+         FROM buffers b
+         JOIN messages m ON m.buffer_id = b.id
+        WHERE b.network_id = ?
+          AND b.kind NOT IN ('server', 'system')
+        GROUP BY b.id
         ORDER BY lastMessageAt DESC`,
     )
     .all(networkId) as BufferSummary[];
 }
 
 // (target, max_id) per buffer in this network. Used by /mark-all-read so the
-// server can clamp every buffer's read pointer to its tail in one pass.
+// server can clamp every buffer's read pointer to its tail in one pass. The
+// correlated MAX is the first entry of each buffer's `id DESC` index run —
+// O(buffers) seeks, where the old GROUP BY scanned the network's whole
+// message partition.
 export function maxIdByBuffer(networkId: number): MaxIdByBufferRow[] {
   return db
-    .prepare('SELECT target, MAX(id) AS maxId FROM messages WHERE network_id = ? GROUP BY target')
+    .prepare(
+      `SELECT target, maxId FROM (
+         SELECT b.target AS target,
+                (SELECT MAX(m.id) FROM messages m WHERE m.buffer_id = b.id) AS maxId
+         FROM buffers b
+         WHERE b.network_id = ?
+       ) WHERE maxId IS NOT NULL`,
+    )
     .all(networkId) as MaxIdByBufferRow[];
 }
 
@@ -630,9 +683,11 @@ export function maxMessageId(): number {
 // MAX(id) for a single buffer, or 0 when the buffer has no rows. Used by
 // /clear to anchor the marker at the current tail.
 export function maxIdForBuffer(networkId: number, target: string): number {
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  if (bufferId === undefined) return 0;
   const row = db
-    .prepare('SELECT MAX(id) AS maxId FROM messages WHERE network_id = ? AND target = ?')
-    .get(networkId, target) as { maxId: number | null } | undefined;
+    .prepare('SELECT MAX(id) AS maxId FROM messages WHERE buffer_id = ?')
+    .get(bufferId) as { maxId: number | null } | undefined;
   return row?.maxId || 0;
 }
 
@@ -640,12 +695,17 @@ export function maxIdForBuffer(networkId: number, target: string): number {
 // no_such_nick router: only route a DM-shaped error into a per-nick buffer if
 // the user has actually conversed with that nick. Stops typo /whois replies
 // from spawning empty DM buffers.
+//
+// These two used to be `target = ? COLLATE NOCASE` — the one predicate shape
+// in this file that defeated the index prefix and scanned the network's whole
+// partition. Resolution now folds through the registry, so they're index-only
+// seeks, and the case-insensitivity is the registry's (foldTarget), not
+// SQLite's ASCII NOCASE.
 export function hasMessageForTarget(networkId: number, target: string): boolean {
   if (!networkId || !target) return false;
-  const row = db
-    .prepare('SELECT 1 FROM messages WHERE network_id = ? AND target = ? COLLATE NOCASE LIMIT 1')
-    .get(networkId, target);
-  return !!row;
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  if (bufferId === undefined) return false;
+  return !!db.prepare('SELECT 1 FROM messages WHERE buffer_id = ? LIMIT 1').get(bufferId);
 }
 
 // Whether a target has a real (non-notice) conversation — at least one PRIVMSG or
@@ -654,19 +714,20 @@ export function hasMessageForTarget(networkId: number, target: string): boolean 
 // this so services don't consume MONITOR slots or show a presence dot.
 export function hasConversationForTarget(networkId: number, target: string): boolean {
   if (!networkId || !target) return false;
-  const row = db
-    .prepare(
-      "SELECT 1 FROM messages WHERE network_id = ? AND target = ? COLLATE NOCASE AND type IN ('message', 'action') LIMIT 1",
-    )
-    .get(networkId, target);
-  return !!row;
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  if (bufferId === undefined) return false;
+  return !!db
+    .prepare("SELECT 1 FROM messages WHERE buffer_id = ? AND type IN ('message', 'action') LIMIT 1")
+    .get(bufferId);
 }
 
 export function countOlder(networkId: number, target: string, beforeId: number): number {
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  if (bufferId === undefined) return 0;
   return (
     db
-      .prepare(`SELECT COUNT(*) AS n FROM messages WHERE network_id = ? AND target = ? AND id < ?`)
-      .get(networkId, target, beforeId) as { n: number }
+      .prepare(`SELECT COUNT(*) AS n FROM messages WHERE buffer_id = ? AND id < ?`)
+      .get(bufferId, beforeId) as { n: number }
   ).n;
 }
 
@@ -730,13 +791,15 @@ function countUnreadRows(
   notableOnly: boolean,
   cap: number,
 ): number {
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  if (bufferId === undefined) return 0;
   const lim = Number.isInteger(cap) && cap > 0 ? cap : UNREAD_COUNT_CAP;
   return (
     db
       .prepare(
         `SELECT COUNT(*) AS n FROM (
            SELECT 1 FROM messages
-           WHERE network_id = ? AND target = ? AND id > ?
+           WHERE buffer_id = ? AND id > ?
              AND type IN ${typesSql}
              ${notableOnly ? 'AND notable = 1' : ''}
              AND from_ignored = 0
@@ -744,7 +807,7 @@ function countUnreadRows(
            LIMIT ?
          )`,
       )
-      .get(networkId, target, afterId || 0, lim) as { n: number }
+      .get(bufferId, afterId || 0, lim) as { n: number }
   ).n;
 }
 
@@ -781,16 +844,18 @@ export function countServerBufferUnread(
 // nick rule ("Reclaimed nick <you>.") must not highlight the server buffer when
 // it's deliberately not even counted as unread.
 export function countHighlightsNewer(networkId: number, target: string, afterId: number): number {
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  if (bufferId === undefined) return 0;
   return (
     db
       .prepare(
         `SELECT COUNT(*) AS n FROM messages
-     WHERE network_id = ? AND target = ? AND id > ?
+     WHERE buffer_id = ? AND id > ?
        AND matched_rule_id IS NOT NULL
        AND from_ignored = 0
        AND notable = 1`,
       )
-      .get(networkId, target, afterId || 0) as { n: number }
+      .get(bufferId, afterId || 0) as { n: number }
   ).n;
 }
 
@@ -916,8 +981,14 @@ export function searchMessages(
     params.push(networkId);
   }
   if (target) {
-    where.push('m.target = ? COLLATE NOCASE');
-    params.push(target);
+    // `in:` scope. Without a networkId this means "this name on any of my
+    // networks", so it resolves through the registry as a folded-name subquery
+    // rather than a single id. The user_id prefix of idx_buffers_key bounds
+    // the subquery to the caller's own buffers.
+    where.push(
+      'm.buffer_id IN (SELECT b.id FROM buffers b WHERE b.user_id = ? AND b.target_folded = ?)',
+    );
+    params.push(userId, foldTargetFor(networkId ?? null, target));
   }
   // `nicks` OR-matches several senders (a friend's alts); `nick` is the single
   // case. COLLATE NOCASE binds to the column so the IN comparison is case-fold.
@@ -968,7 +1039,7 @@ const listSpeakersStmt = db.prepare(`
   FROM (
     SELECT nick, time
     FROM messages
-    WHERE network_id = ? AND target = ?
+    WHERE buffer_id = ?
       AND type IN ('message', 'action')
       AND self = 0
       AND nick IS NOT NULL
@@ -990,8 +1061,10 @@ export function listSpeakers(
   limit = 20,
   scanWindow = SPEAKER_SCAN_WINDOW,
 ): Array<{ nick: string; lastTime: number }> {
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  if (bufferId === undefined) return [];
   return (
-    listSpeakersStmt.all(networkId, target, scanWindow, limit) as Array<{
+    listSpeakersStmt.all(bufferId, scanWindow, limit) as Array<{
       nick: string;
       last_time: string;
     }>

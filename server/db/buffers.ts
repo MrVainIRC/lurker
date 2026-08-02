@@ -107,10 +107,13 @@ const reopenStmt = db.prepare(`
     AND state = 'closed'
 `);
 
+// server/system rows are permanent fixtures (the server console and the app
+// console always exist); the kind guard makes closing one structurally
+// impossible rather than a code-path promise.
 const closeStmt = db.prepare(`
   UPDATE buffers SET state = 'closed', closed_at = datetime('now')
   WHERE user_id = ? AND IFNULL(network_id, 0) = IFNULL(?, 0) AND target_folded = ?
-    AND state = 'open'
+    AND state = 'open' AND kind NOT IN ('server', 'system')
 `);
 
 const setAutojoinStmt = db.prepare(`
@@ -123,9 +126,13 @@ const setKeyStmt = db.prepare(`
   WHERE user_id = ? AND IFNULL(network_id, 0) = IFNULL(?, 0) AND target_folded = ?
 `);
 
+// Same kind guard as closeStmt — and doubly load-bearing now that satellite
+// rows cascade from buffers(id): deleting a sentinel row would take its read
+// pointer (and, post-v17, its messages) with it.
 const deleteStmt = db.prepare(`
   DELETE FROM buffers
   WHERE user_id = ? AND IFNULL(network_id, 0) = IFNULL(?, 0) AND target_folded = ?
+    AND kind NOT IN ('server', 'system')
 `);
 
 // Import-path only: close (or stamp) with an archive-supplied closed_at rather
@@ -251,6 +258,58 @@ export interface EnsureResult {
   reopened: boolean;
 }
 
+// --- Sentinel buffers -------------------------------------------------------
+//
+// `:server:<netId>` and `:system:` are real rows as of schema 17 (kinds
+// 'server'/'system', reserved since the registry landed). They are minted at
+// network/user creation, by the v17 migration for existing data, and
+// defensively below — never by the channel/dm reducer paths, whose
+// kindForTarget would misclassify a ':'-prefixed name as a DM.
+
+const networkOwnerStmt = db.prepare(`SELECT user_id FROM networks WHERE id = ?`);
+
+const sentinelInsertStmt = db.prepare(`
+  INSERT INTO buffers (user_id, network_id, target, target_folded, kind, state, autojoin, key)
+  VALUES (?, ?, ?, ?, ?, 'open', 0, NULL)
+  ON CONFLICT(user_id, IFNULL(network_id, 0), target_folded) DO NOTHING
+`);
+
+/** Make the network's `:server:` row exist; returns it. Undefined only for an
+ *  unknown networkId. */
+export function ensureServerBuffer(networkId: number): BufferRecord | undefined {
+  const owner = networkOwnerStmt.get(networkId) as { user_id: number } | undefined;
+  if (!owner) return undefined;
+  const target = `:server:${networkId}`;
+  sentinelInsertStmt.run(owner.user_id, networkId, target, target, 'server');
+  return toRecord(getStmt.get(owner.user_id, networkId, target) as BufferRow | undefined);
+}
+
+/** Make the user's app-scoped `:system:` row exist; returns it. */
+export function ensureSystemBuffer(userId: number): BufferRecord {
+  sentinelInsertStmt.run(userId, null, ':system:', ':system:', 'system');
+  return toRecord(getStmt.get(userId, null, ':system:') as BufferRow);
+}
+
+/** Route a ':'-prefixed target to its sentinel mint. Returns undefined for
+ *  non-sentinel targets (the ordinary reducer path applies). */
+function ensureSentinel(
+  userId: number,
+  networkId: number | null,
+  target: string,
+): EnsureResult | undefined {
+  if (!target.startsWith(':')) return undefined;
+  const record =
+    target === ':system:' || networkId == null
+      ? ensureSystemBuffer(userId)
+      : ensureServerBuffer(networkId);
+  if (!record) {
+    // Unknown network for a ':server:' target — surface it as a programming
+    // error; nothing legitimate constructs this.
+    throw new Error(`ensureSentinel: no network ${networkId} for target ${target}`);
+  }
+  return { record, created: false, reopened: false };
+}
+
 /** The reducer workhorse: make (user, network, target) exist and be open.
  *  Creates the row when absent (canonical casing = the caller's casing),
  *  reopens it when closed. `autojoin` set only when passed (the join echo
@@ -265,6 +324,8 @@ export const ensureOpen = db.transaction(
     target: string,
     opts: { kind?: BufferKind; autojoin?: boolean; key?: string | null } = {},
   ): EnsureResult => {
+    const sentinel = ensureSentinel(userId, networkId, target);
+    if (sentinel) return sentinel;
     const folded = foldTarget(target);
     const existing = getStmt.get(userId, networkId, folded) as BufferRow | undefined;
     if (!existing) {
@@ -310,6 +371,8 @@ export const ensureExists = db.transaction(
     target: string,
     opts: { kind?: BufferKind } = {},
   ): { record: BufferRecord; created: boolean } => {
+    const sentinel = ensureSentinel(userId, networkId, target);
+    if (sentinel) return { record: sentinel.record, created: sentinel.created };
     const folded = foldTarget(target);
     const existing = getStmt.get(userId, networkId, folded) as BufferRow | undefined;
     if (existing) return { record: toRecord(existing), created: false };

@@ -8,6 +8,7 @@ import path from 'path';
 import fs from 'fs';
 import { isNodeMode } from '../utils/edition.js';
 import { foldBufferCase } from './foldBufferCase.js';
+import { normalizeMessagesBufferIds, messagesBackfillDone } from './normalizeBuffers.js';
 import {
   seedUploaderConfig,
   reconcileBuiltInUploaders,
@@ -1044,13 +1045,28 @@ try {
   );
 }
 
+// Buffer identity (#695): every read path keys messages by buffer_id → buffers(id);
+// `target` remains as an insert-time observation only. Added here (nullable —
+// ALTER ADD COLUMN can't add NOT NULL without a constant default, and the
+// backfill is resumable across boots); "never NULL" is the application
+// invariant, enforced by insertMessage and established for existing rows by
+// the flag-driven backfill after the version blocks below. CASCADE rather
+// than NO ACTION because user/network deletes cascade into buffers and
+// messages in unspecified order — NO ACTION could abort a legitimate account
+// deletion mid-cascade. deleteBuffer's "only when no history" contract stays
+// a code contract (and sentinel rows are undeletable by kind guard).
+ensureColumn('messages', 'buffer_id', 'INTEGER REFERENCES buffers(id) ON DELETE CASCADE');
+
 // Persist which rule matched each message so the highlights modal can read
 // from disk instead of scanning whatever happens to be loaded in client memory.
 // Partial index keeps it cheap — only matched rows live in the index.
+//
+// The index itself (idx_messages_matched_buf) is built after the buffer_id
+// backfill below — its key is buffer_id. Its (network_id, target) predecessor
+// is no longer created: no statement issues that predicate shape anymore, and
+// module load is linear, so even a transition boot never queries between here
+// and the swap. The old index is dropped there.
 ensureColumn('messages', 'matched_rule_id', 'INTEGER');
-db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_matched
-         ON messages(network_id, target, id DESC)
-         WHERE matched_rule_id IS NOT NULL`);
 
 // Per-(network, target) alt-row parity, computed at insert time so the client
 // can stripe chat lines without doing its own counting. Only chat-shaped types
@@ -1103,78 +1119,17 @@ ensureColumn('messages', 'notable', 'INTEGER NOT NULL DEFAULT 1');
 // absent, so it runs exactly once — never a repeated full scan on later boots.
 if (!hadNotableColumn) demoteLegacyServerStatusNotices();
 
-// Covering index for the connect-snapshot unread counts (#469). countUnreadRows
-// filters on `type` and `from_ignored` (and `notable` for :server: buffers), but
-// the index this replaces carried only (network_id, target, id) — so SQLite found
-// each candidate in the index and then fetched the full table ROW to evaluate those
-// predicates. On a flood-heavy channel only ~40% of rows are countable, so
-// reaching UNREAD_COUNT_CAP meant ~2,500 scattered rowid lookups PER BUFFER, and a
-// connect snapshot pays that for every buffer on the account. Warm it is invisible;
-// cold — a fresh boot, or an account whose DB doesn't fit in page cache — every one
-// of those lookups is a real seek, which is what pins the event loop for tens of
-// seconds on spinning disks and trips IRC ping timeouts in a feedback loop.
-//
-// Listing the filter columns after the cursor makes the count index-ONLY (verify
-// with EXPLAIN QUERY PLAN: "USING COVERING INDEX idx_messages_unread"). Column
-// order matters: (network_id, target) are the equality prefix, `id DESC` matches
-// the ORDER BY that lets the LIMIT stop early, and the three filter columns ride
-// along purely as payload — they must come last or they'd break the range scan.
-//
-// This REPLACES the old idx_messages_buffer rather than sitting alongside it —
-// see the DROP below for why keeping both would be pure write-path cost.
-//
-// Cost, measured on a synthetic 2.08M-row / 451MB account: a ONE-TIME build on the
-// first boot after upgrade (~1s on NVMe; expect meaningfully longer on the
-// spinning-disk installs this fix targets, since the build is a full scan plus a
-// sort). Startup blocks on it, which is the right trade — the alternative is
-// paying scattered row lookups on every connect, forever — but an operator
-// watching a slow first boot deserves to know why. Net disk after the DROP below
-// is roughly +3.5%, not the +13% this index costs on its own.
-
-// Tell the operator before starting, because a silent stall here is
-// indistinguishable from a hang. The build blocks module import, is not
-// resumable, and on the spinning-disk installs this targets can take long enough
-// that a supervisor (Docker restart policy, the control-plane heartbeat
-// watchdog) kills the container mid-build — SQLite then rolls it back and the
-// next boot starts over, which is a restart loop on precisely the installs the
-// fix is for. An operator who can see WHY boot is stalled can raise the timeout
-// instead of guessing. Only warns when there's enough history for the build to
-// be slow, so ordinary instances stay quiet.
-//
-// The threshold test is an OFFSET probe, not COUNT(*). Counting the table to
-// decide whether to warn about a slow scan would itself be a full scan — silent,
-// and on exactly the cold-cache/spinning-disk install the warning exists for, so
-// it would just move the unexplained silence earlier. This stops at the
-// threshold. (Same idiom as messages.ts hasMoreThan, for the same reason.)
+// The per-buffer covering index (#469's design, re-keyed by buffer_id) is
+// built after the buffer_id backfill below — its key column doesn't have
+// values until then. The full rationale (covering payload columns, warn-probe
+// idiom, measured costs) lives at that build site. Warn threshold shared with
+// it:
 const INDEX_BUILD_WARN_ROWS = 250_000;
-if (
-  !indexExists('idx_messages_unread') &&
-  db.prepare(`SELECT 1 FROM messages LIMIT 1 OFFSET ?`).get(INDEX_BUILD_WARN_ROWS)
-) {
-  console.warn(
-    `[db] building idx_messages_unread over ${INDEX_BUILD_WARN_ROWS.toLocaleString()}+ ` +
-      `messages — one-time, blocks startup, and can take minutes on slow storage. Do not ` +
-      `kill the process: the build is not resumable and a restart begins again from zero.`,
-  );
-}
-db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_unread
-         ON messages(network_id, target, id DESC, type, from_ignored, notable)`);
 
-// ...and retire the index it supersedes. idx_messages_buffer was
-// (network_id, target, id DESC) — a strict column PREFIX of the above, so every
-// query it could serve, idx_messages_unread serves too. Keeping both would mean
-// maintaining two b-trees on every INSERT (on a busy channel, the write path
-// that matters most) to no read benefit.
-//
-// Measured on the same 2.08M-row account, dropping it: no query regresses
-// (the `SELECT *` reads are dominated by fetching full rows from the table, not
-// by index width, and come out within noise), the unread count gets ~24% FASTER,
-// and the database shrinks 44MB. That turns the net cost of this whole change
-// from +13% to roughly +3.5%.
-//
-// Ordered after the CREATE above so there is never a boot in which neither index
-// exists. On an existing database the old index stays live through every
-// migration that ran before this line; on a fresh one the table is empty.
+// Retire the ancient idx_messages_buffer (network_id, target, id DESC) on DBs
+// old enough to still carry it — superseded twice over by now. (Its
+// replacement idx_messages_unread is itself dropped after the buffer_id
+// backfill below.)
 db.exec(`DROP INDEX IF EXISTS idx_messages_buffer`);
 
 // #470 backfill body, split out so it can be unit-tested against seeded rows
@@ -1247,7 +1202,7 @@ ensureColumn('push_subscriptions', 'transport', "TEXT NOT NULL DEFAULT 'webpush'
 // Schema versioning lets us retire one-shot recovery blocks once every
 // production DB has run through them. Bump SCHEMA_VERSION when adding a new
 // recovery block, and delete blocks for versions far enough in the past.
-const SCHEMA_VERSION = 16;
+const SCHEMA_VERSION = 17;
 const schemaVersionRow = db
   .prepare(`SELECT value FROM app_meta WHERE key = 'schema_version'`)
   .get() as { value: string } | undefined;
@@ -2029,6 +1984,78 @@ if (schemaVersion < 16 && tableExists('channels')) {
   // up front makes Litestream's checkpoints wait/retry (their normal, harmless
   // behavior) instead of invalidating us.
   cutover.immediate();
+}
+
+// --- v17: buffer identity normalization (#695) -------------------------------
+//
+// messages.buffer_id becomes the read key (see the ensureColumn above and
+// server/db/messages.ts); this section establishes it for existing rows.
+// Placed AFTER the v16 block on purpose: on a pre-16 database the buffers
+// registry is itself derived by that block, and the backfill resolves against
+// it.
+//
+// Flag-driven rather than version-gated: normalizeMessagesBufferIds is
+// self-terminating on an app_meta done-flag, each chunk commits its own
+// progress cursor, and a mid-run kill resumes on the next boot — the
+// restart-loop failure mode of the one-shot idx_messages_unread build (a
+// supervisor killing a long non-resumable stall, SQLite rolling it back, the
+// next boot starting from zero) structurally cannot happen. Chunking across
+// transactions is safe here solely because this runs synchronously at module
+// load, before the server accepts work — see normalizeBuffers.ts.
+{
+  if (
+    !messagesBackfillDone(db) &&
+    db.prepare(`SELECT 1 FROM messages LIMIT 1 OFFSET ?`).get(INDEX_BUILD_WARN_ROWS)
+  ) {
+    console.warn(
+      `[db] backfilling messages.buffer_id over ${INDEX_BUILD_WARN_ROWS.toLocaleString()}+ ` +
+        `messages — one-time, blocks startup. Resumable: if the process is killed, the next ` +
+        `boot continues from where it stopped.`,
+    );
+  }
+  normalizeMessagesBufferIds(db);
+
+  {
+    // Deliberately NOT gated on the done-flag: reaching this line means the
+    // chunk loop ran to the end of the table (a kill never gets here), so the
+    // only not-done case is the stragglers warn above — a handful of rows a
+    // future boot retries. Gating would leave that server running buffer_id
+    // predicates with no buffer_id index: a full-scan cliff on every read,
+    // which is a far worse failure than indexing early.
+    //
+    // The per-buffer covering index (#469's design, one key column narrower:
+    // a 4-byte int replaces int+text). (buffer_id) is the equality prefix,
+    // `id DESC` matches the ORDER BY that lets unread-count LIMITs stop
+    // early, and (type, from_ignored, notable) ride along purely as payload
+    // so the counts are index-ONLY — they must come last or they'd break the
+    // range scan. Verify with EXPLAIN QUERY PLAN: "USING COVERING INDEX
+    // idx_messages_buf_unread" (messagesEqp.test.ts pins it).
+    //
+    // This build IS one-shot and non-resumable (an index build can't
+    // checkpoint), hence the warn above covers it too; it's a sort over one
+    // integer key — measured on the 2.08M-row reference account the old
+    // build was ~1s on NVMe, and this one is narrower.
+    if (
+      !indexExists('idx_messages_buf_unread') &&
+      db.prepare(`SELECT 1 FROM messages LIMIT 1 OFFSET ?`).get(INDEX_BUILD_WARN_ROWS)
+    ) {
+      console.warn(
+        `[db] building idx_messages_buf_unread — one-time, blocks startup, not resumable. ` +
+          `Do not kill the process.`,
+      );
+    }
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_buf_unread
+             ON messages(buffer_id, id DESC, type, from_ignored, notable)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_matched_buf
+             ON messages(buffer_id, id DESC)
+             WHERE matched_rule_id IS NOT NULL`);
+    // Only after both successors exist: retire the name-keyed generation.
+    // Keeping them would be two dead b-trees maintained on every INSERT (no
+    // statement issues their predicate shape anymore); ordering the drops
+    // after the creates means no boot ever holds neither generation.
+    db.exec(`DROP INDEX IF EXISTS idx_messages_unread`);
+    db.exec(`DROP INDEX IF EXISTS idx_messages_matched`);
+  }
 }
 
 // Issue #510: seed the uploader data model — instance x0/catbox rows +
