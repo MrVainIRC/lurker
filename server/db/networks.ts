@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import db from './index.js';
+import { ensureServerBuffer } from './buffers.js';
 import { encryptSecret, decryptSecret } from '../utils/secretCrypto.js';
 import { ENCRYPTED_NETWORK_COLUMNS } from './exportSchema.js';
 
@@ -122,6 +123,10 @@ export function createNetwork(userId: number, fields: NetworkFields): Network | 
       encryptSecret(connect_commands || null),
       next,
     );
+  // The network's `:server:` buffer is a real registry row (kind 'server',
+  // schema 17) — minted with the network so its console history and read
+  // pointer have an id from the first event.
+  ensureServerBuffer(Number(result.lastInsertRowid));
   return getNetwork(result.lastInsertRowid, userId);
 }
 

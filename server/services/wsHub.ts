@@ -642,6 +642,11 @@ export function* eachUserBufferTarget(userId: number): Generator<UserBufferTarge
   const rowsByNetwork = new Map<number, BufferStateRow[]>();
   for (const row of listBufferStatesForUser(userId)) {
     if (row.networkId == null) continue; // app-scoped rows are synthesized above
+    // Sentinel rows are REAL as of schema 17 (kinds 'server'/'system', minted
+    // for buffer_id), but this walk still yields the per-network `:server:`
+    // entry itself, in its fixed slot ahead of the network's buffers — so the
+    // registry copy is skipped here, not yielded twice.
+    if (row.target.startsWith(':')) continue;
     let list = rowsByNetwork.get(row.networkId);
     if (!list) rowsByNetwork.set(row.networkId, (list = []));
     list.push(row);

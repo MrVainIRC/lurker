@@ -31,8 +31,9 @@ import type { Statement, RunResult } from 'better-sqlite3';
 import db from '../db/index.js';
 import { EXPORT_TABLES, EXPORT_FORMAT_VERSION, IMPORT_ORDER } from '../db/exportSchema.js';
 import { encryptSecret } from '../utils/secretCrypto.js';
-import { importRow as importBufferRow } from '../db/buffers.js';
+import { importRow as importBufferRow, reopen as reopenBuffer } from '../db/buffers.js';
 import { listBufferTargets, hasMessageForTarget } from '../db/messages.js';
+import { resolveOrMintForInsert } from '../db/bufferResolve.js';
 import { migrateSmartFilterToEventMode } from '../db/migrateEventMode.js';
 import ignoreRulesService from './ignoreRulesService.js';
 import type { IgnorePatternKind } from '../db/ignoredMasks.js';
@@ -208,6 +209,13 @@ function insertTable(
     // file can't plant a row the folded lookups will never find.
     if (table === 'buffers') {
       row.target_folded = String(row.target ?? '').toLowerCase();
+      // Sentinel rows (:system:, :server:<id>) are install-local: the target
+      // account already owns its :system: row (minted at account creation —
+      // inserting the archive's copy violates idx_buffers_key), and an
+      // archived ':server:<oldNetId>' target embeds the SOURCE install's
+      // network id, which nothing on this install will ever ask for. The
+      // target install mints its own sentinels on first use.
+      if (String(row.target ?? '').startsWith(':')) continue;
     }
 
     // Export carries at-rest secrets (network passwords, +k channel keys) as
@@ -309,16 +317,22 @@ function convertLegacyBuffers(
   if (!networkMap || (!legacyChannels.length && !legacyClosed.length && !networkMap.size)) return;
 
   let converted = 0;
-  // A: every imported message target becomes an open row.
+  // A: every imported message target becomes an open row. The message stream
+  // already minted these rows (insertMessage's defensive mint materializes
+  // unknown targets CLOSED so it can never conjure a surfaced buffer), and
+  // importRow's conflict policy deliberately never flips closed→open — so the
+  // "message targets are open" rule is applied with an explicit reopen. The
+  // closed_buffers pass below still wins last, exactly as before.
   for (const newNetworkId of networkMap.values()) {
     for (const target of listBufferTargets(newNetworkId as number)) {
-      if (target.startsWith(':')) continue; // virtual buffers are never rows
+      if (target.startsWith(':')) continue; // sentinel rows keep their own state
       importBufferRow({
         userId: targetUserId,
         networkId: newNetworkId as number,
         target,
         state: 'open',
       });
+      reopenBuffer(targetUserId, newNetworkId as number, target);
       converted += 1;
     }
   }
@@ -364,7 +378,15 @@ async function streamMessagesInBatches(
   idMaps: Record<string, Map<unknown, unknown>>,
 ): Promise<number> {
   const def = EXPORT_TABLES.messages as ExportTableDefFull;
-  const { stmt, cols } = buildInsertStatement('messages', def);
+  // buffer_id is not an archive column (archives carry names; ids are
+  // install-local), but the live table's invariant is "never NULL" — an
+  // imported row with a NULL buffer_id would be invisible to every id-keyed
+  // read. Stamped per row below, resolved against the already-imported
+  // buffers rows (IMPORT_ORDER puts `buffers` in Phase A, before messages);
+  // anything a legacy archive fails to resolve gets the same defensive
+  // closed-mint the insert path uses.
+  const defWithBufferId = { ...def, columns: [...def.columns, 'buffer_id'] };
+  const { stmt, cols } = buildInsertStatement('messages', defWithBufferId);
   const messagesMap = idMaps.messages;
   let inserted = 0;
 
@@ -392,6 +414,7 @@ async function streamMessagesInBatches(
       // is NOT NULL. Default to 1 (notable), matching the column default: old
       // history predates the server-buffer notability model, so it all counts.
       if (row.notable === undefined) row.notable = 1;
+      row.buffer_id = resolveOrMintForInsert(row.network_id as number, String(row.target ?? ''));
       const result = insertOne(stmt, cols, row);
       messagesMap.set(original.id, result.lastInsertRowid);
       inserted += 1;

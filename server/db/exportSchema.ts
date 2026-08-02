@@ -128,6 +128,11 @@ export const EXPORT_TABLES = Object.freeze({
     section: 'data',
     pk: 'id',
     rekeyOnImport: true,
+    // Sentinel rows (:system:, :server:<id>) are install-local fixtures: the
+    // target install mints its own at account/network creation, and an
+    // archived ':server:<id>' target embeds the SOURCE install's network id.
+    // The importer independently drops any that appear (older archives).
+    rowWhere: "target NOT LIKE ':%'",
     fkRekey: { user_id: 'users', network_id: 'networks' },
     // The +k channel key gates entry to the channel — same credential class as
     // the network secrets, so same at-rest treatment.
@@ -176,6 +181,11 @@ export const EXPORT_TABLES = Object.freeze({
     fkRekey: {
       network_id: 'networks',
       matched_rule_id: 'highlight_rules',
+    },
+    skippedColumns: {
+      buffer_id:
+        'install-local buffers(id) reference; the importer re-resolves it from ' +
+        '(network_id, target) against the target install’s registry at insert time',
     },
     columns: [
       'id',

@@ -230,8 +230,11 @@ describe('listBufferTargets (loose-index-scan)', () => {
       chat(n, 'dave', 'dave', 'z');
     }
     chat(n, ':server:1', 'lurker', 'notice');
-    // Binary collation: '#'(0x23) < ':'(0x3A) < 'a' < 'd'.
-    expect(listBufferTargets(n)).toEqual(['#alpha', '#zeta', ':server:1', 'dave']);
+    // Binary collation: '#'(0x23) < ':'(0x3A) < 'a' < 'd'. The stray
+    // ':server:1' (a foreign network number, the shape a legacy import
+    // produces) resolves into THIS network's own server buffer — targets come
+    // back canonical from the registry, so the list reports :server:<n>.
+    expect(listBufferTargets(n)).toEqual(['#alpha', '#zeta', `:server:${n}`, 'dave']);
   });
 
   it('returns [] for a network with no messages', () => {
