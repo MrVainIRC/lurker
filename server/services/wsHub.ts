@@ -74,13 +74,14 @@ import {
   listStatesForUser as listBufferStatesForUser,
   kindForTarget,
 } from '../db/buffers.js';
+import { resolveBuffer, requireBufferForUser } from '../db/bufferResolve.js';
 import type { BufferStateRow } from '../db/buffers.js';
 import {
   pinBuffer,
   unpinBuffer,
   unpinBufferCaseInsensitive,
   reorderPins,
-  listPinnedForUserNetwork,
+  listPinnedWithIds,
 } from '../db/pinnedBuffers.js';
 import { setNicklistCollapsed } from '../db/nicklistCollapsed.js';
 import { addBookmark, removeBookmark } from '../db/bookmarks.js';
@@ -610,6 +611,9 @@ function computeUnreadFor(
 export interface UserBufferTarget {
   networkId: number | null; // null == the app-scoped system buffer
   target: string;
+  // buffers(id) — null only for the defensive no-row yield (a live-joined
+  // channel the registry forgot mid-session).
+  bufferId: number | null;
   conn: IrcConnection | null; // the live connection, or null (offline / system)
 }
 
@@ -634,35 +638,54 @@ export interface UserBufferTarget {
 // never-spoken empty buffer is still enumerated — the client counts it from
 // lastReadId 0, and callers use getReadState (defaults to 0) the same way.
 export function* eachUserBufferTarget(userId: number): Generator<UserBufferTarget> {
-  // System buffer first — app-scoped (networkId null), uncloseable.
-  yield { networkId: null, target: SYSTEM_TARGET, conn: null };
   const liveById = new Map<number, IrcConnection>(
     ircManager.listConnections(userId).map((c) => [c.network.id, c]),
   );
+  // One pass over the registry sorts rows into per-network lists AND harvests
+  // the sentinel row ids — the walk yields sentinels in their own fixed slots,
+  // so their registry copies are skipped from the lists but their ids ride
+  // along rather than costing a resolve per network.
+  let systemBufferId: number | null = null;
+  const serverBufferIdByNetwork = new Map<number, number>();
   const rowsByNetwork = new Map<number, BufferStateRow[]>();
   for (const row of listBufferStatesForUser(userId)) {
-    if (row.networkId == null) continue; // app-scoped rows are synthesized above
-    // Sentinel rows are REAL as of schema 17 (kinds 'server'/'system', minted
-    // for buffer_id), but this walk still yields the per-network `:server:`
-    // entry itself, in its fixed slot ahead of the network's buffers — so the
-    // registry copy is skipped here, not yielded twice.
-    if (row.target.startsWith(':')) continue;
+    if (row.networkId == null) {
+      if (row.target === SYSTEM_TARGET) systemBufferId = row.id;
+      continue; // app-scoped rows are yielded in the fixed slot below
+    }
+    if (row.target.startsWith(':')) {
+      if (row.target === `:server:${row.networkId}`) {
+        serverBufferIdByNetwork.set(row.networkId, row.id);
+      }
+      continue;
+    }
     let list = rowsByNetwork.get(row.networkId);
     if (!list) rowsByNetwork.set(row.networkId, (list = []));
     list.push(row);
   }
+  // System buffer first — app-scoped (networkId null), uncloseable.
+  yield { networkId: null, target: SYSTEM_TARGET, bufferId: systemBufferId, conn: null };
   for (const net of listNetworksForUser(userId)) {
     const conn = liveById.get(net.id) ?? null;
-    yield { networkId: net.id, target: `:server:${net.id}`, conn };
+    yield {
+      networkId: net.id,
+      target: `:server:${net.id}`,
+      bufferId: serverBufferIdByNetwork.get(net.id) ?? null,
+      conn,
+    };
     const seen = new Set<string>();
     for (const row of rowsByNetwork.get(net.id) ?? []) {
       seen.add(row.targetFolded);
       if (row.state === 'closed' && !conn?.channels.has(row.targetFolded)) continue;
-      yield { networkId: net.id, target: row.target, conn };
+      yield { networkId: net.id, target: row.target, bufferId: row.id, conn };
     }
     if (conn) {
       for (const ch of conn.channels.values()) {
-        if (!seen.has(ch.name.toLowerCase())) yield { networkId: net.id, target: ch.name, conn };
+        if (!seen.has(ch.name.toLowerCase())) {
+          // Defensive: a live-joined channel whose row was forgotten
+          // mid-session — genuinely no id to carry.
+          yield { networkId: net.id, target: ch.name, bufferId: null, conn };
+        }
       }
     }
   }
@@ -718,8 +741,12 @@ function bufferStateFields(
   precomputed?: {
     lastReadId?: number;
     cleared?: { clearedBeforeId: number; clearedAt: string | null };
+    /** The buffer's id when the caller already holds it (the snapshot walk
+     *  carries it); otherwise resolved here — one idx_buffers_key seek. */
+    bufferId?: number | null;
   },
 ): {
+  bufferId: number | null;
   lastReadId: number;
   unread: number;
   highlights: number;
@@ -727,10 +754,18 @@ function bufferStateFields(
   clearedBeforeId: number;
   clearedAt: string | null;
 } {
+  // `bufferId` rides every backlog variant: the connect burst doubles as the
+  // client's id⇄name directory (docs/CLIENT_PROTOCOL.md §5.2). null only for
+  // the defensive no-row case (a live-joined channel the registry forgot).
+  const bufferId =
+    precomputed?.bufferId !== undefined
+      ? precomputed.bufferId
+      : (resolveBuffer(userId, networkId, target)?.id ?? null);
   const lastReadId = precomputed?.lastReadId ?? getReadState(userId, networkId, target);
   const counts = computeUnreadFor(userId, networkId, target, lastReadId);
   const cleared = precomputed?.cleared ?? getClearedState(userId, networkId, target);
   return {
+    bufferId,
     lastReadId: counts.lastReadId,
     unread: counts.unread,
     highlights: counts.highlights,
@@ -807,6 +842,7 @@ export function buildBufferShell(
   precomputed?: {
     lastReadId?: number;
     cleared?: { clearedBeforeId: number; clearedAt: string | null };
+    bufferId?: number | null;
   },
 ): WsPayload {
   return {
@@ -1003,6 +1039,9 @@ export function buildSystemBacklog(userId: number): WsPayload {
     kind: 'backlog',
     networkId: null,
     target: SYSTEM_TARGET,
+    // The app-scoped sentinel row's id (minted at account creation) — the
+    // system console speaks the same id-keyed dialect as every other buffer.
+    bufferId: resolveBuffer(userId, null, SYSTEM_TARGET)?.id ?? null,
     events: rows.map(systemLineToEvent),
     speakers: [],
     joined: true,
@@ -1035,6 +1074,7 @@ export function buildSystemHistoryReply(userId: number, msg: WsPayload): WsPaylo
     kind: 'history',
     networkId: null,
     target: SYSTEM_TARGET,
+    bufferId: resolveBuffer(userId, null, SYSTEM_TARGET)?.id ?? null,
     mode,
     token: msg.token ?? null,
     speakers: [] as never[],
@@ -1116,10 +1156,15 @@ export function buildSystemHistoryReply(userId: number, msg: WsPayload): WsPaylo
 // No live conn, so channelJoined folds #channels to parted and DMs to joined
 // (they never dim). Shared by buildOfflineBacklogFrames and the snapshot's single
 // enumeration pass so the offline carve-out lives in exactly one place.
-function buildOfflineFrame(userId: number, networkId: number, target: string): WsPayload {
+function buildOfflineFrame(
+  userId: number,
+  networkId: number,
+  target: string,
+  bufferId: number | null = null,
+): WsPayload {
   return target.startsWith(':server:')
     ? buildBufferBacklog(userId, networkId, target)
-    : buildBufferShell(userId, networkId, target, channelJoined(target));
+    : buildBufferShell(userId, networkId, target, channelJoined(target), { bufferId });
 }
 
 // `targets` lets the snapshot hand in the enumeration it already materialized for
@@ -1133,14 +1178,14 @@ export function buildOfflineBacklogFrames(
   timings?: { serverMs: number; shellMs: number },
 ): WsPayload[] {
   const frames: WsPayload[] = [];
-  for (const { networkId, target, conn } of targets) {
+  for (const { networkId, target, bufferId, conn } of targets) {
     // Offline backlog only: the app-scoped system buffer ships via its own frame,
     // and live networks are handled by the snapshot's live loop. eachUserBufferTarget
     // has already applied the closed-flag carve-out (nothing is joined offline, so
     // there's no autorejoin race to defend against here — unlike the live loop).
     if (networkId == null || conn) continue;
     const t0 = timings ? Date.now() : 0;
-    frames.push(buildOfflineFrame(userId, networkId, target));
+    frames.push(buildOfflineFrame(userId, networkId, target, bufferId));
     if (timings) {
       const dt = Date.now() - t0;
       if (target.startsWith(':server:')) timings.serverMs += dt;
@@ -1148,6 +1193,33 @@ export function buildOfflineBacklogFrames(
     }
   }
   return frames;
+}
+
+// The pins-changed frame's dual payload: `pinned` (names, the original wire
+// shape) and `pinnedIds` (parallel-indexed buffer ids) from one read.
+export function pinsChangedFrame(userId: number, networkId: number): WsPayload {
+  const rows = listPinnedWithIds(userId, networkId);
+  return {
+    kind: 'pins-changed',
+    networkId,
+    pinned: rows.map((r) => r.target),
+    pinnedIds: rows.map((r) => r.bufferId),
+  };
+}
+
+// Resolve a verb's optional id-form buffer address (docs/CLIENT_PROTOCOL §6):
+// a numeric `msg.bufferId` wins over `(networkId, target)` and is validated
+// for ownership. Returns the resolved address, `null` for an id that doesn't
+// resolve to this user's buffer (callers DROP the verb — same path as an
+// unknown name), or `undefined` when no id was supplied (fall back to names).
+function verbBuffer(
+  userId: number,
+  msg: WsPayload,
+): { networkId: number | null; target: string; bufferId: number } | null | undefined {
+  if (typeof msg.bufferId !== 'number') return undefined;
+  const b = requireBufferForUser(userId, msg.bufferId);
+  if (!b) return null;
+  return { networkId: b.networkId, target: b.target, bufferId: b.id };
 }
 
 // A buffer the user closed and isn't currently joined to is hidden from the
@@ -1216,9 +1288,11 @@ export function handleOpenBuffer(
   if (row && (hasMessageForTarget(networkId, row.target) || inChannel)) {
     reopenBufferRow(userId, networkId, row.target);
     send(ws, buildBufferBacklog(userId, networkId, row.target, countBy));
-    send(ws, { kind: 'buffer-opened', networkId, target: row.target });
-    announceOpen(ws, userId, networkId, row.target, conn);
+    send(ws, { kind: 'buffer-opened', networkId, target: row.target, bufferId: row.id });
+    announceOpen(ws, userId, networkId, row.target, conn, row.id);
   } else if (requested.startsWith('#')) {
+    // No row yet — the JOIN echo mints it — so this is the one ack that
+    // cannot carry a bufferId; the id arrives with the channel's first frames.
     ircManager.joinChannel(userId, networkId, requested);
     send(ws, { kind: 'buffer-opened', networkId, target: requested });
   } else if (kindForTarget(requested) === 'dm') {
@@ -1229,8 +1303,8 @@ export function handleOpenBuffer(
     // pre-registry code behaved.
     const { record } = ensureBufferOpen(userId, networkId, requested);
     send(ws, buildBufferBacklog(userId, networkId, record.target, countBy));
-    send(ws, { kind: 'buffer-opened', networkId, target: record.target });
-    announceOpen(ws, userId, networkId, record.target, conn);
+    send(ws, { kind: 'buffer-opened', networkId, target: record.target, bufferId: record.id });
+    announceOpen(ws, userId, networkId, record.target, conn, record.id);
   }
 }
 
@@ -1261,13 +1335,16 @@ function announceOpen(
   networkId: number,
   target: string,
   conn: { channels: { has(name: string): boolean } } | null | undefined,
+  bufferId: number | null = null,
 ): void {
   // Pass the live connection: `channelJoined` folds a #channel to parted without
   // one, which would land the other devices' rows dimmed for a channel we're
   // sitting in, until some later frame corrected them.
-  const shell = buildBufferShell(userId, networkId, target, channelJoined(target, conn));
+  const shell = buildBufferShell(userId, networkId, target, channelJoined(target, conn), {
+    bufferId,
+  });
   fanOut(userId, shell, { exceptWs: requester });
-  fanOut(userId, { kind: 'buffer-opened', networkId, target }, { exceptWs: requester });
+  fanOut(userId, { kind: 'buffer-opened', networkId, target, bufferId }, { exceptWs: requester });
 }
 
 // Per-user socket bookkeeping lives at module scope so the verb registry can
@@ -1657,17 +1734,23 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
   // counts are now." Used by mark-read echo and by the live IRC-event fan-out
   // below — the client doesn't increment locally anymore, so this is the
   // only source of badge state.
+  // `bufferId` is threaded from callers that already hold it (the live pipe's
+  // decorated event, an id-addressed mark-read) — this runs per countable
+  // event, so the resolve is a fallback, not a habit.
   function broadcastReadState(
     userId: number,
     networkId: number | null,
     target: string,
     lastReadId: number,
+    bufferId?: number | null,
   ): void {
     const counts = computeUnreadFor(userId, networkId, target, lastReadId);
     fanOut(userId, {
       kind: 'read-state',
       networkId,
       target,
+      bufferId:
+        bufferId !== undefined ? bufferId : (resolveBuffer(userId, networkId, target)?.id ?? null),
       lastReadId: counts.lastReadId,
       unread: counts.unread,
       highlights: counts.highlights,
@@ -1827,6 +1910,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           kind: 'buffer-reopened',
           networkId: decorated.networkId,
           target,
+          bufferId: (decorated as { bufferId?: number }).bufferId ?? null,
         });
       } else if (state === undefined && decorated.id != null) {
         // A persisted event for a target with no registry row mints one — this
@@ -1859,7 +1943,13 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
       typeCountsForUnread(decorated.target, decorated.type)
     ) {
       const lastReadId = getReadState(eventUserId, decorated.networkId, decorated.target);
-      broadcastReadState(eventUserId, decorated.networkId, decorated.target, lastReadId);
+      broadcastReadState(
+        eventUserId,
+        decorated.networkId,
+        decorated.target,
+        lastReadId,
+        (decorated as { bufferId?: number }).bufferId ?? null,
+      );
     }
 
     if (event.type === 'chanlist-end' && event.networkId) {
@@ -1956,10 +2046,10 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
   // that triggered the change (if any) and gets excluded so the originator
   // doesn't clobber its own optimistic state with a stale echo. HTTP-driven
   // writes (sendBeacon on tab close) pass null and reach every tab.
-  draftsService.on('change', ({ userId, networkId, target, body, originWs }) => {
+  draftsService.on('change', ({ userId, networkId, target, bufferId, body, originWs }) => {
     fanOut(
       userId,
-      { kind: 'draft-updated', networkId, target, body },
+      { kind: 'draft-updated', networkId, target, bufferId, body },
       originWs ? { exceptWs: originWs } : undefined,
     );
   });
@@ -2226,7 +2316,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
     // Live loop: the enumerator yields the system buffer and offline networks too —
     // skip both here. The system buffer ships via its own frame above, and offline
     // networks are handled by buildOfflineBacklogFrames below (same materialized set).
-    for (const { networkId: nid, target, conn } of allTargets) {
+    for (const { networkId: nid, target, bufferId, conn } of allTargets) {
       if (nid == null || !conn) continue;
       // Fresh-network branch: this connection just came online, so the client
       // has never received a backlog frame for any of its buffers this
@@ -2252,6 +2342,8 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
       const precomputed = {
         lastReadId: readState[key] || 0,
         cleared: clearedState[key] ?? { clearedBeforeId: 0, clearedAt: null },
+        // The walk already carries the id — bufferStateFields skips its resolve.
+        bufferId,
       };
       if ((isFreshConnect || isFreshNetwork) && !target.startsWith(':server:')) {
         // Shell path: the only per-buffer work is buildBufferShell's unread
@@ -2605,19 +2697,24 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           msg.key as string | undefined,
         );
         break;
-      case 'open-buffer':
+      case 'open-buffer': {
         // A clicked channel name — handleOpenBuffer resolves reopen-vs-join.
         // A WRITE: it reopens a closed row, mints a DM row, or JOINs, and now
         // announces that to the user's other devices. Filling in a shell is
         // `{type:'history', mode:'latest'}`, which reads and changes nothing.
+        // The id form addresses an EXISTING row only — a buffer being minted
+        // has no id yet, so the name form stays the mint/JOIN path.
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
         handleOpenBuffer(
           ws,
           userId,
-          Number(msg.networkId),
-          typeof msg.target === 'string' ? msg.target : '',
+          addr ? Number(addr.networkId) : Number(msg.networkId),
+          addr ? addr.target : typeof msg.target === 'string' ? msg.target : '',
           asPageUnit(msg.countBy),
         );
         break;
+      }
       case 'part':
         ircManager.partChannel(
           userId,
@@ -2627,10 +2724,16 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         );
         break;
       case 'close-buffer': {
-        const networkId = Number(msg.networkId);
-        const target = typeof msg.target === 'string' ? msg.target : '';
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
+        const networkId = addr ? Number(addr.networkId) : Number(msg.networkId);
+        const target = addr ? addr.target : typeof msg.target === 'string' ? msg.target : '';
         // Server pseudo-buffer can't be closed (it's the per-network log).
         if (!networkId || !target || target.startsWith(':server:')) break;
+        // Resolved BEFORE the close so the buffer-closed frame below can carry
+        // the id even though the row's state just flipped.
+        const closedBufferId =
+          addr?.bufferId ?? resolveBuffer(userId, networkId, target)?.id ?? null;
         closeBufferRow(userId, networkId, target);
         // The client renders the pinned section by intersecting pins with open
         // buffers, so a pin on a now-closed buffer is invisible — and leaving
@@ -2639,9 +2742,8 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         // closed buffers folded, so a differently-cased close would otherwise
         // hide the buffer while leaving the exact-cased pin row stranded — an
         // invisible orphan (issue #405).
-        const pinned = unpinBufferCaseInsensitive(userId, networkId, target);
-        if (pinned) {
-          fanOut(userId, { kind: 'pins-changed', networkId, pinned });
+        if (unpinBufferCaseInsensitive(userId, networkId, target)) {
+          fanOut(userId, pinsChangedFrame(userId, networkId));
         }
         if (target.startsWith('#')) {
           // Send PART if connected; partChannel also lowers autojoin. If
@@ -2664,7 +2766,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         // Drop any draft for the now-closed buffer. The client mirror also
         // drops it on `buffer-closed`, so the cleanup happens on both sides.
         draftsService.clear(userId, networkId, target, ws);
-        fanOut(userId, { kind: 'buffer-closed', networkId, target });
+        fanOut(userId, { kind: 'buffer-closed', networkId, target, bufferId: closedBufferId });
         break;
       }
       case 'snapshot':
@@ -2774,23 +2876,31 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         );
         break;
       case 'mark-read': {
-        const target = msg.target as string;
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
+        const target = addr ? addr.target : (msg.target as string);
         const requested = Number(msg.messageId);
         if (!target || !Number.isFinite(requested) || requested <= 0) break;
         // The app-scoped system buffer (#355) has no network — its read pointer
         // keys on a NULL network_id. Everything else needs a real network id.
-        const networkId = target === SYSTEM_TARGET ? null : Number(msg.networkId);
+        const networkId = addr
+          ? addr.networkId
+          : target === SYSTEM_TARGET
+            ? null
+            : Number(msg.networkId);
         if (networkId !== null && !networkId) break;
         const lastReadId = setReadState(userId, networkId, target, requested);
-        broadcastReadState(userId, networkId, target, lastReadId);
+        broadcastReadState(userId, networkId, target, lastReadId, addr?.bufferId);
         break;
       }
       case 'clear-buffer': {
         // /clear: anchor the marker at the current tail. Server-computed so
         // a message persisted between client send and server receive gets
         // hidden too — the user's intent is "everything visible right now."
-        const networkId = Number(msg.networkId);
-        const target = typeof msg.target === 'string' ? msg.target : '';
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
+        const networkId = addr ? Number(addr.networkId) : Number(msg.networkId);
+        const target = addr ? addr.target : typeof msg.target === 'string' ? msg.target : '';
         if (!networkId || !target) break;
         const boundary = maxIdForBuffer(networkId, target);
         // Empty buffer: nothing to clear; don't write a no-op row.
@@ -2800,6 +2910,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           kind: 'buffer-cleared',
           networkId,
           target,
+          bufferId: addr?.bufferId ?? resolveBuffer(userId, networkId, target)?.id ?? null,
           clearedBeforeId: next.clearedBeforeId,
           clearedAt: next.clearedAt,
         });
@@ -2809,14 +2920,17 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         // Drop the clear marker so previously-hidden messages reappear.
         // Fired by the "Show earlier messages" affordance on the divider
         // and by `/clear off`.
-        const networkId = Number(msg.networkId);
-        const target = typeof msg.target === 'string' ? msg.target : '';
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
+        const networkId = addr ? Number(addr.networkId) : Number(msg.networkId);
+        const target = addr ? addr.target : typeof msg.target === 'string' ? msg.target : '';
         if (!networkId || !target) break;
         setClearedState(userId, networkId, target, 0, null);
         fanOut(userId, {
           kind: 'buffer-cleared',
           networkId,
           target,
+          bufferId: addr?.bufferId ?? resolveBuffer(userId, networkId, target)?.id ?? null,
           clearedBeforeId: 0,
           clearedAt: null,
         });
@@ -2851,84 +2965,129 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         break;
       }
       case 'input-history-add': {
-        const networkId = Number(msg.networkId);
-        const target = typeof msg.target === 'string' ? msg.target : '';
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
+        const networkId = addr ? Number(addr.networkId) : Number(msg.networkId);
+        const target = addr ? addr.target : typeof msg.target === 'string' ? msg.target : '';
         const text = typeof msg.text === 'string' ? msg.text : '';
         if (!networkId || !target || !text) break;
         addInputHistory(userId, networkId, target, text);
         // Other tabs/devices need this for cross-client up-arrow consistency.
         // The originating socket already added it optimistically, so skip it
         // to avoid a duplicate append.
-        fanOut(userId, { kind: 'input-history-added', networkId, target, text }, { exceptWs: ws });
+        fanOut(
+          userId,
+          {
+            kind: 'input-history-added',
+            networkId,
+            target,
+            bufferId: addr?.bufferId ?? resolveBuffer(userId, networkId, target)?.id ?? null,
+            text,
+          },
+          { exceptWs: ws },
+        );
         break;
       }
       case 'draft-set': {
-        const networkId = Number(msg.networkId);
-        const target = typeof msg.target === 'string' ? msg.target : '';
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
+        const networkId = addr ? Number(addr.networkId) : Number(msg.networkId);
+        const target = addr ? addr.target : typeof msg.target === 'string' ? msg.target : '';
         const body = typeof msg.body === 'string' ? msg.body : '';
         if (!networkId || !target || target.startsWith(':server:')) break;
         draftsService.set(userId, networkId, target, body, ws);
         break;
       }
       case 'draft-clear': {
-        const networkId = Number(msg.networkId);
-        const target = typeof msg.target === 'string' ? msg.target : '';
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
+        const networkId = addr ? Number(addr.networkId) : Number(msg.networkId);
+        const target = addr ? addr.target : typeof msg.target === 'string' ? msg.target : '';
         if (!networkId || !target) break;
         draftsService.clear(userId, networkId, target, ws);
         break;
       }
       case 'pin-buffer': {
-        const networkId = Number(msg.networkId);
-        const target = typeof msg.target === 'string' ? msg.target : '';
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
+        const networkId = addr ? Number(addr.networkId) : Number(msg.networkId);
+        const target = addr ? addr.target : typeof msg.target === 'string' ? msg.target : '';
         // Server pseudo-buffer is the network header row, not a pinnable item.
         if (!networkId || !target || target.startsWith(':server:')) break;
-        const pinned = pinBuffer(userId, networkId, target);
-        fanOut(userId, { kind: 'pins-changed', networkId, pinned });
+        pinBuffer(userId, networkId, target);
+        fanOut(userId, pinsChangedFrame(userId, networkId));
         break;
       }
       case 'unpin-buffer': {
-        const networkId = Number(msg.networkId);
-        const target = typeof msg.target === 'string' ? msg.target : '';
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
+        const networkId = addr ? Number(addr.networkId) : Number(msg.networkId);
+        const target = addr ? addr.target : typeof msg.target === 'string' ? msg.target : '';
         if (!networkId || !target) break;
-        const pinned = unpinBuffer(userId, networkId, target);
-        fanOut(userId, { kind: 'pins-changed', networkId, pinned });
+        unpinBuffer(userId, networkId, target);
+        fanOut(userId, pinsChangedFrame(userId, networkId));
         break;
       }
       case 'reorder-pins': {
         const networkId = Number(msg.networkId);
-        if (!networkId || !Array.isArray(msg.targets)) break;
-        const targets = (msg.targets as unknown[]).filter(
-          (t): t is string => typeof t === 'string' && !!t,
-        );
-        const next = reorderPins(userId, networkId, targets);
+        if (!networkId || (!Array.isArray(msg.targets) && !Array.isArray(msg.bufferIds))) break;
+        // `bufferIds` is the id-form alternative to `targets`. An id that
+        // doesn't resolve to this user's buffer means the client's set is
+        // stale — same as the name-form mismatch, so fall through to the
+        // authoritative echo rather than dropping silently.
+        let targets: string[] | null = null;
+        if (Array.isArray(msg.bufferIds)) {
+          targets = [];
+          for (const bid of msg.bufferIds as unknown[]) {
+            const b = typeof bid === 'number' ? requireBufferForUser(userId, bid) : undefined;
+            if (!b || b.networkId !== networkId) {
+              targets = null;
+              break;
+            }
+            targets.push(b.target);
+          }
+        } else {
+          targets = (msg.targets as unknown[]).filter(
+            (t): t is string => typeof t === 'string' && !!t,
+          );
+        }
+        const next = targets === null ? null : reorderPins(userId, networkId, targets);
         if (next === null) {
           // Set mismatch (concurrent pin/unpin from another tab landed before
           // this reorder). Echo the authoritative current order so the
           // originating client snaps back to truth instead of staying out of
           // sync.
-          fanOut(userId, {
-            kind: 'pins-changed',
-            networkId,
-            pinned: listPinnedForUserNetwork(userId, networkId),
-          });
+          fanOut(userId, pinsChangedFrame(userId, networkId));
           break;
         }
-        fanOut(userId, { kind: 'pins-changed', networkId, pinned: next });
+        fanOut(userId, pinsChangedFrame(userId, networkId));
         break;
       }
       case 'set-nicklist-collapsed': {
-        const networkId = Number(msg.networkId);
-        const target = typeof msg.target === 'string' ? msg.target : '';
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
+        const networkId = addr ? Number(addr.networkId) : Number(msg.networkId);
+        const target = addr ? addr.target : typeof msg.target === 'string' ? msg.target : '';
         // Only channels have a nicklist; server/DM buffers are never tracked.
+        // (The guard runs on the RESOLVED target, so the id form is policed
+        // identically to the name form.)
         if (!networkId || !target.startsWith('#')) break;
         const collapsed = !!msg.collapsed;
         setNicklistCollapsed(userId, networkId, target, collapsed);
-        fanOut(userId, { kind: 'nicklist-collapsed-changed', networkId, target, collapsed });
+        fanOut(userId, {
+          kind: 'nicklist-collapsed-changed',
+          networkId,
+          target,
+          bufferId: addr?.bufferId ?? resolveBuffer(userId, networkId, target)?.id ?? null,
+          collapsed,
+        });
         break;
       }
       case 'set-channel-notify-always': {
-        const networkId = Number(msg.networkId);
-        const target = typeof msg.target === 'string' ? msg.target : '';
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
+        const networkId = addr ? Number(addr.networkId) : Number(msg.networkId);
+        const target = addr ? addr.target : typeof msg.target === 'string' ? msg.target : '';
         // Always-notify is a channel-level concept. DMs are blanket-controlled
         // by notifications.dm.enabled; server pseudo-buffers can't carry it.
         if (!networkId || !target.startsWith('#')) break;
@@ -2937,6 +3096,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           kind: 'channel-notify-changed',
           networkId,
           target,
+          bufferId: addr?.bufferId ?? resolveBuffer(userId, networkId, target)?.id ?? null,
           ...getChannelFlags(userId, networkId, target),
         });
         break;
@@ -3071,13 +3231,18 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         break;
       }
       case 'history': {
-        const histNetworkId = msg.networkId as number;
-        let histTarget = msg.target as string;
+        const histAddr = verbBuffer(userId, msg);
+        if (histAddr === null) break;
+        const histNetworkId = histAddr ? (histAddr.networkId as number) : (msg.networkId as number);
+        let histTarget = histAddr ? histAddr.target : (msg.target as string);
 
         // System buffer: app-scoped, no IRC connection — dispatch to the
         // system_messages keyset access. Reply shapes match the network path
         // below exactly, so the client's history handlers are identical (#355).
-        if (msg.networkId == null && histTarget === SYSTEM_TARGET) {
+        if (
+          (histAddr ? histAddr.networkId : msg.networkId) == null &&
+          histTarget === SYSTEM_TARGET
+        ) {
           send(ws, buildSystemHistoryReply(userId, msg));
           break;
         }
@@ -3108,7 +3273,8 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         // different to it. The registry lookup folds; no row (a `:server:`
         // pseudo-buffer, or a target with history but no row) falls through to
         // what was asked. See feedback_irc_target_case_insensitive.
-        histTarget = getBuffer(userId, histNetworkId, histTarget)?.target ?? histTarget;
+        const histRow = getBuffer(userId, histNetworkId, histTarget);
+        histTarget = histRow?.target ?? histTarget;
         const limit = Math.min(Math.max(Number(msg.limit) || 100, 1), 500);
         const mode = typeof msg.mode === 'string' ? msg.mode : 'before';
         // What `limit` counts (#10). 'renderable' sizes the page in the unit the
@@ -3131,6 +3297,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           kind: 'history',
           networkId: histNetworkId,
           target: histTarget,
+          bufferId: histAddr?.bufferId ?? histRow?.id ?? null,
           mode,
           token,
           speakers,
@@ -3226,8 +3393,8 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
             'recent_messages',
             { userId, scope: 'read-write', transport: 'ws' },
             {
-              networkId: msg.networkId,
-              target: msg.target,
+              networkId: histNetworkId,
+              target: histTarget,
               before,
               limit,
               countBy,
@@ -3260,7 +3427,13 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
             {
               query: msg.query,
               networkId: msg.networkId || undefined,
-              target: typeof msg.target === 'string' && msg.target ? msg.target : undefined,
+              // `bufferId` narrows the in:-scope by id; resolved to the
+              // canonical name since search's scope filter is name-shaped.
+              target:
+                (typeof msg.bufferId === 'number'
+                  ? requireBufferForUser(userId, msg.bufferId)?.target
+                  : undefined) ??
+                (typeof msg.target === 'string' && msg.target ? msg.target : undefined),
               nick: typeof msg.nick === 'string' && msg.nick ? msg.nick : undefined,
               nicks: Array.isArray(msg.nicks) ? msg.nicks : undefined,
               before: msg.before ? Number(msg.before) : undefined,

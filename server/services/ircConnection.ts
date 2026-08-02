@@ -310,6 +310,8 @@ interface EnrichedEvent extends IrcEvent {
   networkId: number;
   time: string;
   id?: number | bigint;
+  /** buffers(id) the persisted row landed in — the wire's stable buffer key. */
+  bufferId?: number;
   alt?: boolean;
   matched?: boolean;
   matchedRuleId?: number | null;
@@ -816,7 +818,7 @@ export class IrcConnection {
       } catch (e) {
         console.warn('[ignore/highlight] match-on-insert failed:', (e as Error)?.message || e);
       }
-      const { id, alt } = insertMessage({
+      const { id, alt, bufferId } = insertMessage({
         networkId: this.network.id,
         target: event.target as string,
         time,
@@ -835,6 +837,9 @@ export class IrcConnection {
       });
       enriched.id = id;
       enriched.alt = alt;
+      // The buffer the row landed in — the wire's stable identity for the
+      // buffer (schema 17); rides every persisted `irc` frame.
+      enriched.bufferId = bufferId;
       enriched.matched = matchedRuleId != null;
       enriched.matchedRuleId = matchedRuleId;
       enriched.fromIgnored = fromIgnored;

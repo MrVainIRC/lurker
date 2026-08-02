@@ -9,6 +9,7 @@ import { resolveBuffer } from './bufferResolve.js';
 
 /** A draft row returned to callers (camelCase aliased columns). */
 export interface DraftRow {
+  bufferId: number;
   networkId: number;
   target: string;
   body: string;
@@ -29,22 +30,31 @@ const clearStmt = db.prepare(`
 `);
 
 const listStmt = db.prepare(`
-  SELECT b.network_id AS networkId, b.target AS target, d.body AS body,
-         d.updated_at AS updatedAt
+  SELECT d.buffer_id AS bufferId, b.network_id AS networkId, b.target AS target,
+         d.body AS body, d.updated_at AS updatedAt
     FROM user_drafts d JOIN buffers b ON b.id = d.buffer_id
    WHERE d.user_id = ?
 `);
 
-export function upsertDraft(userId: number, networkId: number, target: string, body: string): void {
+/** Returns the buffer id the draft landed on (undefined = unknown buffer,
+ *  no-op) so the draft-updated fanout can carry it without a second resolve. */
+export function upsertDraft(
+  userId: number,
+  networkId: number,
+  target: string,
+  body: string,
+): number | undefined {
   const buffer = resolveBuffer(userId, networkId, target);
-  if (!buffer) return;
+  if (!buffer) return undefined;
   upsertStmt.run(userId, buffer.id, body);
+  return buffer.id;
 }
 
-export function clearDraft(userId: number, networkId: number, target: string): void {
+export function clearDraft(userId: number, networkId: number, target: string): number | undefined {
   const buffer = resolveBuffer(userId, networkId, target);
-  if (!buffer) return;
+  if (!buffer) return undefined;
   clearStmt.run(userId, buffer.id);
+  return buffer.id;
 }
 
 // Returns every draft for this user as plain objects — the snapshot ships
