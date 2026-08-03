@@ -112,7 +112,12 @@
       <div class="topic-meta">
         <span v-if="isVirtual || active" class="buffer">{{ bufferLabel }}</span>
         <template v-if="active && topic">
+          <!-- A channel topic is user prose: auto-link it and open the full
+               view on click. A DM's pseudo-topic is the peer's ident@host —
+               an identity string, not prose; auto-linking turns the host into
+               a bogus email/URL link, so it renders as plain static text. -->
           <button
+            v-if="isChannel"
             type="button"
             class="topic-text"
             title="View full topic"
@@ -120,6 +125,7 @@
           >
             <LinkedText :text="topic" />
           </button>
+          <span v-else class="topic-text">{{ topic }}</span>
         </template>
       </div>
       <div class="topic-actions">
