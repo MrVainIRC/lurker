@@ -54,18 +54,28 @@ export function useBufferActions(): BufferActionsAPI {
     // server and to the sections getter, so their label must agree.
     const favorited = favorites.isFavorite(networkId, buf.target);
     const favoriteSection = /^[#&+!]/.test(buf.target) ? 'Favorites' : 'Friends';
-    const items: ContextMenuItem[] = [
-      pinned
-        ? {
-            label: `Unpin ${kind}`,
-            icon: 'fa-solid fa-thumbtack-slash',
-            onClick: () => pins.unpin(networkId, buf.target),
-          }
-        : {
-            label: `Pin ${kind}`,
-            icon: 'fa-solid fa-thumbtack',
-            onClick: () => pins.pin(networkId, buf.target),
-          },
+    const items: ContextMenuItem[] = [];
+    // A favorited buffer can't be pinned (one placement per buffer:
+    // favorite⇒unpin server-side), so the pin item on a favorited buffer is
+    // noise — hidden. The favorite item on a PINNED buffer stays: it's the
+    // sanctioned way to promote a pin into the sections (the server drops the
+    // pin as part of the grant).
+    if (!favorited) {
+      items.push(
+        pinned
+          ? {
+              label: `Unpin ${kind}`,
+              icon: 'fa-solid fa-thumbtack-slash',
+              onClick: () => pins.unpin(networkId, buf.target),
+            }
+          : {
+              label: `Pin ${kind}`,
+              icon: 'fa-solid fa-thumbtack',
+              onClick: () => pins.pin(networkId, buf.target),
+            },
+      );
+    }
+    items.push(
       favorited
         ? {
             label: `Remove from ${favoriteSection}`,
@@ -77,7 +87,7 @@ export function useBufferActions(): BufferActionsAPI {
             icon: isChannel ? 'fa-solid fa-star' : 'fa-solid fa-user-group',
             onClick: () => favorites.favorite(networkId, buf.target),
           },
-    ];
+    );
     // Notification "quietness" ladder (issue #359): channels get the full 4-rung
     // ladder (All / Highlights / Nothing / Muted), DMs the 3-rung one (no
     // "Highlights only" — every DM is already the signal).
