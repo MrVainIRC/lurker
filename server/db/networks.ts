@@ -42,7 +42,14 @@ export interface Network {
    *  the network first connects to one that declares it. Server-captured
    *  (stored by db/refoldBuffers inside the refold transaction), deliberately
    *  not part of NetworkFields — a PATCH body must not be able to plant a
-   *  fold rule the registry wasn't rewritten under. */
+   *  fold rule the registry wasn't rewritten under.
+   *
+   *  Typed `string | null`, NOT the Casemapping union, on purpose: this
+   *  mirrors the raw column, which archive import writes verbatim — so an
+   *  archive from a newer Lurker could legally hold a value this build
+   *  doesn't know. The union lives at the read boundary
+   *  (buffers.networkCasemapping normalizes, unknown → null = legacy fold)
+   *  and at the sole writer (refoldNetworkBuffers takes Casemapping). */
   casemapping: string | null;
   created_at: string;
 }
