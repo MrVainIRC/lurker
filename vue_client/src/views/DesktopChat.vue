@@ -904,14 +904,18 @@ useChatBootstrap({ onJump: onJumpToMessage });
   margin: 0;
   font: inherit;
   text-align: left;
-  cursor: pointer;
   white-space: nowrap;
   min-width: 0;
 }
-.topic .topic-text:hover {
+/* Hover/click affordances belong to the clickable channel-topic BUTTON only;
+   the DM identity renders as a static span sharing the layout styles above. */
+button.topic-text {
+  cursor: pointer;
+}
+button.topic-text:hover {
   color: var(--fg);
 }
-.topic .topic-text:focus-visible {
+button.topic-text:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 2px;
 }
