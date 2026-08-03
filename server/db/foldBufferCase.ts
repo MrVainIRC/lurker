@@ -26,7 +26,7 @@ import type Database from 'better-sqlite3';
 // actually used = the case you joined/opened with), ties broken by `target ASC`
 // purely for determinism. A target that never drifted (a single case) maps to
 // itself and is left untouched, so #idleRPG stays #idleRPG. The flat ':'-virtual
-// buffers (`:server:`, `:friends:`…) are never folded. Composite-PK tables merge
+// buffers (`:server:`…) are never folded. Composite-PK tables merge
 // conflict-aware (furthest read pointer + clear marker, joined flag, junk-close
 // dropped). The whole apply runs in one transaction; dryRun computes the same
 // report without mutating.

@@ -4,7 +4,6 @@
 import type { ContextMenuItem } from './useContextMenu.js';
 import { usePinsStore } from '../stores/pins.js';
 import { useNickNotesStore } from '../stores/nickNotes.js';
-import { useFriendsStore } from '../stores/friends.js';
 import { useWhoisStore } from '../stores/whois.js';
 import { useContextMenu } from './useContextMenu.js';
 import { useNotifyLadder } from './useNotifyLadder.js';
@@ -33,7 +32,6 @@ export interface BufferActionsAPI {
 export function useBufferActions(): BufferActionsAPI {
   const pins = usePinsStore();
   const nickNotes = useNickNotesStore();
-  const friends = useFriendsStore();
   const whois = useWhoisStore();
   const menu = useContextMenu();
   const notify = useNotifyLadder();
@@ -76,7 +74,6 @@ export function useBufferActions(): BufferActionsAPI {
       // so these are DM-only; in-channel equivalents flow through the member
       // list menu.
       const hasNote = nickNotes.hasNote(networkId, buf.target);
-      const isFriend = !!friends.contactForTarget(networkId, buf.target);
       items.push(
         { divider: true },
         {
@@ -88,11 +85,6 @@ export function useBufferActions(): BufferActionsAPI {
           label: hasNote ? 'Edit Note…' : 'Add Note…',
           icon: 'fa-solid fa-note-sticky',
           onClick: () => nickNotes.openEditor(networkId, buf.target),
-        },
-        {
-          label: isFriend ? 'Edit Friend…' : 'Add Friend…',
-          icon: 'fa-solid fa-user-group',
-          onClick: () => friends.openEditorForNick(networkId, buf.target),
         },
       );
     }

@@ -129,26 +129,7 @@
         </template>
       </div>
       <div class="topic-actions">
-        <template v-if="isVirtual">
-          <template v-if="isFriendsBuffer">
-            <button
-              type="button"
-              class="link"
-              title="Add friend"
-              aria-label="Add friend"
-              @click="friends.openEditorNew()"
-            >
-              <i class="fa-solid fa-person-circle-plus"></i>
-            </button>
-            <span
-              class="member-count"
-              :title="`${friendCount} ${friendCount === 1 ? 'friend' : 'friends'}`"
-            >
-              <i class="fa-solid fa-users"></i> {{ friendCount }}
-            </span>
-          </template>
-        </template>
-        <template v-else-if="active">
+        <template v-if="active && !isVirtual">
           <!-- Search & highlights scoped to this buffer (channels/DMs only) —
                parity with the mobile topic bar. The server buffer has no
                per-buffer scope, so it's excluded. -->
@@ -246,8 +227,7 @@
     </header>
     <div class="topic-divider"></div>
 
-    <FriendsOverview v-if="renderMode === 'overview'" @view-activity="onViewActivity" />
-    <MessageList v-else ref="messageListRef" :pending-scroll-id="pendingScrollId" />
+    <MessageList ref="messageListRef" :pending-scroll-id="pendingScrollId" />
     <MemberList v-if="showMembers && hasNicklist" />
     <StatusBar />
     <MessageInput v-if="hasInput" ref="messageInputRef" />
@@ -316,7 +296,6 @@
       :nick="nickNotes.editor.nick"
       :network-id="nickNotes.editor.networkId"
     />
-    <ConfigureFriendModal v-if="friends.editor.open" />
   </div>
 </template>
 
@@ -336,7 +315,6 @@ import { useSettingsStore } from '../stores/settings.js';
 import { useAuthStore } from '../stores/auth.js';
 import BufferList from '../components/BufferList.vue';
 import MessageList from '../components/MessageList.vue';
-import FriendsOverview from '../components/FriendsOverview.vue';
 import MessageInput from '../components/MessageInput.vue';
 import MemberList from '../components/MemberList.vue';
 import StatusBar from '../components/StatusBar.vue';
@@ -353,13 +331,11 @@ import QuickSwitcher from '../components/QuickSwitcher.vue';
 import SearchModal from '../components/SearchModal.vue';
 import KeyboardHelpModal from '../components/KeyboardHelpModal.vue';
 import NickNoteModal from '../components/NickNoteModal.vue';
-import ConfigureFriendModal from '../components/ConfigureFriendModal.vue';
 import UserProfileModal from '../components/UserProfileModal.vue';
 import MediaViewerModal from '../components/MediaViewerModal.vue';
 import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts.js';
 import { useNicklistCollapseStore } from '../stores/nicklistCollapse.js';
 import { useNickNotesStore } from '../stores/nickNotes.js';
-import { useFriendsStore } from '../stores/friends.js';
 import { useDccStore } from '../stores/dcc.js';
 import { useWhoisStore } from '../stores/whois.js';
 import { useChannelListModal } from '../composables/useChannelListModal.js';
@@ -394,8 +370,6 @@ const {
   bufferLabel,
   isSystemBuffer,
   isVirtual,
-  isFriendsBuffer,
-  renderMode,
   hasInput,
   hasNicklist,
 } = useActiveBuffer();
@@ -404,8 +378,6 @@ const settings = useSettingsStore();
 const auth = useAuthStore();
 const nicklistCollapse = useNicklistCollapseStore();
 const nickNotes = useNickNotesStore();
-const friends = useFriendsStore();
-const friendCount = computed(() => friends.contacts.length);
 const dcc = useDccStore();
 const dccTitle = computed(() =>
   dcc.pendingCount > 0 ? `DCC transfers — ${dcc.pendingCount} awaiting approval` : 'DCC transfers',
@@ -437,15 +409,8 @@ const pendingScrollId = ref<number | null>(null);
 
 // Search & Highlights modal state + per-buffer `in:/on:` scoping, shared with
 // MobileChat (#496).
-const {
-  showSearch,
-  showHighlights,
-  searchScope,
-  highlightScope,
-  openSearch,
-  openHighlights,
-  onViewActivity,
-} = useBufferSearchScope();
+const { showSearch, showHighlights, searchScope, highlightScope, openSearch, openHighlights } =
+  useBufferSearchScope();
 const messageInputRef = ref<{ focus: () => void } | null>(null);
 const messageListRef = ref<{ scrollByPage: (dir: number) => void } | null>(null);
 

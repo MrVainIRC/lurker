@@ -72,8 +72,8 @@ export function startBufferHydration(): void {
       if (!connected.value) return false;
       const key = networks.activeKey;
       if (!key) return false;
-      // Virtual buffers without a store entry (the FRIENDS overview) resolve to
-      // null; the system buffer is excluded inside bufferNeedsHydration.
+      // Virtual buffers without a store entry resolve to null; the system
+      // buffer is excluded inside bufferNeedsHydration.
       const buf = buffers.byKey(key);
       return !!buf && bufferNeedsHydration(buf);
     });

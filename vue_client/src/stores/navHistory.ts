@@ -3,8 +3,7 @@
 
 import { defineStore } from 'pinia';
 import { useBuffersStore } from './buffers.js';
-import { useFriendsStore } from './friends.js';
-import { FRIENDS_KEY, isVirtualKey } from '../lib/virtualBuffers.js';
+import { isVirtualKey } from '../lib/virtualBuffers.js';
 import { createNavHistory, recordVisit, stepIndex } from '../utils/navHistory.js';
 
 // True only for the synchronous span of a back()/forward() activation, so the
@@ -51,7 +50,7 @@ export const useNavHistoryStore = defineStore('navHistory', {
         navigating = false;
       }
     },
-    // A virtual pane (:friends:, :system:) is always reachable; a real buffer is
+    // A virtual pane (:system:) is always reachable; a real buffer is
     // gone once parted/closed (the buffers store deletes its entry).
     exists(activeKey: string): boolean {
       return isVirtualKey(activeKey) || !!useBuffersStore().byKey(activeKey);
@@ -76,10 +75,6 @@ export const useNavHistoryStore = defineStore('navHistory', {
       this.stack = this.stack.map((x: string) => (x === fromKey ? toKey : x));
     },
     go(activeKey: string) {
-      if (activeKey === FRIENDS_KEY) {
-        useFriendsStore().open();
-        return;
-      }
       // `${networkId}::${target}`, or a bare sentinel (:system:) with no `::`,
       // which activates as the networkId-less system buffer.
       const sep = activeKey.indexOf('::');

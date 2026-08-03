@@ -162,8 +162,8 @@ export function unpinBufferCaseInsensitive(
 //
 // The supplied list may be a strict SUBSET of the pinned set. The client only
 // renders pins that resolve to a visible buffer — it drops any pin whose buffer
-// is closed/parted, or that is a friend's primary DM (shown under FRIENDS) —
-// so a drag legitimately reorders only the rows the user can see. We honor
+// is closed/parted — so a drag legitimately reorders only the rows the user can
+// see. We honor
 // that order for the supplied targets and keep the unmentioned ("hidden") pins
 // after them in their existing relative order. Requiring an exact set match
 // instead made a single invisible orphan pin wedge every reorder for that

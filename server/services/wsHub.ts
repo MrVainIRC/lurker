@@ -93,7 +93,6 @@ import {
   getChannelFlags,
 } from '../db/channelNotify.js';
 import { getUserAwayState } from '../db/userAwayState.js';
-import { findNotifyContactForTarget } from '../db/contacts.js';
 import { ownsNetwork, listNetworksForUser } from '../db/networks.js';
 import * as chanlistDb from '../db/chanlist.js';
 import { getUserSettings } from '../db/settings.js';
@@ -919,7 +918,7 @@ interface SnapshotBreakdown {
   bufferCount: number;
   fresh: boolean; // true = fresh connect → online loop shipped shells, not resume frames
   networksMs: number; // ircManager.snapshotForUser (serializes channel member lists)
-  seedsMs: number; // drafts/system/contacts + the bulk read/cleared/closed maps
+  seedsMs: number; // drafts/system + the bulk read/cleared/closed maps
   onlineMs: number; // the live per-buffer loop (shells: unread counts; resume: +reads/speakers)
   offlineMs: number; // buildOfflineBacklogFrames
   // Online-loop op split (the rest of onlineMs is sends/input-history/overhead).
@@ -1871,38 +1870,6 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
       .catch((err) => console.warn('[push] deliver failed:', err?.message || err));
   }
 
-  // Came-online push: fired from a peer-presence offline→online transition for
-  // a friend the user flagged "notify when online", when no client is visible
-  // (the in-app toast owns the visible case). The same enabled/quiet/away gates
-  // as message pushes apply, keyed off the friend_online settings namespace.
-  function maybePushFriendOnline(
-    userId: number,
-    networkId: number,
-    nick: string | null | undefined,
-  ): void {
-    if (!nick) return;
-    if (userHasVisibleClient(userId)) return;
-    if (!effectiveSetting(userId, 'notifications.friend_online.enabled')) return;
-    const contact = findNotifyContactForTarget(userId, networkId, nick);
-    if (!contact) return;
-    if (pushQuietOrAway(userId)) return;
-    const network = ircManager.getConnection(userId, networkId)?.network;
-    pushService
-      .deliver(userId, {
-        kind: 'friend_online',
-        networkId,
-        networkName: network?.name || `net:${networkId}`,
-        // target is the friend's nick so a notification tap opens their DM.
-        target: nick,
-        displayName: contact.displayName,
-        // No `badge` here on purpose (#451 review): a friend coming online isn't
-        // a highlight, so the total can't have changed since the last message
-        // push set it. The SW no-ops when data.badge is absent, so omitting it
-        // avoids an O(buffers) scan that would only re-stamp the same number.
-      })
-      .catch((err) => console.warn('[push] friend-online deliver failed:', err?.message || err));
-  }
-
   ircManager.on('event', (rawEvent) => {
     // EnrichedEvent (from ircConnection) is a strict superset of MessageEvent.
     const event = rawEvent as MessageEvent & { userId: number; state?: string };
@@ -1999,11 +1966,6 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
     }
     fanOut(eventUserId, { ...decorated, kind: 'irc' });
     maybePush(eventUserId, decorated);
-    // A friend coming online is a presence transition, not a message, so it
-    // bypasses maybePush (no `notify`); push it on its own path.
-    if (event.type === 'peer-presence' && (event as { cameOnline?: boolean }).cameOnline) {
-      maybePushFriendOnline(eventUserId, event.networkId, event.nick);
-    }
 
     // Countable persisted events change the buffer's unread/highlight counts
     // for this user. Broadcast the recomputed read-state so every tab —
@@ -2352,7 +2314,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
     // No bookmark seed here on purpose. There used to be an id-only snapshot so
     // the message context menu could flip its label ("Save" ↔ "Remove bookmark")
     // without a round-trip — but it shipped EVERY id the account had ever saved,
-    // on every connect, and unlike drafts or contacts that set only ever grows.
+    // on every connect, and unlike drafts that set only ever grows.
     // Bookmark state now rides on the message rows themselves (`bookmarked`, see
     // db/messages.ts BOOKMARKED_COL), so a client learns what it saved from the
     // lines it actually renders and holds state bounded by what it has loaded.
@@ -2363,11 +2325,6 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
     // `?since` cursor); the client dedupes/gap-fills by id, so a re-snapshot on
     // resync is safe. See buildSystemBacklog.
     send(ws, buildSystemBacklog(userId));
-    // Friends/contacts seed: the user's full contact list (display name, notify
-    // flag, per-network watch targets). User-level, so one message rather than a
-    // per-network field. Drives the FRIENDS overview/sidebar + the came-online
-    // toast gate.
-    send(ws, { kind: 'contacts-snapshot', contacts: ircManager.listContacts(userId) });
     const readState = listReadStateForUser(userId);
     const clearedState = listClearedStateForUser(userId);
     // Walk the shared enumerator ONCE per snapshot and reuse it for both the live
@@ -3212,37 +3169,6 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           );
         } catch (_) {
           /* boundary already filtered bad networkId; ignore */
-        }
-        break;
-      }
-      case 'set-contact': {
-        // Verb owns validation, the per-(network,nick) uniqueness guard, the
-        // live MONITOR diff, and the fanOut. Thin delegator, same as nick-note.
-        try {
-          callVerb(
-            'set_contact',
-            { userId, scope: 'read-write', transport: 'ws' },
-            {
-              contactId: msg.contactId,
-              displayName: msg.displayName,
-              notifyOnline: msg.notifyOnline,
-              targets: msg.targets,
-            },
-          );
-        } catch (_) {
-          /* invalid input / not owned; ignore */
-        }
-        break;
-      }
-      case 'delete-contact': {
-        try {
-          callVerb(
-            'delete_contact',
-            { userId, scope: 'read-write', transport: 'ws' },
-            { contactId: msg.contactId },
-          );
-        } catch (_) {
-          /* not owned / gone; ignore */
         }
         break;
       }

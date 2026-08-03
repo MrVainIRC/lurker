@@ -45,7 +45,6 @@ import { computed, onMounted, ref, watch, nextTick } from 'vue';
 import { useNetworksStore } from '../stores/networks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { usePinsStore } from '../stores/pins.js';
-import { useFriendsStore } from '../stores/friends.js';
 import { useRecentBuffersStore } from '../stores/recentBuffers.js';
 import { useNickColors } from '../composables/useNickColors.js';
 import { flattenBufferOrder, bufferSortKey } from '../utils/bufferOrder.js';
@@ -73,7 +72,6 @@ const emit = defineEmits<{
 const networks = useNetworksStore();
 const buffers = useBuffersStore();
 const pins = usePinsStore();
-const friends = useFriendsStore();
 const recent = useRecentBuffersStore();
 const nicks = useNickColors();
 
@@ -106,15 +104,6 @@ const allRows = computed<Row[]>(() => {
     networks: networks.networks,
     buffers,
     pins,
-    // Match the sidebar/keyboard-nav surface: surface each friend's primary DM
-    // in the FRIENDS group position and exclude it from its real network so it
-    // isn't listed twice. No feedKey — the overview pane isn't a quick-switch
-    // target (this is for jumping to conversations), which also sidesteps having
-    // to special-case activating the virtual entry here.
-    friends: {
-      dms: friends.primaryDmEntries,
-      excludeKeys: friends.primaryDmKeys,
-    },
   });
   return order.map((entry) => {
     const net = netById(entry.networkId);

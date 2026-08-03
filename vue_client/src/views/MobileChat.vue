@@ -82,22 +82,6 @@
              search / highlights / saved / uploads live on the list top bar. -->
         <span v-if="isServerBuffer || isVirtual" class="title">{{ bufferLabel }}</span>
         <span class="spacer"></span>
-        <template v-if="isFriendsBuffer">
-          <button
-            class="icon"
-            title="Add friend"
-            aria-label="Add friend"
-            @click="friends.openEditorNew()"
-          >
-            <i class="fa-solid fa-person-circle-plus"></i>
-          </button>
-          <span
-            class="friend-count"
-            :title="`${friendCount} ${friendCount === 1 ? 'friend' : 'friends'}`"
-          >
-            <i class="fa-solid fa-users"></i> {{ friendCount }}
-          </span>
-        </template>
         <button
           v-if="!isVirtual && !isServerBuffer"
           class="icon"
@@ -153,8 +137,7 @@
           <i class="fa-solid fa-ellipsis-vertical"></i>
         </button>
       </header>
-      <FriendsOverview v-if="renderMode === 'overview'" @view-activity="onViewActivity" />
-      <MessageList v-else :pending-scroll-id="pendingScrollId" />
+      <MessageList :pending-scroll-id="pendingScrollId" />
       <StatusBar compact />
       <div
         v-if="hasInput"
@@ -238,7 +221,6 @@
       :nick="nickNotes.editor.nick"
       :network-id="nickNotes.editor.networkId"
     />
-    <ConfigureFriendModal v-if="friends.editor.open" />
   </div>
 </template>
 
@@ -256,7 +238,6 @@ import { useContextMenu } from '../composables/useContextMenu.js';
 import type { ContextMenuItem } from '../composables/useContextMenu.js';
 import BufferList from '../components/BufferList.vue';
 import MessageList from '../components/MessageList.vue';
-import FriendsOverview from '../components/FriendsOverview.vue';
 import MessageInput from '../components/MessageInput.vue';
 import MemberList from '../components/MemberList.vue';
 import StatusBar from '../components/StatusBar.vue';
@@ -270,11 +251,9 @@ import RecentUploadsModal from '../components/RecentUploadsModal.vue';
 import TransfersModal from '../components/TransfersModal.vue';
 import SearchModal from '../components/SearchModal.vue';
 import NickNoteModal from '../components/NickNoteModal.vue';
-import ConfigureFriendModal from '../components/ConfigureFriendModal.vue';
 import UserProfileModal from '../components/UserProfileModal.vue';
 import MediaViewerModal from '../components/MediaViewerModal.vue';
 import { useNickNotesStore } from '../stores/nickNotes.js';
-import { useFriendsStore } from '../stores/friends.js';
 import { useDccStore } from '../stores/dcc.js';
 import { useWhoisStore } from '../stores/whois.js';
 import { useChannelListModal } from '../composables/useChannelListModal.js';
@@ -315,15 +294,11 @@ const {
   topic,
   isSystemBuffer,
   isVirtual,
-  isFriendsBuffer,
-  renderMode,
   hasInput,
 } = useActiveBuffer();
 const bufferActions = useBufferActions();
 const menu = useContextMenu();
 const nickNotes = useNickNotesStore();
-const friends = useFriendsStore();
-const friendCount = computed(() => friends.contacts.length);
 const dcc = useDccStore();
 const dccTitle = computed(() =>
   dcc.pendingCount > 0 ? `DCC transfers — ${dcc.pendingCount} awaiting approval` : 'DCC transfers',
@@ -359,15 +334,8 @@ const bufferCogBtn = ref<HTMLElement | null>(null);
 
 // Search & Highlights modal state + per-buffer `in:/on:` scoping, shared with
 // DesktopChat (#496).
-const {
-  showSearch,
-  showHighlights,
-  searchScope,
-  highlightScope,
-  openSearch,
-  openHighlights,
-  onViewActivity,
-} = useBufferSearchScope();
+const { showSearch, showHighlights, searchScope, highlightScope, openSearch, openHighlights } =
+  useBufferSearchScope();
 
 // Mobile folds the remaining buffer/topic/server actions behind one kebab menu
 // to keep the header uncluttered (Members is an inline header button — see
@@ -565,12 +533,6 @@ useChatBootstrap({ onJump: onJumpToMessage });
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
-}
-.friend-count {
-  color: var(--fg-muted);
-  font-variant-numeric: tabular-nums;
-  padding: 0 var(--space-2);
-  white-space: nowrap;
 }
 .spacer {
   flex: 1;

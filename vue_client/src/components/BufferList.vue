@@ -84,64 +84,6 @@
         :class="{ 'unread-bold': unreadBold }"
         @scroll="scheduleRecompute"
       >
-        <!-- FRIENDS pseudo-network: a cross-network gathering of DM shortcuts. The
-           header opens the compilation feed (:friends:); each row opens that
-           friend's DM on their primary network. -->
-        <div v-if="friends.contacts.length || isFriendsActive" class="net friends-net">
-          <div
-            class="net-head"
-            :class="{ active: isFriendsActive }"
-            title="Open Friends feed"
-            @click="selectFriends"
-          >
-            <span class="indicator" :class="friendsPresence" :title="friendsStatusTitle"></span>
-            <span class="name">FRIENDS</span>
-            <div class="net-actions">
-              <button
-                type="button"
-                class="net-action net-add"
-                title="Add friend"
-                aria-label="Add friend"
-                @click.stop="friends.openEditorNew()"
-                @contextmenu.stop.prevent
-              >
-                <i class="fa-solid fa-plus"></i>
-              </button>
-            </div>
-          </div>
-          <ul v-if="friends.contacts.length" class="channels">
-            <li
-              v-for="c in friends.contacts"
-              :key="c.id"
-              :class="friendRowClasses(c)"
-              :title="`Open DM with ${c.displayName}`"
-              @click="openFriendDm(c)"
-              @contextmenu.prevent="openFriendActions($event, c)"
-            >
-              <span class="label">{{ c.displayName }}</span>
-              <span
-                v-if="friendHighlights(c) > 0 && showHighlightBadge"
-                class="badge highlight"
-                title="unread highlight"
-                >●</span
-              >
-              <span v-if="friendUnread(c) > 0" class="badge">{{
-                unreadLabel(friendUnread(c))
-              }}</span>
-              <button
-                type="button"
-                class="row-actions"
-                title="Edit friend"
-                aria-label="Edit friend"
-                @click.stop="friends.openEditorForContact(c)"
-                @contextmenu.stop.prevent
-              >
-                <i class="fa-solid fa-user-pen"></i>
-              </button>
-            </li>
-          </ul>
-        </div>
-
         <div v-for="net in networks.networks" :key="net.id" class="net">
           <div
             class="net-head"
@@ -338,8 +280,7 @@ import { useRouter } from 'vue-router';
 import draggable from 'vuedraggable';
 import { useNetworksStore, type Network, type PeerPresenceEntry } from '../stores/networks.js';
 import { useBuffersStore, type Buffer } from '../stores/buffers.js';
-import { useFriendsStore, primaryTargetOf, type Contact } from '../stores/friends.js';
-import { FRIENDS_KEY, SYSTEM_KEY } from '../lib/virtualBuffers.js';
+import { SYSTEM_KEY } from '../lib/virtualBuffers.js';
 import { connected as lurkerConnected } from '../composables/useSocket.js';
 import { useDraftStore } from '../stores/drafts.js';
 import { usePinsStore } from '../stores/pins.js';
@@ -350,7 +291,6 @@ import { useBufferActions } from '../composables/useBufferActions.js';
 import { useNetworkActions } from '../composables/useNetworkActions.js';
 import { useNetworkEditor } from '../composables/useNetworkEditor.js';
 import { useJoinChannelModal } from '../composables/useJoinChannelModal.js';
-import { useContextMenu } from '../composables/useContextMenu.js';
 import { unreadLabel } from '../utils/unreadLabel.js';
 import {
   isPeerOffline as derivePeerOffline,
@@ -359,7 +299,6 @@ import {
 
 const networks = useNetworksStore();
 const buffers = useBuffersStore();
-const friends = useFriendsStore();
 const drafts = useDraftStore();
 const pins = usePinsStore();
 const ignores = useIgnoresStore();
@@ -369,7 +308,6 @@ const bufferActions = useBufferActions();
 const networkActions = useNetworkActions();
 const networkEditor = useNetworkEditor();
 const joinChannelModal = useJoinChannelModal();
-const friendMenu = useContextMenu();
 const router = useRouter();
 
 // The + in the LURKER header opens the add-network editor (the button moved off
@@ -504,10 +442,7 @@ function unpinnedBufs(networkId: number): Buffer[] {
   const pinnedSet = new Set(pins.forNetwork(networkId));
   return buffers
     .forNetwork(networkId)
-    .filter(
-      (b) =>
-        !isServerBuffer(b) && !pinnedSet.has(b.target) && !isFriendPrimaryDm(b.networkId, b.target),
-    )
+    .filter((b) => !isServerBuffer(b) && !pinnedSet.has(b.target))
     .toSorted((a, b) => {
       const oa = bufferOrder(a);
       const ob = bufferOrder(b);
@@ -525,9 +460,7 @@ function syncPinned(): void {
     const targets = pins.forNetwork(net.id);
     const bufByTarget = new Map<string, Buffer>();
     for (const b of buffers.forNetwork(net.id)) bufByTarget.set(b.target, b);
-    const list = targets
-      .map((t) => bufByTarget.get(t))
-      .filter((b): b is Buffer => !!b && !isFriendPrimaryDm(b.networkId, b.target));
+    const list = targets.map((t) => bufByTarget.get(t)).filter((b): b is Buffer => !!b);
     if (!pinnedBufsByNet[net.id]) {
       pinnedBufsByNet[net.id] = list;
     } else {
@@ -543,18 +476,11 @@ function syncPinned(): void {
 }
 
 // Only re-sync when something structurally relevant changes — pin order, the
-// set of networks, the set of buffer keys, or the friend primary DMs the mirror
-// filters out (so flipping a friend/primary doesn't leave a stale duplicate row
-// in the pinned section). Per-buffer state churn (unread counts, member list,
-// messages) doesn't affect which buffers belong in the pinned list and shouldn't
-// re-walk this whole map on every keystroke.
+// set of networks, or the set of buffer keys. Per-buffer state churn (unread
+// counts, member list, messages) doesn't affect which buffers belong in the
+// pinned list and shouldn't re-walk this whole map on every keystroke.
 watch(
-  () => [
-    pins.byNetwork,
-    networks.networks.map((n) => n.id),
-    Object.keys(buffers.buffers),
-    [...friends.primaryDmKeys],
-  ],
+  () => [pins.byNetwork, networks.networks.map((n) => n.id), Object.keys(buffers.buffers)],
   syncPinned,
   { deep: true, immediate: true },
 );
@@ -598,118 +524,6 @@ function select(networkId: number, target: string): void {
 
 function isActive(networkId: number, target: string): boolean {
   return networks.activeKey === `${networkId}::${target}`;
-}
-
-const isFriendsActive = computed(() => networks.activeKey === FRIENDS_KEY);
-// The FRIENDS dot is green only when friends are actually reachable: the lurker
-// service is up AND at least one IRC network is connected. If every network is
-// down, it's red even though the lurker session itself is fine.
-const anyNetworkConnected = computed(() =>
-  networks.networks.some((n) => networks.states[n.id]?.state === 'connected'),
-);
-const friendsConnected = computed(() => lurkerConnected.value && anyNetworkConnected.value);
-// FRIENDS dot reflects friend presence, not just connectivity (#367-adjacent
-// polish): green if any friend is actively online, yellow (warn) if friends are
-// present but all away, red otherwise (none online, or we're disconnected so
-// every peer reads offline).
-const friendsPresence = computed<'good' | 'warn' | 'bad'>(() => {
-  if (!friendsConnected.value) return 'bad';
-  let online = 0;
-  let away = 0;
-  for (const c of friends.contacts) {
-    const state = friends.primaryPresence(c.id);
-    if (state === 'online') online += 1;
-    else if (state === 'away') away += 1;
-  }
-  return online > 0 ? 'good' : away > 0 ? 'warn' : 'bad';
-});
-const friendsStatusTitle = computed(() => {
-  if (!lurkerConnected.value) return 'Disconnected from Lurker';
-  if (!anyNetworkConnected.value) return 'Not connected to any network';
-  return friendsPresence.value === 'good'
-    ? 'Friends online'
-    : friendsPresence.value === 'warn'
-      ? 'Online friends are away'
-      : 'No friends online';
-});
-function selectFriends(): void {
-  friends.open();
-}
-// Clicking a friend opens their DM on the primary network — the FRIENDS group
-// is a cross-network launcher/pin list for DMs. A target-less contact (none
-// watched) falls back to opening its editor.
-//
-// Resolve to an EXISTING DM buffer case-insensitively so we never fork a second
-// buffer that differs from the open one only by nick case. Computed once per
-// render as a contactId → buffer map so the per-row getters below (presence,
-// unread, highlight, active) don't each re-scan the network's buffers.
-const dmBufByContact = computed<Map<number, Buffer | null>>(() => {
-  const map = new Map<number, Buffer | null>();
-  for (const c of friends.contacts) {
-    const t = primaryTargetOf(c);
-    map.set(c.id, t ? buffers.findDm(t.networkId, t.nick) : null);
-  }
-  return map;
-});
-function friendDmBuffer(c: Contact): Buffer | null {
-  return dmBufByContact.value.get(c.id) ?? null;
-}
-function openFriendDm(c: Contact): void {
-  friends.openDm(c);
-}
-function isFriendDmActive(c: Contact): boolean {
-  const t = primaryTargetOf(c);
-  if (!t) return false;
-  const existing = friendDmBuffer(c);
-  return networks.activeKey === `${t.networkId}::${existing ? existing.target : t.nick}`;
-}
-function friendRowClasses(c: Contact): Record<string, boolean> {
-  // Reflect the PRIMARY DM's presence — that's the buffer this row opens, so an
-  // alt being online elsewhere must not make the row look reachable.
-  const state = friends.primaryPresence(c.id);
-  // Mirror rowClasses so an unread/highlighted friend DM colors its name like
-  // any other buffer (DMs are never muted, so no mute gate). An offline/away
-  // friend with unread still dims to gray — the peer-state rule wins on source
-  // order — but the accent-colored unread badge still flags it. (#307)
-  const buf = friendDmBuffer(c);
-  return {
-    active: isFriendDmActive(c),
-    unread: !!buf && buf.unread > 0,
-    highlighted: !!buf && buf.highlighted > 0,
-    'peer-offline': state === 'offline',
-    'peer-away': state === 'away',
-  };
-}
-function friendUnread(c: Contact): number {
-  const buf = friendDmBuffer(c);
-  return buf ? countFor(buf.unread, buf.highlighted) : 0;
-}
-function friendHighlights(c: Contact): number {
-  return friendDmBuffer(c)?.highlighted ?? 0;
-}
-// Kebab / right-click menu on a friend row. Edit only — removal lives behind
-// the modal's Remove button so a destructive action isn't one stray click away.
-function openFriendActions(e: MouseEvent, c: Contact): void {
-  const el = e.currentTarget as Element;
-  const rect = el.getBoundingClientRect();
-  friendMenu.open(
-    [
-      {
-        label: 'Edit Friend…',
-        icon: 'fa-solid fa-user-pen',
-        onClick: () => friends.openEditorForContact(c),
-      },
-    ],
-    rect.right,
-    rect.bottom,
-    el,
-  );
-}
-// A friend's primary DM is shown under FRIENDS, so hide it from its real
-// network's buffer list (dedupe).
-function isFriendPrimaryDm(networkId: number | null, target: string): boolean {
-  if (networkId == null) return false;
-  return friends.primaryDmKeys.has(`${networkId}::${target.toLowerCase()}`);
 }
 
 function stateClass(networkId: number): string {
@@ -1031,8 +845,8 @@ onBeforeUnmount(() => {
 .system-net .net-head {
   padding-block: var(--space-4);
   /* Trim the right padding to var(--space-2) so the always-visible inline
-     + / gear / << line up with the absolutely-positioned + that the network /
-     FRIENDS headers reveal at right: var(--space-2). Without this the LURKER
+     + / gear / << line up with the absolutely-positioned + that the network
+     headers reveal at right: var(--space-2). Without this the LURKER
      controls, being in normal flow, end at the wider var(--space-5) content edge
      and read ~6px too far left. (#411) */
   padding-inline-end: var(--space-2);
@@ -1063,7 +877,7 @@ onBeforeUnmount(() => {
   border-left-color: var(--accent);
 }
 
-/* Network-row header actions (+ add channel/network/friend, kebab). Hidden by
+/* Network-row header actions (+ add channel/network, kebab). Hidden by
    default and revealed only when the row is engaged — hovered, selected
    (active), or keyboard-focused (#411) — so the corner stays quiet. At rest it
    shows the unread/highlight badge (or nothing); when the actions appear the
@@ -1101,7 +915,7 @@ onBeforeUnmount(() => {
   opacity: 1;
   pointer-events: auto;
 }
-/* Only the network/FRIENDS headers hide their badge when the actions reveal —
+/* Only the network headers hide their badge when the actions reveal —
    their actions are absolute and would overlap it. The LURKER header keeps its
    actions inline and always-visible (below), so its count never needs to hide. */
 .net:not(.system-net) .net-head.active .badge,
@@ -1276,7 +1090,7 @@ onBeforeUnmount(() => {
 .channels li.not-joined {
   opacity: 0.5;
 }
-/* DM/friend peer state. Both away and offline render in muted gray (matching
+/* DM peer state. Both away and offline render in muted gray (matching
    away members in the channel nicklist); offline is additionally italicized,
    which is the offline tell. */
 .channels li.peer-away .label,
@@ -1306,8 +1120,8 @@ onBeforeUnmount(() => {
   color: var(--fg-muted);
 }
 
-/* Per-row settings affordance (the sliders on channel/DM rows, the kebab on
-   friend rows). Absolute so it overlays the badges rather than displacing them.
+/* Per-row settings affordance (the sliders on channel/DM rows).
+   Absolute so it overlays the badges rather than displacing them.
    Same reveal model as the header + buttons (#411): hidden at rest, surfaced
    when the row is hovered, selected (active), or keyboard-focused, with the
    badge stepping aside so the two never stack. Background matches the row's
