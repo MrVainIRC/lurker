@@ -2933,7 +2933,7 @@ export class IrcConnection {
     userhost: string | null,
     time: unknown,
   ): void {
-    let result;
+    let result: ReturnType<typeof renameDmBuffer>;
     try {
       const row = getBuffer(this.network.user_id, this.network.id, oldNick);
       if (!row || row.kind !== 'dm') return;
