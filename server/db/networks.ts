@@ -38,6 +38,10 @@ export interface Network {
   sasl_password: string | null;
   connect_commands: string | null;
   position: number;
+  /** ISUPPORT CASEMAPPING as last declared by the server (#707); null until
+   *  the network first connects to one that declares it. Server-captured, not
+   *  user-editable — see setNetworkCasemapping. */
+  casemapping: string | null;
   created_at: string;
 }
 
@@ -128,6 +132,14 @@ export function createNetwork(userId: number, fields: NetworkFields): Network | 
   // pointer have an id from the first event.
   ensureServerBuffer(Number(result.lastInsertRowid));
   return getNetwork(result.lastInsertRowid, userId);
+}
+
+/** Record the server-declared CASEMAPPING (#707). Deliberately not part of
+ *  updateNetwork/NetworkFields: this is a fact captured from the wire, not a
+ *  setting a user edits, and routing it through the settings path would let a
+ *  PATCH body overwrite it. */
+export function setNetworkCasemapping(id: number, casemapping: string): void {
+  db.prepare(`UPDATE networks SET casemapping = ? WHERE id = ?`).run(casemapping, id);
 }
 
 export function updateNetwork(

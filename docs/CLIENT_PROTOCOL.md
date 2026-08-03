@@ -411,10 +411,14 @@ Sentinel targets are exact-match, never case-folded. (The web client's
 it.)
 
 **Case folding:** IRC targets are case-insensitive and servers echo
-inconsistently-cased names. Fold with **ASCII `toLowerCase`** for identity;
-keep the first/canonical casing for display. RFC 1459 casemapping (treating
-`{}|^` as the lowercase of `[]\~`) is deliberately **not** implemented anywhere
-in Lurker — match that, don't "fix" it unilaterally.
+inconsistently-cased names. Clients fold with **ASCII `toLowerCase`** for
+identity and keep the first/canonical casing for display. The _server_ folds
+per the network's declared ISUPPORT `CASEMAPPING` (#707) — including the
+RFC 1459 rule treating `{|}~` as the lowercase of `[\]^` — so two names a
+client held apart may be one buffer server-side. Don't implement that fold
+client-side: when the server learns a mapping that collapses names, it merges
+the rows and announces each merge with the ordinary `buffer-renamed` frame
+(§9.7), which is all a client needs to converge.
 
 ### 5.3 Messages (`MessageEvent`)
 

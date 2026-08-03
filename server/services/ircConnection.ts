@@ -5,7 +5,10 @@ import IRC, { ircLineParser } from 'irc-framework';
 import type { Client as IrcClient } from 'irc-framework';
 import { insertMessage, hasMessageForTarget, hasConversationForTarget } from '../db/messages.js';
 import { renameBuffer as renameDmBuffer } from '../db/renameBuffer.js';
+import { refoldNetworkBuffers } from '../db/refoldBuffers.js';
+import { normalizeCasemapping } from '../db/casemapping.js';
 import type { Network } from '../db/networks.js';
+import { setNetworkCasemapping } from '../db/networks.js';
 import {
   isClosed as isBufferClosed,
   getBuffer,
@@ -14,6 +17,7 @@ import {
   setChannelKey as setBufferChannelKey,
   deleteBuffer,
   listOpenDms,
+  networkCasemapping,
 } from '../db/buffers.js';
 import { listTargetsForNetwork as listFriendTargetsForNetwork } from '../db/contacts.js';
 import * as chanlistDb from '../db/chanlist.js';
@@ -514,6 +518,9 @@ export class IrcConnection {
   useMonitor: boolean;
   monitorLimit: number;
   pendingMonitorSeed: boolean;
+  /** Per-socket latch: CASEMAPPING has been captured off this connection's
+   *  005 burst, so later 'server options' firings skip the DB read. */
+  capturedCasemapping: boolean;
   disposed: boolean;
   connectCommandTimer: ReturnType<typeof setTimeout> | null;
   lagMs: number | null;
@@ -677,6 +684,7 @@ export class IrcConnection {
     this.useMonitor = false;
     this.monitorLimit = 0;
     this.pendingMonitorSeed = false;
+    this.capturedCasemapping = false;
     this.disposed = false;
     // Pending timer for the next WAIT-delayed connect command. Cleared on
     // close/dispose so we never call client.raw() after the socket is gone.
@@ -1214,6 +1222,9 @@ export class IrcConnection {
       this.useMonitor = false;
       this.monitorLimit = 0;
       this.pendingMonitorSeed = false;
+      // The next socket's 005 re-captures CASEMAPPING (cheap: it early-outs
+      // when the declared value matches what's stored).
+      this.capturedCasemapping = false;
       // Safety-net presence sweep. The primary one runs in 'socket close',
       // which fires on every disconnect (including auto-reconnect blips), so it
       // has almost always swept already by the time this terminal 'close'
@@ -1286,6 +1297,9 @@ export class IrcConnection {
       // (harmless — they're just booleans, and trackDmPeer's per-add path
       // also checks useMonitor before sending).
       const opts = this.client.network?.options || {};
+      // CASEMAPPING rides the same 005 bursts (#707); capture before the
+      // MONITOR gate below can return early.
+      this.captureCasemapping(opts);
       const limit = Number(opts.MONITOR) || 0;
       if (limit === 0 || this.useMonitor) return;
       this.useMonitor = true;
@@ -2906,6 +2920,53 @@ export class IrcConnection {
       this.client.raw('MONITOR S');
     } catch (_) {
       /* ignore */
+    }
+  }
+
+  // ISUPPORT CASEMAPPING capture (#707). The declared fold is a property of
+  // the network ROW, not the socket: stored once, compared on every connect,
+  // and only a CHANGE does real work — most connects are one PK read and out.
+  // Absent/unknown values store nothing: the network keeps the legacy fold
+  // rather than adopting a rule we can't implement.
+  //
+  // On a change, db/refoldBuffers rewrites drifted folds silently and merges
+  // rows that now fold together (`#foo[bar]`/`#foo{bar}` under rfc1459), each
+  // merge announced with the same buffer-renamed frame a DM nick-collision
+  // rides — nothing new for clients to handle. In-memory per-target maps
+  // (unsendableTargets & co.) are keyed by the wire name, which a re-fold
+  // doesn't change, so they're left alone.
+  private captureCasemapping(opts: Record<string, unknown>): void {
+    if (this.capturedCasemapping) return;
+    const declared = normalizeCasemapping(opts.CASEMAPPING);
+    // Not in this 005 line (they arrive in bursts), or a value we don't
+    // implement — keep listening either way; the latch only sets on capture.
+    if (!declared) return;
+    this.capturedCasemapping = true;
+    try {
+      const stored = networkCasemapping(this.network.id);
+      if (stored === declared) return;
+      setNetworkCasemapping(this.network.id, declared);
+      const merges = refoldNetworkBuffers(this.network.user_id, this.network.id, declared);
+      this.logNet(
+        `CASEMAPPING ${declared}${stored ? ` (was ${stored})` : ''}` +
+          (merges.length
+            ? `; merged ${merges.length} case-colliding buffer${merges.length === 1 ? '' : 's'}`
+            : ''),
+      );
+      for (const m of merges) {
+        this.publishEphemeral({
+          type: 'buffer-renamed',
+          target: m.survivorTarget,
+          from: m.absorbedTarget,
+          to: m.survivorTarget,
+          bufferId: m.survivorId,
+          merged: true,
+          mergedFromBufferId: m.absorbedId,
+          draftChanged: m.draftChanged,
+        });
+      }
+    } catch (e) {
+      console.warn('[casemapping] capture/refold failed:', (e as Error)?.message || e);
     }
   }
 

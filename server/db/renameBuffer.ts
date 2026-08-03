@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import db from './index.js';
-import { foldTarget } from './buffers.js';
+import { foldTargetFor } from './buffers.js';
 import { resolveBuffer } from './bufferResolve.js';
 
 // Rename a buffer — the primitive behind DM nick-follows (and, when the
@@ -113,6 +113,38 @@ const renumberPinsStmt = db.prepare(`
   WHERE user_id = ? AND network_id = ?
 `);
 
+/**
+ * Absorb one buffer row into another — the merge half of a rename, shared
+ * with the CASEMAPPING re-fold pass (#707), where two rows folded apart under
+ * the old rule collide under the declared one. Same policies as the rename
+ * merge (they ARE the rename merge): repoint history wholesale, furthest read
+ * pointer + max clear marker, survivor's pin slot (or adopt), survivor's
+ * view-state and draft win, visibility is the union, absorbed row deleted,
+ * pin positions re-densified. Runs inside the caller's transaction; the
+ * caller announces.
+ */
+export function absorbBufferRow(
+  userId: number,
+  networkId: number,
+  survivor: { id: number; state: string },
+  absorbed: { id: number; state: string },
+): void {
+  repointMessages.run(survivor.id, absorbed.id);
+  repointInputHistory.run(survivor.id, absorbed.id);
+  mergeReadsStmt.run({ survivor: survivor.id, absorbed: absorbed.id });
+  adoptReadsStmt.run(survivor.id, absorbed.id);
+  adoptPinStmt.run(survivor.id, absorbed.id);
+  adoptNicklistStmt.run(survivor.id, absorbed.id);
+  adoptNotifyStmt.run(survivor.id, absorbed.id);
+  adoptDraftStmt.run(survivor.id, absorbed.id);
+  // Visibility is the union: if either side was open, the merged buffer is.
+  if (absorbed.state === 'open' && survivor.state !== 'open') setOpenStmt.run(survivor.id);
+  // The absorbed row dies; its remaining satellites cascade with it (any
+  // UPDATE OR IGNORE above that lost to the survivor left rows behind).
+  deleteRowStmt.run(absorbed.id);
+  renumberPinsStmt.run(userId, networkId);
+}
+
 const work = db.transaction(
   (userId: number, networkId: number, from: string, to: string): RenameResult | undefined => {
     const src = resolveBuffer(userId, networkId, from);
@@ -127,7 +159,7 @@ const work = db.transaction(
     };
     // Sentinels never rename; a rename onto a sentinel name is nonsense.
     if (src.target.startsWith(':') || to.startsWith(':')) return noop;
-    const toFolded = foldTarget(to);
+    const toFolded = foldTargetFor(networkId, to);
 
     // Casing-only: same identity under the fold, just adopt the new display
     // casing. Announced (the display changed) but never a merge.
@@ -160,20 +192,7 @@ const work = db.transaction(
     // Merge: the destination row is absorbed into the (surviving) source.
     const survivorDraftBefore = (draftBodyStmt.get(userId, src.id) as { body: string } | undefined)
       ?.body;
-    repointMessages.run(src.id, dest.id);
-    repointInputHistory.run(src.id, dest.id);
-    mergeReadsStmt.run({ survivor: src.id, absorbed: dest.id });
-    adoptReadsStmt.run(src.id, dest.id);
-    adoptPinStmt.run(src.id, dest.id);
-    adoptNicklistStmt.run(src.id, dest.id);
-    adoptNotifyStmt.run(src.id, dest.id);
-    adoptDraftStmt.run(src.id, dest.id);
-    // Visibility is the union: if either side was open, the merged buffer is.
-    if (dest.state === 'open' && src.state !== 'open') setOpenStmt.run(src.id);
-    // The absorbed row dies; its remaining satellites cascade with it (any
-    // UPDATE OR IGNORE above that lost to the survivor left rows behind).
-    deleteRowStmt.run(dest.id);
-    renumberPinsStmt.run(userId, networkId);
+    absorbBufferRow(userId, networkId, src, dest);
     setNameStmt.run(to, toFolded, src.id);
     const survivorDraftAfter = (draftBodyStmt.get(userId, src.id) as { body: string } | undefined)
       ?.body;
