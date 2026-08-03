@@ -2739,6 +2739,24 @@ describe('CASEMAPPING capture + refold (#707)', () => {
     raw005(conn, 'CASEMAPPING=rfc1459');
     expect(published.filter((e) => e.type === 'buffer-renamed')).toEqual([]);
   });
+
+  it('isChannelJoined folds both sides per the declared mapping', () => {
+    // The one membership probe every consumer must use instead of the raw
+    // channels-map key (legacy-lowercased wire names): a fold-variant
+    // spelling of a joined channel reads joined, and a Unicode case-twin on
+    // an ascii-family network does NOT (toLowerCase over-folds).
+    const { conn } = connFor('casemap-joined');
+    conn.upsertChannel('#foo[bar]');
+    conn.upsertChannel('#ärger');
+    raw005(conn, 'CASEMAPPING=rfc1459');
+
+    expect(conn.isChannelJoined('#foo{bar}')).toBe(true);
+    expect(conn.isChannelJoined('#FOO[BAR]')).toBe(true);
+    expect(conn.isChannelJoined('#ärger')).toBe(true);
+    // Distinct channels under rfc1459: Ä is not in the fold range.
+    expect(conn.isChannelJoined('#Ärger')).toBe(false);
+    expect(conn.isChannelJoined('#elsewhere')).toBe(false);
+  });
 });
 
 // #716 QA follow-up: a DM opened fresh from the nicklist showed its peer

@@ -69,11 +69,16 @@ const casemappingStmt = db.prepare(`SELECT casemapping FROM networks WHERE id = 
 // the whole hot path for a value that changes at most once per network life.
 const casemappingCache = new Map<number, Casemapping | null>();
 
-/** Drop a network's cached CASEMAPPING. Callers are the two writers: the
- *  refold pass (after its transaction stores a new mapping) and network
- *  deletion (SQLite can reuse the id for a future network). */
-export function invalidateCasemappingCache(networkId: number): void {
-  casemappingCache.delete(networkId);
+/** Drop a network's cached CASEMAPPING — or, with no argument, all of them.
+ *  Callers are the paths that can make an entry lie: the refold pass (after
+ *  its transaction stores a new mapping), network deletion (SQLite can reuse
+ *  the id for a future network), and an import ROLLBACK (whole-cache clear:
+ *  the buffers import folds through the cache mid-transaction, and a
+ *  rollback reverts sqlite_sequence, so the rolled-back ids — cached with
+ *  the rolled-back mappings — are exactly the ids the retry will mint). */
+export function invalidateCasemappingCache(networkId?: number): void {
+  if (networkId === undefined) casemappingCache.clear();
+  else casemappingCache.delete(networkId);
 }
 
 /** The network's declared ISUPPORT CASEMAPPING, as last captured on connect

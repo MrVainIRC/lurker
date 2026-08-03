@@ -74,7 +74,6 @@ import {
   listStatesForUser as listBufferStatesForUser,
   kindForTarget,
   foldTargetFor,
-  networkCasemapping,
 } from '../db/buffers.js';
 import { resolveBuffer, requireBufferForUser } from '../db/bufferResolve.js';
 import { getDraftForBuffer } from '../db/drafts.js';
@@ -731,32 +730,17 @@ export function computeTotalHighlights(userId: number): number {
 // dimmed). `conn` is optional — an offline network passes none, which folds a
 // #channel to parted. Centralized so the four snapshot/backlog sites can't drift
 // (channel-case folding already bit this codebase — see #289/#269).
-function channelJoined(
-  networkId: number,
-  target: string,
-  conn?: { channels: JoinedChannels } | null,
-): boolean {
-  if (!target.startsWith('#')) return true;
-  if (!conn) return false;
-  // Fast path: the channels map is keyed by the legacy-lowercased WIRE name,
-  // which matches whenever buffer name and joined name agree up to ASCII case
-  // — every lookup until a declared CASEMAPPING diverges from the legacy fold.
-  if (conn.channels.has(target.toLowerCase())) return true;
-  // Fold-aware path (#707): after a refold merge the registry name can be the
-  // bracket-variant that was never the JOINed spelling ('#foo{bar}' joined as
-  // '#foo[bar]'); on a declared network, compare per-network folds of the
-  // live wire names before calling the channel parted.
-  if (!networkCasemapping(networkId)) return false;
-  const folded = foldTargetFor(networkId, target);
-  for (const ch of conn.channels.values()) {
-    if (foldTargetFor(networkId, ch.name) === folded) return true;
-  }
-  return false;
+function channelJoined(target: string, conn?: JoinedProbe | null): boolean {
+  return target.startsWith('#') ? !!conn?.isChannelJoined(target) : true;
 }
 
-interface JoinedChannels {
-  has(name: string): boolean;
-  values(): Iterable<{ name: string }>;
+// The one membership surface (IrcConnection.isChannelJoined): fold-aware per
+// the network's declared CASEMAPPING, so a refold-merged registry spelling
+// still reads joined, and a Unicode case-twin on an ascii network doesn't.
+// Never probe conn.channels with `.has(x.toLowerCase())` here — the map is
+// keyed by legacy-lowercased wire names, which is the pre-#707 rule.
+interface JoinedProbe {
+  isChannelJoined(name: string): boolean;
 }
 
 // The per-buffer read/unread/cleared block shared by every backlog frame
@@ -846,7 +830,7 @@ export function buildBufferBacklog(
     // Non-empty buffers hid the bug — any event at all reads as hydrated.
     hasMoreOlder: oldestId > 0 && hasOlderRow(networkId, target, oldestId),
     speakers: listSpeakers(networkId, target),
-    joined: channelJoined(networkId, target, conn),
+    joined: channelJoined(target, conn),
     ...bufferStateFields(userId, networkId, target),
     inputHistory: listRecentInputHistory(userId, networkId, target, INPUT_HISTORY_SLICE),
   };
@@ -1196,7 +1180,7 @@ function buildOfflineFrame(
 ): WsPayload {
   return target.startsWith(':server:')
     ? buildBufferBacklog(userId, networkId, target)
-    : buildBufferShell(userId, networkId, target, channelJoined(networkId, target), { bufferId });
+    : buildBufferShell(userId, networkId, target, channelJoined(target), { bufferId });
 }
 
 // `targets` lets the snapshot hand in the enumeration it already materialized for
@@ -1261,19 +1245,21 @@ function verbBuffer(
 // per-network since #707, so 'john^' probes the 'john~' key an rfc1459
 // network stored (servers also hand us inconsistently-cased names, #289). A
 // currently-joined channel always beats a stale closed flag (defensive
-// against autorejoin/state races); the channel probe is fold-aware for the
-// same reason, but stays channels-only — a DM is never "joined", and letting
-// channelJoined's trivially-true non-channel arm in here would exempt every
-// closed DM from hiding.
+// against autorejoin/state races). The joined probe is the RAW membership
+// scan, not `channelJoined`: that helper answers true for anything that
+// isn't '#'-prefixed — right for the display field it feeds (a DM is always
+// "joined"), but here it would exempt every closed DM from hiding, and its
+// '#'-only test would strip the joined-beats-closed defense from '&'/'+'/'!'
+// channels, which the membership map covers regardless of prefix.
 function isHiddenClosedBuffer(
   closed: Set<string>,
-  conn: { channels: JoinedChannels } | null | undefined,
+  conn: JoinedProbe | null | undefined,
   networkId: number,
   target: string,
 ): boolean {
   return (
     closed.has(`${networkId}::${foldTargetFor(networkId, target)}`) &&
-    !(target.startsWith('#') && channelJoined(networkId, target, conn))
+    !conn?.isChannelJoined(target)
   );
 }
 
@@ -1320,10 +1306,12 @@ export function handleOpenBuffer(
   // which is right for the display field it feeds (a DM is always "joined") but wrong
   // as a branch condition: `kindForTarget` counts '&', '+' and '!' as channels too, so
   // routing through it would report an unjoined `&local` as joined and hand back a
-  // backlog for a channel we aren't in.
+  // backlog for a channel we aren't in. Fold-aware (#707): a refold-merged
+  // buffer's registry spelling can differ from the joined wire spelling, and
+  // a raw map probe would send a channel we're sitting in down the join
+  // branch — the no-echo spinner this comment exists to prevent.
   const conn = ircManager.getConnection(userId, networkId);
-  const inChannel =
-    kindForTarget(requested) === 'channel' && !!conn?.channels.has(requested.toLowerCase());
+  const inChannel = kindForTarget(requested) === 'channel' && !!conn?.isChannelJoined(requested);
   if (row && (hasMessageForTarget(networkId, row.target) || inChannel)) {
     reopenBufferRow(userId, networkId, row.target);
     send(ws, buildBufferBacklog(userId, networkId, row.target, countBy));
@@ -1373,21 +1361,15 @@ function announceOpen(
   userId: number,
   networkId: number,
   target: string,
-  conn: { channels: JoinedChannels } | null | undefined,
+  conn: JoinedProbe | null | undefined,
   bufferId: number | null = null,
 ): void {
   // Pass the live connection: `channelJoined` folds a #channel to parted without
   // one, which would land the other devices' rows dimmed for a channel we're
   // sitting in, until some later frame corrected them.
-  const shell = buildBufferShell(
-    userId,
-    networkId,
-    target,
-    channelJoined(networkId, target, conn),
-    {
-      bufferId,
-    },
-  );
+  const shell = buildBufferShell(userId, networkId, target, channelJoined(target, conn), {
+    bufferId,
+  });
   fanOut(userId, shell, { exceptWs: requester });
   fanOut(userId, { kind: 'buffer-opened', networkId, target, bufferId }, { exceptWs: requester });
 }
@@ -2446,7 +2428,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           userId,
           conn.network.id,
           target,
-          channelJoined(conn.network.id, target, conn),
+          channelJoined(target, conn),
           precomputed,
         );
         unreadMs += Date.now() - tShell;
@@ -2497,7 +2479,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         // from `reset` + `networkId` + whether it sent ?since.
         mode: slice.mode,
         hasMoreOlder: slice.hasMoreOlder,
-        joined: channelJoined(conn.network.id, target, conn),
+        joined: channelJoined(target, conn),
         ...stateFields,
         inputHistory,
       });

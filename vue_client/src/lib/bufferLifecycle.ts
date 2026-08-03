@@ -121,7 +121,16 @@ export function applyBufferRenamed(payload: {
   }
   bufferRenamed(networkId, from, to);
   const buffers = useBuffersStore();
-  const buf = buffers.findByTarget(networkId, to);
+  let buf = buffers.findByTarget(networkId, to);
+  if (!buf && merged && typeof bufferId === 'number' && networkId != null) {
+    // Whatever the sweep above decided, a merged frame PROVES a live buffer
+    // named `to` exists server-side. If local state ended up rowless — both
+    // twins held id-less and the fallback swept the wrong one — materialize
+    // the survivor instead of bailing, so the buffer can never vanish from
+    // the sidebar; the wipe below routes it through the ordinary hydration
+    // fetch, and the read-state/pins/draft follow-ups correct the rest.
+    buf = buffers.ensure(networkId, to, bufferId);
+  }
   if (!buf) return;
   // Learn/confirm the id under the new key (also heals the case where the
   // rename raced ahead of the burst and we never knew the id).

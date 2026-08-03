@@ -91,8 +91,9 @@ const work = db.transaction(
         survivor = ranked[0].row;
         for (const { row: absorbed } of ranked.slice(1)) {
           const { draftChanged } = absorbBufferRow(userId, networkId, survivor, absorbed);
-          // The union may have opened the survivor; later absorbs in this
-          // group must see that, or they'd re-run the flip's subquery dance.
+          // Keep the in-memory copy honest with the union absorbBufferRow may
+          // have just written, so later absorbs in this group pass the
+          // already-open survivor state instead of re-flipping it.
           if (absorbed.state === 'open') survivor.state = 'open';
           merges.push({
             survivorId: survivor.id,
@@ -106,20 +107,16 @@ const work = db.transaction(
       finalFolds.push({ row: survivor, folded });
     }
 
-    // Rewrite drifted folds in two phases, so a one-pass UPDATE order can
-    // never trip idx_buffers_key transiently (row A's new fold landing on row
-    // B's not-yet-rewritten old fold). Belt-and-braces: for every mapping
-    // transition we could construct, such a pair already collides under the
-    // OLD fold and merged above — but that's an argument about four specific
-    // fold functions, and parking changing rows on a synthetic fold first
-    // costs two statements to make the argument unnecessary. The parking
-    // value opens with a NUL, which no wire target can carry and no fold
-    // produces — a stronger guarantee than any printable prefix, since the
-    // archive import writes targets verbatim and a hand-crafted row named
-    // "refold:7" would otherwise be able to abort the pass.
-    const changing = finalFolds.filter(({ row, folded }) => row.target_folded !== folded);
-    for (const { row } of changing) setFoldedStmt.run(`\u0000refold:${row.id}`, row.id);
-    for (const { row, folded } of changing) setFoldedStmt.run(folded, row.id);
+    // Rewrite drifted folds in one pass. Order can't trip idx_buffers_key:
+    // the final folds are unique by construction (one survivor per group),
+    // and a transient collision would need row A's NEW fold to equal row B's
+    // still-stored OLD fold — checked case-by-case across the four
+    // implemented rules, any pair in that shape already folded together
+    // under the old rule and merged above, so B's slot is never occupied
+    // when A's rewrite lands.
+    for (const { row, folded } of finalFolds) {
+      if (row.target_folded !== folded) setFoldedStmt.run(folded, row.id);
+    }
     return merges;
   },
 );

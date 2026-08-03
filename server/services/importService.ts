@@ -37,6 +37,7 @@ import {
   ensureServerBuffer,
   ensureSystemBuffer,
   foldTargetFor,
+  invalidateCasemappingCache,
 } from '../db/buffers.js';
 import { resolveBuffer } from '../db/bufferResolve.js';
 import { listBufferTargets, hasMessageForTarget } from '../db/messages.js';
@@ -508,6 +509,14 @@ async function streamMessagesInBatches(
 // we clear them explicitly. Must cover every importable user-scoped root in
 // EXPORT_TABLES.
 function resetImportedData(userId: number): void {
+  // The buffers import folds through the casemapping cache mid-transaction,
+  // and the rollback that lands us here reverts sqlite_sequence — so the
+  // rolled-back network ids (cached with the rolled-back mappings) are
+  // exactly the ids the next createNetwork or retried import will mint.
+  // A stale hit there folds new rows under a dead network's rule AND makes
+  // the healing refold's stored===declared compare read the lie. Clear it
+  // all; the cache is lazy and refills on first use.
+  invalidateCasemappingCache();
   const wipe = db.transaction(() => {
     db.prepare('DELETE FROM networks WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM highlight_rules WHERE user_id = ?').run(userId);

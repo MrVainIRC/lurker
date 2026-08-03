@@ -17,6 +17,8 @@ import {
   deleteBuffer,
   listOpenDms,
   networkCasemapping,
+  foldTargetFor,
+  kindForTarget,
 } from '../db/buffers.js';
 import { listTargetsForNetwork as listFriendTargetsForNetwork } from '../db/contacts.js';
 import * as chanlistDb from '../db/chanlist.js';
@@ -2966,6 +2968,21 @@ export class IrcConnection {
           mergedFromBufferId: m.absorbedId,
           draftChanged: m.draftChanged,
         });
+        // A merged DM must hand over its presence watch: the hydration seed
+        // ran at 001 (before this 005) against pre-refold rows, so the
+        // absorbed spelling holds a MONITOR slot for a registry row that no
+        // longer exists — stranded until reconnect, consuming the shared cap.
+        // The surviving spelling may never have been seeded at all (a closed
+        // survivor absorbed an open twin). Both trackers refcount, so this is
+        // safe when the survivor was already watched. Per-target maps
+        // (unsendableTargets & co.) are left alone deliberately: they key by
+        // wire name, sends go out under the surviving buffer's name from here
+        // on, and the dead spelling's entries are inert residue until the
+        // socket closes.
+        if (kindForTarget(m.absorbedTarget) === 'dm') {
+          this.untrackDmPeer(m.absorbedTarget);
+          this.trackDmPeer(m.survivorTarget);
+        }
       }
     } catch (e) {
       console.warn('[casemapping] capture/refold failed:', (e as Error)?.message || e);
@@ -3285,6 +3302,26 @@ export class IrcConnection {
       /* ignore */
     }
     this.publish({ type: 'channel-parted', target: canonical });
+  }
+
+  /** Fold-aware live membership (#707): is `name` one of this connection's
+   *  joined channels under the network's declared CASEMAPPING? The channels
+   *  map is keyed by the legacy-lowercased WIRE name, so a raw
+   *  `.has(x.toLowerCase())` probe has two failure modes on a declared
+   *  network — it misses a fold-variant spelling (`#foo{bar}` asked, joined
+   *  as `#foo[bar]`), and it over-folds Unicode (on an ascii network
+   *  `#Ärger` must NOT read joined via its distinct case-twin `#ärger`).
+   *  Folding BOTH sides with the network's rule is the one comparison that's
+   *  right everywhere; on an undeclared network it reduces to exactly the
+   *  old map probe. O(channels) per call, with the mapping cached — cheap at
+   *  IRC scale, and the single definition every consumer must use instead of
+   *  the idiomatic-looking raw probe. */
+  isChannelJoined(name: string): boolean {
+    const folded = foldTargetFor(this.network.id, name);
+    for (const ch of this.channels.values()) {
+      if (foldTargetFor(this.network.id, ch.name) === folded) return true;
+    }
+    return false;
   }
 
   upsertChannel(name: string): ChannelState {

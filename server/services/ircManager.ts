@@ -391,7 +391,11 @@ class IrcManager extends EventEmitter {
     // write the row (and any key) directly — and do NOT stash the key, since
     // no echo will ever consume it and an orphaned stash would be misapplied
     // by some later join's echo.
-    if (conn.channels.has(name.toLowerCase())) {
+    // Fold-aware (#707): '/join #ops{1}' while joined as '#ops[1]' on an
+    // rfc1459 network IS the already-in case — a raw map probe would miss it,
+    // stash a key no echo will consume, and hand the orphaned stash to the
+    // next join's echo (the exact hazard above).
+    if (conn.isChannelJoined(name)) {
       ensureOpenBuffer(userId, networkId, name, {
         kind: 'channel',
         autojoin: true,
