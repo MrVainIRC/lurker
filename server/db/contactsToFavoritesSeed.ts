@@ -53,6 +53,13 @@ export function seedFavoritesFromContacts(db: Database.Database): number {
   const insertFavoriteStmt = db.prepare(
     `INSERT OR IGNORE INTO favorite_buffers (user_id, buffer_id, position) VALUES (?, ?, ?)`,
   );
+  // Favorite implies unpin (one placement per buffer — see the wsHub
+  // favorite-buffer handler): a migrated friend's pinned DM would otherwise
+  // carry an invisible pin row that every later subset reorder silently
+  // demotes. Position holes left by the delete are harmless: ORDER BY
+  // tolerates gaps, pinBuffer appends at MAX+1, and the next unpin/reorder
+  // re-densifies.
+  const dropPinStmt = db.prepare(`DELETE FROM pinned_buffers WHERE user_id = ? AND buffer_id = ?`);
 
   let seeded = 0;
   const seededContacts = new Set<number>();
@@ -81,6 +88,7 @@ export function seedFavoritesFromContacts(db: Database.Database): number {
 
     const { next } = nextPositionStmt.get(userId) as { next: number };
     seeded += Number(insertFavoriteStmt.run(userId, bufferId, next).changes);
+    dropPinStmt.run(userId, bufferId);
     seededContacts.add(contactId);
   }
 

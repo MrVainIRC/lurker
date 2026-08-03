@@ -104,16 +104,11 @@ function dmStyle(networkId: string | number, target: string): { color: string } 
 const allRows = computed<Row[]>(() => {
   // Match the sidebar surface: favorites in their FRIENDS/FAVORITES section
   // positions, excluded from their real network so nothing is listed twice.
-  const secs = favoritesStore.sections;
   const order = flattenBufferOrder({
     networks: networks.networks,
     buffers,
     pins,
-    favorites: {
-      friends: secs.friends,
-      channels: secs.channels,
-      excludeKeys: favoritesStore.favoriteKeys,
-    },
+    favorites: favoritesStore.orderInjection,
   });
   return order.map((entry) => {
     const net = netById(entry.networkId);

@@ -50,11 +50,28 @@ export const useFavoritesStore = defineStore('favorites', {
       for (const e of state.entries) {
         const buf = buffers.findByTarget(e.networkId, e.target);
         if (!buf) continue;
+        if (buf.kind === 'server' || buf.kind === 'system') continue;
         const resolved = buf.target === e.target ? e : { ...e, target: buf.target };
-        if (buf.kind === 'channel') channels.push(resolved);
-        else if (buf.kind === 'dm') friends.push(resolved);
+        // Split by channel PREFIX, not buf.kind: the client's deriveKind only
+        // knows '#', but the server counts '&'/'+'/'!' channels too
+        // (kindForTarget) — a favorited &local must land under FAVORITES with
+        // channel chrome, not under FRIENDS with a bogus presence dot.
+        if (/^[#&+!]/.test(buf.target)) channels.push(resolved);
+        else friends.push(resolved);
       }
       return { friends, channels };
+    },
+    // The ready-made bufferOrder injection ({friends, channels, excludeKeys})
+    // for keyboard nav and the quick switcher. One owner: assembling it
+    // field-by-field at each call site around an optional param invites a
+    // caller that forgets it and silently walks a divergent, un-deduped order.
+    orderInjection(): {
+      friends: FavoriteEntry[];
+      channels: FavoriteEntry[];
+      excludeKeys: Set<string>;
+    } {
+      const secs = this.sections;
+      return { friends: secs.friends, channels: secs.channels, excludeKeys: this.favoriteKeys };
     },
   },
   actions: {

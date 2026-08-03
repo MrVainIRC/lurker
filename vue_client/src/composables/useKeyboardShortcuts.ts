@@ -81,24 +81,15 @@ export function useKeyboardShortcuts({
     recentBuffers.record(networks.activeKey);
   }
 
-  // The FRIENDS/FAVORITES sections as the sidebar shows them, with those
-  // buffers excluded from their real network group so nav doesn't visit
-  // them twice.
-  function favoritesOrder() {
-    const secs = favorites.sections;
-    return {
-      friends: secs.friends,
-      channels: secs.channels,
-      excludeKeys: favorites.favoriteKeys,
-    };
-  }
-
   function order() {
     return flattenBufferOrder({
       networks: networks.networks,
       buffers,
       pins,
-      favorites: favoritesOrder(),
+      // The FRIENDS/FAVORITES sections as the sidebar shows them, with those
+      // buffers excluded from their real network group so nav doesn't visit
+      // them twice.
+      favorites: favorites.orderInjection,
     });
   }
 
@@ -107,7 +98,7 @@ export function useKeyboardShortcuts({
       networks: networks.networks,
       buffers,
       pins,
-      favorites: favoritesOrder(),
+      favorites: favorites.orderInjection,
     });
   }
 

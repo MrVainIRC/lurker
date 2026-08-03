@@ -111,11 +111,12 @@
             <template #item="{ element: row }">
               <li
                 :class="rowClasses(row.buf, row.networkId)"
-                :title="dmTitle(row.buf)"
+                :title="sectionRowTitle(row)"
                 @click="select(row.networkId, row.buf.target)"
                 @contextmenu.prevent="onBufferContextMenu($event, row.buf)"
               >
                 <span class="label">{{ labelFor(row.buf) }}</span>
+                <span v-if="showNetHints" class="net-hint">{{ row.networkName }}</span>
                 <span
                   v-if="hasDraft(row.buf)"
                   class="badge draft"
@@ -575,11 +576,13 @@ function onPinDragEnd(networkId: number): void {
     networkId,
     list.map((b) => b.target),
   );
-  // Both mirrors share the one `dragging` guard, so an echo that landed
-  // mid-drag (a favorite flipped from another tab while this pin drag was
-  // up, or vice versa) was skipped with nothing left to re-fire its watch —
-  // catch up explicitly now that the guard is down.
-  syncPinned();
+  // Both mirrors share the one `dragging` guard, so a favorites echo that
+  // landed mid-drag was skipped with nothing left to re-fire its watch —
+  // catch the OTHER mirror up now that the guard is down. Deliberately NOT
+  // this mirror: the store still holds the pre-echo order, and re-splicing
+  // from it would snap the row the user just dropped back to its old slot
+  // for a round-trip (and corrupt a quick second drag). The pins-changed
+  // echo re-syncs it authoritatively.
   syncFavorites();
 }
 
@@ -595,7 +598,18 @@ interface FavoriteRow {
   // are favoritable) — the template needs it non-null where Buffer.networkId
   // is nullable for the app-scoped system buffer.
   networkId: number;
+  networkName: string;
   buf: Buffer;
+}
+
+// Section rows are cross-network: with more than one network, two favorites
+// named #general are otherwise pixel-identical, so each row carries a muted
+// network hint (and the tooltip always names the network).
+const showNetHints = computed(() => networks.networks.length > 1);
+
+function sectionRowTitle(row: FavoriteRow): string {
+  const presence = dmTitle(row.buf);
+  return presence ? `${presence} — ${row.networkName}` : `${row.buf.target} — ${row.networkName}`;
 }
 const friendRows = reactive<FavoriteRow[]>([]);
 const favoriteChannelRows = reactive<FavoriteRow[]>([]);
@@ -620,6 +634,7 @@ function syncFavorites(): void {
               key: `${e.networkId}::${buf.target}`,
               bufferId: e.bufferId,
               networkId: e.networkId,
+              networkName: networks.networkById(e.networkId)?.name || `net:${e.networkId}`,
               buf,
             },
           ]
@@ -637,14 +652,28 @@ watch(() => [favorites.entries, Object.keys(buffers.buffers)], syncFavorites, {
 
 function onFavoriteDragEnd(rows: FavoriteRow[]): void {
   dragging.value = false;
-  // Only this section's ids — the server keeps the other section's relative
-  // order (subset reorder), then echoes the authoritative list.
-  favorites.reorder(rows.map((r) => r.bufferId));
-  // Same mid-drag catch-up as onPinDragEnd (the echo for THIS reorder also
-  // re-syncs, but a dead socket would never send one — don't leave the
-  // mirrors hanging on it).
+  // Send the FULL global order, not just this section's rows: the store's
+  // entry order with the dragged section's ids permuted in place. A
+  // section-only subset would float those ids to the front — silently and
+  // globally demoting any favorite this tab has no materialized buffer for
+  // yet (favorites-changed can outrun hydration) and every entry of the
+  // OTHER section that sorted ahead. Full-list reorder moves exactly what
+  // the user moved.
+  // The store can have moved under a frozen mirror (an echo landing
+  // mid-drag): drop dragged rows the store no longer knows, so the slot
+  // count always matches and the permutation can't misalign. Anything still
+  // stale after that is caught by the server's set check → authoritative echo.
+  const known = new Set(favorites.entries.map((e) => e.bufferId));
+  const dragged = rows.filter((r) => known.has(r.bufferId));
+  const draggedIds = new Set(dragged.map((r) => r.bufferId));
+  let i = 0;
+  const full = favorites.entries.map((e) =>
+    draggedIds.has(e.bufferId) ? dragged[i++].bufferId : e.bufferId,
+  );
+  favorites.reorder(full);
+  // Catch the pins mirror up on any echo skipped mid-drag (see onPinDragEnd);
+  // this mirror keeps its dropped order until the favorites-changed echo.
   syncPinned();
-  syncFavorites();
 }
 
 function onBufferContextMenu(e: MouseEvent, buf: Buffer): void {
@@ -1020,6 +1049,17 @@ onBeforeUnmount(() => {
    buffer behind them to open. */
 .net-head.section-head {
   cursor: default;
+}
+/* Cross-network disambiguation on section rows: quiet, never competes with
+   the label or badges, disappears entirely on single-network instances. */
+.net-hint {
+  color: var(--fg-muted);
+  font-size: 0.85em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 8em;
+  flex-shrink: 1;
 }
 /* Gate :hover behind (hover: hover) so iPad-in-desktop-layout (width > 768px,
    touch-only) doesn't get the iOS sticky-hover two-tap: with bare :hover the

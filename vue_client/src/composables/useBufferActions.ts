@@ -50,8 +50,10 @@ export function useBufferActions(): BufferActionsAPI {
     const pinned = pins.isPinned(networkId, buf.target);
     // One flag, two labels: a favorited channel surfaces in the FAVORITES
     // section, a favorited DM under FRIENDS (the Friends/Contacts successor).
+    // Prefix test, not isChannel: '&'/'+'/'!' channels are channels to the
+    // server and to the sections getter, so their label must agree.
     const favorited = favorites.isFavorite(networkId, buf.target);
-    const favoriteSection = isChannel ? 'Favorites' : 'Friends';
+    const favoriteSection = /^[#&+!]/.test(buf.target) ? 'Favorites' : 'Friends';
     const items: ContextMenuItem[] = [
       pinned
         ? {

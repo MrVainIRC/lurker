@@ -8,6 +8,7 @@ import { useNickNotesStore } from '../stores/nickNotes.js';
 import { useWhoisStore } from '../stores/whois.js';
 import { useContextMenu } from './useContextMenu.js';
 import { socketSend } from './useSocket.js';
+import { historyCountBy } from '../lib/historyPaging.js';
 import { addressNick } from './useComposerOverlay.js';
 
 export interface MemberLike {
@@ -168,7 +169,15 @@ export function useMemberActions(): MemberActionsAPI {
               // and the same socket delivers it before the favorite, so the
               // favorite always lands. No client-side ordering to get wrong.
               onClick: () => {
-                socketSend({ type: 'open-buffer', networkId: ctx.networkId, target: nick });
+                // countBy matches the store's openBuffer seam — without it
+                // the server sizes the first backlog slice in 'event' units
+                // even for users paging by renderable lines.
+                socketSend({
+                  type: 'open-buffer',
+                  networkId: ctx.networkId,
+                  target: nick,
+                  countBy: historyCountBy(),
+                });
                 favorites.favorite(ctx.networkId, nick);
               },
             },

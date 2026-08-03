@@ -451,7 +451,9 @@ watch(activeKey, (next) => {
 // to the buffer screen. Vue event bubbling runs BufferList's @click first,
 // so by the time we read activeKey it's already up to date.
 function onBufferListClick(e: MouseEvent) {
-  const hit = (e.target as Element).closest('.channels li, .net-head');
+  // :not(.section-head): the FRIENDS/FAVORITES headers are inert labels — a
+  // tap on one must not teleport into whatever buffer was last active.
+  const hit = (e.target as Element).closest('.channels li, .net-head:not(.section-head)');
   if (!hit) return;
   if (activeKey.value) screen.value = 'buffer';
 }

@@ -3085,6 +3085,12 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         if (!networkId || !target || target.startsWith(':server:')) break;
         pinBuffer(userId, networkId, target);
         fanOut(userId, pinsChangedFrame(userId, networkId));
+        // Pin implies unfavorite — the mirror of favorite⇒unpin (one placement
+        // per buffer). Without it, pinning a favorited buffer would recreate
+        // the invisible-pin state the favorite side just closed off.
+        if (unfavoriteBuffer(userId, networkId, target)) {
+          fanOut(userId, favoritesChangedFrame(userId));
+        }
         break;
       }
       case 'unpin-buffer': {
@@ -3106,6 +3112,16 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         if (!networkId || !target || target.startsWith(':')) break;
         if (favoriteBuffer(userId, networkId, target)) {
           fanOut(userId, favoritesChangedFrame(userId));
+          // Favorite implies unpin (the mirror of close⇒unpin): a favorited
+          // buffer renders in its FRIENDS/FAVORITES section instead of its
+          // network group, so a surviving pin row would be invisible — and a
+          // hidden pin gets silently demoted by every subset reorder of the
+          // pins the user CAN see (#405's accepted semantics turned into
+          // data loss). One placement per buffer: unfavorite returns it to
+          // the network group unpinned.
+          if (unpinBufferCaseInsensitive(userId, networkId, target)) {
+            fanOut(userId, pinsChangedFrame(userId, networkId));
+          }
         }
         break;
       }
