@@ -115,8 +115,10 @@
                 @click="select(row.networkId, row.buf.target)"
                 @contextmenu.prevent="onBufferContextMenu($event, row.buf)"
               >
-                <span class="label">{{ labelFor(row.buf) }}</span>
-                <span v-if="showNetHints" class="net-hint">{{ row.networkName }}</span>
+                <span class="label"
+                  >{{ labelFor(row.buf)
+                  }}<span v-if="showNetHints" class="net-hint">{{ row.networkName }}</span></span
+                >
                 <span
                   v-if="hasDraft(row.buf)"
                   class="badge draft"
@@ -1050,16 +1052,14 @@ onBeforeUnmount(() => {
 .net-head.section-head {
   cursor: default;
 }
-/* Cross-network disambiguation on section rows: quiet, never competes with
-   the label or badges, disappears entirely on single-network instances. */
+/* Cross-network disambiguation on section rows: rides INSIDE the label, right
+   after the buffer name — anchored to what it describes, and immune to badges
+   appearing/disappearing at the row's right edge. Quiet; absent entirely on
+   single-network instances. The label's own ellipsis clips it on overflow. */
 .net-hint {
   color: var(--fg-muted);
   font-size: 0.85em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 8em;
-  flex-shrink: 1;
+  margin-inline-start: var(--space-2);
 }
 /* Gate :hover behind (hover: hover) so iPad-in-desktop-layout (width > 768px,
    touch-only) doesn't get the iOS sticky-hover two-tap: with bare :hover the
@@ -1352,8 +1352,7 @@ onBeforeUnmount(() => {
   opacity: 1;
   pointer-events: auto;
 }
-.channels li.active .badge,
-.channels li.active .net-hint {
+.channels li.active .badge {
   visibility: hidden;
 }
 /* Reveal on hover — desktop only, so touch doesn't get a sticky-hover reveal. */
@@ -1362,8 +1361,7 @@ onBeforeUnmount(() => {
     opacity: 1;
     pointer-events: auto;
   }
-  .channels li:hover .badge,
-  .channels li:hover .net-hint {
+  .channels li:hover .badge {
     visibility: hidden;
   }
   .channels .row-actions:hover {
