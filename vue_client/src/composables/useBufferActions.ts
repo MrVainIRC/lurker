@@ -45,15 +45,18 @@ export function useBufferActions(): BufferActionsAPI {
     // the app-scoped system buffer (networkId null) yields no menu.
     const networkId = buf?.networkId;
     if (!buf || networkId == null || buf.target.startsWith(':server:')) return [];
-    const isChannel = buf.target.startsWith('#');
+    // Full channel-prefix test, matching the server's kindForTarget and the
+    // favorites sections getter: '&'/'+'/'!' targets are channels, so they get
+    // channel labels, the channel notify ladder, and channel icons — and are
+    // never offered the DM-only profile/note items (whois on '&local' is
+    // nonsense the old '#'-only test allowed).
+    const isChannel = /^[#&+!]/.test(buf.target);
     const kind = isChannel ? 'Channel' : 'DM';
     const pinned = pins.isPinned(networkId, buf.target);
     // One flag, two labels: a favorited channel surfaces in the FAVORITES
     // section, a favorited DM under FRIENDS (the Friends/Contacts successor).
-    // Prefix test, not isChannel: '&'/'+'/'!' channels are channels to the
-    // server and to the sections getter, so their label must agree.
     const favorited = favorites.isFavorite(networkId, buf.target);
-    const favoriteSection = /^[#&+!]/.test(buf.target) ? 'Favorites' : 'Friends';
+    const favoriteSection = isChannel ? 'Favorites' : 'Friends';
     const items: ContextMenuItem[] = [];
     // A favorited buffer can't be pinned (one placement per buffer:
     // favorite⇒unpin server-side), so the pin item on a favorited buffer is

@@ -3215,7 +3215,8 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         const target = addr ? addr.target : typeof msg.target === 'string' ? msg.target : '';
         // Always-notify is a channel-level concept. DMs are blanket-controlled
         // by notifications.dm.enabled; server pseudo-buffers can't carry it.
-        if (!networkId || !target.startsWith('#')) break;
+        // kindForTarget, not a '#' probe: '&'/'+'/'!' channels carry it too.
+        if (!networkId || kindForTarget(target) !== 'channel') break;
         setChannelNotifyAlways(userId, networkId, target, !!msg.notifyAlways);
         fanOut(userId, {
           kind: 'channel-notify-changed',
