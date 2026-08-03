@@ -54,7 +54,23 @@ export function useActiveBuffer(): ActiveBufferState {
     if (virtualCfg.value && virtualCfg.value.renderMode !== 'buffer') return null;
     return buffers.byKey(activeKey.value);
   });
-  const topic = computed(() => (activeBuf.value as any)?.topic);
+  // Channels show their topic; a DM shows the peer's ident@hostname in the
+  // same slot (irssi-style — it's the identity that survives nick changes,
+  // and the natural companion to DM renames, #695).
+  const topic = computed(() => {
+    const buf = activeBuf.value as {
+      topic?: string | null;
+      kind?: string;
+      networkId?: number | null;
+      target?: string;
+    } | null;
+    if (!buf) return undefined;
+    if (buf.topic) return buf.topic;
+    if (buf.kind === 'dm' && buf.networkId != null && buf.target) {
+      return buffers.userhostFor(buf.networkId, buf.target) ?? undefined;
+    }
+    return buf.topic ?? undefined;
+  });
   const isServerBuffer = computed(() => !!active.value?.target?.startsWith(':server:'));
   const isChannel = computed(() => !!active.value?.target?.startsWith('#'));
   const bufferLabel = computed(() => {

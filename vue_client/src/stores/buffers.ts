@@ -429,6 +429,40 @@ export const useBuffersStore = defineStore('buffers', {
         }
         return undefined;
       },
+    // The peer's ident@hostname for a DM header (#695 QA follow-up — the slot
+    // a channel's topic occupies). Live shared-channel member data first (the
+    // freshest source, present even for a history-less DM opened from the
+    // nicklist); the DM's own persisted rows as fallback (covers a peer with
+    // no shared channel — every message row carries the sender's userhost).
+    userhostFor:
+      (state) =>
+      (networkId: number | string, nick: string): string | null => {
+        if (!nick) return null;
+        const lc = nick.toLowerCase();
+        const nid = Number(networkId);
+        for (const b of Object.values(state.buffers)) {
+          if (b.networkId !== nid) continue;
+          const m = b.members?.find(
+            (x) => typeof x === 'object' && (x.nick || '').toLowerCase() === lc,
+          );
+          if (m?.user && m?.host) return `${m.user}@${m.host}`;
+        }
+        for (const b of Object.values(state.buffers)) {
+          if (b.networkId !== nid || b.target.toLowerCase() !== lc) continue;
+          for (let i = b.messages.length - 1; i >= 0; i--) {
+            const msg = b.messages[i];
+            if (msg.self || (msg.nick || '').toLowerCase() !== lc) continue;
+            const uh = msg.userhost;
+            if (typeof uh === 'string' && uh) {
+              // Rows store the full mask (nick!user@host); the header wants
+              // the identity half.
+              const bang = uh.indexOf('!');
+              return bang === -1 ? uh : uh.slice(bang + 1);
+            }
+          }
+        }
+        return null;
+      },
     // The open DM buffer for a (network, nick), matched case-insensitively so we
     // resolve to whatever case is already open rather than forking a second
     // buffer that differs only by nick case. Channels and the flat virtual

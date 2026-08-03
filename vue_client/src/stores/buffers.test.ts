@@ -1046,3 +1046,43 @@ describe('applyClearedState — unclearing resets to the latest page', () => {
     expect(buf.clearedBeforeId).toBe(300);
   });
 });
+
+describe('userhostFor — the DM header identity', () => {
+  it('prefers live member data, falls back to the DM rows, strips the nick half', async () => {
+    const { setActivePinia, createPinia } = await import('pinia');
+    setActivePinia(createPinia());
+    const { useBuffersStore } = await import('./buffers.js');
+    const store = useBuffersStore();
+
+    // Peer visible in a shared channel: member data wins.
+    const chan = store.ensure(1, '#shared');
+    chan.members = [{ nick: 'Bob', modes: [], away: false, user: 'rob', host: 'host.example' }];
+    expect(store.userhostFor(1, 'bob')).toBe('rob@host.example');
+
+    // No shared channel: the DM's own rows answer, mask stripped to ident@host.
+    const dm = store.ensure(2, 'carol');
+    dm.messages.push({
+      id: 1,
+      networkId: 2,
+      target: 'carol',
+      type: 'message',
+      nick: 'Carol',
+      userhost: 'Carol!cc@irc.example',
+      self: false,
+    });
+    expect(store.userhostFor(2, 'carol')).toBe('cc@irc.example');
+
+    // Own rows never answer for the peer.
+    const dm2 = store.ensure(3, 'dave');
+    dm2.messages.push({
+      id: 2,
+      networkId: 3,
+      target: 'dave',
+      type: 'message',
+      nick: 'me',
+      userhost: 'me!my@own.host',
+      self: true,
+    });
+    expect(store.userhostFor(3, 'dave')).toBeNull();
+  });
+});
