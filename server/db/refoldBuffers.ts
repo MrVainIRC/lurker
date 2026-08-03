@@ -37,6 +37,11 @@ export interface RefoldMerge {
   /** Same contract as RenameResult.draftChanged: the surviving draft differs
    *  from what the survivor had before the absorb. */
   draftChanged: boolean;
+  /** Same contract as RenameResult.open: a closed survivor (both twins were
+   *  closed — the ranking puts any open row first, so this is constant per
+   *  group) must NOT be announced, or clients materialize a sidebar row for
+   *  a conversation closed everywhere. */
+  survivorOpen: boolean;
 }
 
 interface Row {
@@ -101,6 +106,7 @@ const work = db.transaction(
             absorbedId: absorbed.id,
             absorbedTarget: absorbed.target,
             draftChanged,
+            survivorOpen: survivor.state === 'open',
           });
         }
       }

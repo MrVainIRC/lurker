@@ -2666,6 +2666,9 @@ describe('CASEMAPPING capture + refold (#707)', () => {
     })!;
     const conn = new IrcConnection({ network, onEvent: () => {} });
     const published: Array<Record<string, unknown>> = [];
+    conn.publish = vi.fn<(event: unknown) => void>((e) => {
+      published.push(e as Record<string, unknown>);
+    }) as typeof conn.publish;
     conn.publishEphemeral = vi.fn<(event: unknown) => void>((e) => {
       published.push(e as Record<string, unknown>);
     }) as typeof conn.publishEphemeral;
@@ -2730,7 +2733,9 @@ describe('CASEMAPPING capture + refold (#707)', () => {
     expect(get(network.user_id, network.id, '#a[1]')?.id).not.toBe(
       get(network.user_id, network.id, '#a{1}')?.id,
     );
-    expect(published).toEqual([]);
+    // No lifecycle frames — the raw 005 line itself still renders as server
+    // text via the ordinary numeric path, which is not this test's concern.
+    expect(published.filter((e) => e.type === 'buffer-renamed')).toEqual([]);
   });
 
   it('re-declaring the stored mapping is a no-op — reconnects do no work', () => {
@@ -2738,6 +2743,49 @@ describe('CASEMAPPING capture + refold (#707)', () => {
     raw005(conn, 'CASEMAPPING=rfc1459');
     raw005(conn, 'CASEMAPPING=rfc1459');
     expect(published.filter((e) => e.type === 'buffer-renamed')).toEqual([]);
+  });
+
+  it('a merge of two CLOSED twins is silent — clients hold nothing to correct', async () => {
+    const { conn, network, published } = connFor('casemap-closed');
+    const { ensureOpen, close, getBuffer: get } = await import('../db/buffers.js');
+    ensureOpen(network.user_id, network.id, 'ghost^', { kind: 'dm' });
+    ensureOpen(network.user_id, network.id, 'ghost~', { kind: 'dm' });
+    close(network.user_id, network.id, 'ghost^');
+    close(network.user_id, network.id, 'ghost~');
+
+    raw005(conn, 'CASEMAPPING=rfc1459');
+
+    // Merged server-side, closed, and NOT announced — an announced merge
+    // would make clients materialize a sidebar row for it.
+    expect(get(network.user_id, network.id, 'ghost~')?.state).toBe('closed');
+    expect(published.filter((e) => e.type === 'buffer-renamed')).toEqual([]);
+  });
+
+  it('adopts the wire spelling on a join echo when the folds diverge', async () => {
+    // The state a refold merge can leave behind: the surviving twin isn't the
+    // spelling the ircd echoes. The join echo respells it (casing-only
+    // rename, announced) so the id-less control frames that follow can't
+    // fork a ghost buffer client-side. Plain ASCII case differences keep
+    // first-writer-wins display casing.
+    const { conn, network, published } = connFor('casemap-respell');
+    const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
+    raw005(conn, 'CASEMAPPING=rfc1459');
+    ensureOpen(network.user_id, network.id, '#chat{dev}');
+    const id = get(network.user_id, network.id, '#chat{dev}')!.id;
+    conn.client.user.nick = 'me';
+
+    conn.client.emit('join', { nick: 'me', channel: '#chat[dev]' });
+
+    // Same row (the spellings fold together); display adopts the wire spelling.
+    const row = get(network.user_id, network.id, '#chat[dev]');
+    expect(row?.id).toBe(id);
+    expect(row?.target).toBe('#chat[dev]');
+    expect(published.find((e) => e.type === 'buffer-renamed')).toMatchObject({
+      from: '#chat{dev}',
+      to: '#chat[dev]',
+      bufferId: id,
+      merged: false,
+    });
   });
 
   it('isChannelJoined folds both sides per the declared mapping', () => {

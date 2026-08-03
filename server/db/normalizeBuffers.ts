@@ -1,7 +1,8 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
-import type { Database } from 'better-sqlite3';
+import type { Database, Statement } from 'better-sqlite3';
+import { foldTargetWith, normalizeCasemapping } from './casemapping.js';
 
 // The v17 normalization bodies: mint the buffers rows that message history
 // implies, then stamp messages.buffer_id from them. Exported (and handed the
@@ -17,12 +18,17 @@ import type { Database } from 'better-sqlite3';
 // loop documented on the idx_messages_unread build (a one-shot, non-resumable
 // stall) structurally cannot happen here.
 //
-// Folding: lookups everywhere else fold with JS toLowerCase (buffers.ts
-// foldTarget — Unicode-aware), but a set-based UPDATE can only call SQL
-// functions, and SQLite's lower() is ASCII-only. `#Ärger` folds differently
-// under the two, which is exactly the class of bug #707 catalogues. So the
-// SQL side calls a registered custom function that IS foldTarget, and the two
-// rules cannot diverge.
+// Folding: the set-based SQL passes call a registered custom function that IS
+// the legacy JS fold (toLowerCase) — SQLite's own lower() is ASCII-only and
+// `#Ärger` folds differently under the two, exactly the class of bug #707
+// catalogues. That's correct for the version-gated migration bodies, which
+// run before any network can have declared a CASEMAPPING. The JS-side mints
+// are different: they ALSO run on straggler-retry boots and on archive
+// import, where a network may carry a declared mapping — so they fold
+// per-network via foldForNetworkFn below (reading through the handed db;
+// importing buffers.ts here would cycle back through index.ts
+// mid-evaluation). Probing with the legacy fold there misses a refolded row
+// and mints an unreachable zombie twin beside it.
 
 const FOLD_FN = 'lurker_fold_target';
 
@@ -82,6 +88,31 @@ export function mintSentinelBuffers(db: Database): void {
  * iterating a live cursor while writing on the shared connection is the
  * documented crash class (AGENTS.md).
  */
+/** Per-network fold for the JS-side mints (see the module header). Returns a
+ *  closure over a per-run mapping cache; NULL network (app-scoped) and
+ *  undeclared networks use the legacy fold. On a pre-#707 schema (a mid-
+ *  migration fixture where networks.casemapping doesn't exist yet) no mapping
+ *  can have been declared, so the legacy fold is exact by definition. */
+function foldForNetworkFn(db: Database): (networkId: number | null, target: string) => string {
+  let stmt: Statement | null;
+  try {
+    stmt = db.prepare(`SELECT casemapping FROM networks WHERE id = ?`);
+  } catch {
+    stmt = null;
+  }
+  const cache = new Map<number, string | null>();
+  return (networkId, target) => {
+    if (networkId == null || !stmt) return target.toLowerCase();
+    let raw = cache.get(networkId);
+    if (raw === undefined) {
+      raw =
+        (stmt.get(networkId) as { casemapping: string | null } | undefined)?.casemapping ?? null;
+      cache.set(networkId, raw);
+    }
+    return foldTargetWith(normalizeCasemapping(raw) ?? null, target);
+  };
+}
+
 export function mintOrphanBuffersFromMessages(db: Database): number {
   const distinct = db
     .prepare(`SELECT DISTINCT network_id AS networkId, target FROM messages`)
@@ -99,6 +130,7 @@ export function mintOrphanBuffersFromMessages(db: Database): number {
      ON CONFLICT(user_id, IFNULL(network_id, 0), target_folded) DO NOTHING`,
   );
 
+  const foldFor = foldForNetworkFn(db);
   let minted = 0;
   for (const { networkId, target } of distinct) {
     const owner = userByNetwork.get(networkId) as { userId: number } | undefined;
@@ -110,7 +142,7 @@ export function mintOrphanBuffersFromMessages(db: Database): number {
     // instead — the same coalescing the live insert path applies — so
     // imported server-console history becomes reachable rather than hidden.
     if (target.startsWith(':')) continue;
-    const folded = target.toLowerCase();
+    const folded = foldFor(networkId, target);
     if (exists.get(owner.userId, networkId, folded)) continue;
     const kind = '#&+!'.includes(target[0] ?? '') ? 'channel' : 'dm';
     minted += insert.run(owner.userId, networkId, target, folded, kind).changes;
@@ -291,6 +323,7 @@ export function mintOrphanBuffersFromSatellites(db: Database, tables: readonly s
      ON CONFLICT(user_id, IFNULL(network_id, 0), target_folded) DO NOTHING`,
   );
   const networkExists = db.prepare(`SELECT 1 FROM networks WHERE id = ?`);
+  const foldFor = foldForNetworkFn(db);
   let minted = 0;
   for (const table of tables) {
     const rows = db
@@ -304,7 +337,7 @@ export function mintOrphanBuffersFromSatellites(db: Database, tables: readonly s
       if (target.startsWith(':')) continue;
       if (networkId != null && !networkExists.get(networkId)) continue; // FK would reject
       const kind = '#&+!'.includes(target[0] ?? '') ? 'channel' : 'dm';
-      minted += insert.run(userId, networkId, target, target.toLowerCase(), kind).changes;
+      minted += insert.run(userId, networkId, target, foldFor(networkId, target), kind).changes;
     }
   }
   return minted;

@@ -40,6 +40,11 @@ export interface RenameResult {
   /** True when the merge left the surviving draft different from the
    *  source's (the client should refresh its mirror). */
   draftChanged: boolean;
+  /** Whether the surviving buffer is OPEN after the rename (union on a
+   *  merge). Callers must not announce a closed survivor: clients hold no
+   *  state for closed buffers, and a merged frame for one makes them
+   *  materialize a sidebar row for a conversation closed everywhere. */
+  open: boolean;
 }
 
 const setNameStmt = db.prepare(`UPDATE buffers SET target = ?, target_folded = ? WHERE id = ?`);
@@ -174,6 +179,7 @@ const work = db.transaction(
       to: src.target,
       merged: false,
       draftChanged: false,
+      open: src.state === 'open',
     };
     // Sentinels never rename; a rename onto a sentinel name is nonsense.
     if (src.target.startsWith(':') || to.startsWith(':')) return noop;
@@ -191,6 +197,7 @@ const work = db.transaction(
         to,
         merged: false,
         draftChanged: false,
+        open: src.state === 'open',
       };
     }
 
@@ -204,6 +211,7 @@ const work = db.transaction(
         to,
         merged: false,
         draftChanged: false,
+        open: src.state === 'open',
       };
     }
 
@@ -218,6 +226,8 @@ const work = db.transaction(
       merged: true,
       mergedFromBufferId: dest.id,
       draftChanged,
+      // Visibility union already applied by absorbBufferRow.
+      open: src.state === 'open' || dest.state === 'open',
     };
   },
 );

@@ -113,6 +113,7 @@ describe('newly-colliding rows merge (the #foo[bar] ≡ #foo{bar} fix)', () => {
         absorbedId: bracketId,
         absorbedTarget: '#foo[bar]',
         draftChanged: false,
+        survivorOpen: true,
       },
     ]);
     // One row remains, open, and BOTH spellings resolve to it now.
@@ -144,6 +145,23 @@ describe('newly-colliding rows merge (the #foo[bar] ≡ #foo{bar} fix)', () => {
     const survivor = buffers.getBuffer(userId, networkId, '#ops{1}')!;
     expect(survivor.autojoin).toBe(true);
     expect(survivor.key).toBe('hunter2');
+  });
+
+  it('two CLOSED twins merge with survivorOpen false — nothing to announce', () => {
+    // Clients hold no state for closed buffers; the caller uses this flag to
+    // suppress the buffer-renamed frame, or clients would materialize a
+    // sidebar row for a conversation closed everywhere.
+    const networkId = makeNetwork('closedtwins');
+    buffers.ensureOpen(userId, networkId, 'ghost^');
+    buffers.ensureOpen(userId, networkId, 'ghost~');
+    buffers.close(userId, networkId, 'ghost^');
+    buffers.close(userId, networkId, 'ghost~');
+
+    const merges = refoldNetworkBuffers(userId, networkId, 'rfc1459');
+
+    expect(merges).toHaveLength(1);
+    expect(merges[0].survivorOpen).toBe(false);
+    expect(buffers.getBuffer(userId, networkId, 'ghost~')?.state).toBe('closed');
   });
 
   it('between two open rows, the one with the most recent message survives', () => {
