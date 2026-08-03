@@ -1352,7 +1352,8 @@ onBeforeUnmount(() => {
   opacity: 1;
   pointer-events: auto;
 }
-.channels li.active .badge {
+.channels li.active .badge,
+.channels li.active .net-hint {
   visibility: hidden;
 }
 /* Reveal on hover — desktop only, so touch doesn't get a sticky-hover reveal. */
@@ -1361,7 +1362,8 @@ onBeforeUnmount(() => {
     opacity: 1;
     pointer-events: auto;
   }
-  .channels li:hover .badge {
+  .channels li:hover .badge,
+  .channels li:hover .net-hint {
     visibility: hidden;
   }
   .channels .row-actions:hover {
