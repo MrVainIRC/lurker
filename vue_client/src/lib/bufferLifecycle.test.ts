@@ -22,6 +22,7 @@ import { useRecentBuffersStore } from '../stores/recentBuffers.js';
 import { useDraftStore } from '../stores/drafts.js';
 import { useInputHistoryStore } from '../stores/inputHistory.js';
 import { usePinsStore } from '../stores/pins.js';
+import { useFavoritesStore } from '../stores/favorites.js';
 import { useNicklistCollapseStore } from '../stores/nicklistCollapse.js';
 import { useChannelNotifyStore } from '../stores/channelNotify.js';
 
@@ -38,6 +39,10 @@ function seedEverything() {
   useDraftStore().drafts[KEY] = 'half-typed';
   useInputHistoryStore().seed(NET, TARGET, ['first line']);
   usePinsStore().byNetwork[NET] = [TARGET, '#other'];
+  useFavoritesStore().entries = [
+    { networkId: NET, target: TARGET, bufferId: 42 },
+    { networkId: NET, target: '#other', bufferId: 43 },
+  ];
   useNicklistCollapseStore().byNetwork[NET] = { [TARGET]: true };
   useChannelNotifyStore().byNetwork[NET] = { [TARGET]: { notifyAlways: true } };
 }
@@ -52,6 +57,7 @@ function presence() {
     draft: KEY in useDraftStore().drafts,
     inputHistory: useInputHistoryStore().forBuffer(NET, TARGET).length > 0,
     pin: usePinsStore().byNetwork[NET]?.includes(TARGET) ?? false,
+    favorite: useFavoritesStore().isFavorite(NET, TARGET),
     nicklist: TARGET in (useNicklistCollapseStore().byNetwork[NET] ?? {}),
     notify: TARGET in (useChannelNotifyStore().byNetwork[NET] ?? {}),
   };
@@ -76,12 +82,14 @@ describe('bufferClosed', () => {
       draft: false,
       inputHistory: false,
       pin: false,
+      favorite: false,
       nicklist: false,
       notify: false,
     });
     // Neighbors survive the sweep.
     expect(useNavHistoryStore().stack).toEqual([`${NET}::#other`]);
     expect(usePinsStore().byNetwork[NET]).toEqual(['#other']);
+    expect(useFavoritesStore().entries.map((e) => e.target)).toEqual(['#other']);
   });
 
   it('resolves a divergently-cased close target onto the open buffer', () => {
@@ -110,6 +118,7 @@ describe('bufferRenamed', () => {
     expect(useDraftStore().drafts[NEW_KEY]).toBe('half-typed');
     expect(useInputHistoryStore().forBuffer(NET, RENAMED)).toEqual(['first line']);
     expect(usePinsStore().byNetwork[NET]).toEqual([RENAMED, '#other']);
+    expect(useFavoritesStore().entries.map((e) => e.target)).toEqual([RENAMED, '#other']);
     expect(useNicklistCollapseStore().byNetwork[NET]?.[RENAMED]).toBe(true);
     expect(useChannelNotifyStore().byNetwork[NET]?.[RENAMED]).toEqual({ notifyAlways: true });
   });
@@ -154,8 +163,9 @@ describe('rename collisions: destination wins everywhere', () => {
     expect(useNicklistCollapseStore().byNetwork[NET]![DEST]).toBe(false);
     expect(useChannelNotifyStore().byNetwork[NET]![DEST]).toEqual({ notifyAlways: false });
     expect(useInputHistoryStore().forBuffer(NET, DEST)).toEqual(['dest line']);
-    // Pins/MRU keep ONE entry for the destination, in its own slot.
+    // Pins/favorites/MRU keep ONE entry for the destination, in its own slot.
     expect(usePinsStore().byNetwork[NET]).toEqual([DEST]);
+    expect(useFavoritesStore().entries.map((e) => e.target)).toEqual([DEST]);
     expect(useRecentBuffersStore().keys).toEqual([`${NET}::${DEST}`]);
     // Nothing remains under the old name anywhere.
     expect(KEY in useDraftStore().drafts).toBe(false);

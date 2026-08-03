@@ -3,6 +3,7 @@
 
 import type { ContextMenuItem } from './useContextMenu.js';
 import { usePinsStore } from '../stores/pins.js';
+import { useFavoritesStore } from '../stores/favorites.js';
 import { useNickNotesStore } from '../stores/nickNotes.js';
 import { useWhoisStore } from '../stores/whois.js';
 import { useContextMenu } from './useContextMenu.js';
@@ -31,6 +32,7 @@ export interface BufferActionsAPI {
 // network, browse channels) and aren't handled here.
 export function useBufferActions(): BufferActionsAPI {
   const pins = usePinsStore();
+  const favorites = useFavoritesStore();
   const nickNotes = useNickNotesStore();
   const whois = useWhoisStore();
   const menu = useContextMenu();
@@ -46,6 +48,10 @@ export function useBufferActions(): BufferActionsAPI {
     const isChannel = buf.target.startsWith('#');
     const kind = isChannel ? 'Channel' : 'DM';
     const pinned = pins.isPinned(networkId, buf.target);
+    // One flag, two labels: a favorited channel surfaces in the FAVORITES
+    // section, a favorited DM under FRIENDS (the Friends/Contacts successor).
+    const favorited = favorites.isFavorite(networkId, buf.target);
+    const favoriteSection = isChannel ? 'Favorites' : 'Friends';
     const items: ContextMenuItem[] = [
       pinned
         ? {
@@ -57,6 +63,17 @@ export function useBufferActions(): BufferActionsAPI {
             label: `Pin ${kind}`,
             icon: 'fa-solid fa-thumbtack',
             onClick: () => pins.pin(networkId, buf.target),
+          },
+      favorited
+        ? {
+            label: `Remove from ${favoriteSection}`,
+            icon: isChannel ? 'fa-regular fa-star' : 'fa-solid fa-user-minus',
+            onClick: () => favorites.unfavorite(networkId, buf.target),
+          }
+        : {
+            label: `Add to ${favoriteSection}`,
+            icon: isChannel ? 'fa-solid fa-star' : 'fa-solid fa-user-group',
+            onClick: () => favorites.favorite(networkId, buf.target),
           },
     ];
     // Notification "quietness" ladder (issue #359): channels get the full 4-rung

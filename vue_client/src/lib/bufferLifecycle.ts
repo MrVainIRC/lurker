@@ -25,6 +25,7 @@ import { useRecentBuffersStore } from '../stores/recentBuffers.js';
 import { useDraftStore } from '../stores/drafts.js';
 import { useInputHistoryStore } from '../stores/inputHistory.js';
 import { usePinsStore } from '../stores/pins.js';
+import { useFavoritesStore } from '../stores/favorites.js';
 import { useNicklistCollapseStore } from '../stores/nicklistCollapse.js';
 import { useChannelNotifyStore } from '../stores/channelNotify.js';
 
@@ -48,6 +49,7 @@ const participants: Array<() => BufferLifecycleParticipant> = [
   () => useDraftStore(),
   () => useInputHistoryStore(),
   () => usePinsStore(),
+  () => useFavoritesStore(),
   () => useNicklistCollapseStore(),
   () => useChannelNotifyStore(),
 ];

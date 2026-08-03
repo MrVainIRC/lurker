@@ -17,6 +17,7 @@ import { useDraftStore } from '../stores/drafts.js';
 import { useChanlistStore } from '../stores/chanlist.js';
 import { useSearchStore } from '../stores/search.js';
 import { usePinsStore } from '../stores/pins.js';
+import { useFavoritesStore, type FavoriteEntry } from '../stores/favorites.js';
 import { useNicklistCollapseStore } from '../stores/nicklistCollapse.js';
 import { useChannelNotifyStore } from '../stores/channelNotify.js';
 import { useIgnoresStore } from '../stores/ignores.js';
@@ -764,6 +765,12 @@ function handleMessage(raw: string): void {
   if (payload.kind === 'pins-changed') {
     const pins = usePinsStore();
     pins.setNetwork(payload.networkId, payload.pinned || []);
+    return;
+  }
+  if (payload.kind === 'favorites-changed') {
+    // Full ordered global list, replace wholesale — the same frame seeds the
+    // connect burst, so this one handler covers seed and every correction.
+    useFavoritesStore().apply((payload.favorites as FavoriteEntry[]) || []);
     return;
   }
   if (payload.kind === 'nicklist-collapsed-changed') {

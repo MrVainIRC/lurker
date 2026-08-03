@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { describe, it, expect } from 'vitest';
-import { flattenBufferOrder, flattenUnreadOrder } from './bufferOrder.js';
+import {
+  flattenBufferOrder,
+  flattenUnreadOrder,
+  FRIENDS_GROUP_ID,
+  FAVORITES_GROUP_ID,
+} from './bufferOrder.js';
 
 // Lightweight duck-typed fakes matching the store interfaces bufferOrder reads.
 function makeBuffers(byNetwork: Record<string, string[]>, unread: Record<string, number> = {}) {
@@ -52,6 +57,58 @@ describe('flattenBufferOrder', () => {
       pins: makePins({ '1': ['#ghost', '#real'] }), // #ghost has no buffer
     });
     expect(order.map((e) => e.target)).toEqual([':server:1', '#real']);
+  });
+
+  it('injects the FRIENDS then FAVORITES sections first, under their group ids', () => {
+    const order = flattenBufferOrder({
+      networks: [{ id: 1 }],
+      buffers: makeBuffers({ '1': ['#chan', '#fav', 'bob'] }),
+      pins: makePins({}),
+      favorites: {
+        friends: [{ networkId: 1, target: 'bob' }],
+        channels: [{ networkId: 1, target: '#fav' }],
+        excludeKeys: new Set(['1::bob', '1::#fav']),
+      },
+    });
+    expect(order.slice(0, 2)).toEqual([
+      { networkId: 1, target: 'bob', key: '1::bob', groupId: FRIENDS_GROUP_ID },
+      { networkId: 1, target: '#fav', key: '1::#fav', groupId: FAVORITES_GROUP_ID },
+    ]);
+    // Favorited buffers are excluded from their real network so they aren't
+    // walked twice.
+    expect(order.filter((e) => e.groupId === 1).map((e) => e.target)).toEqual([
+      ':server:1',
+      '#chan',
+    ]);
+  });
+
+  it('excludeKeys matching is case-insensitive on the target', () => {
+    const order = flattenBufferOrder({
+      networks: [{ id: 1 }],
+      buffers: makeBuffers({ '1': ['Bob'] }), // server-cased nick
+      pins: makePins({}),
+      favorites: {
+        friends: [{ networkId: 1, target: 'Bob' }],
+        channels: [],
+        excludeKeys: new Set(['1::bob']),
+      },
+    });
+    // Only the friends-section Bob remains; the real-network one is excluded.
+    expect(order.filter((e) => e.groupId === 1).map((e) => e.target)).toEqual([':server:1']);
+  });
+
+  it('excludes favorited pins from the pinned walk too', () => {
+    const order = flattenBufferOrder({
+      networks: [{ id: 1 }],
+      buffers: makeBuffers({ '1': ['#fav', '#pinned'] }),
+      pins: makePins({ '1': ['#fav', '#pinned'] }),
+      favorites: {
+        friends: [],
+        channels: [{ networkId: 1, target: '#fav' }],
+        excludeKeys: new Set(['1::#fav']),
+      },
+    });
+    expect(order.map((e) => e.key)).toEqual(['1::#fav', srvKey(1), '1::#pinned']);
   });
 });
 

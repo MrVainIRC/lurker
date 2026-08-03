@@ -45,6 +45,7 @@ import { computed, onMounted, ref, watch, nextTick } from 'vue';
 import { useNetworksStore } from '../stores/networks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { usePinsStore } from '../stores/pins.js';
+import { useFavoritesStore } from '../stores/favorites.js';
 import { useRecentBuffersStore } from '../stores/recentBuffers.js';
 import { useNickColors } from '../composables/useNickColors.js';
 import { flattenBufferOrder, bufferSortKey } from '../utils/bufferOrder.js';
@@ -72,6 +73,7 @@ const emit = defineEmits<{
 const networks = useNetworksStore();
 const buffers = useBuffersStore();
 const pins = usePinsStore();
+const favoritesStore = useFavoritesStore();
 const recent = useRecentBuffersStore();
 const nicks = useNickColors();
 
@@ -100,10 +102,18 @@ function dmStyle(networkId: string | number, target: string): { color: string } 
 }
 
 const allRows = computed<Row[]>(() => {
+  // Match the sidebar surface: favorites in their FRIENDS/FAVORITES section
+  // positions, excluded from their real network so nothing is listed twice.
+  const secs = favoritesStore.sections;
   const order = flattenBufferOrder({
     networks: networks.networks,
     buffers,
     pins,
+    favorites: {
+      friends: secs.friends,
+      channels: secs.channels,
+      excludeKeys: favoritesStore.favoriteKeys,
+    },
   });
   return order.map((entry) => {
     const net = netById(entry.networkId);

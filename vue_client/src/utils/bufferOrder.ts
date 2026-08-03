@@ -24,11 +24,29 @@ interface BuffersStore {
   byKey(key: string): { unread: number } | null | undefined;
 }
 
+// The FRIENDS/FAVORITES sections (two kind-filtered views of the one global
+// favorites list) are injected at the top so keyboard nav / quick-switch walk
+// the same order the sidebar renders. `excludeKeys` drops those buffers from
+// their real network group so they aren't visited twice.
+export interface FavoritesOrder {
+  friends: Array<{ networkId: string | number; target: string }>;
+  channels: Array<{ networkId: string | number; target: string }>;
+  // `${networkId}::${lowercased target}` keys of every favorite.
+  excludeKeys: Set<string>;
+}
+
 interface BufferOrderArgs {
   networks: Network[];
   buffers: BuffersStore;
   pins: PinsStore;
+  favorites?: FavoritesOrder;
 }
+
+// Sentinel group ids for the two favorites sections — their members carry
+// their real networkId for activation but group together, apart from that
+// network. Non-numeric strings so they can never alias a real network id.
+export const FRIENDS_GROUP_ID = 'group:friends';
+export const FAVORITES_GROUP_ID = 'group:favorites';
 
 interface BufferOrderEntry {
   networkId: string | number;
@@ -37,9 +55,9 @@ interface BufferOrderEntry {
   // Callers match the active buffer and re-activate against this rather than
   // recomputing.
   key: string;
-  // Logical group this entry belongs to: the networkId for real buffers. Kept
-  // distinct so a cross-network group (the removed FRIENDS section was the
-  // model) can group entries apart from their underlying network.
+  // Logical group this entry belongs to: the networkId for real buffers, a
+  // section sentinel for favorites (so they group apart from their
+  // underlying network).
   groupId: string | number;
 }
 
@@ -67,8 +85,31 @@ export function flattenBufferOrder({
   networks,
   buffers,
   pins,
+  favorites,
 }: BufferOrderArgs): BufferOrderEntry[] {
   const out: BufferOrderEntry[] = [];
+  const exclude = favorites?.excludeKeys;
+  const isExcluded = (networkId: string | number, target: string): boolean =>
+    !!exclude && exclude.has(`${networkId}::${target.toLowerCase()}`);
+
+  // Favorites sections first (matches the sidebar): FRIENDS then FAVORITES.
+  for (const dm of favorites?.friends || []) {
+    out.push({
+      networkId: dm.networkId,
+      target: dm.target,
+      key: `${dm.networkId}::${dm.target}`,
+      groupId: FRIENDS_GROUP_ID,
+    });
+  }
+  for (const ch of favorites?.channels || []) {
+    out.push({
+      networkId: ch.networkId,
+      target: ch.target,
+      key: `${ch.networkId}::${ch.target}`,
+      groupId: FAVORITES_GROUP_ID,
+    });
+  }
+
   for (const net of networks) {
     const serverTarget = `:server:${net.id}`;
     out.push({
@@ -85,12 +126,15 @@ export function flattenBufferOrder({
     for (const b of all) byTarget.set(b.target, b);
 
     for (const t of pinnedTargets) {
-      if (byTarget.has(t))
+      if (byTarget.has(t) && !isExcluded(net.id, t))
         out.push({ networkId: net.id, target: t, key: `${net.id}::${t}`, groupId: net.id });
     }
 
     const unpinned = all
-      .filter((b) => !isServerTarget(b.target) && !pinnedSet.has(b.target))
+      .filter(
+        (b) =>
+          !isServerTarget(b.target) && !pinnedSet.has(b.target) && !isExcluded(net.id, b.target),
+      )
       .toSorted((a, b) => {
         const oa = bufferOrder(a.target);
         const ob = bufferOrder(b.target);
