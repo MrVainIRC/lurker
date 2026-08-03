@@ -744,7 +744,7 @@ function onMessageRowClick(e: MouseEvent, m: ChatMessage | undefined | null): vo
 // ─── Nick interactivity (#238) + mode-prefix glyph (#376) ──────────────────
 // Message-list nicks behave exactly like their nicklist entry: a tap (or
 // right-click / long-press) opens the shared member-action menu — Reply, Copy
-// Nickname, whois, DM, note, friend, ignore, and op-gated kick/ban/op/voice.
+// Nickname, whois, DM, note, ignore, and op-gated kick/ban/op/voice.
 // The menu and ignore modal are owned here, mirroring MemberList's pattern.
 const memberActions = useMemberActions();
 const contextMenu = useContextMenu();

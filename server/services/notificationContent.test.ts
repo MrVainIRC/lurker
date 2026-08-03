@@ -46,37 +46,12 @@ describe('composeNotification', () => {
     );
   });
 
-  it('names the identity a friend signed on as when it differs', () => {
-    expect(
-      composeNotification(
-        payload({ kind: 'friend_online', target: 'nostimo', displayName: 'Amiantos', text: null }),
-      ),
-    ).toMatchObject({
-      title: 'Amiantos came online (as nostimo · Libera)',
-      // No text on a presence transition — the title carries it.
-      body: '',
-    });
-  });
-
-  it('omits the nick when a friend signed on under their display name', () => {
-    // Case-insensitively: 'Amiantos' vs 'amiantos' is the same identity, and
-    // saying "Amiantos came online (as amiantos)" would be noise.
-    expect(
-      composeNotification(
-        payload({ kind: 'friend_online', target: 'amiantos', displayName: 'Amiantos' }),
-      ).title,
-    ).toBe('Amiantos came online (Libera)');
-  });
-
-  it('falls back when a nick or display name is missing', () => {
+  it('falls back when a nick is missing', () => {
     expect(composeNotification(payload({ nick: null })).title).toBe('someone (Libera)');
     // The same fallback on the channel branch, which is a separate expression.
     expect(
       composeNotification(payload({ kind: 'highlight', target: '#lurker', nick: null })).title,
     ).toBe('someone in #lurker');
-    expect(
-      composeNotification(payload({ kind: 'friend_online', displayName: null, target: '' })).title,
-    ).toBe('A friend came online (Libera)');
   });
 
   it('strips mIRC formatting codes from the body (#606)', () => {
@@ -136,27 +111,6 @@ describe('parity with the service worker fallback', () => {
     [
       'always_notify with no nick',
       payload({ kind: 'always_notify', target: '#lurker', nick: null }),
-    ],
-    [
-      'friend_online under a different nick',
-      payload({ kind: 'friend_online', target: 'nostimo', displayName: 'Amiantos' }),
-    ],
-    [
-      'friend_online under the same nick',
-      payload({ kind: 'friend_online', target: 'amiantos', displayName: 'Amiantos' }),
-    ],
-    [
-      'friend_online with no display name',
-      payload({ kind: 'friend_online', target: 'nostimo', displayName: null }),
-    ],
-    [
-      'friend_online with no network',
-      payload({
-        kind: 'friend_online',
-        target: 'nostimo',
-        displayName: 'Amiantos',
-        networkName: '',
-      }),
     ],
   ];
 

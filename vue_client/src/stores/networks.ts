@@ -74,7 +74,7 @@ export const useNetworksStore = defineStore('networks', {
     // Presence row for a (network, nick), disconnected-aware: a down network's
     // cached rows are stale, so report a synthetic 'offline'. Connected with no
     // row stays null (unknown = "potentially online", the no-MONITOR case).
-    // Single source of truth for the sidebar, status bar, profile, and Friends.
+    // Single source of truth for the sidebar, status bar, and profile.
     peerFor:
       (state) =>
       (networkId: number | string, nick: string): PeerPresenceEntry | null => {
@@ -85,10 +85,10 @@ export const useNetworksStore = defineStore('networks', {
       },
     activeBuffer(state): ActiveBuffer | null {
       if (!state.activeKey) return null;
-      // Virtual buffers (:system:, :friends:) use a flat sentinel key (no `::`).
+      // Virtual buffers (:system:) use a flat sentinel key (no `::`).
       // They have no IRC send target, so report "no IRC buffer active" — the
-      // views drive their own header/rendering. Friends still renders messages
-      // via buffers.byKey(activeKey) directly, not through this getter.
+      // views drive their own header/rendering; the system buffer still renders
+      // messages via buffers.byKey(activeKey) directly, not through this getter.
       if (isVirtualKey(state.activeKey)) return null;
       if (!state.activeKey.includes('::')) return null;
       const [networkId, name] = state.activeKey.split('::');
@@ -173,7 +173,7 @@ export const useNetworksStore = defineStore('networks', {
       // sentinel target, matching the buffers store's key() helper.
       this.activeKey = networkId == null ? target : `${networkId}::${target}`;
     },
-    // Virtual buffers (system console, friends) aren't tied to an IRC network.
+    // Virtual buffers (the system console) aren't tied to an IRC network.
     // They use a flat sentinel key (no `::`) so the existing
     // `${networkId}::${target}` parsers ignore them.
     activateVirtual(key: string) {

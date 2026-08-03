@@ -28,8 +28,8 @@ function armScroll(pendingScrollId: Ref<number | null> | undefined, messageId: n
 export interface JumpTarget {
   networkId: number;
   target: string;
-  // Omitted for an "open this conversation" intent (e.g. a friend-online push)
-  // — there's no specific message to scroll to, just the buffer to open.
+  // Omitted for an "open this conversation" intent (a push tap that names a
+  // buffer but no message) — there's nothing to scroll to, just a buffer to open.
   messageId?: number | null;
 }
 
@@ -66,9 +66,9 @@ export function useJumpToMessage({ pendingScrollId, afterActivate }: JumpToMessa
       toasts.push({ kind: 'info', title: 'Cannot jump in server buffer', ttlMs: 4000 } as any);
       return;
     }
-    // No specific message — an "open this conversation" intent (a friend-online
-    // push tap). Just activate the DM, creating its buffer if needed; skip the
-    // closed-buffer guard and the loadAround scroll path entirely.
+    // No specific message — an "open this conversation" intent (a push tap
+    // with no messageId). Just activate the DM, creating its buffer if needed;
+    // skip the closed-buffer guard and the loadAround scroll path entirely.
     if (messageId == null) {
       buffers.activate(networkId, target);
       if (typeof afterActivate === 'function') afterActivate();

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { describe, it, expect } from 'vitest';
-import { flattenBufferOrder, flattenUnreadOrder, FRIENDS_GROUP_ID } from './bufferOrder.js';
+import { flattenBufferOrder, flattenUnreadOrder } from './bufferOrder.js';
 
 // Lightweight duck-typed fakes matching the store interfaces bufferOrder reads.
 function makeBuffers(byNetwork: Record<string, string[]>, unread: Record<string, number> = {}) {
@@ -53,46 +53,6 @@ describe('flattenBufferOrder', () => {
     });
     expect(order.map((e) => e.target)).toEqual([':server:1', '#real']);
   });
-
-  it('injects the FRIENDS group first (feed header + friend DMs) under FRIENDS_GROUP_ID', () => {
-    const order = flattenBufferOrder({
-      networks: [{ id: 1 }],
-      buffers: makeBuffers({ '1': ['#chan', 'bob'] }),
-      pins: makePins({}),
-      friends: {
-        feedKey: ':friends:',
-        dms: [{ networkId: 1, target: 'bob' }],
-        excludeKeys: new Set(['1::bob']),
-      },
-    });
-    expect(order.slice(0, 2)).toEqual([
-      {
-        networkId: FRIENDS_GROUP_ID,
-        target: ':friends:',
-        key: ':friends:',
-        groupId: FRIENDS_GROUP_ID,
-      },
-      { networkId: 1, target: 'bob', key: '1::bob', groupId: FRIENDS_GROUP_ID },
-    ]);
-    // bob is excluded from its real network so it isn't walked twice.
-    const realNetKeys = order.filter((e) => e.groupId === 1).map((e) => e.target);
-    expect(realNetKeys).toEqual([':server:1', '#chan']);
-  });
-
-  it('excludeKeys matching is case-insensitive on the nick', () => {
-    const order = flattenBufferOrder({
-      networks: [{ id: 1 }],
-      buffers: makeBuffers({ '1': ['Bob'] }), // server-cased nick
-      pins: makePins({}),
-      friends: {
-        feedKey: ':friends:',
-        dms: [{ networkId: 1, target: 'Bob' }],
-        excludeKeys: new Set(['1::bob']),
-      },
-    });
-    // Only the friends-group Bob remains; the real-network one is excluded.
-    expect(order.filter((e) => e.groupId === 1).map((e) => e.target)).toEqual([':server:1']);
-  });
 });
 
 describe('flattenUnreadOrder', () => {
@@ -106,17 +66,5 @@ describe('flattenUnreadOrder', () => {
       pins: makePins({}),
     };
     expect(flattenUnreadOrder(args).map((e) => e.key)).toEqual([srvKey(1), '1::#busy']);
-  });
-
-  it('drops the virtual FRIENDS feed (no backing buffer / never unread)', () => {
-    const args = {
-      networks: [{ id: 1 }],
-      buffers: makeBuffers({ '1': ['#busy'] }, { '1::#busy': 2 }),
-      pins: makePins({}),
-      friends: { feedKey: ':friends:', dms: [] as Array<{ networkId: number; target: string }> },
-    };
-    const keys = flattenUnreadOrder(args).map((e) => e.key);
-    expect(keys).not.toContain(':friends:');
-    expect(keys).toEqual(['1::#busy']);
   });
 });

@@ -114,7 +114,7 @@ export function bufferKey(networkId: number | string | null, target: string) {
 // hand us divergent casing (#289 for channels; #327 for live DMs), so exact-key
 // identity alone forks duplicates. Exact key is tried first as the common fast
 // path; the O(n) folded scan only runs on a miss. The flat ':'-sentinels
-// (`:server:`, `:friends:`…) are fixed keys — exact only, never folded.
+// (`:server:`…) are fixed keys — exact only, never folded.
 function resolveExistingKey(
   buffers: Record<string, Buffer>,
   networkId: number | string | null,
@@ -398,9 +398,9 @@ export const useBuffersStore = defineStore('buffers', {
     // tell "open" from "closed/parted-away" before activating — activate() would
     // otherwise recreate an empty shell and strand the UI in a half-state. The
     // case fold matters because the toast/jump focus guards gate activate() on
-    // the raw server-cased target (highlight toast → event.target, friend-online
-    // → event.nick): an exact-key lookup would report a buffer that's open under
-    // a different casing as closed and refuse to focus its own notification.
+    // the raw server-cased target (highlight toast → event.target): an
+    // exact-key lookup would report a buffer that's open under a different
+    // casing as closed and refuse to focus its own notification.
     isOpen: (state) => (networkId: number | string, target: string) =>
       resolveExistingKey(state.buffers, networkId, target) !== null,
     forNetwork: (state) => (networkId: number | string) =>
@@ -466,8 +466,8 @@ export const useBuffersStore = defineStore('buffers', {
     // The open DM buffer for a (network, nick), matched case-insensitively so we
     // resolve to whatever case is already open rather than forking a second
     // buffer that differs only by nick case. Channels and the flat virtual
-    // sentinels (`:server:`, `:friends:`…) are excluded. One home for the
-    // resolution the Friends sidebar, overview, and keyboard nav all need.
+    // sentinels (`:server:`…) are excluded. One home for the
+    // resolution the sidebar and keyboard nav both need.
     findDm:
       (state) =>
       (networkId: number | string, nick: string): Buffer | null => {
@@ -488,7 +488,7 @@ export const useBuffersStore = defineStore('buffers', {
     // (#289), so an exact-key lookup alone would miss the open buffer and drop
     // ephemeral signals (e.g. typing) on the floor. Exact key is tried first as
     // the common fast path; the folded scan only runs on a case mismatch. The
-    // flat ':'-sentinels (`:server:`, `:friends:`…) are fixed keys — exact only.
+    // flat ':'-sentinels (`:server:`…) are fixed keys — exact only.
     findByTarget:
       (state) =>
       (networkId: number | string | null, target: string): Buffer | null => {

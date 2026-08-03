@@ -22,7 +22,6 @@ import { useChannelNotifyStore } from '../stores/channelNotify.js';
 import { useIgnoresStore } from '../stores/ignores.js';
 import { useNickNotesStore } from '../stores/nickNotes.js';
 import { useRelayBotsStore } from '../stores/relayBots.js';
-import { useFriendsStore } from '../stores/friends.js';
 import { useWhoisStore } from '../stores/whois.js';
 import { useBookmarksStore } from '../stores/bookmarks.js';
 import { useDataExportStore } from '../stores/dataExport.js';
@@ -31,7 +30,7 @@ import { useUploadsStore } from '../stores/uploads.js';
 import { makeClientId } from '../utils/clientId.js';
 import { useToastsStore } from '../stores/toasts.js';
 import { downloadTextFile } from '../utils/download.js';
-import { notifyForEvent, playSound } from './useHighlightNotifier.js';
+import { notifyForEvent } from './useHighlightNotifier.js';
 
 export interface AckResult {
   ok: boolean;
@@ -52,7 +51,7 @@ let socket: WebSocket | null = null;
 // 'close' reconnect arm can't fire.
 let socketListeners: AbortController | null = null;
 // Module-level singleton: the live WS link to the lurker service. Exported so
-// read-only consumers (e.g. the FRIENDS status dot) can reflect it without
+// read-only consumers (e.g. the sidebar status dot) can reflect it without
 // calling useSocket() (which would re-register the connect lifecycle).
 export const connected = ref(false);
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -351,59 +350,11 @@ function applyEvent(event: any): void {
       );
       break;
     case 'peer-presence': {
-      // Capture the prior known state BEFORE applying the update — the
-      // came-online toast must fire only on a transition we actually witnessed.
-      const prevPeerState =
-        networks.states[event.networkId]?.peerPresence?.[String(event.nick).toLowerCase()]?.state ??
-        null;
       networks.applyPeerPresence(event.networkId, event.nick, {
         state: event.state,
         stateAt: event.stateAt,
         awayMessage: event.awayMessage,
       });
-      const friends = useFriendsStore();
-      // Came-online notification: only on a real offline→online transition. The
-      // server also reports current state on the MONITOR seed and whenever a nick
-      // is freshly added to the watch (RPL_MONONLINE with no prior presence row),
-      // so keying purely off `state === 'online'` would fire when you add an
-      // already-online friend or on a first connect. Gate on the prior client
-      // state being 'offline' so only genuine transitions notify.
-      //
-      // In-app toast + sound only when the tab is visible — the hidden case is
-      // the server-side push's job (wsHub.maybePushFriendOnline), gated on the
-      // same Page Visibility signal, so exactly one of the two fires.
-      if (
-        event.state === 'online' &&
-        prevPeerState === 'offline' &&
-        typeof document !== 'undefined' &&
-        !document.hidden
-      ) {
-        const contact = friends.notifyContactFor(event.networkId, event.nick);
-        const settings = useSettingsStore();
-        if (contact && settings.effective('notifications.friend_online.enabled')) {
-          // Name the nick that actually signed on when it differs from the
-          // display name — for a friend watched under several nicks/alts, "(as
-          // nostimo)" says which identity, and matches the dot in the breakdown.
-          const nick = String(event.nick);
-          const asNick =
-            nick && nick.toLowerCase() !== contact.displayName.toLowerCase() ? ` (as ${nick})` : '';
-          useToastsStore().push({
-            kind: 'notify',
-            title: `${contact.displayName} came online${asNick}`,
-            body: '',
-            networkId: event.networkId,
-            target: event.nick,
-          });
-          // Optional sound, same enable/choice/volume model as the DM/highlight/
-          // always-notify toasts (shared playSound helper).
-          if (settings.effective('notifications.friend_online.sound.enabled')) {
-            playSound(
-              (settings.effective('notifications.friend_online.sound.choice') as string) || 'knock',
-              settings.effective('notifications.friend_online.sound.volume'),
-            );
-          }
-        }
-      }
       break;
     }
     case 'system': {
@@ -847,18 +798,6 @@ function handleMessage(raw: string): void {
     // message. Upsert the row into the Transfers store; this also self-reveals
     // the Transfers affordance the first time an offer lands.
     useDccStore().applyTransfer(payload.transfer);
-    return;
-  }
-  if (payload.kind === 'contacts-snapshot') {
-    useFriendsStore().applySnapshot(payload.contacts || []);
-    return;
-  }
-  if (payload.kind === 'contact-updated') {
-    useFriendsStore().applyContactUpdated(payload.contact);
-    return;
-  }
-  if (payload.kind === 'contact-deleted') {
-    useFriendsStore().applyContactDeleted(payload.contactId);
     return;
   }
   if (payload.kind === 'bookmark-updated') {

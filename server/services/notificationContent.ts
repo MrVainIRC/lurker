@@ -21,7 +21,7 @@
 
 import { stripFormatting } from './textMatch.js';
 
-export type PushPayloadKind = 'dm' | 'highlight' | 'always_notify' | 'friend_online';
+export type PushPayloadKind = 'dm' | 'highlight' | 'always_notify';
 
 /**
  * The semantic push payload wsHub hands to pushService. Deliberately typed (it
@@ -39,8 +39,6 @@ export interface PushPayload {
   text?: string | null;
   time?: string;
   messageId?: number | null;
-  /** friend_online only. */
-  displayName?: string | null;
   /** Unread-highlight total for the app icon; absent when it can't have changed. */
   badge?: number;
 }
@@ -56,34 +54,18 @@ export interface NotificationContent {
   tag: string;
 }
 
-// "Amiantos came online (as nostimo · Libera)". The nick (target) is shown only
-// when it differs from the display name — for a friend watched under several
-// nicks it says which identity signed on; the network disambiguates a friend
-// watched across networks.
-function friendOnlineTitle(payload: PushPayload): string {
-  const name = payload.displayName || 'A friend';
-  const parts: string[] = [];
-  if (payload.target && String(payload.target).toLowerCase() !== name.toLowerCase()) {
-    parts.push(`as ${payload.target}`);
-  }
-  if (payload.networkName) parts.push(payload.networkName);
-  return `${name} came online${parts.length ? ` (${parts.join(' · ')})` : ''}`;
-}
-
 function title(payload: PushPayload): string {
   // A DM is already identified by its sender, so the target would just repeat the
   // nick; a channel highlight needs to say where it happened.
   if (payload.kind === 'dm') {
     return `${payload.nick || 'someone'}${payload.networkName ? ' (' + payload.networkName + ')' : ''}`;
   }
-  if (payload.kind === 'friend_online') return friendOnlineTitle(payload);
   return `${payload.nick || 'someone'} in ${payload.target || ''}`;
 }
 
 export function composeNotification(payload: PushPayload): NotificationContent {
   return {
     title: title(payload),
-    // friend_online carries no text, so its body is empty — the title says it all.
     // Strip mIRC formatting codes (\x03 colors, \x02 bold, …): a native alert
     // renders body as plain text, so the codes would otherwise arrive as literal
     // control chars on the lock screen (#606).

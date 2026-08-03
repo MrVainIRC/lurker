@@ -452,11 +452,11 @@ describe('addPeerWatch live presence seed (#302)', () => {
     });
   }
 
-  // A friend added while connected must get a MONITOR S follow-up: the server
+  // A peer tracked while connected must get a MONITOR S follow-up: the server
   // only SHOULD (not MUST) volunteer current state in reply to MONITOR +, so
-  // without the explicit status query a freshly-added offline friend lands with
+  // without the explicit status query a freshly-added offline peer lands with
   // no state and renders as if online until a reconnect re-seeds.
-  it('follows MONITOR + with MONITOR S when a friend is tracked on a live connection', () => {
+  it('follows MONITOR + with MONITOR S when a peer is tracked on a live connection', () => {
     const conn = makeConn();
     conn.useMonitor = true;
     conn.monitorLimit = 100;
@@ -464,7 +464,7 @@ describe('addPeerWatch live presence seed (#302)', () => {
     const raw = vi.fn<(...args: string[]) => void>();
     conn.client.raw = raw;
 
-    conn.trackFriend('offlinepal', 42);
+    conn.trackDmPeer('offlinepal');
 
     // Order matters: the nick must be added before MONITOR S, or the status
     // dump won't include it.
@@ -478,7 +478,7 @@ describe('addPeerWatch live presence seed (#302)', () => {
     const raw = vi.fn<(...args: string[]) => void>();
     conn.client.raw = raw;
 
-    conn.trackFriend('offlinepal', 42);
+    conn.trackDmPeer('offlinepal');
 
     expect(raw).not.toHaveBeenCalled();
   });
@@ -1178,7 +1178,7 @@ describe('away/back presence logging (#310)', () => {
   // online/offline 'Presence:' lines.
   it('logs Presence: away (with reason) and back for a tracked peer', () => {
     const conn = makeConn('awaylog');
-    conn.trackFriend('awaypal', 7);
+    conn.trackDmPeer('awaypal');
     conn.markPeerEvent('awaypal', 'online'); // online itself isn't logged here
     conn.markPeerEvent('awaypal', 'away', 'brb');
     conn.markPeerEvent('awaypal', 'back');
@@ -1221,9 +1221,9 @@ describe('disconnect-offline sweep + WHO re-light (no-MONITOR presence)', () => 
     return new IrcConnection({ network, onEvent: () => {} });
   }
 
-  it('markAllPeersOffline forces every tracked peer (DM + friend) offline', () => {
+  it('markAllPeersOffline forces every tracked peer offline', () => {
     const conn = makeConn('disco');
-    conn.trackFriend('pal', 1);
+    conn.trackDmPeer('pal');
     conn.trackDmPeer('dmpal');
     conn.markPeerEvent('pal', 'online');
     conn.markPeerEvent('dmpal', 'away', 'brb');
@@ -1245,7 +1245,7 @@ describe('disconnect-offline sweep + WHO re-light (no-MONITOR presence)', () => 
   // The guard makes the sweep a no-op in that window.
   it('is a no-op when the connection is disposed (avoids a post-delete FK write)', () => {
     const conn = makeConn('disco-disposed');
-    conn.trackFriend('pal', 1);
+    conn.trackDmPeer('pal');
     conn.markPeerEvent('pal', 'online');
     conn.disposed = true;
     conn.markAllPeersOffline();
@@ -1258,7 +1258,7 @@ describe('disconnect-offline sweep + WHO re-light (no-MONITOR presence)', () => 
   it("fires the sweep from the 'socket close' event (the auto-reconnect path)", () => {
     const conn = makeConn('sockclose');
     conn.publish = vi.fn<typeof conn.publish>(); // skip the disconnected-state + error publishes
-    conn.trackFriend('pal', 1);
+    conn.trackDmPeer('pal');
     conn.markPeerEvent('pal', 'online');
     conn.client.emit('socket close', {});
     expect(getPeerPresence(conn.network.id, 'pal')?.state).toBe('offline');
@@ -1268,7 +1268,7 @@ describe('disconnect-offline sweep + WHO re-light (no-MONITOR presence)', () => 
     const conn = makeConn('relight');
     conn.publish = vi.fn<typeof conn.publish>(); // assert on presence, not history
     conn.client.user.nick = 'me';
-    conn.trackFriend('chanpal', 9);
+    conn.trackDmPeer('chanpal');
     // Peer shares a channel with us…
     conn.client.emit('join', { channel: '#room', nick: 'chanpal', ident: 'u', hostname: 'h' });
     // …then our socket drops (peer quit unseen or not — doesn't matter):
@@ -1286,7 +1286,7 @@ describe('disconnect-offline sweep + WHO re-light (no-MONITOR presence)', () => 
     const conn = makeConn('relight-away');
     conn.publish = vi.fn<typeof conn.publish>();
     conn.client.user.nick = 'me';
-    conn.trackFriend('awaychan', 10);
+    conn.trackDmPeer('awaychan');
     conn.client.emit('join', { channel: '#room', nick: 'awaychan' });
     conn.client.emit('wholist', { target: '#room', users: [{ nick: 'awaychan', away: true }] });
     expect(getPeerPresence(conn.network.id, 'awaychan')?.state).toBe('away');
