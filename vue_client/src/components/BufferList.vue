@@ -1069,8 +1069,8 @@ onBeforeUnmount(() => {
    appearing/disappearing at the row's right edge. Quiet; absent entirely on
    single-network instances. The label's own ellipsis clips it on overflow. */
 .net-hint {
+  /* One font size across the UI: the hint demotes itself with color alone. */
   color: var(--fg-muted);
-  font-size: 0.85em;
   margin-inline-start: var(--space-2);
 }
 /* Gate :hover behind (hover: hover) so iPad-in-desktop-layout (width > 768px,
