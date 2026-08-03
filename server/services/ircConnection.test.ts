@@ -38,7 +38,7 @@ import {
   seedAutojoinChannel,
   listForNetwork as listBufferRowsForNetwork,
 } from '../db/buffers.js';
-import { getPeerPresence } from '../db/peerPresence.js';
+import { getPeerPresence, writePeerState } from '../db/peerPresence.js';
 import { setUserSetting, deleteUserSetting } from '../db/settings.js';
 
 // The bare IrcConnections built below carry user_id: 1, and their join/part
@@ -1237,6 +1237,25 @@ describe('disconnect-offline sweep + WHO re-light (no-MONITOR presence)', () => 
     conn.markPeerEvent('stranger', 'online'); // untracked → gated out, no row
     conn.markAllPeersOffline();
     expect(getPeerPresence(conn.network.id, 'stranger')).toBeNull();
+  });
+
+  // Rows left behind by anything that no longer tracks the nick (the removed
+  // friends system being the motivating case) can never be refreshed — but
+  // they WOULD be served as live state if the nick is ever re-tracked, and on
+  // a no-MONITOR network nothing ever corrects them. The hydrate-time orphan
+  // sweep deletes them; rows for still-tracked peers survive.
+  it('sweepUntrackedPresenceRows deletes rows for untracked nicks and keeps tracked ones', () => {
+    const conn = makeConn('orphan-sweep');
+    conn.trackDmPeer('keptpal');
+    // Simulate leftovers: rows written under a prior regime for nicks nothing
+    // tracks anymore (writePeerState bypasses the eligiblePeer gate on purpose).
+    writePeerState(conn.network.id, 'exfriend', 'online', new Date().toISOString(), null);
+    writePeerState(conn.network.id, 'keptpal', 'away', new Date().toISOString(), 'brb');
+
+    conn.sweepUntrackedPresenceRows();
+
+    expect(getPeerPresence(conn.network.id, 'exfriend')).toBeNull();
+    expect(getPeerPresence(conn.network.id, 'keptpal')?.state).toBe('away');
   });
 
   // dispose() sets disposed=true before the socket tears down; on a deletion

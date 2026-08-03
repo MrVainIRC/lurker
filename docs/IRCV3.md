@@ -103,7 +103,7 @@ them yet.
   refused your messages to (a `+R`/`+M` channel you can't speak in), and to peers it
   knows are offline — otherwise every keystroke earns another error reply in your DM
   buffer.
-  <br>`server/services/ircConnection.ts:4529` (send), `:2615` (receive)
+  <br>`server/services/ircConnection.ts:4873` (send), `:2746` (receive)
 
 ### You can see when your DM peers are around
 
@@ -113,11 +113,11 @@ Presence dots on DMs, without Lurker hammering the network with `WHOIS` polls.
   specific people connect or disconnect. Networks without it get no presence
   tracking at all; we deliberately don't fall back to polling, because polling
   every open DM's peer is abusive to the network.
-  <br>`server/services/ircConnection.ts:611`
+  <br>`server/services/ircConnection.ts:1298` (ISUPPORT gate), `:2891` (seed)
 - **`extended-monitor`** — extends that to away/back state for people you share no
   channel with, which is what makes presence useful for DM peers rather than just
   channel regulars.
-  <br>`server/services/ircConnection.ts:586`
+  <br>`server/services/ircConnection.ts:657`
 
 ### End-to-end encryption can identify who it's talking to
 

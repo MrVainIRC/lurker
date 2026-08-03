@@ -6,11 +6,10 @@ import { SYSTEM_KEY, VIRTUAL_BUFFERS, isVirtualKey, virtualConfig } from './virt
 
 describe('virtualBuffers', () => {
   it('registers the system buffer as a real input buffer', () => {
-    // #355: system is a first-class buffer (renderMode 'buffer') with a
-    // slash-command input and no nicklist.
+    // #355: system is a first-class buffer with a slash-command input and no
+    // nicklist.
     expect(VIRTUAL_BUFFERS[SYSTEM_KEY]).toMatchObject({
       key: SYSTEM_KEY,
-      renderMode: 'buffer',
       hasNicklist: false,
       hasInput: true,
     });

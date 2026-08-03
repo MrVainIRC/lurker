@@ -1118,6 +1118,7 @@ export class IrcConnection {
           }
           this.addPeerReason(buf.target.toLowerCase(), 'dm');
         }
+        this.sweepUntrackedPresenceRows();
       } catch (e) {
         console.warn('[presence] hydrate failed:', (e as Error)?.message || e);
       }
@@ -3207,6 +3208,26 @@ export class IrcConnection {
       deletePeerPresence(this.network.id, nick);
     } catch (e) {
       console.warn('[presence] untrack failed:', (e as Error)?.message || e);
+    }
+  }
+
+  // Restore the invariant that presence rows ⊆ tracked peers. Run right after
+  // hydration: any row whose nick isn't tracked can never be refreshed (nothing
+  // watches it) but WOULD be served as live state the moment the nick re-enters
+  // trackedPeers — on a no-MONITOR network probePresence has no wire follow-up,
+  // so a frozen 'online' from weeks ago would render as current. The friends
+  // system used to keep such nicks tracked (its hydrate pass re-adopted them,
+  // so every disconnect swept them offline); with that gone, rows it left
+  // behind are permanent orphans unless swept here.
+  sweepUntrackedPresenceRows(): void {
+    for (const row of listPeerPresenceForNetwork(this.network.id)) {
+      if (!row) continue;
+      if (this.trackedPeers.has(row.nick.toLowerCase())) continue;
+      try {
+        deletePeerPresence(this.network.id, row.nick);
+      } catch (e) {
+        console.warn('[presence] orphan sweep failed:', (e as Error)?.message || e);
+      }
     }
   }
 

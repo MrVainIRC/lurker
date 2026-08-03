@@ -6,7 +6,7 @@ import { computed } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useNetworksStore } from '../stores/networks.js';
 import { useBuffersStore } from '../stores/buffers.js';
-import { SYSTEM_KEY, virtualConfig, type VirtualRenderMode } from '../lib/virtualBuffers.js';
+import { SYSTEM_KEY, virtualConfig } from '../lib/virtualBuffers.js';
 
 export interface ActiveBufferState {
   activeKey: Ref<string | null>;
@@ -21,7 +21,6 @@ export interface ActiveBufferState {
   // Registry-driven capabilities so views dispatch off the virtual-buffer
   // config instead of hard-coding per-key checks. For a real IRC buffer these
   // default to a normal message buffer with input + nicklist.
-  renderMode: ComputedRef<VirtualRenderMode>;
   hasInput: ComputedRef<boolean>;
   hasNicklist: ComputedRef<boolean>;
 }
@@ -37,14 +36,10 @@ export function useActiveBuffer(): ActiveBufferState {
   const isSystemBuffer = computed(() => activeKey.value === SYSTEM_KEY);
   // A real IRC buffer renders the message list with input + (for channels) a
   // nicklist; virtual buffers declare their own capabilities in the registry.
-  const renderMode = computed<VirtualRenderMode>(() => virtualCfg.value?.renderMode ?? 'buffer');
   const hasInput = computed(() => virtualCfg.value?.hasInput ?? true);
   const hasNicklist = computed(() => virtualCfg.value?.hasNicklist ?? true);
   const activeBuf = computed(() => {
     if (!activeKey.value) return null;
-    // Only 'buffer'-mode virtual buffers have a Buffer object in the store; a
-    // bespoke-component mode would render its own body.
-    if (virtualCfg.value && virtualCfg.value.renderMode !== 'buffer') return null;
     return buffers.byKey(activeKey.value);
   });
   // Channels show their topic; a DM shows the peer's ident@hostname in the
@@ -84,7 +79,6 @@ export function useActiveBuffer(): ActiveBufferState {
     bufferLabel,
     isSystemBuffer,
     isVirtual,
-    renderMode,
     hasInput,
     hasNicklist,
   };
