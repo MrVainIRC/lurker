@@ -202,7 +202,7 @@ Authorization: Bearer <token>        (native; browsers ride the cookie)
 ### 4.3 Connect: the snapshot burst
 
 On every successful connect the server immediately sends a **burst of separate
-frames**, synchronously, in this order (`wsHub.ts` `sendSnapshotInner`, 2273):
+frames**, synchronously, in this order (`wsHub.ts` `sendSnapshotInner`, 2293):
 
 1. `{kind:'snapshot', protocolVersion, maxUploadBytes, networks, globalIgnores, cursor?}`
    — full live state for every network (see §5.1). `cursor` (present only on a
@@ -213,14 +213,20 @@ frames**, synchronously, in this order (`wsHub.ts` `sendSnapshotInner`, 2273):
 2. `{kind:'draft-snapshot', drafts}` — saved per-buffer input drafts.
 3. A `backlog` frame for the app-scoped **system buffer** (`networkId:null`,
    `target:':system:'`).
-4. One `backlog` frame per open buffer on each connected network.
-5. Per **offline** network: a real backlog for its `:server:` log, shells for
+4. `{kind:'favorites-changed', favorites:[{networkId, target, bufferId}]}` —
+   the user's favorite buffers in global order. Deliberately the SAME frame
+   every later favorite/unfavorite/reorder correction uses (replace
+   wholesale), so one handler covers seed and updates. Additive like frame 7:
+   an older server never sends it — no frame ⇒ treat favorites as empty,
+   don't wait on it.
+5. One `backlog` frame per open buffer on each connected network.
+6. Per **offline** network: a real backlog for its `:server:` log, shells for
    its channels/DMs.
-6. `{kind:'backlog-complete'}` — terminal marker, nothing else in it.
+7. `{kind:'backlog-complete'}` — terminal marker, nothing else in it.
 
 Render progressively from frame 1; don't wait for the end.
 
-**What frame 8 is for.** Until it arrives, "I have no row for this buffer _yet_"
+**What frame 7 is for.** Until it arrives, "I have no row for this buffer _yet_"
 and "there is no such buffer" are the same observation, and no amount of waiting
 separates them. After it arrives, **absence is proof**: a buffer key with no
 `backlog` frame is **not open** — for channels, DMs and `:server:` logs alike,
@@ -253,7 +259,7 @@ Two things that look like they'd answer the same question and don't:
   (§4.3) is the read — it answers for any target without creating, reopening, or
   joining anything.
 
-An older server never sends frame 8 (it's additive, and `protocolVersion` does
+An older server never sends frame 7 (it's additive, and `protocolVersion` does
 not move for it) — if you don't see one, keep whatever you do today rather than
 concluding anything. A truncated burst withholds it too: the server only sends
 it once the whole burst went out, so a snapshot that failed part-way through
@@ -503,7 +509,9 @@ buffer also accepts an optional `bufferId` (number). When present and valid it
 WINS over `networkId`/`target`, which may then be omitted; an id that doesn't
 resolve to one of your buffers drops the verb — the same outcome as an unknown
 name. `reorder-pins` takes `bufferIds:[…]` as the id-form alternative to
-`targets`. Verbs that address IRC _entities_ rather than buffers (`send`,
+`targets`; `reorder-favorites` is id-form ONLY (favorites span networks, so
+bare names can't address them — and every client holds the ids from
+`favorites-changed`). Verbs that address IRC _entities_ rather than buffers (`send`,
 `action`, `notice`, `join`, `part`, `typing`, `e2e`, `ctcp`) stay name-only —
 the name is what goes on the IRC wire. `open-buffer`'s id form addresses an
 existing row only; minting a new DM or JOINing a channel is inherently
@@ -573,21 +581,23 @@ anything at all.
 
 ### View state (persisted server-side, fanned out to your other devices)
 
-| `type`                            | Fields                                                                                                                                                                                                                                                                                                                                            |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mark-read`                       | `networkId, target, messageId` (or `bufferId, messageId`) — MAX-clamped server-side, idempotent. System buffer: `networkId: null, target: ':system:'` (send an explicit null, don't omit)                                                                                                                                                         |
-| `mark-all-read`                   | —                                                                                                                                                                                                                                                                                                                                                 |
-| `clear-buffer` / `unclear-buffer` | `networkId, target` (or `bufferId`)                                                                                                                                                                                                                                                                                                               |
-| `pin-buffer` / `unpin-buffer`     | `networkId, target` (or `bufferId`)                                                                                                                                                                                                                                                                                                               |
-| `reorder-pins`                    | `networkId, targets:[…]` (or `networkId, bufferIds:[…]`)                                                                                                                                                                                                                                                                                          |
-| `set-nicklist-collapsed`          | `networkId, target, collapsed` (or `bufferId, collapsed`)                                                                                                                                                                                                                                                                                         |
-| `set-channel-notify-always`       | `networkId, target, notifyAlways` (or `bufferId, notifyAlways`)                                                                                                                                                                                                                                                                                   |
-| `draft-set` / `draft-clear`       | `networkId, target, body?` (or `bufferId, body?`)                                                                                                                                                                                                                                                                                                 |
-| `input-history-add`               | `networkId, target, text` (or `bufferId, text`)                                                                                                                                                                                                                                                                                                   |
-| `set-bookmark` / `unset-bookmark` | `messageId`. Saving is a silent no-op for a message you don't own, and for system-buffer lines (`networkId:null`) which have no owning network — no `bookmark-updated` follows, so don't render a toggle optimistically                                                                                                                           |
-| `set-nick-note`                   | `networkId, nick, note`                                                                                                                                                                                                                                                                                                                           |
-| `set-relay-bot`                   | `networkId, nick, marked, pattern`                                                                                                                                                                                                                                                                                                                |
-| `add-ignore` / `remove-ignore`    | `networkId` (null = global), `rule`/`mask` / `id`/`mask`. `rule` = `{mask (null or '*' = anyone), channels?, pattern?, patternKind: substr\|full\|regex, levels? (default ALL), isExcept?, expiresAt?}` (`ignoreRuleInput.ts`). Channel/network **muting** is expressed here — a rule with no mask scoped to a channel — not via a dedicated verb |
+| `type`                                  | Fields                                                                                                                                                                                                                                                                                                                                            |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mark-read`                             | `networkId, target, messageId` (or `bufferId, messageId`) — MAX-clamped server-side, idempotent. System buffer: `networkId: null, target: ':system:'` (send an explicit null, don't omit)                                                                                                                                                         |
+| `mark-all-read`                         | —                                                                                                                                                                                                                                                                                                                                                 |
+| `clear-buffer` / `unclear-buffer`       | `networkId, target` (or `bufferId`)                                                                                                                                                                                                                                                                                                               |
+| `pin-buffer` / `unpin-buffer`           | `networkId, target` (or `bufferId`)                                                                                                                                                                                                                                                                                                               |
+| `reorder-pins`                          | `networkId, targets:[…]` (or `networkId, bufferIds:[…]`). Same subset semantics as `reorder-favorites`: unmentioned pins keep their relative order after the supplied ones                                                                                                                                                                        |
+| `favorite-buffer` / `unfavorite-buffer` | `networkId, target` (or `bufferId`). One flag for both UX labels: channels surface as "Favorites", DMs as "Friends". Server/system pseudo-buffers are refused. Closing a buffer implies unfavorite                                                                                                                                                |
+| `reorder-favorites`                     | `bufferIds:[…]` (id-form only, global order). May be a subset — unmentioned favorites keep their relative order after the supplied ones, so a kind-filtered section reorders independently. A stale/foreign id ⇒ no write; either way the server echoes the authoritative `favorites-changed`                                                     |
+| `set-nicklist-collapsed`                | `networkId, target, collapsed` (or `bufferId, collapsed`)                                                                                                                                                                                                                                                                                         |
+| `set-channel-notify-always`             | `networkId, target, notifyAlways` (or `bufferId, notifyAlways`)                                                                                                                                                                                                                                                                                   |
+| `draft-set` / `draft-clear`             | `networkId, target, body?` (or `bufferId, body?`)                                                                                                                                                                                                                                                                                                 |
+| `input-history-add`                     | `networkId, target, text` (or `bufferId, text`)                                                                                                                                                                                                                                                                                                   |
+| `set-bookmark` / `unset-bookmark`       | `messageId`. Saving is a silent no-op for a message you don't own, and for system-buffer lines (`networkId:null`) which have no owning network — no `bookmark-updated` follows, so don't render a toggle optimistically                                                                                                                           |
+| `set-nick-note`                         | `networkId, nick, note`                                                                                                                                                                                                                                                                                                                           |
+| `set-relay-bot`                         | `networkId, nick, marked, pattern`                                                                                                                                                                                                                                                                                                                |
+| `add-ignore` / `remove-ignore`          | `networkId` (null = global), `rule`/`mask` / `id`/`mask`. `rule` = `{mask (null or '*' = anyone), channels?, pattern?, patternKind: substr\|full\|regex, levels? (default ALL), isExcept?, expiresAt?}` (`ignoreRuleInput.ts`). Channel/network **muting** is expressed here — a rule with no mask scoped to a channel — not via a dedicated verb |
 
 ### Presence & status
 
@@ -635,6 +645,7 @@ a v1 client.
 | `buffer-cleared`                                                                                                                 | `networkId, target, bufferId, clearedBeforeId, clearedAt`                                                                                                                                                                                                             | `/clear` marker                                                                                                                                           |
 | `buffer-renamed`                                                                                                                 | `networkId, from, to, bufferId, merged, mergedFromBufferId?` — see §9.7                                                                                                                                                                                               | A buffer kept its id across a name event: DM follows a peer's NICK, or a CASEMAPPING refold merged case-twins (any kind)                                  |
 | `pins-changed`                                                                                                                   | `networkId, pinned[], pinnedIds[]` (parallel-indexed: `pinnedIds[i]` is `pinned[i]`'s buffer)                                                                                                                                                                         | Authoritative pin order                                                                                                                                   |
+| `favorites-changed`                                                                                                              | `favorites:[{networkId, target, bufferId}]` — the FULL global order; replace wholesale                                                                                                                                                                                | Connect burst + authoritative favorites order                                                                                                             |
 | `nicklist-collapsed-changed` / `channel-notify-changed`                                                                          | `networkId, target, bufferId, …`                                                                                                                                                                                                                                      | View-state sync                                                                                                                                           |
 | `draft-updated` / `input-history-added` / `bookmark-updated` / `nick-note-updated` / `relay-bot-updated` / `ignore-list-updated` | various                                                                                                                                                                                                                                                               | Multi-device view-state fan-out                                                                                                                           |
 | `settings`                                                                                                                       | `changes`, `maxUploadBytes?` (only when the upload cap was touched)                                                                                                                                                                                                   | Server-side settings changed                                                                                                                              |
@@ -991,10 +1002,11 @@ The contract, in the order a client should apply it:
   order there is no key collision. The surviving conversation keeps its id.
   The merged history interleaves server-side, so wipe the local slice and
   re-hydrate rather than guessing at the interleave.
-- **Corrections ride behind a merge.** `read-state`, `pins-changed`, and (when
-  the surviving draft changed) `draft-updated` frames follow immediately —
-  the merge changed those server-side and an idle buffer would never
-  otherwise learn.
+- **Corrections ride behind a merge.** `read-state`, `pins-changed`,
+  `favorites-changed`, and (when the surviving draft changed) `draft-updated`
+  frames follow immediately — the merge changed those server-side and an idle
+  buffer would never otherwise learn. Favorites entries' `target` strings are
+  display hints subject to `buffer-renamed`; `bufferId` is the identity.
 - **Key off `to`, never a name you predicted**, and follow the active buffer:
   a rename of the buffer the user is reading is the same buffer, not a
   navigation.

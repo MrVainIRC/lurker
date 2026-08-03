@@ -4,6 +4,7 @@
 import db from './index.js';
 import { foldTargetFor } from './buffers.js';
 import { resolveBuffer } from './bufferResolve.js';
+import { renumberFavorites } from './favoriteBuffers.js';
 
 // Rename a buffer — the primitive behind DM nick-follows (and, when the
 // draft/channel-rename CAP lands, channel renames). Under the normalized
@@ -89,6 +90,12 @@ const adoptPinStmt = db.prepare(
   `UPDATE OR IGNORE pinned_buffers SET buffer_id = ? WHERE buffer_id = ?`,
 );
 
+// favorites: same policy as pins — survivor keeps its slot, an absorbed-only
+// favorite transfers.
+const adoptFavoriteStmt = db.prepare(
+  `UPDATE OR IGNORE favorite_buffers SET buffer_id = ? WHERE buffer_id = ?`,
+);
+
 // view-state singletons: survivor's row wins, absorbed-only rows transfer.
 const adoptNicklistStmt = db.prepare(
   `UPDATE OR IGNORE nicklist_collapsed SET buffer_id = ? WHERE buffer_id = ?`,
@@ -154,6 +161,7 @@ export function absorbBufferRow(
   mergeReadsStmt.run({ survivor: survivor.id, absorbed: absorbed.id });
   adoptReadsStmt.run(survivor.id, absorbed.id);
   adoptPinStmt.run(survivor.id, absorbed.id);
+  adoptFavoriteStmt.run(survivor.id, absorbed.id);
   adoptNicklistStmt.run(survivor.id, absorbed.id);
   adoptNotifyStmt.run(survivor.id, absorbed.id);
   adoptDraftStmt.run(survivor.id, absorbed.id);
@@ -164,6 +172,11 @@ export function absorbBufferRow(
   // UPDATE OR IGNORE above that lost to the survivor left rows behind).
   deleteRowStmt.run(absorbed.id);
   renumberPinsStmt.run(userId, networkId);
+  // Favorites density is per user alone (global order). Unlike the pins twin
+  // above, the module's renumber is exported (the network-delete route needs
+  // it too), so reuse it — it's a bare statement-runner, no transaction of its
+  // own, so it nests fine inside the caller's.
+  renumberFavorites(userId);
   const draftAfter = (draftBodyStmt.get(userId, survivor.id) as { body: string } | undefined)?.body;
   return { draftChanged: draftAfter !== draftBefore };
 }

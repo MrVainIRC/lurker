@@ -21,6 +21,7 @@ import {
   foldTargetFor,
   kindForTarget,
 } from '../db/buffers.js';
+import { unfavoriteBuffer } from '../db/favoriteBuffers.js';
 import * as chanlistDb from '../db/chanlist.js';
 import type { PeerPresence, PeerState } from '../db/peerPresence.js';
 import {
@@ -3314,8 +3315,15 @@ export class IrcConnection {
     const canonical = canonicalChannelTarget(name, this.channels) ?? name;
     this.channels.delete(name.toLowerCase());
     this.joinedFoldedCache = null;
+    let favoritesChanged = false;
     try {
       if (forget && !hasMessageForTarget(this.network.id, canonical)) {
+        // Unfavorite BEFORE the hard delete: letting the FK cascade take the
+        // favorite row would skip the renumber and leave every connected
+        // client holding a ghost favorites entry for the dead buffer id. The
+        // flag rides the channel-parted event so wsHub re-publishes the
+        // authoritative list.
+        favoritesChanged = unfavoriteBuffer(this.network.user_id, this.network.id, canonical);
         deleteBuffer(this.network.user_id, this.network.id, canonical);
       } else {
         setBufferAutojoin(this.network.user_id, this.network.id, canonical, false);
@@ -3326,7 +3334,11 @@ export class IrcConnection {
     } catch (_) {
       /* ignore */
     }
-    this.publish({ type: 'channel-parted', target: canonical });
+    this.publish({
+      type: 'channel-parted',
+      target: canonical,
+      ...(favoritesChanged ? { favoritesChanged: true } : {}),
+    });
   }
 
   /** Fold-aware live membership (#707): is `name` one of this connection's

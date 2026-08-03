@@ -2442,6 +2442,33 @@ describe('join echo, forwarded joins (470), and un-partable channels (442)', () 
     expect(getBuffer(conn.network.user_id, netId, '#apple')).toBeUndefined();
   });
 
+  it('470-forget drops a favorite on the deleted row and flags the part event', async () => {
+    // The hard delete would otherwise cascade the favorite away silently —
+    // no renumber, no favorites-changed republish — leaving clients with a
+    // ghost entry for the dead buffer id.
+    const { favoriteBuffer, listFavoritesForUser } = await import('../db/favoriteBuffers.js');
+    const conn = makeConn('fwd-fav');
+    const netId = conn.network.id;
+    // An OPEN history-less row (a quiet just-joined channel) — the config-row
+    // variant seedAutojoinChannel mints is born closed, which favoriteBuffer
+    // now refuses by design (the stale-tab orphan guard).
+    ensureBufferOpen(conn.network.user_id, netId, '#apple', { kind: 'channel' });
+    expect(favoriteBuffer(conn.network.user_id, netId, '#apple')).toBe(true);
+    const published: Array<Record<string, unknown>> = [];
+    conn.publish = ((ev: Record<string, unknown>) => {
+      published.push(ev);
+    }) as typeof conn.publish;
+
+    conn.client.emit('channel_redirect', { from: '#apple', to: '##apple' });
+
+    expect(getBuffer(conn.network.user_id, netId, '#apple')).toBeUndefined();
+    expect(listFavoritesForUser(conn.network.user_id).some((f) => f.target === '#apple')).toBe(
+      false,
+    );
+    const parted = published.find((e) => e.type === 'channel-parted');
+    expect(parted).toMatchObject({ target: '#apple', favoritesChanged: true });
+  });
+
   it('470 discards a stashed join key for the forwarded-from channel', () => {
     const conn = makeConn('fwd-key');
     conn.client.user.nick = 'me';

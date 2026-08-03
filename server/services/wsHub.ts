@@ -85,6 +85,12 @@ import {
   reorderPins,
   listPinnedWithIds,
 } from '../db/pinnedBuffers.js';
+import {
+  favoriteBuffer,
+  unfavoriteBuffer,
+  reorderFavorites,
+  listFavoritesForUser,
+} from '../db/favoriteBuffers.js';
 import { setNicklistCollapsed } from '../db/nicklistCollapsed.js';
 import { addBookmark, removeBookmark } from '../db/bookmarks.js';
 import {
@@ -1222,6 +1228,15 @@ export function pinsChangedFrame(userId: number, networkId: number): WsPayload {
   };
 }
 
+// The user's full favorites list in global order — one frame shape for the
+// connect-burst seed and every later correction (clients replace wholesale,
+// so a handler written for either covers both). Entry objects rather than
+// pins' parallel arrays: favorites span networks, so each entry needs its own
+// networkId and the parallel-array shape was pins-only back-compat anyway.
+export function favoritesChangedFrame(userId: number): WsPayload {
+  return { kind: 'favorites-changed', favorites: listFavoritesForUser(userId) };
+}
+
 // Resolve a verb's optional id-form buffer address (docs/CLIENT_PROTOCOL §6):
 // a numeric `msg.bufferId` wins over `(networkId, target)` and is validated
 // for ownership. Returns the resolved address, `null` for an id that doesn't
@@ -1918,6 +1933,11 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           ev.bufferId,
         );
         fanOut(eventUserId, pinsChangedFrame(eventUserId, ev.networkId));
+        // The merge may have adopted the absorbed row's favorite onto the
+        // survivor (renameBuffer.absorbBufferRow) — clients hold favorites by
+        // bufferId, so without a re-publish they'd render a ghost entry for
+        // the absorbed id until the next favorites mutation or reconnect.
+        fanOut(eventUserId, favoritesChangedFrame(eventUserId));
         if (ev.draftChanged) {
           const draft = getDraftForBuffer(eventUserId, ev.bufferId);
           fanOut(eventUserId, {
@@ -1966,6 +1986,13 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
     }
     fanOut(eventUserId, { ...decorated, kind: 'irc' });
     maybePush(eventUserId, decorated);
+    // A server-side path deleted a favorited buffer outright (evictChannel's
+    // 470-forget is the one such path today) — the FK cascade took the
+    // favorite row with it, so re-publish the authoritative list or every
+    // client keeps a ghost entry for the dead buffer id.
+    if ((event as { favoritesChanged?: boolean }).favoritesChanged) {
+      fanOut(eventUserId, favoritesChangedFrame(eventUserId));
+    }
 
     // Countable persisted events change the buffer's unread/highlight counts
     // for this user. Broadcast the recomputed read-state so every tab —
@@ -2325,6 +2352,10 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
     // `?since` cursor); the client dedupes/gap-fills by id, so a re-snapshot on
     // resync is safe. See buildSystemBacklog.
     send(ws, buildSystemBacklog(userId));
+    // Favorites seed: the same frame later corrections use, so one client
+    // handler covers connect and every favorite/unfavorite/reorder after it.
+    // User-level (favorites span networks), one frame per snapshot.
+    send(ws, favoritesChangedFrame(userId));
     const readState = listReadStateForUser(userId);
     const clearedState = listClearedStateForUser(userId);
     // Walk the shared enumerator ONCE per snapshot and reuse it for both the live
@@ -2777,6 +2808,12 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         if (unpinBufferCaseInsensitive(userId, networkId, target)) {
           fanOut(userId, pinsChangedFrame(userId, networkId));
         }
+        // Same reasoning for favorites: the sections render favorites ∩ open
+        // buffers, so a favorite on a closed buffer is an invisible orphan.
+        // Close implies unfavorite.
+        if (unfavoriteBuffer(userId, networkId, target)) {
+          fanOut(userId, favoritesChangedFrame(userId));
+        }
         if (target.startsWith('#')) {
           // Send PART if connected; partChannel also lowers autojoin. If
           // disconnected, partChannel is a no-op, so lower autojoin here to
@@ -3058,6 +3095,46 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         if (!networkId || !target) break;
         unpinBuffer(userId, networkId, target);
         fanOut(userId, pinsChangedFrame(userId, networkId));
+        break;
+      }
+      case 'favorite-buffer': {
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
+        const networkId = addr ? Number(addr.networkId) : Number(msg.networkId);
+        const target = addr ? addr.target : typeof msg.target === 'string' ? msg.target : '';
+        // Server/system pseudo-buffers aren't favoritable rows.
+        if (!networkId || !target || target.startsWith(':')) break;
+        if (favoriteBuffer(userId, networkId, target)) {
+          fanOut(userId, favoritesChangedFrame(userId));
+        }
+        break;
+      }
+      case 'unfavorite-buffer': {
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
+        const networkId = addr ? Number(addr.networkId) : Number(msg.networkId);
+        const target = addr ? addr.target : typeof msg.target === 'string' ? msg.target : '';
+        if (!networkId || !target) break;
+        if (unfavoriteBuffer(userId, networkId, target)) {
+          fanOut(userId, favoritesChangedFrame(userId));
+        }
+        break;
+      }
+      case 'reorder-favorites': {
+        // Id-form only: favorites span networks, so bare target strings can't
+        // address them, and every client has the ids from favorites-changed.
+        // No per-id ownership probe: reorderFavorites accepts only ids in the
+        // USER'S favorite set (membership implies ownership — every insert
+        // path is user-keyed), and a foreign/stale/duplicate id makes it
+        // return null without writing. Both outcomes echo the authoritative
+        // order — success carries the new order, mismatch snaps the
+        // originating tab back (reorder-pins' stale-set policy).
+        if (!Array.isArray(msg.bufferIds)) break;
+        const raw = msg.bufferIds as unknown[];
+        if (raw.every((bid): bid is number => typeof bid === 'number')) {
+          reorderFavorites(userId, raw);
+        }
+        fanOut(userId, favoritesChangedFrame(userId));
         break;
       }
       case 'reorder-pins': {

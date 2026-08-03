@@ -161,26 +161,6 @@ export const EXPORT_TABLES = Object.freeze({
     ],
   },
 
-  // Friends/contacts. contacts is a rekey root (its id is referenced by
-  // contact_targets), so it imports before contact_targets.
-  contacts: {
-    mode: 'export',
-    scope: 'user_id',
-    section: 'data',
-    pk: 'id',
-    rekeyOnImport: true,
-    fkRekey: { user_id: 'users' },
-    columns: ['id', 'user_id', 'display_name', 'notify_online', 'created_at'],
-  },
-
-  contact_targets: {
-    mode: 'export',
-    scope: 'via_network',
-    section: 'data',
-    fkRekey: { contact_id: 'contacts', network_id: 'networks' },
-    columns: ['contact_id', 'network_id', 'nick', 'is_primary'],
-  },
-
   messages: {
     mode: 'export',
     scope: 'via_network',
@@ -360,6 +340,14 @@ export const EXPORT_TABLES = Object.freeze({
     section: 'data',
     fkRekey: { user_id: 'users', buffer_id: 'buffers', network_id: 'networks' },
     columns: ['user_id', 'buffer_id', 'network_id', 'position', 'created_at'],
+  },
+
+  favorite_buffers: {
+    mode: 'export',
+    scope: 'user_id',
+    section: 'data',
+    fkRekey: { user_id: 'users', buffer_id: 'buffers' },
+    columns: ['user_id', 'buffer_id', 'position', 'created_at'],
   },
 
   nicklist_collapsed: {
@@ -679,15 +667,13 @@ export const IMPORT_ORDER = Object.freeze([
   'user_nick_notes',
   'user_relay_bots',
   'pinned_buffers',
+  'favorite_buffers',
   'nicklist_collapsed',
   'channel_notify_settings',
   'user_drafts',
   'user_away_state',
   'input_history',
   'upload_history',
-  // contacts is referenced by contact_targets.
-  'contacts',
-  'contact_targets',
   // Messages depend on networks and highlight_rules.
   'messages',
   // Bookmarks and buffer_reads depend on messages.

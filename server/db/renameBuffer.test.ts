@@ -18,6 +18,7 @@ let insertMessage: typeof import('./messages.js').insertMessage;
 let listMessages: typeof import('./messages.js').listMessages;
 let bufferReads: typeof import('./bufferReads.js');
 let pinned: typeof import('./pinnedBuffers.js');
+let favorites: typeof import('./favoriteBuffers.js');
 let drafts: typeof import('./drafts.js');
 let userId: number;
 let networkId: number;
@@ -44,6 +45,7 @@ beforeAll(async () => {
   ({ insertMessage, listMessages } = await import('./messages.js'));
   bufferReads = await import('./bufferReads.js');
   pinned = await import('./pinnedBuffers.js');
+  favorites = await import('./favoriteBuffers.js');
   drafts = await import('./drafts.js');
   userId = createUser('rename-alice').id;
   networkId = createNetwork(userId, {
@@ -105,12 +107,13 @@ describe('plain rename', () => {
 describe('merge (a buffer already holds the new name): SOURCE survives', () => {
   it('keeps the live id, repoints history, merges pointers, unions visibility', () => {
     // The absorbed side: an old CLOSED dm under the new nick, with history,
-    // a further clear marker, and a pin.
+    // a further clear marker, a pin, and a favorite.
     buffers.ensureOpen(userId, networkId, 'erin_away');
     const absorbedId = buffers.getBuffer(userId, networkId, 'erin_away')!.id;
     const oldMsg = seed('erin_away', 'ancient chat');
     bufferReads.setReadState(userId, networkId, 'erin_away', oldMsg);
     pinned.pinBuffer(userId, networkId, 'erin_away');
+    favorites.favoriteBuffer(userId, networkId, 'erin_away');
     buffers.close(userId, networkId, 'erin_away');
 
     // The live side: the current conversation.
@@ -144,6 +147,12 @@ describe('merge (a buffer already holds the new name): SOURCE survives', () => {
     expect(bufferReads.getReadState(userId, networkId, 'erin_away')).toBe(liveMsg);
     // The absorbed pin transferred to the survivor and positions are dense.
     expect(pinned.listPinnedForUserNetwork(userId, networkId)).toContain('erin_away');
+    // Same for the absorbed favorite: it rides to the survivor's id.
+    expect(favorites.listFavoritesForUser(userId)).toContainEqual({
+      networkId,
+      target: 'erin_away',
+      bufferId: liveId,
+    });
     // The survivor's draft wins.
     expect(drafts.getDraftForBuffer(userId, liveId)?.body).toBe('live draft');
     expect(result.draftChanged).toBe(false);

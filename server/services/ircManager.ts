@@ -37,6 +37,7 @@ import {
   removeRelayBot as removeRelayBotRow,
 } from '../db/relayBots.js';
 import type { RelayBotResult } from '../db/relayBots.js';
+import { unfavoriteBuffer } from '../db/favoriteBuffers.js';
 import { splitSay, splitAction, hasInteriorNewline } from './messageSplit.js';
 import { e2eManager } from './e2e/manager.js';
 import { contextKey, isChannelContext } from './e2e/context.js';
@@ -416,11 +417,14 @@ class IrcManager extends EventEmitter {
   forgetChannel(userId: number, networkId: number, name: string): void {
     // With history the buffer (and its messages) must survive — just stop the
     // auto-rejoin and drop the stored key. Without history there is nothing
-    // left to show, so the row itself goes.
+    // left to show, so the row itself goes — after dropping any favorite, so
+    // the cascade can't leave a position hole (evictChannel does the same;
+    // callers of this method must re-publish favorites if it mattered).
     if (hasMessageForTarget(networkId, name)) {
       setBufferAutojoin(userId, networkId, name, false);
       setBufferChannelKey(userId, networkId, name, null);
     } else {
+      unfavoriteBuffer(userId, networkId, name);
       deleteBuffer(userId, networkId, name);
     }
   }
