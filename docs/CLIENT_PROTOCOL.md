@@ -216,7 +216,9 @@ frames**, synchronously, in this order (`wsHub.ts` `sendSnapshotInner`, 2293):
 4. `{kind:'favorites-changed', favorites:[{networkId, target, bufferId}]}` —
    the user's favorite buffers in global order. Deliberately the SAME frame
    every later favorite/unfavorite/reorder correction uses (replace
-   wholesale), so one handler covers seed and updates.
+   wholesale), so one handler covers seed and updates. Additive like frame 7:
+   an older server never sends it — no frame ⇒ treat favorites as empty,
+   don't wait on it.
 5. One `backlog` frame per open buffer on each connected network.
 6. Per **offline** network: a real backlog for its `:server:` log, shells for
    its channels/DMs.
@@ -585,7 +587,7 @@ anything at all.
 | `mark-all-read`                         | —                                                                                                                                                                                                                                                                                                                                                 |
 | `clear-buffer` / `unclear-buffer`       | `networkId, target` (or `bufferId`)                                                                                                                                                                                                                                                                                                               |
 | `pin-buffer` / `unpin-buffer`           | `networkId, target` (or `bufferId`)                                                                                                                                                                                                                                                                                                               |
-| `reorder-pins`                          | `networkId, targets:[…]` (or `networkId, bufferIds:[…]`)                                                                                                                                                                                                                                                                                          |
+| `reorder-pins`                          | `networkId, targets:[…]` (or `networkId, bufferIds:[…]`). Same subset semantics as `reorder-favorites`: unmentioned pins keep their relative order after the supplied ones                                                                                                                                                                        |
 | `favorite-buffer` / `unfavorite-buffer` | `networkId, target` (or `bufferId`). One flag for both UX labels: channels surface as "Favorites", DMs as "Friends". Server/system pseudo-buffers are refused. Closing a buffer implies unfavorite                                                                                                                                                |
 | `reorder-favorites`                     | `bufferIds:[…]` (id-form only, global order). May be a subset — unmentioned favorites keep their relative order after the supplied ones, so a kind-filtered section reorders independently. A stale/foreign id ⇒ no write; either way the server echoes the authoritative `favorites-changed`                                                     |
 | `set-nicklist-collapsed`                | `networkId, target, collapsed` (or `bufferId, collapsed`)                                                                                                                                                                                                                                                                                         |
@@ -1000,10 +1002,11 @@ The contract, in the order a client should apply it:
   order there is no key collision. The surviving conversation keeps its id.
   The merged history interleaves server-side, so wipe the local slice and
   re-hydrate rather than guessing at the interleave.
-- **Corrections ride behind a merge.** `read-state`, `pins-changed`, and (when
-  the surviving draft changed) `draft-updated` frames follow immediately —
-  the merge changed those server-side and an idle buffer would never
-  otherwise learn.
+- **Corrections ride behind a merge.** `read-state`, `pins-changed`,
+  `favorites-changed`, and (when the surviving draft changed) `draft-updated`
+  frames follow immediately — the merge changed those server-side and an idle
+  buffer would never otherwise learn. Favorites entries' `target` strings are
+  display hints subject to `buffer-renamed`; `bufferId` is the identity.
 - **Key off `to`, never a name you predicted**, and follow the active buffer:
   a rename of the buffer the user is reading is the same buffer, not a
   navigation.

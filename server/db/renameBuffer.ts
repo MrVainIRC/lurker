@@ -4,6 +4,7 @@
 import db from './index.js';
 import { foldTargetFor } from './buffers.js';
 import { resolveBuffer } from './bufferResolve.js';
+import { renumberFavorites } from './favoriteBuffers.js';
 
 // Rename a buffer — the primitive behind DM nick-follows (and, when the
 // draft/channel-rename CAP lands, channel renames). Under the normalized
@@ -135,21 +136,6 @@ const renumberPinsStmt = db.prepare(`
   WHERE user_id = ? AND network_id = ?
 `);
 
-// Same for favorites, whose density is per user alone (global order).
-const renumberFavoritesStmt = db.prepare(`
-  UPDATE favorite_buffers SET position = (
-    SELECT rn - 1 FROM (
-      SELECT f2.buffer_id AS bid2,
-             ROW_NUMBER() OVER (
-               PARTITION BY f2.user_id ORDER BY f2.position, f2.buffer_id
-             ) AS rn
-      FROM favorite_buffers f2
-      WHERE f2.user_id = favorite_buffers.user_id
-    ) WHERE bid2 = favorite_buffers.buffer_id
-  )
-  WHERE user_id = ?
-`);
-
 /**
  * Absorb one buffer row into another — the merge half of a rename, shared
  * with the CASEMAPPING re-fold pass (#707), where two rows folded apart under
@@ -186,7 +172,11 @@ export function absorbBufferRow(
   // UPDATE OR IGNORE above that lost to the survivor left rows behind).
   deleteRowStmt.run(absorbed.id);
   renumberPinsStmt.run(userId, networkId);
-  renumberFavoritesStmt.run(userId);
+  // Favorites density is per user alone (global order). Unlike the pins twin
+  // above, the module's renumber is exported (the network-delete route needs
+  // it too), so reuse it — it's a bare statement-runner, no transaction of its
+  // own, so it nests fine inside the caller's.
+  renumberFavorites(userId);
   const draftAfter = (draftBodyStmt.get(userId, survivor.id) as { body: string } | undefined)?.body;
   return { draftChanged: draftAfter !== draftBefore };
 }

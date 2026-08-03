@@ -76,6 +76,17 @@ describe('favoriteBuffer / listFavoritesForUser', () => {
     expect(targets(user.id)).toEqual(['#a', 'bob', '#meta']);
   });
 
+  it('refuses a CLOSED buffer (stale-tab favorite after a close elsewhere)', async () => {
+    // close-buffer enforces close⇒unfavorite; a favorite racing in from a tab
+    // that hasn't seen the close must not mint an invisible orphan that
+    // resurrects on reopen.
+    const buffers = await import('./buffers.js');
+    ensureBuffer(user.id, net!.id, 'ghost');
+    buffers.close(user.id, net!.id, 'ghost');
+    expect(favorites.favoriteBuffer(user.id, net!.id, 'ghost')).toBe(false);
+    expect(targets(user.id)).toEqual(['#a', 'bob', '#meta']);
+  });
+
   it('resolves the target case-insensitively', () => {
     expect(favorites.favoriteBuffer(user.id, net!.id, 'BOB')).toBe(false); // already a favorite
     expect(targets(user.id)).toEqual(['#a', 'bob', '#meta']);

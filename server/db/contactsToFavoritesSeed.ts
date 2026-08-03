@@ -11,9 +11,13 @@ import { normalizeCasemapping, foldTargetWith } from './casemapping.js';
 // swap. Ordering: alphabetical by contact display name (the order the old
 // FRIENDS section rendered), appended after any favorites that already exist
 // (there are none at v19, but the seed must be safe to re-run after a partial
-// failure). Multi-target contacts contribute one favorite per network (their
-// primary there); non-primary alts are part of the complexity the feature
-// drop deliberately sheds.
+// failure). setContact enforced exactly ONE primary per contact — globally,
+// not per network — so a contact yields one favorite: the DM their FRIENDS
+// row opened on click. The schema never enforced that invariant though, and
+// the old archive import never validated it, so a crafted/hand-edited backup
+// can carry several is_primary rows per contact: the first by (network, nick)
+// wins and the rest are skipped, rather than duplicating the person.
+// Non-primary alts are part of the complexity the feature drop sheds.
 //
 // Receives `db` instead of importing it — this runs during db/index.ts module
 // evaluation, so importing buffers.ts (which imports db/index.js) would cycle.
@@ -25,12 +29,13 @@ import { normalizeCasemapping, foldTargetWith } from './casemapping.js';
 export function seedFavoritesFromContacts(db: Database.Database): number {
   const primaries = db
     .prepare(
-      `SELECT c.user_id AS userId, t.network_id AS networkId, t.nick AS nick
+      `SELECT c.id AS contactId, c.user_id AS userId, t.network_id AS networkId, t.nick AS nick
        FROM contacts c
        JOIN contact_targets t ON t.contact_id = c.id AND t.is_primary = 1
-       ORDER BY c.user_id ASC, c.display_name COLLATE NOCASE ASC, c.id ASC, t.network_id ASC`,
+       ORDER BY c.user_id ASC, c.display_name COLLATE NOCASE ASC, c.id ASC,
+                t.network_id ASC, t.nick COLLATE NOCASE ASC`,
     )
-    .all() as Array<{ userId: number; networkId: number; nick: string }>;
+    .all() as Array<{ contactId: number; userId: number; networkId: number; nick: string }>;
 
   const casemappingStmt = db.prepare(`SELECT casemapping FROM networks WHERE id = ?`);
   const findBufferStmt = db.prepare(
@@ -50,7 +55,11 @@ export function seedFavoritesFromContacts(db: Database.Database): number {
   );
 
   let seeded = 0;
-  for (const { userId, networkId, nick } of primaries) {
+  const seededContacts = new Set<number>();
+  for (const { contactId, userId, networkId, nick } of primaries) {
+    // One favorite per contact (the old one-primary-globally invariant);
+    // extra is_primary rows from an unvalidated archive lose to the first.
+    if (seededContacts.has(contactId)) continue;
     const raw = (nick || '').trim();
     // A channel-shaped or sentinel "nick" can't have been a real DM target;
     // skip rather than mint a mis-kinded buffer.
@@ -72,6 +81,7 @@ export function seedFavoritesFromContacts(db: Database.Database): number {
 
     const { next } = nextPositionStmt.get(userId) as { next: number };
     seeded += Number(insertFavoriteStmt.run(userId, bufferId, next).changes);
+    seededContacts.add(contactId);
   }
 
   db.exec(`DROP TABLE IF EXISTS contact_targets`);

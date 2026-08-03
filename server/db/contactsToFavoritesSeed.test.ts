@@ -78,6 +78,14 @@ beforeAll(async () => {
     [net!.id, 'ada', 1],
     [net!.id, 'ada_alt', 0],
   ]);
+  // Wren: TWO is_primary rows — schema-legal and importable through the old
+  // unvalidated archive path, though live setContact never wrote this. Only
+  // the first by (network, nick) may become a favorite; duplicating the
+  // person in the migrated Friends list is the bug this guards against.
+  addContact('Wren', [
+    [net!.id, 'wren', 1],
+    [net!.id, 'wren2', 1],
+  ]);
 });
 
 afterAll(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
@@ -85,12 +93,14 @@ afterAll(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
 describe('seedFavoritesFromContacts', () => {
   it('converts primaries to favorites (alphabetical), minting/reopening buffers, then drops the tables', () => {
     const seeded = db.transaction(() => seedFavoritesFromContacts(db))();
-    expect(seeded).toBe(3);
+    expect(seeded).toBe(4);
 
-    // Alphabetical by display name: Ada, Bram, Zoe. Targets resolve to the
-    // stored buffer casing (zoe's row wins over the contact's 'ZOE').
+    // Alphabetical by display name: Ada, Bram, Wren, Zoe. Targets resolve to
+    // the stored buffer casing (zoe's row wins over the contact's 'ZOE'), and
+    // Wren's duplicate primary contributes ONE favorite (first by nick), not
+    // two entries for the same person.
     const favs = listFavoritesForUser(user.id);
-    expect(favs.map((f) => f.target)).toEqual(['ada', 'bram', 'zoe']);
+    expect(favs.map((f) => f.target)).toEqual(['ada', 'bram', 'wren', 'zoe']);
 
     // Every favorited buffer is a real, OPEN dm row now.
     for (const f of favs) {

@@ -83,11 +83,15 @@ export function renumberFavorites(userId: number): void {
 
 // Favorite at the end of the global order. Idempotent — favoriting an
 // already-favorite buffer keeps its position (INSERT OR IGNORE) — and a no-op
-// for a target that doesn't resolve to a buffer. Returns true when a row was
-// added (callers skip the broadcast otherwise, matching the unfavorite side).
+// for a target that doesn't resolve to a buffer. A CLOSED buffer is refused
+// too: close-buffer enforces close⇒unfavorite, so accepting a favorite from a
+// tab that hasn't seen the close yet would mint an invisible orphan (the
+// sections render favorites ∩ open) that silently resurrects as a favorite
+// when the buffer reopens. Returns true when a row was added (callers skip
+// the broadcast otherwise, matching the unfavorite side).
 export function favoriteBuffer(userId: number, networkId: number, target: string): boolean {
   const buffer = resolveBuffer(userId, networkId, target);
-  if (!buffer) return false;
+  if (!buffer || buffer.state === 'closed') return false;
   let added = 0;
   const tx = db.transaction(() => {
     const { next } = nextPositionStmt.get(userId) as { next: number };

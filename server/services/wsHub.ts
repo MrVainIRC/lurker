@@ -1986,6 +1986,13 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
     }
     fanOut(eventUserId, { ...decorated, kind: 'irc' });
     maybePush(eventUserId, decorated);
+    // A server-side path deleted a favorited buffer outright (evictChannel's
+    // 470-forget is the one such path today) — the FK cascade took the
+    // favorite row with it, so re-publish the authoritative list or every
+    // client keeps a ghost entry for the dead buffer id.
+    if ((event as { favoritesChanged?: boolean }).favoritesChanged) {
+      fanOut(eventUserId, favoritesChangedFrame(eventUserId));
+    }
 
     // Countable persisted events change the buffer's unread/highlight counts
     // for this user. Broadcast the recomputed read-state so every tab —
@@ -3116,22 +3123,17 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
       case 'reorder-favorites': {
         // Id-form only: favorites span networks, so bare target strings can't
         // address them, and every client has the ids from favorites-changed.
+        // No per-id ownership probe: reorderFavorites accepts only ids in the
+        // USER'S favorite set (membership implies ownership — every insert
+        // path is user-keyed), and a foreign/stale/duplicate id makes it
+        // return null without writing. Both outcomes echo the authoritative
+        // order — success carries the new order, mismatch snaps the
+        // originating tab back (reorder-pins' stale-set policy).
         if (!Array.isArray(msg.bufferIds)) break;
-        const ids: number[] = [];
-        let valid = true;
-        for (const bid of msg.bufferIds as unknown[]) {
-          // Ownership check: a foreign or stale id falls through to the
-          // authoritative echo, same as reorder-pins' set-mismatch path.
-          const b = typeof bid === 'number' ? requireBufferForUser(userId, bid) : undefined;
-          if (!b) {
-            valid = false;
-            break;
-          }
-          ids.push(b.id);
+        const raw = msg.bufferIds as unknown[];
+        if (raw.every((bid): bid is number => typeof bid === 'number')) {
+          reorderFavorites(userId, raw);
         }
-        // Both branches echo the authoritative order — on success it carries
-        // the new order, on mismatch it snaps the originating tab back.
-        if (valid) reorderFavorites(userId, ids);
         fanOut(userId, favoritesChangedFrame(userId));
         break;
       }
