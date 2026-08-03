@@ -117,7 +117,11 @@
               >
                 <span class="label"
                   >{{ labelFor(row.buf)
-                  }}<span v-if="showNetHints" class="net-hint">{{ row.networkName }}</span></span
+                  }}<span
+                    v-if="duplicateFavoriteNames.has(row.buf.target.toLowerCase())"
+                    class="net-hint"
+                    >{{ row.networkName }}</span
+                  ></span
                 >
                 <span
                   v-if="hasDraft(row.buf)"
@@ -604,10 +608,18 @@ interface FavoriteRow {
   buf: Buffer;
 }
 
-// Section rows are cross-network: with more than one network, two favorites
-// named #general are otherwise pixel-identical, so each row carries a muted
-// network hint (and the tooltip always names the network).
-const showNetHints = computed(() => networks.networks.length > 1);
+// Section rows are cross-network, so two favorites can share a name (#lurker
+// on two networks) and be otherwise pixel-identical. The network hint renders
+// ONLY for those collisions — when every name is unique it says nothing the
+// row doesn't, and the tooltip still names the network for everyone.
+const duplicateFavoriteNames = computed(() => {
+  const counts = new Map<string, number>();
+  for (const r of [...friendRows, ...favoriteChannelRows]) {
+    const k = r.buf.target.toLowerCase();
+    counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  return new Set([...counts].filter(([, n]) => n > 1).map(([k]) => k));
+});
 
 function sectionRowTitle(row: FavoriteRow): string {
   const presence = dmTitle(row.buf);
