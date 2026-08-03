@@ -1089,9 +1089,16 @@ export class IrcConnection {
       try {
         for (const buf of listOpenDms(this.network.id)) {
           // A notice-only buffer (NickServ/ChanServ, #439) is not a real DM —
-          // don't seed it into MONITOR or it consumes presence slots and shows a
-          // bogus presence dot for a service. Track only actual conversations.
-          if (!hasConversationForTarget(this.network.id, buf.target)) continue;
+          // don't seed it into MONITOR or it consumes presence slots and shows
+          // a bogus presence dot for a service. Seed actual conversations AND
+          // empty just-opened DMs (same intent test as probePresence), so a
+          // reconnect doesn't strand a fresh query's presence dot.
+          if (
+            !hasConversationForTarget(this.network.id, buf.target) &&
+            hasMessageForTarget(this.network.id, buf.target)
+          ) {
+            continue;
+          }
           this.addPeerReason(buf.target.toLowerCase(), 'dm', null);
         }
       } catch (e) {
@@ -3129,10 +3136,20 @@ export class IrcConnection {
   // RPL_MONOFFLINE from the server — no separate WHOIS probe needed.
   probePresence(nick: string | undefined | null): void {
     if (!nick || !isDmTargetName(nick)) return;
-    // Opening a notice-only buffer (a service like NickServ, #439) must not start
-    // MONITOR tracking — only probe presence for targets we have a real
-    // conversation with. Friends are tracked separately at hydrate time.
-    if (!hasConversationForTarget(this.network.id, nick)) return;
+    // Opening a notice-only buffer (a service like NickServ, #439) must not
+    // start MONITOR tracking. But an EMPTY buffer is different from a
+    // notice-only one: zero rows means the user just deliberately opened a
+    // DM (nicklist → "open query") and is about to talk — showing the peer
+    // as offline until the first message lands reads as a bug (QA on #716
+    // hit exactly this). Probe for real conversations AND for brand-new
+    // empty DMs; only the notice-only service shape stays blocked. Friends
+    // are tracked separately at hydrate time.
+    if (
+      !hasConversationForTarget(this.network.id, nick) &&
+      hasMessageForTarget(this.network.id, nick)
+    ) {
+      return;
+    }
     this.trackDmPeer(nick);
   }
 

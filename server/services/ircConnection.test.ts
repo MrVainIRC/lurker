@@ -2633,3 +2633,77 @@ describe('DM rename on peer NICK', () => {
     expect(published.find((e) => e.type === 'buffer-renamed')).toBeUndefined();
   });
 });
+
+// #716 QA follow-up: a DM opened fresh from the nicklist showed its peer
+// offline until the first message, because the presence probe refused to
+// track anything without a conversation. The gate exists for notice-only
+// service buffers (NickServ, #439) — an EMPTY buffer is deliberate user
+// intent and must probe.
+describe('probePresence intent gate', () => {
+  function connFor(name: string) {
+    const network = createNetwork(1, {
+      name,
+      host: 'irc.example.test',
+      port: 6697,
+      tls: 1,
+      trusted_certificates: 1,
+      nick: 'me',
+      username: null,
+      realname: null,
+      server_password: null,
+      autoconnect: 0,
+      sasl_account: null,
+      sasl_password: null,
+      connect_commands: null,
+    })!;
+    const conn = new IrcConnection({ network, onEvent: () => {} });
+    const tracked: string[] = [];
+    conn.trackDmPeer = vi.fn<(nick: string) => boolean>((n) => {
+      tracked.push(n);
+      return true;
+    }) as typeof conn.trackDmPeer;
+    return { conn, network, tracked };
+  }
+
+  it('probes a brand-new empty DM (the just-opened query)', async () => {
+    const { conn, network, tracked } = connFor('probe-fresh');
+    const { ensureOpen } = await import('../db/buffers.js');
+    ensureOpen(network.user_id, network.id, 'newperson', { kind: 'dm' });
+    conn.probePresence('newperson');
+    expect(tracked).toEqual(['newperson']);
+  });
+
+  it('probes a real conversation', async () => {
+    const { conn, network, tracked } = connFor('probe-convo');
+    const { ensureOpen } = await import('../db/buffers.js');
+    const { insertMessage } = await import('../db/messages.js');
+    ensureOpen(network.user_id, network.id, 'talker', { kind: 'dm' });
+    insertMessage({
+      networkId: network.id,
+      target: 'talker',
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'talker',
+      text: 'hi',
+    });
+    conn.probePresence('talker');
+    expect(tracked).toEqual(['talker']);
+  });
+
+  it('still refuses a notice-only service buffer', async () => {
+    const { conn, network, tracked } = connFor('probe-service');
+    const { ensureOpen } = await import('../db/buffers.js');
+    const { insertMessage } = await import('../db/messages.js');
+    ensureOpen(network.user_id, network.id, 'NickServ', { kind: 'dm' });
+    insertMessage({
+      networkId: network.id,
+      target: 'NickServ',
+      time: new Date().toISOString(),
+      type: 'notice',
+      nick: 'NickServ',
+      text: 'This nickname is registered.',
+    });
+    conn.probePresence('NickServ');
+    expect(tracked).toEqual([]);
+  });
+});
