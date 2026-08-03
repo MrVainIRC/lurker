@@ -381,7 +381,9 @@ function openBufferActions() {
   const el = bufferCogBtn.value;
   if (!a || !el) return;
   const items: ContextMenuItem[] = [];
-  if (topic.value) {
+  // Channels only: a DM's pseudo-topic (the peer's ident@host) is a header
+  // identity, not prose worth a modal.
+  if (isChannel.value && topic.value) {
     items.push({
       label: 'View topic',
       icon: 'fa-solid fa-circle-info',

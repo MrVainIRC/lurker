@@ -12,7 +12,7 @@ import { previewableEventTexts } from '../utils/previewEvents.js';
 import { useConfigStore } from '../stores/config.js';
 import { useHighlightRulesStore } from '../stores/highlightRules.js';
 import { useInputHistoryStore } from '../stores/inputHistory.js';
-import { bufferClosed } from '../lib/bufferLifecycle.js';
+import { bufferClosed, applyBufferRenamed } from '../lib/bufferLifecycle.js';
 import { useDraftStore } from '../stores/drafts.js';
 import { useChanlistStore } from '../stores/chanlist.js';
 import { useSearchStore } from '../stores/search.js';
@@ -722,6 +722,12 @@ function handleMessage(raw: string): void {
       clearedBeforeId: payload.clearedBeforeId,
       clearedAt: payload.clearedAt,
     });
+    return;
+  }
+  if (payload.kind === 'buffer-renamed') {
+    // A buffer kept its identity and changed names (a DM following a peer's
+    // /nick; later, channel renames). One call moves every store.
+    applyBufferRenamed(payload);
     return;
   }
   if (payload.kind === 'buffer-closed') {

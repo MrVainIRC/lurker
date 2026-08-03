@@ -75,6 +75,7 @@ import {
   kindForTarget,
 } from '../db/buffers.js';
 import { resolveBuffer, requireBufferForUser } from '../db/bufferResolve.js';
+import { getDraftForBuffer } from '../db/drafts.js';
 import type { BufferStateRow } from '../db/buffers.js';
 import {
   pinBuffer,
@@ -1887,6 +1888,54 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         kind: 'dcc-transfer',
         transfer: (event as unknown as { transfer: unknown }).transfer,
       });
+      return;
+    }
+    // A buffer changed names (a DM peer's NICK; later, channel RENAME). This
+    // is a lifecycle frame, not a message — intercept before decoration so it
+    // can't leak to clients as a kind:'irc' row. Fanned to EVERY socket
+    // including any originator: it describes a fact, not an instruction
+    // (docs §9.7). Follow-ups ride behind it on a merge, because the merged
+    // counts/pins/draft changed server-side and an idle buffer would
+    // otherwise never learn.
+    if ((event as { type?: string }).type === 'buffer-renamed') {
+      const ev = event as unknown as {
+        networkId: number;
+        from: string;
+        to: string;
+        bufferId: number;
+        merged?: boolean;
+        mergedFromBufferId?: number;
+        draftChanged?: boolean;
+      };
+      fanOut(eventUserId, {
+        kind: 'buffer-renamed',
+        networkId: ev.networkId,
+        from: ev.from,
+        to: ev.to,
+        bufferId: ev.bufferId,
+        merged: !!ev.merged,
+        ...(ev.mergedFromBufferId != null ? { mergedFromBufferId: ev.mergedFromBufferId } : {}),
+      });
+      if (ev.merged) {
+        broadcastReadState(
+          eventUserId,
+          ev.networkId,
+          ev.to,
+          getReadState(eventUserId, ev.networkId, ev.to),
+          ev.bufferId,
+        );
+        fanOut(eventUserId, pinsChangedFrame(eventUserId, ev.networkId));
+        if (ev.draftChanged) {
+          const draft = getDraftForBuffer(eventUserId, ev.bufferId);
+          fanOut(eventUserId, {
+            kind: 'draft-updated',
+            networkId: ev.networkId,
+            target: ev.to,
+            bufferId: ev.bufferId,
+            body: draft?.body ?? '',
+          });
+        }
+      }
       return;
     }
     const decorated = decorateMessage(eventUserId, event);

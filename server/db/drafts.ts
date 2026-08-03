@@ -62,3 +62,16 @@ export function clearDraft(userId: number, networkId: number, target: string): n
 export function listForUser(userId: number): DraftRow[] {
   return listStmt.all(userId) as DraftRow[];
 }
+
+const getForBufferStmt = db.prepare(`
+  SELECT d.buffer_id AS bufferId, b.network_id AS networkId, b.target AS target,
+         d.body AS body, d.updated_at AS updatedAt
+    FROM user_drafts d JOIN buffers b ON b.id = d.buffer_id
+   WHERE d.user_id = ? AND d.buffer_id = ?
+`);
+
+/** Point read by buffer id — the rename/merge announcement uses this to ship
+ *  the surviving draft. */
+export function getDraftForBuffer(userId: number, bufferId: number): DraftRow | undefined {
+  return getForBufferStmt.get(userId, bufferId) as DraftRow | undefined;
+}
