@@ -92,11 +92,10 @@
              server floats the sent subset and keeps unmentioned favorites'
              relative order, so reordering Friends never scrambles Favorites. -->
         <div v-for="section in favoriteSections" :key="section.name" class="net">
-          <div v-if="section.rows.length" class="net-head section-head">
+          <div class="net-head section-head">
             <span class="name">{{ section.name }}</span>
           </div>
           <draggable
-            v-if="section.rows.length"
             :list="section.rows"
             item-key="key"
             tag="ul"
@@ -576,6 +575,12 @@ function onPinDragEnd(networkId: number): void {
     networkId,
     list.map((b) => b.target),
   );
+  // Both mirrors share the one `dragging` guard, so an echo that landed
+  // mid-drag (a favorite flipped from another tab while this pin drag was
+  // up, or vice versa) was skipped with nothing left to re-fire its watch —
+  // catch up explicitly now that the guard is down.
+  syncPinned();
+  syncFavorites();
 }
 
 // The FRIENDS/FAVORITES sections: the global favorites list resolved to
@@ -594,10 +599,15 @@ interface FavoriteRow {
 }
 const friendRows = reactive<FavoriteRow[]>([]);
 const favoriteChannelRows = reactive<FavoriteRow[]>([]);
-const favoriteSections = computed(() => [
-  { name: 'FRIENDS', rows: friendRows },
-  { name: 'FAVORITES', rows: favoriteChannelRows },
-]);
+// Only non-empty sections render — an empty `.net` div still carries padding
+// and the `.net + .net` separator, which would stack dead chrome above the
+// first network for everyone with no favorites (the default state).
+const favoriteSections = computed(() =>
+  [
+    { name: 'FRIENDS', rows: friendRows },
+    { name: 'FAVORITES', rows: favoriteChannelRows },
+  ].filter((s) => s.rows.length > 0),
+);
 
 function syncFavorites(): void {
   if (dragging.value) return;
@@ -630,6 +640,11 @@ function onFavoriteDragEnd(rows: FavoriteRow[]): void {
   // Only this section's ids — the server keeps the other section's relative
   // order (subset reorder), then echoes the authoritative list.
   favorites.reorder(rows.map((r) => r.bufferId));
+  // Same mid-drag catch-up as onPinDragEnd (the echo for THIS reorder also
+  // re-syncs, but a dead socket would never send one — don't leave the
+  // mirrors hanging on it).
+  syncPinned();
+  syncFavorites();
 }
 
 function onBufferContextMenu(e: MouseEvent, buf: Buffer): void {

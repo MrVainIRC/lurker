@@ -37,6 +37,12 @@ export const useFavoritesStore = defineStore('favorites', {
     // what the sidebar sections render and keyboard nav / the quick switcher
     // walk. Entries whose buffer hasn't materialized yet are skipped (they
     // surface once hydration lands), so consumers never see a dead row.
+    // `target` is re-resolved to the LOCAL buffer's casing: the entry carries
+    // the server-canonical spelling, but a client-materialized buffer can hold
+    // a divergent case (first-writer-wins, #327), and downstream consumers do
+    // exact `${networkId}::${target}` key lookups — an entry-cased key would
+    // miss the buffer, dropping it from unread-nav while excludeKeys still
+    // removed it from its network group (unreachable).
     sections(state): { friends: FavoriteEntry[]; channels: FavoriteEntry[] } {
       const buffers = useBuffersStore();
       const friends: FavoriteEntry[] = [];
@@ -44,8 +50,9 @@ export const useFavoritesStore = defineStore('favorites', {
       for (const e of state.entries) {
         const buf = buffers.findByTarget(e.networkId, e.target);
         if (!buf) continue;
-        if (buf.kind === 'channel') channels.push(e);
-        else if (buf.kind === 'dm') friends.push(e);
+        const resolved = buf.target === e.target ? e : { ...e, target: buf.target };
+        if (buf.kind === 'channel') channels.push(resolved);
+        else if (buf.kind === 'dm') friends.push(resolved);
       }
       return { friends, channels };
     },
