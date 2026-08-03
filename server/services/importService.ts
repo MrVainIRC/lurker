@@ -523,12 +523,6 @@ function resetImportedData(userId: number): void {
     db.prepare('DELETE FROM user_settings WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM upload_history WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM user_away_state WHERE user_id = ?').run(userId);
-    // Contacts are a user-scoped import root: contact_targets cascade away with
-    // the networks above, but the contacts rows themselves only cascade on user
-    // delete, so wipe them here too. Otherwise a failed-then-retried import
-    // re-inserts every contact (accountIsEmpty only counts networks), leaving
-    // duplicated, target-less friends.
-    db.prepare('DELETE FROM contacts WHERE user_id = ?').run(userId);
     // Network-scoped buffers cascade with networks above, but an app-scoped row
     // (network_id NULL — the reserved system/server kinds) only cascades on
     // user delete; without this a failed-then-retried import of an archive

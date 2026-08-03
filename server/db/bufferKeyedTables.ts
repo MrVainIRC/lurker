@@ -93,6 +93,12 @@ export const BUFFER_SCOPED_TABLES: readonly BufferScopedTable[] = [
     note: 'sidebar pins; network_id kept — position density is per (user, network)',
   },
   {
+    table: 'favorite_buffers',
+    status: 'buffer_id',
+    scope: ['user_id'],
+    note: 'buffer favorites (Friends/Contacts replacement); one global per-user order, born id-keyed at v19',
+  },
+  {
     table: 'nicklist_collapsed',
     status: 'buffer_id',
     scope: ['user_id'],
@@ -220,7 +226,6 @@ export const NICK_KEYED_TABLES: readonly string[] = [
   'user_nick_notes',
   'user_relay_bots',
   'peer_presence_state',
-  'contact_targets',
   'dcc_transfers',
 ];
 

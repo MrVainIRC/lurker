@@ -89,6 +89,12 @@ const adoptPinStmt = db.prepare(
   `UPDATE OR IGNORE pinned_buffers SET buffer_id = ? WHERE buffer_id = ?`,
 );
 
+// favorites: same policy as pins — survivor keeps its slot, an absorbed-only
+// favorite transfers.
+const adoptFavoriteStmt = db.prepare(
+  `UPDATE OR IGNORE favorite_buffers SET buffer_id = ? WHERE buffer_id = ?`,
+);
+
 // view-state singletons: survivor's row wins, absorbed-only rows transfer.
 const adoptNicklistStmt = db.prepare(
   `UPDATE OR IGNORE nicklist_collapsed SET buffer_id = ? WHERE buffer_id = ?`,
@@ -129,6 +135,21 @@ const renumberPinsStmt = db.prepare(`
   WHERE user_id = ? AND network_id = ?
 `);
 
+// Same for favorites, whose density is per user alone (global order).
+const renumberFavoritesStmt = db.prepare(`
+  UPDATE favorite_buffers SET position = (
+    SELECT rn - 1 FROM (
+      SELECT f2.buffer_id AS bid2,
+             ROW_NUMBER() OVER (
+               PARTITION BY f2.user_id ORDER BY f2.position, f2.buffer_id
+             ) AS rn
+      FROM favorite_buffers f2
+      WHERE f2.user_id = favorite_buffers.user_id
+    ) WHERE bid2 = favorite_buffers.buffer_id
+  )
+  WHERE user_id = ?
+`);
+
 /**
  * Absorb one buffer row into another — the merge half of a rename, shared
  * with the CASEMAPPING re-fold pass (#707), where two rows folded apart under
@@ -154,6 +175,7 @@ export function absorbBufferRow(
   mergeReadsStmt.run({ survivor: survivor.id, absorbed: absorbed.id });
   adoptReadsStmt.run(survivor.id, absorbed.id);
   adoptPinStmt.run(survivor.id, absorbed.id);
+  adoptFavoriteStmt.run(survivor.id, absorbed.id);
   adoptNicklistStmt.run(survivor.id, absorbed.id);
   adoptNotifyStmt.run(survivor.id, absorbed.id);
   adoptDraftStmt.run(survivor.id, absorbed.id);
@@ -164,6 +186,7 @@ export function absorbBufferRow(
   // UPDATE OR IGNORE above that lost to the survivor left rows behind).
   deleteRowStmt.run(absorbed.id);
   renumberPinsStmt.run(userId, networkId);
+  renumberFavoritesStmt.run(userId);
   const draftAfter = (draftBodyStmt.get(userId, survivor.id) as { body: string } | undefined)?.body;
   return { draftChanged: draftAfter !== draftBefore };
 }

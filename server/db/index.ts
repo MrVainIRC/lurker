@@ -4,6 +4,7 @@
 import Database from 'better-sqlite3';
 import { foldMutedIntoIgnoreRules } from './migrateMutedFold.js';
 import { migrateSmartFilterToEventMode } from './migrateEventMode.js';
+import { seedFavoritesFromContacts } from './contactsToFavoritesSeed.js';
 import path from 'path';
 import fs from 'fs';
 import { isNodeMode } from '../utils/edition.js';
@@ -418,6 +419,27 @@ function migrate() {
     CREATE INDEX IF NOT EXISTS idx_pinned_buffers_user_net
       ON pinned_buffers(user_id, network_id, position);
 
+    -- Per-user favorite buffer list (replaced the Friends/Contacts system).
+    -- Favorited channels surface in a "Favorites" section, favorited DMs in a
+    -- "Friends" section — one flag, kind-filtered client-side. Unlike pins
+    -- (per-network), position density is per USER: favorites span networks in
+    -- one user-controlled global order, and the kind-filtered sections stay
+    -- independently reorderable because a subset reorder preserves the
+    -- relative order of unmentioned rows. Born buffer_id-keyed at v19 — no
+    -- name-keyed generation ever existed. Close-buffer implies unfavorite
+    -- (same reasoning as pins; see wsHub close-buffer handler).
+    CREATE TABLE IF NOT EXISTS favorite_buffers (
+      user_id INTEGER NOT NULL,
+      buffer_id INTEGER NOT NULL,
+      position INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY (user_id, buffer_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (buffer_id) REFERENCES buffers(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_favorite_buffers_user
+      ON favorite_buffers(user_id, position);
+
     -- Per-(user, network, channel) override for the desktop nicklist's
     -- collapsed state. Only channels the user has explicitly toggled get a
     -- row; absent a row the global look.layout.show_member_list default
@@ -529,35 +551,6 @@ function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_user_relay_bots_user_net
       ON user_relay_bots(user_id, network_id);
-
-    -- Friends / watch-list. A "contact" is a person, network-agnostic: it carries
-    -- the display name and the per-contact "toast me when they come online" flag.
-    -- contact_targets is the watch list — which (network, nick) to follow for
-    -- this person. A contact can have several nicks per network (alts/ghosts/
-    -- bouncer connections) and nicks across networks, so the key includes nick.
-    -- nick collates NOCASE; is_primary marks the one DM that opens on click.
-    -- Both cascade on user/network delete.
-    CREATE TABLE IF NOT EXISTS contacts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      display_name TEXT NOT NULL,
-      notify_online INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_contacts_user ON contacts(user_id);
-
-    CREATE TABLE IF NOT EXISTS contact_targets (
-      contact_id INTEGER NOT NULL,
-      network_id INTEGER NOT NULL,
-      nick TEXT NOT NULL COLLATE NOCASE,
-      is_primary INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (contact_id, network_id, nick),
-      FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE,
-      FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_contact_targets_net_nick
-      ON contact_targets(network_id, nick);
 
     -- Per-(user, message) bookmarks. Operator hits "Save" on a message in the
     -- context menu to pin it for later recall via the bookmarks modal. The
@@ -1220,7 +1213,7 @@ ensureColumn('push_subscriptions', 'transport', "TEXT NOT NULL DEFAULT 'webpush'
 // Schema versioning lets us retire one-shot recovery blocks once every
 // production DB has run through them. Bump SCHEMA_VERSION when adding a new
 // recovery block, and delete blocks for versions far enough in the past.
-const SCHEMA_VERSION = 18;
+const SCHEMA_VERSION = 19;
 const schemaVersionRow = db
   .prepare(`SELECT value FROM app_meta WHERE key = 'schema_version'`)
   .get() as { value: string } | undefined;
@@ -2111,6 +2104,19 @@ if (schemaVersion < 18 && columnExists('buffer_reads', 'target')) {
   } finally {
     db.pragma(`foreign_keys = ${prevFk ? 'ON' : 'OFF'}`);
   }
+}
+
+// v19: buffer favorites replace the Friends/Contacts system. Seed a favorite
+// (an open DM buffer, minted/reopened if need be) from each contact's primary
+// target, then drop the contacts tables. Gated on the tables actually existing:
+// fresh installs never create them (their DDL left with the friends removal),
+// so the gate below is what distinguishes "old DB carrying friends data" from
+// "born after the feature". Runs in one transaction — a failure leaves the
+// contacts tables (and schema_version) untouched for a retry next boot.
+if (schemaVersion < 19 && tableExists('contacts')) {
+  const seeded = db.transaction(() => seedFavoritesFromContacts(db));
+  const count = seeded.immediate();
+  if (count > 0) console.log(`[db] migrated ${count} friend(s) into buffer favorites`);
 }
 
 // Issue #510: seed the uploader data model — instance x0/catbox rows +

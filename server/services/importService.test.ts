@@ -22,6 +22,7 @@ let setUserSetting: typeof import('../db/settings.js').setUserSetting;
 let createRule: typeof import('../db/highlightRules.js').createRule;
 let setNote: typeof import('../db/nickNotes.js').setNote;
 let pinBuffer: typeof import('../db/pinnedBuffers.js').pinBuffer;
+let favoriteBuffer: typeof import('../db/favoriteBuffers.js').favoriteBuffer;
 let addRule: typeof import('../db/ignoredMasks.js').addRule;
 let addBookmark: typeof import('../db/bookmarks.js').addBookmark;
 // Seed an ALL-level ignore the way the pre-#301 addMask helper did.
@@ -66,6 +67,7 @@ beforeAll(async () => {
   ({ createRule } = await import('../db/highlightRules.js'));
   ({ setNote } = await import('../db/nickNotes.js'));
   ({ pinBuffer } = await import('../db/pinnedBuffers.js'));
+  ({ favoriteBuffer } = await import('../db/favoriteBuffers.js'));
   ({ addRule } = await import('../db/ignoredMasks.js'));
   ({ addBookmark } = await import('../db/bookmarks.js'));
   ({ setReadState, setClearedState, getClearedState } = await import('../db/bufferReads.js'));
@@ -127,6 +129,7 @@ function seedAlice(): { alice: User; net: Network; ruleId: number } {
   setNote({ userId: alice.id, networkId: net.id, nick: 'bob', note: 'lives in berlin' });
   addMask({ userId: alice.id, networkId: net.id, mask: 'spammer!*@*' });
   pinBuffer(alice.id, net.id, '#general');
+  favoriteBuffer(alice.id, net.id, '#general');
   addBookmark(alice.id, m1.id as number);
   setReadState(alice.id, net.id, '#general', m1.id as number);
   insertUpload(alice.id, {
@@ -254,6 +257,16 @@ describe('importFromZipBuffer — roundtrip', () => {
     expect(bobPins.length).toBe(1);
     expect(bobPins[0].network_id).toBe(bobNets[0].id);
     expect(bobPins[0].target).toBe('#general');
+
+    // Favorites ride the same buffer_id rekey; the imported row points at
+    // bob's minted #general, not alice's id.
+    const bobFavorites = db
+      .prepare(
+        `SELECT b.network_id, b.target FROM favorite_buffers f
+         JOIN buffers b ON b.id = f.buffer_id WHERE f.user_id = ?`,
+      )
+      .all(bob.id) as Array<{ network_id: number; target: string }>;
+    expect(bobFavorites).toEqual([{ network_id: bobNets[0].id, target: '#general' }]);
 
     const bobMasks = db
       .prepare('SELECT * FROM ignored_masks WHERE user_id = ?')
@@ -854,6 +867,72 @@ describe('importFromZipBuffer — roundtrip', () => {
     // A history-less channel absent from the legacy tables gets no row at all
     // — legacy existence WAS message history.
     expect(buffers.getBuffer(pat.id, patNet, '#dev')).toBeUndefined();
+  });
+
+  it("skips a pre-v19 archive's contacts sections (tables dropped with buffer favorites)", async () => {
+    // Backups taken before schema v19 carry `contacts`/`contact_targets`
+    // sections; the registry no longer declares them, and import iterates the
+    // registry — never the archive's keys — so they must be silently ignored,
+    // not fatal. This pins the property the drop relied on.
+    const { alice, net } = seedAlice();
+    const buf = await exportToBuffer(alice.id, { includeMessages: false });
+    const yauzl = await import('yauzl');
+    const { ZipArchive } = await import('archiver');
+
+    const entries = await new Promise<Map<string, Buffer>>((resolve, reject) => {
+      yauzl.fromBuffer(buf, { lazyEntries: true }, (err, zip) => {
+        if (err) return reject(err);
+        const out = new Map<string, Buffer>();
+        zip.readEntry();
+        zip.on('entry', (entry) => {
+          if (entry.fileName.endsWith('/')) {
+            zip.readEntry();
+            return;
+          }
+          zip.openReadStream(entry, (e2, stream) => {
+            if (e2) return reject(e2);
+            const chunks: Buffer[] = [];
+            stream.on('data', (c: Buffer) => chunks.push(c));
+            stream.on('end', () => {
+              out.set(entry.fileName, Buffer.concat(chunks));
+              zip.readEntry();
+            });
+            stream.on('error', reject);
+          });
+        });
+        zip.on('end', () => resolve(out));
+        zip.on('error', reject);
+      });
+    });
+
+    const data = JSON.parse(entries.get('data.json')!.toString('utf8'));
+    data.contacts = [
+      { id: 1, user_id: alice.id, display_name: 'Zoe', notify_online: 1, created_at: '2026-01-01' },
+    ];
+    data.contact_targets = [{ contact_id: 1, network_id: net.id, nick: 'zoe', is_primary: 1 }];
+    entries.set('data.json', Buffer.from(JSON.stringify(data)));
+
+    const archive = new ZipArchive();
+    const rebuiltChunks: Buffer[] = [];
+    archive.on('data', (c: Buffer) => rebuiltChunks.push(c));
+    for (const [name, content] of entries) archive.append(content, { name });
+    await archive.finalize();
+    const rebuilt = Buffer.concat(rebuiltChunks);
+
+    const quinn = createUser(`quinn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    const result = await importFromZipBuffer(quinn.id, rebuilt);
+    // The rest of the archive lands normally — including the real
+    // favorite_buffers section (seedAlice favorites #general) — while the
+    // contacts payload never surfaces: no tables to land in, and no favorite
+    // conjured from Zoe's contact row.
+    expect(result.counts.networks).toBeGreaterThan(0);
+    const quinnFavorites = db
+      .prepare(
+        `SELECT b.target AS target FROM favorite_buffers f
+         JOIN buffers b ON b.id = f.buffer_id WHERE f.user_id = ?`,
+      )
+      .all(quinn.id) as Array<{ target: string }>;
+    expect(quinnFavorites).toEqual([{ target: '#general' }]);
   });
 
   it('rejects an archive without a manifest', async () => {
