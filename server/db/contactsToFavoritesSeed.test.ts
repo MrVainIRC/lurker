@@ -65,8 +65,12 @@ beforeAll(async () => {
     }
   };
 
-  // Zoe: open DM already exists (stored casing differs from the target's).
+  // Zoe: open DM already exists (stored casing differs from the target's) —
+  // and is PINNED, which the seed must drop (favorite implies unpin; a hidden
+  // pin row would be silently demoted by every later subset reorder).
   ensureBuffer(user.id, net!.id, 'zoe');
+  const { pinBuffer } = await import('./pinnedBuffers.js');
+  pinBuffer(user.id, net!.id, 'zoe');
   addContact('Zoe', [[net!.id, 'ZOE', 1]]);
   // Bram: DM exists but is closed — the seed must reopen it.
   ensureBuffer(user.id, net!.id, 'bram');
@@ -117,6 +121,12 @@ describe('seedFavoritesFromContacts', () => {
       )
       .get(user.id, net!.id);
     expect(alt).toBeUndefined();
+
+    // Zoe's pin was dropped along with the favorite grant (favorite⇒unpin).
+    const pins = db
+      .prepare(`SELECT COUNT(*) AS n FROM pinned_buffers WHERE user_id = ?`)
+      .get(user.id) as { n: number };
+    expect(pins.n).toBe(0);
 
     const tables = db
       .prepare(

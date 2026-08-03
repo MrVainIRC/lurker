@@ -2106,6 +2106,18 @@ if (schemaVersion < 18 && columnExists('buffer_reads', 'target')) {
   }
 }
 
+// One placement per buffer: a favorite and a pin are mutually exclusive
+// (favorite⇒unpin and pin⇒unfavorite in the wsHub verbs). Enforce it on every
+// boot for rows that predate the invariant — chiefly v19 migrations that
+// seeded a favorite onto an already-pinned DM before the seed learned to drop
+// the pin. The favorite wins (matching the seed's intent); idempotent, and a
+// no-op once clean. Position holes are harmless (ORDER BY tolerates gaps,
+// pinBuffer appends at MAX+1, the next unpin/reorder re-densifies).
+db.exec(`DELETE FROM pinned_buffers WHERE EXISTS (
+  SELECT 1 FROM favorite_buffers f
+  WHERE f.user_id = pinned_buffers.user_id AND f.buffer_id = pinned_buffers.buffer_id
+)`);
+
 // v19: buffer favorites replace the Friends/Contacts system. Seed a favorite
 // (an open DM buffer, minted/reopened if need be) from each contact's primary
 // target, then drop the contacts tables. Gated on the tables actually existing:

@@ -3,6 +3,7 @@
 
 import type { ContextMenuItem } from './useContextMenu.js';
 import { usePinsStore } from '../stores/pins.js';
+import { useFavoritesStore } from '../stores/favorites.js';
 import { useNickNotesStore } from '../stores/nickNotes.js';
 import { useWhoisStore } from '../stores/whois.js';
 import { useContextMenu } from './useContextMenu.js';
@@ -31,6 +32,7 @@ export interface BufferActionsAPI {
 // network, browse channels) and aren't handled here.
 export function useBufferActions(): BufferActionsAPI {
   const pins = usePinsStore();
+  const favorites = useFavoritesStore();
   const nickNotes = useNickNotesStore();
   const whois = useWhoisStore();
   const menu = useContextMenu();
@@ -43,22 +45,52 @@ export function useBufferActions(): BufferActionsAPI {
     // the app-scoped system buffer (networkId null) yields no menu.
     const networkId = buf?.networkId;
     if (!buf || networkId == null || buf.target.startsWith(':server:')) return [];
-    const isChannel = buf.target.startsWith('#');
+    // Full channel-prefix test, matching the server's kindForTarget and the
+    // favorites sections getter: '&'/'+'/'!' targets are channels, so they get
+    // channel labels, the channel notify ladder, and channel icons — and are
+    // never offered the DM-only profile/note items (whois on '&local' is
+    // nonsense the old '#'-only test allowed).
+    const isChannel = /^[#&+!]/.test(buf.target);
     const kind = isChannel ? 'Channel' : 'DM';
     const pinned = pins.isPinned(networkId, buf.target);
-    const items: ContextMenuItem[] = [
-      pinned
+    // One flag, two labels: a favorited channel surfaces in the FAVORITES
+    // section, a favorited DM under FRIENDS (the Friends/Contacts successor).
+    const favorited = favorites.isFavorite(networkId, buf.target);
+    const favoriteSection = isChannel ? 'Favorites' : 'Friends';
+    const items: ContextMenuItem[] = [];
+    // A favorited buffer can't be pinned (one placement per buffer:
+    // favorite⇒unpin server-side), so the pin item on a favorited buffer is
+    // noise — hidden. The favorite item on a PINNED buffer stays: it's the
+    // sanctioned way to promote a pin into the sections (the server drops the
+    // pin as part of the grant).
+    if (!favorited) {
+      items.push(
+        pinned
+          ? {
+              label: `Unpin ${kind}`,
+              icon: 'fa-solid fa-thumbtack-slash',
+              onClick: () => pins.unpin(networkId, buf.target),
+            }
+          : {
+              label: `Pin ${kind}`,
+              icon: 'fa-solid fa-thumbtack',
+              onClick: () => pins.pin(networkId, buf.target),
+            },
+      );
+    }
+    items.push(
+      favorited
         ? {
-            label: `Unpin ${kind}`,
-            icon: 'fa-solid fa-thumbtack-slash',
-            onClick: () => pins.unpin(networkId, buf.target),
+            label: `Remove from ${favoriteSection}`,
+            icon: isChannel ? 'fa-regular fa-star' : 'fa-solid fa-user-minus',
+            onClick: () => favorites.unfavorite(networkId, buf.target),
           }
         : {
-            label: `Pin ${kind}`,
-            icon: 'fa-solid fa-thumbtack',
-            onClick: () => pins.pin(networkId, buf.target),
+            label: `Add to ${favoriteSection}`,
+            icon: isChannel ? 'fa-solid fa-star' : 'fa-solid fa-user-group',
+            onClick: () => favorites.favorite(networkId, buf.target),
           },
-    ];
+    );
     // Notification "quietness" ladder (issue #359): channels get the full 4-rung
     // ladder (All / Highlights / Nothing / Muted), DMs the 3-rung one (no
     // "Highlights only" — every DM is already the signal).

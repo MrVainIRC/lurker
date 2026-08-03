@@ -84,6 +84,76 @@
         :class="{ 'unread-bold': unreadBold }"
         @scroll="scheduleRecompute"
       >
+        <!-- FRIENDS / FAVORITES: two kind-filtered views of the one global
+             favorites list (queries vs channels). Rows are real buffers —
+             presence dots, badges, menus all behave like any DM/channel row —
+             shown here INSTEAD of their network group (dedupe, like the old
+             FRIENDS section). Each section drag-reorders independently: the
+             server floats the sent subset and keeps unmentioned favorites'
+             relative order, so reordering Friends never scrambles Favorites. -->
+        <div v-for="section in favoriteSections" :key="section.name" class="net">
+          <div class="net-head section-head">
+            <span class="name">{{ section.name }}</span>
+          </div>
+          <draggable
+            :list="section.rows"
+            item-key="key"
+            tag="ul"
+            class="channels"
+            :animation="120"
+            ghost-class="drag-ghost"
+            :delay="200"
+            :delay-on-touch-only="true"
+            :touch-start-threshold="5"
+            @start="dragging = true"
+            @end="onFavoriteDragEnd(section.rows)"
+          >
+            <template #item="{ element: row }">
+              <li
+                :class="rowClasses(row.buf, row.networkId)"
+                :title="sectionRowTitle(row)"
+                @click="select(row.networkId, row.buf.target)"
+                @contextmenu.prevent="onBufferContextMenu($event, row.buf)"
+              >
+                <span class="label"
+                  >{{ labelFor(row.buf)
+                  }}<span
+                    v-if="duplicateFavoriteNames.has(row.buf.target.toLowerCase())"
+                    class="net-hint"
+                    >{{ networkAbbrevs.get(row.networkId) || row.networkName }}</span
+                  ></span
+                >
+                <span
+                  v-if="hasDraft(row.buf)"
+                  class="badge draft"
+                  title="unsent draft"
+                  aria-label="unsent draft"
+                  ><i class="fa-solid fa-pencil"></i
+                ></span>
+                <span
+                  v-if="row.buf.highlighted > 0 && showHighlightBadge"
+                  class="badge highlight"
+                  :title="`${row.buf.highlighted} highlight${row.buf.highlighted === 1 ? '' : 's'}`"
+                  >●</span
+                >
+                <span v-if="displayCount(row.buf) > 0" class="badge">{{
+                  unreadLabel(displayCount(row.buf))
+                }}</span>
+                <button
+                  type="button"
+                  class="row-actions"
+                  title="Actions"
+                  aria-label="Buffer actions"
+                  @click.stop="onRowActionsClick($event, row.buf)"
+                  @contextmenu.stop.prevent
+                >
+                  <i class="fa-solid fa-ellipsis-vertical"></i>
+                </button>
+              </li>
+            </template>
+          </draggable>
+        </div>
+
         <div v-for="net in networks.networks" :key="net.id" class="net">
           <div
             class="net-head"
@@ -284,6 +354,7 @@ import { SYSTEM_KEY } from '../lib/virtualBuffers.js';
 import { connected as lurkerConnected } from '../composables/useSocket.js';
 import { useDraftStore } from '../stores/drafts.js';
 import { usePinsStore } from '../stores/pins.js';
+import { useFavoritesStore, type FavoriteEntry } from '../stores/favorites.js';
 import { useIgnoresStore } from '../stores/ignores.js';
 import { useSettingsStore } from '../stores/settings.js';
 import { useAuthStore } from '../stores/auth.js';
@@ -301,6 +372,7 @@ const networks = useNetworksStore();
 const buffers = useBuffersStore();
 const drafts = useDraftStore();
 const pins = usePinsStore();
+const favorites = useFavoritesStore();
 const ignores = useIgnoresStore();
 const settings = useSettingsStore();
 const auth = useAuthStore();
@@ -438,11 +510,20 @@ function sortKey(target: string): string {
   return target.replace(/^#+/, '').toLowerCase();
 }
 
+// A favorited buffer renders in its FRIENDS/FAVORITES section instead of its
+// network group (dedupe, matching the old FRIENDS behavior) — filtered from
+// both the unpinned list and the pinned mirror below.
+function isFavoriteBuf(b: Buffer): boolean {
+  return (
+    b.networkId != null && favorites.favoriteKeys.has(`${b.networkId}::${b.target.toLowerCase()}`)
+  );
+}
+
 function unpinnedBufs(networkId: number): Buffer[] {
   const pinnedSet = new Set(pins.forNetwork(networkId));
   return buffers
     .forNetwork(networkId)
-    .filter((b) => !isServerBuffer(b) && !pinnedSet.has(b.target))
+    .filter((b) => !isServerBuffer(b) && !pinnedSet.has(b.target) && !isFavoriteBuf(b))
     .toSorted((a, b) => {
       const oa = bufferOrder(a);
       const ob = bufferOrder(b);
@@ -460,7 +541,9 @@ function syncPinned(): void {
     const targets = pins.forNetwork(net.id);
     const bufByTarget = new Map<string, Buffer>();
     for (const b of buffers.forNetwork(net.id)) bufByTarget.set(b.target, b);
-    const list = targets.map((t) => bufByTarget.get(t)).filter((b): b is Buffer => !!b);
+    const list = targets
+      .map((t) => bufByTarget.get(t))
+      .filter((b): b is Buffer => !!b && !isFavoriteBuf(b));
     if (!pinnedBufsByNet[net.id]) {
       pinnedBufsByNet[net.id] = list;
     } else {
@@ -476,11 +559,18 @@ function syncPinned(): void {
 }
 
 // Only re-sync when something structurally relevant changes — pin order, the
-// set of networks, or the set of buffer keys. Per-buffer state churn (unread
-// counts, member list, messages) doesn't affect which buffers belong in the
-// pinned list and shouldn't re-walk this whole map on every keystroke.
+// set of networks, the set of buffer keys, or the favorites the mirror
+// filters out (so favoriting a pinned buffer doesn't leave a stale duplicate
+// row in the pinned section). Per-buffer state churn (unread counts, member
+// list, messages) doesn't affect which buffers belong in the pinned list and
+// shouldn't re-walk this whole map on every keystroke.
 watch(
-  () => [pins.byNetwork, networks.networks.map((n) => n.id), Object.keys(buffers.buffers)],
+  () => [
+    pins.byNetwork,
+    networks.networks.map((n) => n.id),
+    Object.keys(buffers.buffers),
+    favorites.entries,
+  ],
   syncPinned,
   { deep: true, immediate: true },
 );
@@ -492,6 +582,132 @@ function onPinDragEnd(networkId: number): void {
     networkId,
     list.map((b) => b.target),
   );
+  // Both mirrors share the one `dragging` guard, so a favorites echo that
+  // landed mid-drag was skipped with nothing left to re-fire its watch —
+  // catch the OTHER mirror up now that the guard is down. Deliberately NOT
+  // this mirror: the store still holds the pre-echo order, and re-splicing
+  // from it would snap the row the user just dropped back to its old slot
+  // for a round-trip (and corrupt a quick second drag). The pins-changed
+  // echo re-syncs it authoritatively.
+  syncFavorites();
+}
+
+// The FRIENDS/FAVORITES sections: the global favorites list resolved to
+// concrete buffers and split by kind. Mirrored into stable reactive arrays
+// (the syncPinned pattern) so vuedraggable's array refs survive re-syncs;
+// entries whose buffer hasn't materialized yet (favorites-changed can outrun
+// hydration) are skipped and picked up when the buffer lands.
+interface FavoriteRow {
+  key: string;
+  bufferId: number;
+  // The entry's network id, numeric by construction (only real IRC buffers
+  // are favoritable) — the template needs it non-null where Buffer.networkId
+  // is nullable for the app-scoped system buffer.
+  networkId: number;
+  networkName: string;
+  buf: Buffer;
+}
+
+// Section rows are cross-network, so two favorites can share a name (#lurker
+// on two networks) and be otherwise pixel-identical. The network hint renders
+// ONLY for those collisions — when every name is unique it says nothing the
+// row doesn't, and the tooltip still names the network for everyone.
+const duplicateFavoriteNames = computed(() => {
+  const counts = new Map<string, number>();
+  for (const r of [...friendRows, ...favoriteChannelRows]) {
+    const k = r.buf.target.toLowerCase();
+    counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  return new Set([...counts].filter(([, n]) => n > 1).map(([k]) => k));
+});
+
+// The hint text itself: the shortest prefix of the network name that is
+// unique among the user's networks ('l' for libera next to mansionNET, but
+// 'li'/'lu' when libera and lurkernet coexist) — a full name next to a nick
+// read as clutter at every length we tried. Tooltip carries the full name.
+const networkAbbrevs = computed(() => {
+  const names = networks.networks.map((n) => [n.id, n.name.toLowerCase()] as const);
+  const out = new Map<number, string>();
+  for (const [id, name] of names) {
+    let len = 1;
+    while (
+      len < name.length &&
+      names.some(([otherId, other]) => otherId !== id && other.startsWith(name.slice(0, len)))
+    ) {
+      len += 1;
+    }
+    out.set(id, name.slice(0, len));
+  }
+  return out;
+});
+
+function sectionRowTitle(row: FavoriteRow): string {
+  const presence = dmTitle(row.buf);
+  return presence ? `${presence} — ${row.networkName}` : `${row.buf.target} — ${row.networkName}`;
+}
+const friendRows = reactive<FavoriteRow[]>([]);
+const favoriteChannelRows = reactive<FavoriteRow[]>([]);
+// Only non-empty sections render — an empty `.net` div still carries padding
+// and the `.net + .net` separator, which would stack dead chrome above the
+// first network for everyone with no favorites (the default state).
+const favoriteSections = computed(() =>
+  [
+    { name: 'FRIENDS', rows: friendRows },
+    { name: 'FAVORITES', rows: favoriteChannelRows },
+  ].filter((s) => s.rows.length > 0),
+);
+
+function syncFavorites(): void {
+  if (dragging.value) return;
+  const toRows = (entries: FavoriteEntry[]): FavoriteRow[] =>
+    entries.flatMap((e) => {
+      const buf = buffers.findByTarget(e.networkId, e.target);
+      return buf
+        ? [
+            {
+              key: `${e.networkId}::${buf.target}`,
+              bufferId: e.bufferId,
+              networkId: e.networkId,
+              networkName: networks.networkById(e.networkId)?.name || `net:${e.networkId}`,
+              buf,
+            },
+          ]
+        : [];
+    });
+  const secs = favorites.sections;
+  friendRows.splice(0, friendRows.length, ...toRows(secs.friends));
+  favoriteChannelRows.splice(0, favoriteChannelRows.length, ...toRows(secs.channels));
+}
+
+watch(() => [favorites.entries, Object.keys(buffers.buffers)], syncFavorites, {
+  deep: true,
+  immediate: true,
+});
+
+function onFavoriteDragEnd(rows: FavoriteRow[]): void {
+  dragging.value = false;
+  // Send the FULL global order, not just this section's rows: the store's
+  // entry order with the dragged section's ids permuted in place. A
+  // section-only subset would float those ids to the front — silently and
+  // globally demoting any favorite this tab has no materialized buffer for
+  // yet (favorites-changed can outrun hydration) and every entry of the
+  // OTHER section that sorted ahead. Full-list reorder moves exactly what
+  // the user moved.
+  // The store can have moved under a frozen mirror (an echo landing
+  // mid-drag): drop dragged rows the store no longer knows, so the slot
+  // count always matches and the permutation can't misalign. Anything still
+  // stale after that is caught by the server's set check → authoritative echo.
+  const known = new Set(favorites.entries.map((e) => e.bufferId));
+  const dragged = rows.filter((r) => known.has(r.bufferId));
+  const draggedIds = new Set(dragged.map((r) => r.bufferId));
+  let i = 0;
+  const full = favorites.entries.map((e) =>
+    draggedIds.has(e.bufferId) ? dragged[i++].bufferId : e.bufferId,
+  );
+  favorites.reorder(full);
+  // Catch the pins mirror up on any echo skipped mid-drag (see onPinDragEnd);
+  // this mirror keeps its dropped order until the favorites-changed echo.
+  syncPinned();
 }
 
 function onBufferContextMenu(e: MouseEvent, buf: Buffer): void {
@@ -862,6 +1078,20 @@ onBeforeUnmount(() => {
   cursor: pointer;
   border-left: 2px solid transparent;
   position: relative;
+}
+/* FRIENDS/FAVORITES section labels are headings, not buttons — no server
+   buffer behind them to open. */
+.net-head.section-head {
+  cursor: default;
+}
+/* Cross-network disambiguation on section rows: rides INSIDE the label, right
+   after the buffer name — anchored to what it describes, and immune to badges
+   appearing/disappearing at the row's right edge. Quiet; absent entirely on
+   single-network instances. The label's own ellipsis clips it on overflow. */
+.net-hint {
+  /* One font size across the UI: the hint demotes itself with color alone. */
+  color: var(--fg-muted);
+  margin-inline-start: var(--space-2);
 }
 /* Gate :hover behind (hover: hover) so iPad-in-desktop-layout (width > 768px,
    touch-only) doesn't get the iOS sticky-hover two-tap: with bare :hover the

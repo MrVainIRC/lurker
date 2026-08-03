@@ -5,6 +5,7 @@ import { onBeforeUnmount, onMounted, watch } from 'vue';
 import { useNetworksStore } from '../stores/networks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { usePinsStore } from '../stores/pins.js';
+import { useFavoritesStore } from '../stores/favorites.js';
 import { useNavHistoryStore } from '../stores/navHistory.js';
 import { useRecentBuffersStore } from '../stores/recentBuffers.js';
 import { socketSend } from './useSocket.js';
@@ -51,6 +52,7 @@ export function useKeyboardShortcuts({
   const networks = useNetworksStore();
   const buffers = useBuffersStore();
   const pins = usePinsStore();
+  const favorites = useFavoritesStore();
   const navHistory = useNavHistoryStore();
   const recentBuffers = useRecentBuffersStore();
 
@@ -84,6 +86,10 @@ export function useKeyboardShortcuts({
       networks: networks.networks,
       buffers,
       pins,
+      // The FRIENDS/FAVORITES sections as the sidebar shows them, with those
+      // buffers excluded from their real network group so nav doesn't visit
+      // them twice.
+      favorites: favorites.orderInjection,
     });
   }
 
@@ -92,6 +98,7 @@ export function useKeyboardShortcuts({
       networks: networks.networks,
       buffers,
       pins,
+      favorites: favorites.orderInjection,
     });
   }
 

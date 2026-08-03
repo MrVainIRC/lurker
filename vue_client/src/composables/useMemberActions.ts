@@ -3,10 +3,12 @@
 
 import type { ContextMenuItem } from './useContextMenu.js';
 import { useBuffersStore } from '../stores/buffers.js';
+import { useFavoritesStore } from '../stores/favorites.js';
 import { useNickNotesStore } from '../stores/nickNotes.js';
 import { useWhoisStore } from '../stores/whois.js';
 import { useContextMenu } from './useContextMenu.js';
 import { socketSend } from './useSocket.js';
+import { historyCountBy } from '../lib/historyPaging.js';
 import { addressNick } from './useComposerOverlay.js';
 
 export interface MemberLike {
@@ -96,6 +98,7 @@ function kickLine(channel: string, nick: string, reason: string): string {
 //   { networkId, isSelf(member), onIgnore(member) }
 export function useMemberActions(): MemberActionsAPI {
   const buffers = useBuffersStore();
+  const favorites = useFavoritesStore();
   const nickNotes = useNickNotesStore();
   const whois = useWhoisStore();
   const menu = useContextMenu();
@@ -149,6 +152,36 @@ export function useMemberActions(): MemberActionsAPI {
       onClick: () => nickNotes.openEditor(ctx.networkId, nick),
     });
     if (!isSelf) {
+      const isFriend = favorites.isFavorite(ctx.networkId, nick);
+      items.push(
+        isFriend
+          ? {
+              label: 'Remove from Friends',
+              icon: 'fa-solid fa-user-minus',
+              onClick: () => favorites.unfavorite(ctx.networkId, nick),
+            }
+          : {
+              label: 'Add to Friends',
+              icon: 'fa-solid fa-user-group',
+              // Favoriting requires an OPEN buffer (a closed one is refused —
+              // the stale-tab orphan guard), and this member may have no DM
+              // yet. open-buffer mints/reopens the row without stealing focus,
+              // and the same socket delivers it before the favorite, so the
+              // favorite always lands. No client-side ordering to get wrong.
+              onClick: () => {
+                // countBy matches the store's openBuffer seam — without it
+                // the server sizes the first backlog slice in 'event' units
+                // even for users paging by renderable lines.
+                socketSend({
+                  type: 'open-buffer',
+                  networkId: ctx.networkId,
+                  target: nick,
+                  countBy: historyCountBy(),
+                });
+                favorites.favorite(ctx.networkId, nick);
+              },
+            },
+      );
       items.push({
         label: 'Ignore…',
         icon: 'fa-solid fa-ban',
