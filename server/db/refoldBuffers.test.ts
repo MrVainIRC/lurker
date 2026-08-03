@@ -12,7 +12,6 @@ process.env.DATABASE_PATH = path.join(tmpDir, 'test.db');
 let db: typeof import('./index.js').default;
 let createUser: typeof import('./users.js').createUser;
 let createNetwork: typeof import('./networks.js').createNetwork;
-let setNetworkCasemapping: typeof import('./networks.js').setNetworkCasemapping;
 let buffers: typeof import('./buffers.js');
 let refoldNetworkBuffers: typeof import('./refoldBuffers.js').refoldNetworkBuffers;
 let resolveBuffer: typeof import('./bufferResolve.js').resolveBuffer;
@@ -41,7 +40,7 @@ function seed(networkId: number, target: string, text: string): number {
 beforeAll(async () => {
   ({ default: db } = await import('./index.js'));
   ({ createUser } = await import('./users.js'));
-  ({ createNetwork, setNetworkCasemapping } = await import('./networks.js'));
+  ({ createNetwork } = await import('./networks.js'));
   buffers = await import('./buffers.js');
   ({ refoldNetworkBuffers } = await import('./refoldBuffers.js'));
   ({ resolveBuffer } = await import('./bufferResolve.js'));
@@ -59,10 +58,19 @@ describe('fold drift without collision', () => {
     buffers.ensureOpen(userId, networkId, '#Ärger');
     const id = buffers.getBuffer(userId, networkId, '#Ärger')!.id;
 
-    setNetworkCasemapping(networkId, 'rfc1459');
     const merges = refoldNetworkBuffers(userId, networkId, 'rfc1459');
     expect(merges).toEqual([]);
 
+    // The mapping stores atomically WITH the refold — a mapping committed
+    // ahead of a failed refold would never be retried (the stored value is
+    // the capture path's only "already done" signal).
+    expect(
+      (
+        db.prepare(`SELECT casemapping FROM networks WHERE id = ?`).get(networkId) as {
+          casemapping: string | null;
+        }
+      ).casemapping,
+    ).toBe('rfc1459');
     // ascii-family rules leave Ä alone, so the stored fold must now carry it.
     const folded = (
       db.prepare(`SELECT target_folded FROM buffers WHERE id = ?`).get(id) as {
@@ -78,7 +86,6 @@ describe('fold drift without collision', () => {
 
   it('leaves sentinels alone', () => {
     const networkId = makeNetwork('sentinels');
-    setNetworkCasemapping(networkId, 'rfc1459');
     refoldNetworkBuffers(userId, networkId, 'rfc1459');
     expect(buffers.getBuffer(userId, networkId, `:server:${networkId}`)).toBeTruthy();
   });
@@ -97,7 +104,6 @@ describe('newly-colliding rows merge (the #foo[bar] ≡ #foo{bar} fix)', () => {
     bufferReads.setReadState(userId, networkId, '#foo[bar]', bracketMsg);
     buffers.close(userId, networkId, '#foo[bar]');
 
-    setNetworkCasemapping(networkId, 'rfc1459');
     const merges = refoldNetworkBuffers(userId, networkId, 'rfc1459');
 
     expect(merges).toEqual([
@@ -122,6 +128,24 @@ describe('newly-colliding rows merge (the #foo[bar] ≡ #foo{bar} fix)', () => {
     expect(bufferReads.getReadState(userId, networkId, '#foo{bar}')).toBe(bracketMsg);
   });
 
+  it('a merge unions autojoin and adopts the absorbed +k key', () => {
+    // The absorbed side can be the one carrying the channel's autojoin flag
+    // and key (joined recently, no history yet); deleting the row must not
+    // take them with it — importRow's channel semantics (autojoin = MAX,
+    // key = first non-null) apply to merges too.
+    const networkId = makeNetwork('channelprops');
+    buffers.ensureOpen(userId, networkId, '#ops{1}');
+    seed(networkId, '#ops{1}', 'chatty survivor');
+    buffers.ensureOpen(userId, networkId, '#ops[1]', { autojoin: true, key: 'hunter2' });
+
+    const merges = refoldNetworkBuffers(userId, networkId, 'rfc1459');
+
+    expect(merges).toHaveLength(1);
+    const survivor = buffers.getBuffer(userId, networkId, '#ops{1}')!;
+    expect(survivor.autojoin).toBe(true);
+    expect(survivor.key).toBe('hunter2');
+  });
+
   it('between two open rows, the one with the most recent message survives', () => {
     const networkId = makeNetwork('recency');
     buffers.ensureOpen(userId, networkId, 'nick^');
@@ -130,7 +154,6 @@ describe('newly-colliding rows merge (the #foo[bar] ≡ #foo{bar} fix)', () => {
     seed(networkId, 'nick~', 'newest');
     const tildeId = buffers.getBuffer(userId, networkId, 'nick~')!.id;
 
-    setNetworkCasemapping(networkId, 'rfc1459');
     const merges = refoldNetworkBuffers(userId, networkId, 'rfc1459');
 
     expect(merges).toHaveLength(1);
@@ -142,7 +165,8 @@ describe('newly-colliding rows merge (the #foo[bar] ≡ #foo{bar} fix)', () => {
 describe('the live paths fold per-network once a mapping is stored', () => {
   it('ensureOpen cannot fork a bracket variant on an rfc1459 network', () => {
     const networkId = makeNetwork('nofork');
-    setNetworkCasemapping(networkId, 'rfc1459');
+    // The refold IS the mapping's writer (it stores inside its transaction).
+    refoldNetworkBuffers(userId, networkId, 'rfc1459');
     buffers.ensureOpen(userId, networkId, '#chan[1]');
     const id = buffers.getBuffer(userId, networkId, '#chan[1]')!.id;
     // Pre-#707 this minted a second row; now it lands on the same one.

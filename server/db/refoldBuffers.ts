@@ -5,12 +5,14 @@ import db from './index.js';
 import { foldTargetWith } from './casemapping.js';
 import type { Casemapping } from './casemapping.js';
 import { absorbBufferRow } from './renameBuffer.js';
+import { invalidateCasemappingCache } from './buffers.js';
 
 // Re-fold one network's buffer registry under a newly-declared CASEMAPPING
-// (#707). Runs when the capture path (ircConnection 'server options') sees a
-// declared mapping that differs from what's stored — first contact with a
-// declaring server included, since every existing row was folded with the
-// legacy Unicode-lowercase rule.
+// (#707). Runs when the capture path (ircConnection's raw-005 token scan)
+// sees a declared mapping that differs from what's stored — first contact
+// with a declaring server included, since every existing row was folded with
+// the legacy Unicode-lowercase rule. This pass is also the mapping's ONE
+// writer: the store rides inside the refold transaction (see below).
 //
 // Two things can change:
 //
@@ -52,12 +54,18 @@ const rowsStmt = db.prepare(`
 `);
 const lastMessageStmt = db.prepare(`SELECT MAX(id) AS m FROM messages WHERE buffer_id = ?`);
 const setFoldedStmt = db.prepare(`UPDATE buffers SET target_folded = ? WHERE id = ?`);
-const draftBodyStmt = db.prepare(
-  `SELECT body FROM user_drafts WHERE user_id = ? AND buffer_id = ?`,
-);
+const storeMappingStmt = db.prepare(`UPDATE networks SET casemapping = ? WHERE id = ?`);
 
 const work = db.transaction(
   (userId: number, networkId: number, mapping: Casemapping): RefoldMerge[] => {
+    // The mapping is stored INSIDE the refold transaction, not before it: the
+    // stored value is the capture path's only "already done" signal, so a
+    // mapping committed ahead of a refold that then failed (Litestream write
+    // contention, a crash between the two) would never be retried — every
+    // lookup would fold with the new rule against rows still holding legacy
+    // folds, minting the exact duplicate-buffer split this seam exists to
+    // prevent. Fail together, retry together on the next 005.
+    storeMappingStmt.run(mapping, networkId);
     const rows = rowsStmt.all(userId, networkId) as Row[];
     const groups = new Map<string, Row[]>();
     for (const row of rows) {
@@ -82,20 +90,16 @@ const work = db.transaction(
           .sort((a, b) => b.open - a.open || b.last - a.last || a.row.id - b.row.id);
         survivor = ranked[0].row;
         for (const { row: absorbed } of ranked.slice(1)) {
-          const before = (draftBodyStmt.get(userId, survivor.id) as { body: string } | undefined)
-            ?.body;
-          absorbBufferRow(userId, networkId, survivor, absorbed);
+          const { draftChanged } = absorbBufferRow(userId, networkId, survivor, absorbed);
           // The union may have opened the survivor; later absorbs in this
           // group must see that, or they'd re-run the flip's subquery dance.
           if (absorbed.state === 'open') survivor.state = 'open';
-          const after = (draftBodyStmt.get(userId, survivor.id) as { body: string } | undefined)
-            ?.body;
           merges.push({
             survivorId: survivor.id,
             survivorTarget: survivor.target,
             absorbedId: absorbed.id,
             absorbedTarget: absorbed.target,
-            draftChanged: after !== before,
+            draftChanged,
           });
         }
       }
@@ -108,11 +112,13 @@ const work = db.transaction(
     // transition we could construct, such a pair already collides under the
     // OLD fold and merged above — but that's an argument about four specific
     // fold functions, and parking changing rows on a synthetic fold first
-    // costs two statements to make the argument unnecessary. `refold:<id>`
-    // can't collide with a real fold: DM targets can't contain ':' on the
-    // wire and channel folds keep their sigil prefix.
+    // costs two statements to make the argument unnecessary. The parking
+    // value opens with a NUL, which no wire target can carry and no fold
+    // produces — a stronger guarantee than any printable prefix, since the
+    // archive import writes targets verbatim and a hand-crafted row named
+    // "refold:7" would otherwise be able to abort the pass.
     const changing = finalFolds.filter(({ row, folded }) => row.target_folded !== folded);
-    for (const { row } of changing) setFoldedStmt.run(`refold:${row.id}`, row.id);
+    for (const { row } of changing) setFoldedStmt.run(`\u0000refold:${row.id}`, row.id);
     for (const { row, folded } of changing) setFoldedStmt.run(folded, row.id);
     return merges;
   },
@@ -129,5 +135,10 @@ export function refoldNetworkBuffers(
   networkId: number,
   mapping: Casemapping,
 ): RefoldMerge[] {
-  return work.immediate(userId, networkId, mapping);
+  const merges = work.immediate(userId, networkId, mapping);
+  // Only after the commit: an invalidation before a rolled-back store would
+  // just re-read the old value, but this ordering keeps the cache unable to
+  // ever run ahead of the database.
+  invalidateCasemappingCache(networkId);
+  return merges;
 }

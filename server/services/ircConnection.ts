@@ -8,7 +8,6 @@ import { renameBuffer as renameDmBuffer } from '../db/renameBuffer.js';
 import { refoldNetworkBuffers } from '../db/refoldBuffers.js';
 import { normalizeCasemapping } from '../db/casemapping.js';
 import type { Network } from '../db/networks.js';
-import { setNetworkCasemapping } from '../db/networks.js';
 import {
   isClosed as isBufferClosed,
   getBuffer,
@@ -518,9 +517,6 @@ export class IrcConnection {
   useMonitor: boolean;
   monitorLimit: number;
   pendingMonitorSeed: boolean;
-  /** Per-socket latch: CASEMAPPING has been captured off this connection's
-   *  005 burst, so later 'server options' firings skip the DB read. */
-  capturedCasemapping: boolean;
   disposed: boolean;
   connectCommandTimer: ReturnType<typeof setTimeout> | null;
   lagMs: number | null;
@@ -684,7 +680,6 @@ export class IrcConnection {
     this.useMonitor = false;
     this.monitorLimit = 0;
     this.pendingMonitorSeed = false;
-    this.capturedCasemapping = false;
     this.disposed = false;
     // Pending timer for the next WAIT-delayed connect command. Cleared on
     // close/dispose so we never call client.raw() after the socket is gone.
@@ -963,6 +958,21 @@ export class IrcConnection {
       // so a stray mid-session numeric can't graft onto a stale burst. The
       // raw line keeps its trailing CR; strip it so replay consumers get a
       // clean single-line payload.
+      // CASEMAPPING capture (#707) reads the RAW 005 tokens, NOT
+      // client.network.options: irc-framework pre-seeds options.CASEMAPPING
+      // to 'rfc1459' in its NetworkInfo constructor, so through the options
+      // bag "the server declared rfc1459" and "the server declared nothing"
+      // are indistinguishable — and storing the framework default would
+      // trigger a destructive registry merge on servers that declared
+      // something else on a later 005 line, or nothing at all. A token seen
+      // here is a declaration by construction.
+      if (rawCommand === '005') {
+        for (const param of msg?.params ?? []) {
+          if (typeof param === 'string' && param.startsWith('CASEMAPPING=')) {
+            this.adoptDeclaredCasemapping(param.slice('CASEMAPPING='.length));
+          }
+        }
+      }
       const burstLine = event.line.replace(/[\r\n]+$/, '');
       if (rawCommand === '001') this.registrationLines = [burstLine];
       else if (
@@ -1222,9 +1232,6 @@ export class IrcConnection {
       this.useMonitor = false;
       this.monitorLimit = 0;
       this.pendingMonitorSeed = false;
-      // The next socket's 005 re-captures CASEMAPPING (cheap: it early-outs
-      // when the declared value matches what's stored).
-      this.capturedCasemapping = false;
       // Safety-net presence sweep. The primary one runs in 'socket close',
       // which fires on every disconnect (including auto-reconnect blips), so it
       // has almost always swept already by the time this terminal 'close'
@@ -1297,9 +1304,6 @@ export class IrcConnection {
       // (harmless — they're just booleans, and trackDmPeer's per-add path
       // also checks useMonitor before sending).
       const opts = this.client.network?.options || {};
-      // CASEMAPPING rides the same 005 bursts (#707); capture before the
-      // MONITOR gate below can return early.
-      this.captureCasemapping(opts);
       const limit = Number(opts.MONITOR) || 0;
       if (limit === 0 || this.useMonitor) return;
       this.useMonitor = true;
@@ -2923,29 +2927,29 @@ export class IrcConnection {
     }
   }
 
-  // ISUPPORT CASEMAPPING capture (#707). The declared fold is a property of
-  // the network ROW, not the socket: stored once, compared on every connect,
-  // and only a CHANGE does real work — most connects are one PK read and out.
-  // Absent/unknown values store nothing: the network keeps the legacy fold
-  // rather than adopting a rule we can't implement.
+  // A CASEMAPPING token seen on a raw 005 line (#707) — a declaration by
+  // construction, never irc-framework's default (see the 'raw' handler). The
+  // declared fold is a property of the network ROW, not the socket: stored
+  // once, compared per token, and only a CHANGE does real work — a reconnect
+  // that re-declares the stored value is one cached compare and out. No
+  // latch, deliberately: the stored===declared compare is already idempotent,
+  // and a latch would freeze the first token of a burst against a correction
+  // on a later line. Unknown values store nothing: the network keeps the
+  // legacy fold rather than adopting a rule we can't implement.
   //
-  // On a change, db/refoldBuffers rewrites drifted folds silently and merges
-  // rows that now fold together (`#foo[bar]`/`#foo{bar}` under rfc1459), each
-  // merge announced with the same buffer-renamed frame a DM nick-collision
-  // rides — nothing new for clients to handle. In-memory per-target maps
+  // On a change, db/refoldBuffers stores the mapping and rewrites the
+  // registry in ONE transaction (a failed refold leaves the mapping unstored,
+  // so the next 005 retries) — drifted folds rewrite silently, rows that now
+  // fold together (`#foo[bar]`/`#foo{bar}` under rfc1459) merge, each merge
+  // announced like a DM nick-collision. In-memory per-target maps
   // (unsendableTargets & co.) are keyed by the wire name, which a re-fold
   // doesn't change, so they're left alone.
-  private captureCasemapping(opts: Record<string, unknown>): void {
-    if (this.capturedCasemapping) return;
-    const declared = normalizeCasemapping(opts.CASEMAPPING);
-    // Not in this 005 line (they arrive in bursts), or a value we don't
-    // implement — keep listening either way; the latch only sets on capture.
+  private adoptDeclaredCasemapping(rawValue: string): void {
+    const declared = normalizeCasemapping(rawValue);
     if (!declared) return;
-    this.capturedCasemapping = true;
     try {
       const stored = networkCasemapping(this.network.id);
       if (stored === declared) return;
-      setNetworkCasemapping(this.network.id, declared);
       const merges = refoldNetworkBuffers(this.network.user_id, this.network.id, declared);
       this.logNet(
         `CASEMAPPING ${declared}${stored ? ` (was ${stored})` : ''}` +
@@ -2954,9 +2958,7 @@ export class IrcConnection {
             : ''),
       );
       for (const m of merges) {
-        this.publishEphemeral({
-          type: 'buffer-renamed',
-          target: m.survivorTarget,
+        this.announceBufferRenamed({
           from: m.absorbedTarget,
           to: m.survivorTarget,
           bufferId: m.survivorId,
@@ -2968,6 +2970,32 @@ export class IrcConnection {
     } catch (e) {
       console.warn('[casemapping] capture/refold failed:', (e as Error)?.message || e);
     }
+  }
+
+  /** The one builder for the buffer-renamed announcement, shared by the DM
+   *  nick-follow and the casemapping refold so the frame shape cannot drift
+   *  between its two producers. `to` is ALWAYS the surviving buffer's final
+   *  name and `mergedFromBufferId` the absorbed row — clients identify the
+   *  absorbed side by that id, never by which of from/to it sat under
+   *  (docs §9.7: the two producers orient from/to differently). */
+  private announceBufferRenamed(r: {
+    from: string;
+    to: string;
+    bufferId: number;
+    merged: boolean;
+    mergedFromBufferId?: number;
+    draftChanged: boolean;
+  }): void {
+    this.publishEphemeral({
+      type: 'buffer-renamed',
+      target: r.to,
+      from: r.from,
+      to: r.to,
+      bufferId: r.bufferId,
+      merged: r.merged,
+      ...(r.mergedFromBufferId != null ? { mergedFromBufferId: r.mergedFromBufferId } : {}),
+      draftChanged: r.draftChanged,
+    });
   }
 
   // ---- presence watch list (shared MONITOR + peer_presence_state rails) ----
@@ -3035,18 +3063,7 @@ export class IrcConnection {
       this.untrackDmPeer(oldNick);
       this.trackDmPeer(newNick);
     }
-    this.publishEphemeral({
-      type: 'buffer-renamed',
-      target: result.to,
-      from: result.from,
-      to: result.to,
-      bufferId: result.bufferId,
-      merged: result.merged,
-      ...(result.mergedFromBufferId != null
-        ? { mergedFromBufferId: result.mergedFromBufferId }
-        : {}),
-      draftChanged: result.draftChanged,
-    });
+    this.announceBufferRenamed(result);
     // The DM's own "x is now known as y" line — same row shape the channel
     // loop above persists, no new renderer work anywhere.
     this.publish({

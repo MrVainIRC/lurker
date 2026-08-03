@@ -73,6 +73,8 @@ import {
   setAutojoin as setBufferAutojoin,
   listStatesForUser as listBufferStatesForUser,
   kindForTarget,
+  foldTargetFor,
+  networkCasemapping,
 } from '../db/buffers.js';
 import { resolveBuffer, requireBufferForUser } from '../db/bufferResolve.js';
 import { getDraftForBuffer } from '../db/drafts.js';
@@ -674,15 +676,23 @@ export function* eachUserBufferTarget(userId: number): Generator<UserBufferTarge
       bufferId: serverBufferIdByNetwork.get(net.id) ?? null,
       conn,
     };
+    // One folded view of the live channel set per network: both probes below
+    // compare against registry folds (per-network since #707), and the
+    // channels map's own keys are legacy-lowercased wire names, which diverge
+    // from those folds on a declared network ('#a[b]' joined vs '#a{b}'
+    // stored). Probing the map raw double-yielded the bracket variants.
+    const joinedFolded = conn
+      ? new Set(Array.from(conn.channels.values(), (ch) => foldTargetFor(net.id, ch.name)))
+      : undefined;
     const seen = new Set<string>();
     for (const row of rowsByNetwork.get(net.id) ?? []) {
       seen.add(row.targetFolded);
-      if (row.state === 'closed' && !conn?.channels.has(row.targetFolded)) continue;
+      if (row.state === 'closed' && !joinedFolded?.has(row.targetFolded)) continue;
       yield { networkId: net.id, target: row.target, bufferId: row.id, conn };
     }
     if (conn) {
       for (const ch of conn.channels.values()) {
-        if (!seen.has(ch.name.toLowerCase())) {
+        if (!seen.has(foldTargetFor(net.id, ch.name))) {
           // Defensive: a live-joined channel whose row was forgotten
           // mid-session — genuinely no id to carry.
           yield { networkId: net.id, target: ch.name, bufferId: null, conn };
@@ -722,10 +732,31 @@ export function computeTotalHighlights(userId: number): number {
 // #channel to parted. Centralized so the four snapshot/backlog sites can't drift
 // (channel-case folding already bit this codebase — see #289/#269).
 function channelJoined(
+  networkId: number,
   target: string,
-  conn?: { channels: { has(name: string): boolean } } | null,
+  conn?: { channels: JoinedChannels } | null,
 ): boolean {
-  return target.startsWith('#') ? !!conn?.channels.has(target.toLowerCase()) : true;
+  if (!target.startsWith('#')) return true;
+  if (!conn) return false;
+  // Fast path: the channels map is keyed by the legacy-lowercased WIRE name,
+  // which matches whenever buffer name and joined name agree up to ASCII case
+  // — every lookup until a declared CASEMAPPING diverges from the legacy fold.
+  if (conn.channels.has(target.toLowerCase())) return true;
+  // Fold-aware path (#707): after a refold merge the registry name can be the
+  // bracket-variant that was never the JOINed spelling ('#foo{bar}' joined as
+  // '#foo[bar]'); on a declared network, compare per-network folds of the
+  // live wire names before calling the channel parted.
+  if (!networkCasemapping(networkId)) return false;
+  const folded = foldTargetFor(networkId, target);
+  for (const ch of conn.channels.values()) {
+    if (foldTargetFor(networkId, ch.name) === folded) return true;
+  }
+  return false;
+}
+
+interface JoinedChannels {
+  has(name: string): boolean;
+  values(): Iterable<{ name: string }>;
 }
 
 // The per-buffer read/unread/cleared block shared by every backlog frame
@@ -815,7 +846,7 @@ export function buildBufferBacklog(
     // Non-empty buffers hid the bug — any event at all reads as hydrated.
     hasMoreOlder: oldestId > 0 && hasOlderRow(networkId, target, oldestId),
     speakers: listSpeakers(networkId, target),
-    joined: channelJoined(target, conn),
+    joined: channelJoined(networkId, target, conn),
     ...bufferStateFields(userId, networkId, target),
     inputHistory: listRecentInputHistory(userId, networkId, target, INPUT_HISTORY_SLICE),
   };
@@ -1165,7 +1196,7 @@ function buildOfflineFrame(
 ): WsPayload {
   return target.startsWith(':server:')
     ? buildBufferBacklog(userId, networkId, target)
-    : buildBufferShell(userId, networkId, target, channelJoined(target), { bufferId });
+    : buildBufferShell(userId, networkId, target, channelJoined(networkId, target), { bufferId });
 }
 
 // `targets` lets the snapshot hand in the enumeration it already materialized for
@@ -1226,17 +1257,24 @@ function verbBuffer(
 // A buffer the user closed and isn't currently joined to is hidden from the
 // sidebar; broadcasting a read-state frame for it would resurrect it (#319).
 // The closed set is folded `${networkId}::${folded}` keys built from the
-// buffers registry (closedBufferKeySet); fold the target here too — servers
-// hand us inconsistently-cased names (#289). A currently-joined channel always
-// beats a stale closed flag (defensive against autorejoin/state races).
+// buffers registry (closedBufferKeySet); fold the target the same way —
+// per-network since #707, so 'john^' probes the 'john~' key an rfc1459
+// network stored (servers also hand us inconsistently-cased names, #289). A
+// currently-joined channel always beats a stale closed flag (defensive
+// against autorejoin/state races); the channel probe is fold-aware for the
+// same reason, but stays channels-only — a DM is never "joined", and letting
+// channelJoined's trivially-true non-channel arm in here would exempt every
+// closed DM from hiding.
 function isHiddenClosedBuffer(
   closed: Set<string>,
-  joined: { has(name: string): boolean },
+  conn: { channels: JoinedChannels } | null | undefined,
   networkId: number,
   target: string,
 ): boolean {
-  const lower = target.toLowerCase();
-  return closed.has(`${networkId}::${lower}`) && !joined.has(lower);
+  return (
+    closed.has(`${networkId}::${foldTargetFor(networkId, target)}`) &&
+    !(target.startsWith('#') && channelJoined(networkId, target, conn))
+  );
 }
 
 // The folded closed-buffer key set for isHiddenClosedBuffer, from the registry.
@@ -1335,15 +1373,21 @@ function announceOpen(
   userId: number,
   networkId: number,
   target: string,
-  conn: { channels: { has(name: string): boolean } } | null | undefined,
+  conn: { channels: JoinedChannels } | null | undefined,
   bufferId: number | null = null,
 ): void {
   // Pass the live connection: `channelJoined` folds a #channel to parted without
   // one, which would land the other devices' rows dimmed for a channel we're
   // sitting in, until some later frame corrected them.
-  const shell = buildBufferShell(userId, networkId, target, channelJoined(target, conn), {
-    bufferId,
-  });
+  const shell = buildBufferShell(
+    userId,
+    networkId,
+    target,
+    channelJoined(networkId, target, conn),
+    {
+      bufferId,
+    },
+  );
   fanOut(userId, shell, { exceptWs: requester });
   fanOut(userId, { kind: 'buffer-opened', networkId, target, bufferId }, { exceptWs: requester });
 }
@@ -2402,7 +2446,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           userId,
           conn.network.id,
           target,
-          channelJoined(target, conn),
+          channelJoined(conn.network.id, target, conn),
           precomputed,
         );
         unreadMs += Date.now() - tShell;
@@ -2453,7 +2497,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         // from `reset` + `networkId` + whether it sent ?since.
         mode: slice.mode,
         hasMoreOlder: slice.hasMoreOlder,
-        joined: channelJoined(target, conn),
+        joined: channelJoined(conn.network.id, target, conn),
         ...stateFields,
         inputHistory,
       });
@@ -3007,7 +3051,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
             const before = getReadState(userId, networkId, target);
             if (before >= maxId) continue;
             const after = setReadState(userId, networkId, target, maxId);
-            if (isHiddenClosedBuffer(closed, conn.channels, networkId, target)) continue;
+            if (isHiddenClosedBuffer(closed, conn, networkId, target)) continue;
             broadcastReadState(userId, networkId, target, after);
           }
         }

@@ -479,6 +479,30 @@ describe('searchMessages', () => {
     expect(hits.map((m) => m.target)).toEqual(['#a']);
   });
 
+  it('unscoped in: folds per network, not with one legacy fold (#707)', async () => {
+    // On an rfc1459 network '#chat[dev]' is stored under fold '#chat{dev}'.
+    // The unscoped search used to bind ONE legacy-folded string, which
+    // matches no per-network fold — zero results that look like missing data.
+    const user = createUser('search-refold');
+    const net = createNetwork(user.id, {
+      name: 'n',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'search-refold',
+    });
+    chat(net!.id, '#chat[dev]', 'alice', 'deploy went fine');
+    const { refoldNetworkBuffers } = await import('./refoldBuffers.js');
+    refoldNetworkBuffers(user.id, net!.id, 'rfc1459');
+
+    // Either bracket spelling finds it, with and without the network scope.
+    expect(searchMessages(user.id, { query: 'deploy', target: '#chat[dev]' })).toHaveLength(1);
+    expect(searchMessages(user.id, { query: 'deploy', target: '#chat{dev}' })).toHaveLength(1);
+    expect(
+      searchMessages(user.id, { query: 'deploy', target: '#chat[dev]', networkId: net!.id }),
+    ).toHaveLength(1);
+  });
+
   it('filters by networkId (on:)', () => {
     const user = createUser('search-network');
     const netA = createNetwork(user.id, {

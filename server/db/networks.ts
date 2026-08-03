@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import db from './index.js';
-import { ensureServerBuffer } from './buffers.js';
+import { ensureServerBuffer, invalidateCasemappingCache } from './buffers.js';
 import { encryptSecret, decryptSecret } from '../utils/secretCrypto.js';
 import { ENCRYPTED_NETWORK_COLUMNS } from './exportSchema.js';
 
@@ -39,8 +39,10 @@ export interface Network {
   connect_commands: string | null;
   position: number;
   /** ISUPPORT CASEMAPPING as last declared by the server (#707); null until
-   *  the network first connects to one that declares it. Server-captured, not
-   *  user-editable — see setNetworkCasemapping. */
+   *  the network first connects to one that declares it. Server-captured
+   *  (stored by db/refoldBuffers inside the refold transaction), deliberately
+   *  not part of NetworkFields — a PATCH body must not be able to plant a
+   *  fold rule the registry wasn't rewritten under. */
   casemapping: string | null;
   created_at: string;
 }
@@ -134,14 +136,6 @@ export function createNetwork(userId: number, fields: NetworkFields): Network | 
   return getNetwork(result.lastInsertRowid, userId);
 }
 
-/** Record the server-declared CASEMAPPING (#707). Deliberately not part of
- *  updateNetwork/NetworkFields: this is a fact captured from the wire, not a
- *  setting a user edits, and routing it through the settings path would let a
- *  PATCH body overwrite it. */
-export function setNetworkCasemapping(id: number, casemapping: string): void {
-  db.prepare(`UPDATE networks SET casemapping = ? WHERE id = ?`).run(casemapping, id);
-}
-
 export function updateNetwork(
   id: number,
   userId: number,
@@ -186,6 +180,10 @@ export function updateNetwork(
 
 export function deleteNetwork(id: number, userId: number): void {
   db.prepare('DELETE FROM networks WHERE id = ? AND user_id = ?').run(id, userId);
+  // SQLite may hand a future network this id (rowid reuse); a cached
+  // CASEMAPPING surviving the row would fold the newcomer's targets with the
+  // dead network's rule.
+  invalidateCasemappingCache(id);
 }
 
 // The at-rest backfill that wraps any plaintext secret columns once a key is

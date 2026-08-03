@@ -210,4 +210,51 @@ describe('applyBufferRenamed — the full frame contract', () => {
     expect(useDraftStore().drafts[`${NET}::${ABSORBED}`]).toBe('half-typed');
     expect(usePinsStore().byNetwork[NET]).toEqual([ABSORBED]);
   });
+
+  it('refold orientation: the absorbed row is identified by id, never by `to`', () => {
+    // The frame's OTHER producer (#707 casemapping refold) absorbs the FROM
+    // row — the survivor already sits at `to` under its own name, no actual
+    // rename. Reading orientation here ("drop `to`") swept the survivor — the
+    // open channel the user was reading — out of every store.
+    useBuffersStore().ensure(NET, '#foo{bar}', 42); // survivor
+    useBuffersStore().ensure(NET, '#foo[bar]', 99); // absorbed bracket-twin
+    useDraftStore().drafts[`${NET}::#foo[bar]`] = 'stale';
+
+    applyBufferRenamed({
+      networkId: NET,
+      from: '#foo[bar]',
+      to: '#foo{bar}',
+      bufferId: 42,
+      merged: true,
+      mergedFromBufferId: 99,
+    });
+
+    const survivor = useBuffersStore().buffers[`${NET}::#foo{bar}`]!;
+    expect(survivor.id).toBe(42);
+    expect(survivor.unseeded).toBe(true); // history interleaved → refetch
+    expect(useBuffersStore().buffers[`${NET}::#foo[bar]`]).toBeUndefined();
+    expect(useDraftStore().drafts[`${NET}::#foo[bar]`]).toBeUndefined();
+    // The absorbed side was DROPPED, not renamed onto the survivor — its
+    // stale draft must not wear the survivor's key (the drop-`to`-then-rekey
+    // failure mode converges on ids but leaks exactly this).
+    expect(useDraftStore().drafts[`${NET}::#foo{bar}`]).toBeUndefined();
+  });
+
+  it('a refold merge with the absorbed id unknown still spares the proven survivor', () => {
+    // Fallback path: no local row carries mergedFromBufferId, so the DM
+    // orientation would say "drop `to`" — but the row at `to` records the
+    // SURVIVING id, which is proof it must stay.
+    useBuffersStore().ensure(NET, '#foo{bar}', 42);
+
+    applyBufferRenamed({
+      networkId: NET,
+      from: '#foo[bar]',
+      to: '#foo{bar}',
+      bufferId: 42,
+      merged: true,
+      mergedFromBufferId: 99,
+    });
+
+    expect(useBuffersStore().buffers[`${NET}::#foo{bar}`]?.id).toBe(42);
+  });
 });

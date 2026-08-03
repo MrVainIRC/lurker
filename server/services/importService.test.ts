@@ -143,6 +143,61 @@ function seedAlice(): { alice: User; net: Network; ruleId: number } {
 }
 
 describe('importFromZipBuffer — roundtrip', () => {
+  it('restores an rfc1459 network with per-network folds — no mid-restore fork (#707)', async () => {
+    // The archive carries the network's declared CASEMAPPING, and the buffer
+    // rows must be re-folded under THAT rule on the way in: a legacy
+    // toLowerCase here writes folds the message import's own resolver then
+    // misses, minting a duplicate buffer during the restore — and the healing
+    // refold never runs, because the imported mapping makes the first
+    // reconnect's stored===declared check a no-op.
+    const src = createUser(`refold_src_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    const net = createNetwork(src.id, {
+      name: 'rfc1459net',
+      host: 'irc.example.test',
+      port: 6697,
+      tls: true,
+      nick: 'src',
+    })!;
+    buffers.ensureOpen(src.id, net.id, '#foo[bar]');
+    insertMessage({
+      networkId: net.id,
+      target: '#foo[bar]',
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'peer',
+      text: 'bracket history',
+    });
+    const { refoldNetworkBuffers } = await import('../db/refoldBuffers.js');
+    refoldNetworkBuffers(src.id, net.id, 'rfc1459');
+
+    const dst = createUser(`refold_dst_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    const result = await importFromZipBuffer(
+      dst.id,
+      await exportToBuffer(src.id, {
+        includeMessages: true,
+      }),
+    );
+    expect(result.manifest.export_format_version).toBe(EXPORT_FORMAT_VERSION);
+
+    const dstNet = db
+      .prepare(`SELECT id, casemapping FROM networks WHERE user_id = ?`)
+      .get(dst.id) as { id: number; casemapping: string | null };
+    expect(dstNet.casemapping).toBe('rfc1459');
+    // ONE channel row, folded under the imported mapping, holding the history.
+    const rows = db
+      .prepare(
+        `SELECT id, target, target_folded FROM buffers WHERE network_id = ? AND kind = 'channel'`,
+      )
+      .all(dstNet.id) as Array<{ id: number; target: string; target_folded: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].target).toBe('#foo[bar]');
+    expect(rows[0].target_folded).toBe('#foo{bar}');
+    const msgRows = db
+      .prepare(`SELECT buffer_id FROM messages WHERE network_id = ?`)
+      .all(dstNet.id) as Array<{ buffer_id: number }>;
+    expect(msgRows.map((m) => m.buffer_id)).toEqual([rows[0].id]);
+  });
+
   it('rehydrates networks, channels, messages, bookmarks, highlights, pins, notes, masks, settings, uploads', async () => {
     const { alice, net } = seedAlice();
     const bob = createUser(`bob_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);

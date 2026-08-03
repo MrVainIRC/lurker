@@ -49,7 +49,7 @@ import { verifyPassword, hashPassword } from './password.js';
 import { hashToken, findActiveByHash, touchLastUsed } from '../db/apiTokens.js';
 import { listNetworksForUser } from '../db/networks.js';
 import type { Network } from '../db/networks.js';
-import { closedFoldedSetForNetwork } from '../db/buffers.js';
+import { closedFoldedSetForNetwork, foldTargetFor } from '../db/buffers.js';
 import {
   listMessages,
   listBuffersForNetwork,
@@ -1332,8 +1332,11 @@ class BouncerSession {
     // buffers registry this path enumerated straight from messages and offered
     // conversations the user had closed everywhere else.
     const closed = closedFoldedSetForNetwork(this.networkId);
+    // The set holds target_folded values — per-network folds since #707, so
+    // the probe must fold the same way or a closed 'foo[m]' (stored 'foo{m}'
+    // on an rfc1459 network) slips past and gets re-offered.
     const targets = listActiveTargetsInWindow(this.networkId, isoA, isoB, limit).filter(
-      (t) => !closed.has(t.target.toLowerCase()),
+      (t) => !closed.has(foldTargetFor(this.networkId, t.target)),
     );
     this.withBatch('draft/chathistory-targets', [], (ref) => {
       const tag = ref ? `@batch=${ref} ` : '';
@@ -1510,7 +1513,10 @@ class BouncerSession {
     const dms = listBuffersForNetwork(this.networkId)
       .filter((b) => !isChannelName(b.target) && !b.target.startsWith(':server:'))
       .filter((b) => !joined.has(b.target.toLowerCase()))
-      .filter((b) => !closed.has(b.target.toLowerCase()))
+      // Fold like the set was built (per-network target_folded, #707) — the
+      // legacy lowercase probe replays closed DMs on every attach once the
+      // folds diverge, the exact pre-registry regression this filter stops.
+      .filter((b) => !closed.has(foldTargetFor(this.networkId, b.target)))
       .slice(0, PLAYBACK_MAX_DM_BUFFERS);
     for (const b of dms) targets.push({ target: b.target, isChannel: false });
 

@@ -2672,21 +2672,26 @@ describe('CASEMAPPING capture + refold (#707)', () => {
     return { conn, network, published };
   }
 
-  function declare(conn: IrcConnection, value: string) {
-    // 005 path: irc-framework accumulates ISUPPORT into network.options and
-    // re-emits 'server options' per line; drive the real handler through it.
-    (conn.client.network.options as Record<string, unknown>).CASEMAPPING = value;
-    conn.client.emit('server options', {});
+  function raw005(conn: IrcConnection, tokens: string) {
+    // Capture reads the RAW 005 tokens, deliberately NOT network.options —
+    // irc-framework pre-seeds options.CASEMAPPING to 'rfc1459' in its
+    // NetworkInfo constructor, so through the options bag "declared rfc1459"
+    // and "declared nothing" are the same value. Drive the real 'raw' handler
+    // with a wire line, exactly as the socket would.
+    conn.client.emit('raw', {
+      from_server: true,
+      line: `:irc.example.test 005 me ${tokens} :are supported by this server`,
+    });
   }
 
-  it('stores the declared mapping and merges rows that now fold together', async () => {
+  it('stores a declared mapping and merges rows that now fold together', async () => {
     const { conn, network, published } = connFor('casemap');
     const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
     // Two rows under the legacy fold; ONE channel under rfc1459.
     ensureOpen(network.user_id, network.id, '#foo[bar]');
     ensureOpen(network.user_id, network.id, '#foo{bar}');
 
-    declare(conn, 'rfc1459');
+    raw005(conn, 'CHANTYPES=# CASEMAPPING=rfc1459 MONITOR=100');
 
     expect(getNetwork(network.id, network.user_id)?.casemapping).toBe('rfc1459');
     const merged = get(network.user_id, network.id, '#foo[bar]');
@@ -2697,13 +2702,29 @@ describe('CASEMAPPING capture + refold (#707)', () => {
     });
   });
 
+  it("NEVER captures irc-framework's defaulted rfc1459 — no token, no store", () => {
+    const { conn, network } = connFor('casemap-absent');
+    // The framework default is sitting right there in the options bag; a 005
+    // line without the token must not launder it into a declaration.
+    expect(conn.client.network.options.CASEMAPPING).toBe('rfc1459');
+    raw005(conn, 'CHANTYPES=# MONITOR=100');
+    expect(getNetwork(network.id, network.user_id)?.casemapping).toBeNull();
+  });
+
+  it('a declaration on a LATER 005 line still captures', async () => {
+    const { conn, network } = connFor('casemap-late');
+    raw005(conn, 'CHANTYPES=# PREFIX=(ov)@+');
+    raw005(conn, 'MONITOR=100 CASEMAPPING=ascii TARGMAX=NAMES:1');
+    expect(getNetwork(network.id, network.user_id)?.casemapping).toBe('ascii');
+  });
+
   it('an unknown value is not stored and changes nothing', async () => {
     const { conn, network, published } = connFor('casemap-unknown');
     const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
     ensureOpen(network.user_id, network.id, '#a[1]');
     ensureOpen(network.user_id, network.id, '#a{1}');
 
-    declare(conn, 'rfc8265');
+    raw005(conn, 'CASEMAPPING=rfc8265');
 
     expect(getNetwork(network.id, network.user_id)?.casemapping).toBeNull();
     expect(get(network.user_id, network.id, '#a[1]')?.id).not.toBe(
@@ -2714,10 +2735,8 @@ describe('CASEMAPPING capture + refold (#707)', () => {
 
   it('re-declaring the stored mapping is a no-op — reconnects do no work', () => {
     const { conn, published } = connFor('casemap-again');
-    declare(conn, 'rfc1459');
-    // Simulate the next socket: the latch resets on close, the value matches.
-    conn.capturedCasemapping = false;
-    declare(conn, 'rfc1459');
+    raw005(conn, 'CASEMAPPING=rfc1459');
+    raw005(conn, 'CASEMAPPING=rfc1459');
     expect(published.filter((e) => e.type === 'buffer-renamed')).toEqual([]);
   });
 });

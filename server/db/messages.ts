@@ -4,6 +4,7 @@
 import db from './index.js';
 import {
   foldTargetFor,
+  resolveBuffer,
   resolveBufferIdByNetwork,
   resolveOrMintForInsert,
 } from './bufferResolve.js';
@@ -993,14 +994,32 @@ export function searchMessages(
     params.push(networkId);
   }
   if (target) {
-    // `in:` scope. Without a networkId this means "this name on any of my
-    // networks", so it resolves through the registry as a folded-name subquery
-    // rather than a single id. The user_id prefix of idx_buffers_key bounds
-    // the subquery to the caller's own buffers.
-    where.push(
-      'm.buffer_id IN (SELECT b.id FROM buffers b WHERE b.user_id = ? AND b.target_folded = ?)',
-    );
-    params.push(userId, foldTargetFor(networkId ?? null, target));
+    if (networkId) {
+      // `in:` scoped to one network: one fold under that network's rule, one
+      // folded-name probe bounded to the caller's buffers by idx_buffers_key.
+      where.push(
+        'm.buffer_id IN (SELECT b.id FROM buffers b WHERE b.user_id = ? AND b.target_folded = ?)',
+      );
+      params.push(userId, foldTargetFor(networkId, target));
+    } else {
+      // Unscoped `in:` means "this name on any of my networks" — and folds
+      // are per-network (#707), so ONE folded string can't probe them all: a
+      // Libera '#chat[dev]' is stored under its rfc1459 fold '#chat{dev}',
+      // which a legacy fold of the query would silently miss. Resolve per
+      // network in JS and bind the id list; an empty list matches nothing.
+      const ids: number[] = [];
+      for (const net of db.prepare(`SELECT id FROM networks WHERE user_id = ?`).all(userId) as {
+        id: number;
+      }[]) {
+        const found = resolveBuffer(userId, net.id, target);
+        if (found) ids.push(found.id);
+      }
+      if (ids.length === 0) where.push('0');
+      else {
+        where.push(`m.buffer_id IN (${ids.map(() => '?').join(', ')})`);
+        params.push(...ids);
+      }
+    }
   }
   // `nicks` OR-matches several senders (a friend's alts); `nick` is the single
   // case. COLLATE NOCASE binds to the column so the IN comparison is case-fold.

@@ -98,6 +98,17 @@ const draftBodyStmt = db.prepare(
   `SELECT body FROM user_drafts WHERE user_id = ? AND buffer_id = ?`,
 );
 
+// Channel-property union, mirroring importRow's conflict semantics (autojoin
+// = MAX, key = first non-null): a merge must not silently drop the absorbed
+// row's autojoin flag or its +k key, which are properties of the CHANNEL both
+// rows name. `key` is encrypted at rest; COALESCE copies the opaque blob.
+const mergeChannelPropsStmt = db.prepare(`
+  UPDATE buffers SET
+    autojoin = MAX(autojoin, (SELECT b2.autojoin FROM buffers b2 WHERE b2.id = @absorbed)),
+    key = COALESCE(key, (SELECT b2.key FROM buffers b2 WHERE b2.id = @absorbed))
+  WHERE id = @survivor
+`);
+
 // Re-densify a (user, network)'s pin positions after a merge dropped a row.
 const renumberPinsStmt = db.prepare(`
   UPDATE pinned_buffers SET position = (
@@ -119,16 +130,20 @@ const renumberPinsStmt = db.prepare(`
  * the old rule collide under the declared one. Same policies as the rename
  * merge (they ARE the rename merge): repoint history wholesale, furthest read
  * pointer + max clear marker, survivor's pin slot (or adopt), survivor's
- * view-state and draft win, visibility is the union, absorbed row deleted,
- * pin positions re-densified. Runs inside the caller's transaction; the
- * caller announces.
+ * view-state and draft win (with the absorbed draft adopted when the survivor
+ * has none — reported via `draftChanged` so callers can announce it),
+ * autojoin/+k union per importRow's channel semantics, visibility is the
+ * union, absorbed row deleted, pin positions re-densified. Runs inside the
+ * caller's transaction; the caller announces.
  */
 export function absorbBufferRow(
   userId: number,
   networkId: number,
   survivor: { id: number; state: string },
   absorbed: { id: number; state: string },
-): void {
+): { draftChanged: boolean } {
+  const draftBefore = (draftBodyStmt.get(userId, survivor.id) as { body: string } | undefined)
+    ?.body;
   repointMessages.run(survivor.id, absorbed.id);
   repointInputHistory.run(survivor.id, absorbed.id);
   mergeReadsStmt.run({ survivor: survivor.id, absorbed: absorbed.id });
@@ -137,12 +152,15 @@ export function absorbBufferRow(
   adoptNicklistStmt.run(survivor.id, absorbed.id);
   adoptNotifyStmt.run(survivor.id, absorbed.id);
   adoptDraftStmt.run(survivor.id, absorbed.id);
+  mergeChannelPropsStmt.run({ survivor: survivor.id, absorbed: absorbed.id });
   // Visibility is the union: if either side was open, the merged buffer is.
   if (absorbed.state === 'open' && survivor.state !== 'open') setOpenStmt.run(survivor.id);
   // The absorbed row dies; its remaining satellites cascade with it (any
   // UPDATE OR IGNORE above that lost to the survivor left rows behind).
   deleteRowStmt.run(absorbed.id);
   renumberPinsStmt.run(userId, networkId);
+  const draftAfter = (draftBodyStmt.get(userId, survivor.id) as { body: string } | undefined)?.body;
+  return { draftChanged: draftAfter !== draftBefore };
 }
 
 const work = db.transaction(
@@ -190,12 +208,8 @@ const work = db.transaction(
     }
 
     // Merge: the destination row is absorbed into the (surviving) source.
-    const survivorDraftBefore = (draftBodyStmt.get(userId, src.id) as { body: string } | undefined)
-      ?.body;
-    absorbBufferRow(userId, networkId, src, dest);
+    const { draftChanged } = absorbBufferRow(userId, networkId, src, dest);
     setNameStmt.run(to, toFolded, src.id);
-    const survivorDraftAfter = (draftBodyStmt.get(userId, src.id) as { body: string } | undefined)
-      ?.body;
     return {
       renamed: true,
       bufferId: src.id,
@@ -203,7 +217,7 @@ const work = db.transaction(
       to,
       merged: true,
       mergedFromBufferId: dest.id,
-      draftChanged: survivorDraftAfter !== survivorDraftBefore,
+      draftChanged,
     };
   },
 );

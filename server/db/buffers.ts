@@ -59,19 +59,37 @@ export function foldTarget(target: string): string {
 
 const casemappingStmt = db.prepare(`SELECT casemapping FROM networks WHERE id = ?`);
 
+// networkId → declared mapping, lazily filled. Cached — unlike name→id
+// resolution, which stays uncached on principle — because the invalidation
+// story is the opposite of a name's: exactly two writers exist (the refold
+// pass that stores a newly-declared mapping, and network deletion, whose ids
+// SQLite may reuse), both call invalidateCasemappingCache below, and the
+// value is read on every buffer-keyed lookup — several times per inbound
+// message — where an uncached PK seek would double the statement count of
+// the whole hot path for a value that changes at most once per network life.
+const casemappingCache = new Map<number, Casemapping | null>();
+
+/** Drop a network's cached CASEMAPPING. Callers are the two writers: the
+ *  refold pass (after its transaction stores a new mapping) and network
+ *  deletion (SQLite can reuse the id for a future network). */
+export function invalidateCasemappingCache(networkId: number): void {
+  casemappingCache.delete(networkId);
+}
+
 /** The network's declared ISUPPORT CASEMAPPING, as last captured on connect
  *  (#707) — null until the network first declares one. */
 export function networkCasemapping(networkId: number): Casemapping | null {
+  const cached = casemappingCache.get(networkId);
+  if (cached !== undefined) return cached;
   const raw = (casemappingStmt.get(networkId) as { casemapping: string | null } | undefined)
     ?.casemapping;
-  return normalizeCasemapping(raw) ?? null;
+  const mapping = normalizeCasemapping(raw) ?? null;
+  casemappingCache.set(networkId, mapping);
+  return mapping;
 }
 
 /** Per-network target folding (#707): the server-declared CASEMAPPING rule,
- *  falling back to the legacy fold until the network declares one. One PK
- *  seek per call — deliberately uncached, same reasoning as name→id
- *  resolution (bufferResolve.ts): a cache would be a second copy of state
- *  whose invalidation belongs to the capture path alone. */
+ *  falling back to the legacy fold until the network declares one. */
 export function foldTargetFor(networkId: number | null, raw: string): string {
   if (networkId == null) return foldTarget(raw);
   return foldTargetWith(networkCasemapping(networkId), raw);
