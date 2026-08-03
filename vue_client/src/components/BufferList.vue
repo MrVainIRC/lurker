@@ -120,7 +120,7 @@
                   }}<span
                     v-if="duplicateFavoriteNames.has(row.buf.target.toLowerCase())"
                     class="net-hint"
-                    >{{ row.networkName }}</span
+                    >{{ networkAbbrevs.get(row.networkId) || row.networkName }}</span
                   ></span
                 >
                 <span
@@ -619,6 +619,26 @@ const duplicateFavoriteNames = computed(() => {
     counts.set(k, (counts.get(k) || 0) + 1);
   }
   return new Set([...counts].filter(([, n]) => n > 1).map(([k]) => k));
+});
+
+// The hint text itself: the shortest prefix of the network name that is
+// unique among the user's networks ('l' for libera next to mansionNET, but
+// 'li'/'lu' when libera and lurkernet coexist) — a full name next to a nick
+// read as clutter at every length we tried. Tooltip carries the full name.
+const networkAbbrevs = computed(() => {
+  const names = networks.networks.map((n) => [n.id, n.name.toLowerCase()] as const);
+  const out = new Map<number, string>();
+  for (const [id, name] of names) {
+    let len = 1;
+    while (
+      len < name.length &&
+      names.some(([otherId, other]) => otherId !== id && other.startsWith(name.slice(0, len)))
+    ) {
+      len += 1;
+    }
+    out.set(id, name.slice(0, len));
+  }
+  return out;
 });
 
 function sectionRowTitle(row: FavoriteRow): string {
