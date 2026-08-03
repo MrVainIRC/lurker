@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import db from './index.js';
-import { foldTarget, ensureServerBuffer, ensureExists } from './buffers.js';
+import { foldTargetFor, ensureServerBuffer, ensureExists } from './buffers.js';
 import type { BufferKind, BufferState } from './buffers.js';
 
 // Name → buffer_id resolution, in one place.
@@ -14,18 +14,13 @@ import type { BufferKind, BufferState } from './buffers.js';
 // the normalization exists to kill. If profiling ever demands one, its
 // invalidation belongs to renameBuffer/deleteBuffer alone.
 //
-// Folding happens here (and only here) on the way in. `foldTargetFor` is the
-// seam for #707: target folding is server-declared (ISUPPORT CASEMAPPING) and
-// will become per-network. Getting the fold wrong through this seam fails to
-// FIND a buffer — visible and recoverable — rather than splitting one, which
-// is the property that makes deferring #707 safe.
+// Folding happens on the way in, through `foldTargetFor` (buffers.ts) — the
+// network's declared ISUPPORT CASEMAPPING since #707, legacy Unicode-lowercase
+// until a network declares one. Getting the fold wrong through this seam fails
+// to FIND a buffer — visible and recoverable — rather than splitting one,
+// which is the property that made deferring #707 safe while the seam waited.
 
-/** Per-network target folding. Today: the single ASCII/Unicode-lowercase rule
- *  (buffers.ts foldTarget); the networkId parameter is the #707 seam and is
- *  deliberately unused until CASEMAPPING capture lands. */
-export function foldTargetFor(_networkId: number | null, raw: string): string {
-  return foldTarget(raw);
-}
+export { foldTargetFor } from './buffers.js';
 
 /** Decrypt-free buffer identity row — no +k key material (a rotated secret
  *  must not make resolution throw; see buffers.ts getState). */

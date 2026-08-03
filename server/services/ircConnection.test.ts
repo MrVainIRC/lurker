@@ -31,7 +31,7 @@ import { createIdentdServer, unregisterIdent } from './identd.js';
 import connectScheduler from './connectScheduler.js';
 import { getRecent } from './systemLog.js';
 import { createUser } from '../db/users.js';
-import { createNetwork } from '../db/networks.js';
+import { createNetwork, getNetwork } from '../db/networks.js';
 import {
   getBuffer,
   ensureOpen as ensureBufferOpen,
@@ -385,6 +385,7 @@ describe('tls certificate trust setting', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -444,6 +445,7 @@ describe('addPeerWatch live presence seed (#302)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -502,6 +504,7 @@ describe('nick-regain MONITOR teardown gating (#384)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -651,6 +654,7 @@ describe('refused-message handler routing (#283)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -868,6 +872,7 @@ describe('built-in identd registration', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -967,6 +972,7 @@ describe('disconnect quit message (#324)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -1024,6 +1030,7 @@ describe('self nick updates the input bar (#362)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -1123,6 +1130,7 @@ describe('capability negotiation (#310)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -1664,6 +1672,7 @@ describe('IRCv3 draft/multiline (#381)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -1926,6 +1935,7 @@ describe('inbound INVITE handler (#261)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -2023,6 +2033,7 @@ describe('invite channel lines + dedup (#261)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -2110,6 +2121,7 @@ describe('channel mode display (status bar)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -2299,6 +2311,7 @@ describe('join key forwarding', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -2631,6 +2644,166 @@ describe('DM rename on peer NICK', () => {
 
     expect(get(network.user_id, network.id, 'me')).toBeDefined();
     expect(published.find((e) => e.type === 'buffer-renamed')).toBeUndefined();
+  });
+});
+
+describe('CASEMAPPING capture + refold (#707)', () => {
+  function connFor(name: string) {
+    const network = createNetwork(1, {
+      name,
+      host: 'irc.example.test',
+      port: 6697,
+      tls: 1,
+      trusted_certificates: 1,
+      nick: 'me',
+      username: null,
+      realname: null,
+      server_password: null,
+      autoconnect: 0,
+      sasl_account: null,
+      sasl_password: null,
+      connect_commands: null,
+    })!;
+    const conn = new IrcConnection({ network, onEvent: () => {} });
+    const published: Array<Record<string, unknown>> = [];
+    conn.publish = vi.fn<(event: unknown) => void>((e) => {
+      published.push(e as Record<string, unknown>);
+    }) as typeof conn.publish;
+    conn.publishEphemeral = vi.fn<(event: unknown) => void>((e) => {
+      published.push(e as Record<string, unknown>);
+    }) as typeof conn.publishEphemeral;
+    return { conn, network, published };
+  }
+
+  function raw005(conn: IrcConnection, tokens: string) {
+    // Capture reads the RAW 005 tokens, deliberately NOT network.options —
+    // irc-framework pre-seeds options.CASEMAPPING to 'rfc1459' in its
+    // NetworkInfo constructor, so through the options bag "declared rfc1459"
+    // and "declared nothing" are the same value. Drive the real 'raw' handler
+    // with a wire line, exactly as the socket would.
+    conn.client.emit('raw', {
+      from_server: true,
+      line: `:irc.example.test 005 me ${tokens} :are supported by this server`,
+    });
+  }
+
+  it('stores a declared mapping and merges rows that now fold together', async () => {
+    const { conn, network, published } = connFor('casemap');
+    const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
+    // Two rows under the legacy fold; ONE channel under rfc1459.
+    ensureOpen(network.user_id, network.id, '#foo[bar]');
+    ensureOpen(network.user_id, network.id, '#foo{bar}');
+
+    raw005(conn, 'CHANTYPES=# CASEMAPPING=rfc1459 MONITOR=100');
+
+    expect(getNetwork(network.id, network.user_id)?.casemapping).toBe('rfc1459');
+    const merged = get(network.user_id, network.id, '#foo[bar]');
+    expect(merged?.id).toBe(get(network.user_id, network.id, '#foo{bar}')?.id);
+    expect(published.find((e) => e.type === 'buffer-renamed')).toMatchObject({
+      merged: true,
+      bufferId: merged!.id,
+    });
+  });
+
+  it("NEVER captures irc-framework's defaulted rfc1459 — no token, no store", () => {
+    const { conn, network } = connFor('casemap-absent');
+    // The framework default is sitting right there in the options bag; a 005
+    // line without the token must not launder it into a declaration.
+    expect(conn.client.network.options.CASEMAPPING).toBe('rfc1459');
+    raw005(conn, 'CHANTYPES=# MONITOR=100');
+    expect(getNetwork(network.id, network.user_id)?.casemapping).toBeNull();
+  });
+
+  it('a declaration on a LATER 005 line still captures', async () => {
+    const { conn, network } = connFor('casemap-late');
+    raw005(conn, 'CHANTYPES=# PREFIX=(ov)@+');
+    raw005(conn, 'MONITOR=100 CASEMAPPING=ascii TARGMAX=NAMES:1');
+    expect(getNetwork(network.id, network.user_id)?.casemapping).toBe('ascii');
+  });
+
+  it('an unknown value is not stored and changes nothing', async () => {
+    const { conn, network, published } = connFor('casemap-unknown');
+    const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
+    ensureOpen(network.user_id, network.id, '#a[1]');
+    ensureOpen(network.user_id, network.id, '#a{1}');
+
+    raw005(conn, 'CASEMAPPING=rfc8265');
+
+    expect(getNetwork(network.id, network.user_id)?.casemapping).toBeNull();
+    expect(get(network.user_id, network.id, '#a[1]')?.id).not.toBe(
+      get(network.user_id, network.id, '#a{1}')?.id,
+    );
+    // No lifecycle frames — the raw 005 line itself still renders as server
+    // text via the ordinary numeric path, which is not this test's concern.
+    expect(published.filter((e) => e.type === 'buffer-renamed')).toEqual([]);
+  });
+
+  it('re-declaring the stored mapping is a no-op — reconnects do no work', () => {
+    const { conn, published } = connFor('casemap-again');
+    raw005(conn, 'CASEMAPPING=rfc1459');
+    raw005(conn, 'CASEMAPPING=rfc1459');
+    expect(published.filter((e) => e.type === 'buffer-renamed')).toEqual([]);
+  });
+
+  it('a merge of two CLOSED twins is silent — clients hold nothing to correct', async () => {
+    const { conn, network, published } = connFor('casemap-closed');
+    const { ensureOpen, close, getBuffer: get } = await import('../db/buffers.js');
+    ensureOpen(network.user_id, network.id, 'ghost^', { kind: 'dm' });
+    ensureOpen(network.user_id, network.id, 'ghost~', { kind: 'dm' });
+    close(network.user_id, network.id, 'ghost^');
+    close(network.user_id, network.id, 'ghost~');
+
+    raw005(conn, 'CASEMAPPING=rfc1459');
+
+    // Merged server-side, closed, and NOT announced — an announced merge
+    // would make clients materialize a sidebar row for it.
+    expect(get(network.user_id, network.id, 'ghost~')?.state).toBe('closed');
+    expect(published.filter((e) => e.type === 'buffer-renamed')).toEqual([]);
+  });
+
+  it('adopts the wire spelling on a join echo when the folds diverge', async () => {
+    // The state a refold merge can leave behind: the surviving twin isn't the
+    // spelling the ircd echoes. The join echo respells it (casing-only
+    // rename, announced) so the id-less control frames that follow can't
+    // fork a ghost buffer client-side. Plain ASCII case differences keep
+    // first-writer-wins display casing.
+    const { conn, network, published } = connFor('casemap-respell');
+    const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
+    raw005(conn, 'CASEMAPPING=rfc1459');
+    ensureOpen(network.user_id, network.id, '#chat{dev}');
+    const id = get(network.user_id, network.id, '#chat{dev}')!.id;
+    conn.client.user.nick = 'me';
+
+    conn.client.emit('join', { nick: 'me', channel: '#chat[dev]' });
+
+    // Same row (the spellings fold together); display adopts the wire spelling.
+    const row = get(network.user_id, network.id, '#chat[dev]');
+    expect(row?.id).toBe(id);
+    expect(row?.target).toBe('#chat[dev]');
+    expect(published.find((e) => e.type === 'buffer-renamed')).toMatchObject({
+      from: '#chat{dev}',
+      to: '#chat[dev]',
+      bufferId: id,
+      merged: false,
+    });
+  });
+
+  it('isChannelJoined folds both sides per the declared mapping', () => {
+    // The one membership probe every consumer must use instead of the raw
+    // channels-map key (legacy-lowercased wire names): a fold-variant
+    // spelling of a joined channel reads joined, and a Unicode case-twin on
+    // an ascii-family network does NOT (toLowerCase over-folds).
+    const { conn } = connFor('casemap-joined');
+    conn.upsertChannel('#foo[bar]');
+    conn.upsertChannel('#ärger');
+    raw005(conn, 'CASEMAPPING=rfc1459');
+
+    expect(conn.isChannelJoined('#foo{bar}')).toBe(true);
+    expect(conn.isChannelJoined('#FOO[BAR]')).toBe(true);
+    expect(conn.isChannelJoined('#ärger')).toBe(true);
+    // Distinct channels under rfc1459: Ä is not in the fold range.
+    expect(conn.isChannelJoined('#Ärger')).toBe(false);
+    expect(conn.isChannelJoined('#elsewhere')).toBe(false);
   });
 });
 

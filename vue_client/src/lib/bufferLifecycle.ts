@@ -18,7 +18,7 @@
 // only be instantiated once an active pinia exists — these run inside socket
 // handlers, long after app init.
 
-import { useBuffersStore } from '../stores/buffers.js';
+import { useBuffersStore, bufferKeyForId } from '../stores/buffers.js';
 import { useNetworksStore } from '../stores/networks.js';
 import { useNavHistoryStore } from '../stores/navHistory.js';
 import { useRecentBuffersStore } from '../stores/recentBuffers.js';
@@ -77,14 +77,14 @@ export function bufferRenamed(networkId: number | string | null, from: string, t
 
 /**
  * The full `buffer-renamed` frame contract (docs §9.7): the buffer keeps its
- * id and adopts the new name; on a merge the ABSORBED buffer (the one that
- * already held the new name — `mergedFromBufferId`) is dropped everywhere
- * first, so the rename lands with no collision and the destination-wins
- * fallbacks in the rekey hooks never fire on an announced merge. A merged
- * buffer's history interleaves two message streams server-side, so the local
- * slice is wiped and flagged for a fresh hydrate rather than guessed at —
- * the read-state / pins / draft corrections ride in right behind the frame.
- * Following the active buffer is free: networks.rekeyBuffer moves activeKey.
+ * id and adopts the new name; on a merge the ABSORBED buffer
+ * (`mergedFromBufferId`) is dropped everywhere first, so the rename lands
+ * with no collision and the destination-wins fallbacks in the rekey hooks
+ * never fire on an announced merge. A merged buffer's history interleaves two
+ * message streams server-side, so the local slice is wiped and flagged for a
+ * fresh hydrate rather than guessed at — the read-state / pins / draft
+ * corrections ride in right behind the frame. Following the active buffer is
+ * free: networks.rekeyBuffer moves activeKey.
  */
 export function applyBufferRenamed(payload: {
   networkId: number | string | null;
@@ -92,12 +92,45 @@ export function applyBufferRenamed(payload: {
   to: string;
   bufferId?: number | null;
   merged?: boolean;
+  mergedFromBufferId?: number | null;
 }): void {
-  const { networkId, from, to, bufferId, merged } = payload;
-  if (merged) bufferClosed(networkId, to);
+  const { networkId, from, to, bufferId, merged, mergedFromBufferId } = payload;
+  if (merged) {
+    // The absorbed row is identified by ID, never by which of from/to it sat
+    // under: the frame's two producers orient the pair differently. A DM
+    // nick-collision absorbs the row already holding `to`; a casemapping
+    // refold (#707) absorbs the `from` row while the survivor keeps its own
+    // name — so reading orientation here ("drop `to`") swept the SURVIVOR of
+    // a refold merge out of every store, vanishing the open channel the
+    // reader was sitting in.
+    const buffers = useBuffersStore();
+    const absorbedKey = mergedFromBufferId != null ? bufferKeyForId(mergedFromBufferId) : undefined;
+    const absorbed = absorbedKey ? buffers.byKey(absorbedKey) : null;
+    if (absorbed) {
+      bufferClosed(absorbed.networkId, absorbed.target);
+    } else {
+      // Absorbed id unknown locally (optimistically-created row merged before
+      // any id-carrying frame): fall back to the DM orientation — but never
+      // sweep a row that PROVES it is the survivor by recording the
+      // surviving id.
+      const atTo = buffers.findByTarget(networkId, to);
+      if (atTo && !(typeof bufferId === 'number' && atTo.id === bufferId)) {
+        bufferClosed(networkId, to);
+      }
+    }
+  }
   bufferRenamed(networkId, from, to);
   const buffers = useBuffersStore();
-  const buf = buffers.findByTarget(networkId, to);
+  let buf = buffers.findByTarget(networkId, to);
+  if (!buf && merged && typeof bufferId === 'number' && networkId != null) {
+    // Whatever the sweep above decided, a merged frame PROVES a live buffer
+    // named `to` exists server-side. If local state ended up rowless — both
+    // twins held id-less and the fallback swept the wrong one — materialize
+    // the survivor instead of bailing, so the buffer can never vanish from
+    // the sidebar; the wipe below routes it through the ordinary hydration
+    // fetch, and the read-state/pins/draft follow-ups correct the rest.
+    buf = buffers.ensure(networkId, to, bufferId);
+  }
   if (!buf) return;
   // Learn/confirm the id under the new key (also heals the case where the
   // rename raced ahead of the burst and we never knew the id).

@@ -36,6 +36,8 @@ import {
   reopen as reopenBuffer,
   ensureServerBuffer,
   ensureSystemBuffer,
+  foldTargetFor,
+  invalidateCasemappingCache,
 } from '../db/buffers.js';
 import { resolveBuffer } from '../db/bufferResolve.js';
 import { listBufferTargets, hasMessageForTarget } from '../db/messages.js';
@@ -240,9 +242,18 @@ function insertTable(
 
     // target_folded is derived state (the registry's one folded lookup key);
     // recompute rather than trusting the archive so a hand-edited or corrupted
-    // file can't plant a row the folded lookups will never find.
+    // file can't plant a row the folded lookups will never find. Folded
+    // per-network (#707): network_id is already rekeyed and networks import
+    // before buffers, so the just-imported casemapping governs — a legacy
+    // toLowerCase here would write folds the message import's own resolver
+    // then misses, minting duplicate buffers mid-restore (and colliding
+    // outright on ascii-network case-twins), while the healing refold never
+    // runs because the imported mapping makes the next connect a no-op.
     if (table === 'buffers') {
-      row.target_folded = String(row.target ?? '').toLowerCase();
+      row.target_folded = foldTargetFor(
+        (row.network_id as number | null) ?? null,
+        String(row.target ?? ''),
+      );
       // Sentinel rows (:system:, :server:<id>) are install-local: the target
       // account already owns its :system: row (minted at account creation —
       // inserting the archive's copy violates idx_buffers_key), and an
@@ -498,6 +509,14 @@ async function streamMessagesInBatches(
 // we clear them explicitly. Must cover every importable user-scoped root in
 // EXPORT_TABLES.
 function resetImportedData(userId: number): void {
+  // The buffers import folds through the casemapping cache mid-transaction,
+  // and the rollback that lands us here reverts sqlite_sequence — so the
+  // rolled-back network ids (cached with the rolled-back mappings) are
+  // exactly the ids the next createNetwork or retried import will mint.
+  // A stale hit there folds new rows under a dead network's rule AND makes
+  // the healing refold's stored===declared compare read the lie. Clear it
+  // all; the cache is lazy and refills on first use.
+  invalidateCasemappingCache();
   const wipe = db.transaction(() => {
     db.prepare('DELETE FROM networks WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM highlight_rules WHERE user_id = ?').run(userId);

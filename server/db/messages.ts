@@ -3,7 +3,7 @@
 
 import db from './index.js';
 import {
-  foldTargetFor,
+  resolveBuffer,
   resolveBufferIdByNetwork,
   resolveOrMintForInsert,
 } from './bufferResolve.js';
@@ -927,6 +927,10 @@ function toFtsMatch(text: string): string {
 // unread counts) so an ignored user stays ignored everywhere, including for
 // non-UI consumers of the search verb that have no client-side ignore filter.
 //
+// The `in:` scope's network enumeration (unscoped = "this name on any of my
+// networks"); prepared once like every other statement in this module.
+const userNetworkIdsStmt = db.prepare(`SELECT id FROM networks WHERE user_id = ?`);
+
 // `matched: true` restricts to highlight rows (matched_rule_id IS NOT NULL) —
 // this is what powers filterable highlights, which reuse the same from:/in:/on:
 // + free-text machinery as search. Unlike plain search, an all-empty filter set
@@ -993,14 +997,25 @@ export function searchMessages(
     params.push(networkId);
   }
   if (target) {
-    // `in:` scope. Without a networkId this means "this name on any of my
-    // networks", so it resolves through the registry as a folded-name subquery
-    // rather than a single id. The user_id prefix of idx_buffers_key bounds
-    // the subquery to the caller's own buffers.
-    where.push(
-      'm.buffer_id IN (SELECT b.id FROM buffers b WHERE b.user_id = ? AND b.target_folded = ?)',
-    );
-    params.push(userId, foldTargetFor(networkId ?? null, target));
+    // `in:` resolves through the registry once per candidate network — folds
+    // are per-network (#707), so ONE folded string can't probe several
+    // networks: a Libera '#chat[dev]' is stored under its rfc1459 fold
+    // '#chat{dev}', which a legacy fold of the query would silently miss.
+    // The scoped case is the one-network instance of the same loop, so both
+    // shapes share one mechanism. An empty id list matches nothing.
+    const nets = networkId
+      ? [{ id: networkId }]
+      : (userNetworkIdsStmt.all(userId) as { id: number }[]);
+    const ids: number[] = [];
+    for (const net of nets) {
+      const found = resolveBuffer(userId, net.id, target);
+      if (found) ids.push(found.id);
+    }
+    if (ids.length === 0) where.push('0');
+    else {
+      where.push(`m.buffer_id IN (${ids.map(() => '?').join(', ')})`);
+      params.push(...ids);
+    }
   }
   // `nicks` OR-matches several senders (a friend's alts); `nick` is the single
   // case. COLLATE NOCASE binds to the column so the IN comparison is case-fold.

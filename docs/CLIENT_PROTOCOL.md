@@ -411,10 +411,17 @@ Sentinel targets are exact-match, never case-folded. (The web client's
 it.)
 
 **Case folding:** IRC targets are case-insensitive and servers echo
-inconsistently-cased names. Fold with **ASCII `toLowerCase`** for identity;
-keep the first/canonical casing for display. RFC 1459 casemapping (treating
-`{}|^` as the lowercase of `[]\~`) is deliberately **not** implemented anywhere
-in Lurker — match that, don't "fix" it unilaterally.
+inconsistently-cased names. Clients fold with plain `toLowerCase` for identity
+(the first-party clients use their platform's Unicode lowercase; ASCII-only is
+also fine) and keep the first/canonical casing for display. The _server_ folds
+per the network's declared ISUPPORT `CASEMAPPING` (#707) — including the
+RFC 1459 rule treating `{|}~` as the lowercase of `[\]^` — so two names a
+client held apart may be one buffer server-side, and (rarely: non-ASCII
+case-twins on an ascii-family network) two server buffers may collide under a
+client's fold; prefer `bufferId` wherever a frame carries it. Don't implement
+the server's fold client-side: when the server learns a mapping that collapses
+names, it merges the rows and announces each merge with the ordinary
+`buffer-renamed` frame (§9.7), which is all a client needs to converge.
 
 ### 5.3 Messages (`MessageEvent`)
 
@@ -630,7 +637,7 @@ a v1 client.
 | `send-result`                                                                                                                                                            | `clientId, ok, error?`                                                                                                                                                                                                                                                | Ack for `send`/`action`/`notice`                                                                                                                          |
 | `buffer-opened` / `buffer-closed` / `buffer-reopened`                                                                                                                    | `networkId, target, bufferId?` (absent only on the ack for a channel still being JOINed — no row yet)                                                                                                                                                                 | Buffer lifecycle (§9.1). `buffer-opened` is an ack to the socket that asked **and** a fan-out to the user's other devices — only focus on your own (§4.3) |
 | `buffer-cleared`                                                                                                                                                         | `networkId, target, bufferId, clearedBeforeId, clearedAt`                                                                                                                                                                                                             | `/clear` marker                                                                                                                                           |
-| `buffer-renamed`                                                                                                                                                         | `networkId, from, to, bufferId, merged, mergedFromBufferId?` — see §9.7                                                                                                                                                                                               | A buffer changed names (same id): DM follows a peer's NICK                                                                                                |
+| `buffer-renamed`                                                                                                                                                         | `networkId, from, to, bufferId, merged, mergedFromBufferId?` — see §9.7                                                                                                                                                                                               | A buffer kept its id across a name event: DM follows a peer's NICK, or a CASEMAPPING refold merged case-twins (any kind)                                  |
 | `pins-changed`                                                                                                                                                           | `networkId, pinned[], pinnedIds[]` (parallel-indexed: `pinnedIds[i]` is `pinned[i]`'s buffer)                                                                                                                                                                         | Authoritative pin order                                                                                                                                   |
 | `nicklist-collapsed-changed` / `channel-notify-changed`                                                                                                                  | `networkId, target, bufferId, …`                                                                                                                                                                                                                                      | View-state sync                                                                                                                                           |
 | `draft-updated` / `input-history-added` / `bookmark-updated` / `nick-note-updated` / `relay-bot-updated` / `contact-updated` / `contact-deleted` / `ignore-list-updated` | various                                                                                                                                                                                                                                                               | Multi-device view-state fan-out                                                                                                                           |
@@ -952,8 +959,16 @@ nicklist patch arrives separately as `member-update`).
 
 ### 9.7 Renames keep a buffer's identity
 
-**Emitted today for DM buffers following a peer's `/nick`** (weechat/irssi
-parity); channel renames (`draft/channel-rename`) will reuse the same frame.
+**Two producers emit this frame today**, for buffers of any kind: a DM
+following its peer's `/nick` (weechat/irssi parity), and the CASEMAPPING
+refold (#707) merging rows — channels included — that fold together under a
+newly-declared mapping. Channel renames (`draft/channel-rename`) will reuse it
+too. ⚠ The producers orient `from`/`to` differently on a merge: the DM path
+absorbs the row that already held `to`, the refold path absorbs the `from` row
+(the survivor keeps its own name, so `from ≠ to` with no actual rename).
+Never derive which buffer died from orientation — `mergedFromBufferId` is the
+absorbed row, `bufferId` the survivor, and `to` is always the survivor's final
+name.
 
 ```jsonc
 {
@@ -974,13 +989,12 @@ The contract, in the order a client should apply it:
   do; a client keying by name rekeys `from → to` in every store holding
   per-buffer state (the web client does this with one registry sweep —
   `lib/bufferLifecycle.ts`).
-- **`merged: true` means another buffer was absorbed.** A row already held
-  the new name (a stale DM under the peer's old nick, usually). The SOURCE
-  survives — the live conversation keeps its id — and `mergedFromBufferId`
-  names the absorbed buffer: drop it everywhere first, then apply the rename;
-  done in that order there is no key collision. The merged history
-  interleaves server-side, so wipe the local slice and re-hydrate rather
-  than guessing at the interleave.
+- **`merged: true` means another buffer was absorbed**, and
+  `mergedFromBufferId` names it — drop THAT buffer everywhere first (by id,
+  per the orientation warning above), then apply the rename; done in that
+  order there is no key collision. The surviving conversation keeps its id.
+  The merged history interleaves server-side, so wipe the local slice and
+  re-hydrate rather than guessing at the interleave.
 - **Corrections ride behind a merge.** `read-state`, `pins-changed`, and (when
   the surviving draft changed) `draft-updated` frames follow immediately —
   the merge changed those server-side and an idle buffer would never

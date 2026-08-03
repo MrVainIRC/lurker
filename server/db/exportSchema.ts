@@ -118,6 +118,10 @@ export const EXPORT_TABLES = Object.freeze({
       'sasl_password',
       'connect_commands',
       'position',
+      // Server-declared CASEMAPPING (#707): exported so an imported network's
+      // registry folds don't churn (and case-twins don't merge) on the first
+      // reconnect after a restore.
+      'casemapping',
     ],
   },
 

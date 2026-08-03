@@ -538,9 +538,9 @@ describe('handleOpenBuffer', () => {
     // spends its one hydrate request on something that can never be answered and sits on
     // a loading spinner for the rest of the connection.
     buffers.ensureExists(userId, networkId, '#emptyjoined');
-    const spy = vi
-      .spyOn(ircManager, 'getConnection')
-      .mockReturnValue({ channels: new Map([['#emptyjoined', {}]]) } as never);
+    const spy = vi.spyOn(ircManager, 'getConnection').mockReturnValue({
+      isChannelJoined: (n: string) => n.toLowerCase() === '#emptyjoined',
+    } as never);
     try {
       const { ws, frames } = mockWs();
       handleOpenBuffer(ws, userId, networkId, '#emptyjoined');
@@ -564,7 +564,7 @@ describe('handleOpenBuffer', () => {
     buffers.ensureExists(userId, networkId, '&unjoined');
     const spy = vi
       .spyOn(ircManager, 'getConnection')
-      .mockReturnValue({ channels: new Map() } as never);
+      .mockReturnValue({ isChannelJoined: () => false } as never);
     try {
       const { ws, frames } = mockWs();
       handleOpenBuffer(ws, userId, networkId, '&unjoined');
@@ -578,7 +578,7 @@ describe('handleOpenBuffer', () => {
     buffers.ensureExists(userId, networkId, '&joined');
     const spy = vi
       .spyOn(ircManager, 'getConnection')
-      .mockReturnValue({ channels: new Map([['&joined', {}]]) } as never);
+      .mockReturnValue({ isChannelJoined: (n: string) => n.toLowerCase() === '&joined' } as never);
     try {
       const { ws, frames } = mockWs();
       handleOpenBuffer(ws, userId, networkId, '&joined');
@@ -1044,15 +1044,21 @@ describe('computeTotalHighlights', () => {
 // precedence on a live network (finding #3), and per-buffer highlight parity
 // between the frames the client receives and the total the badge shows.
 describe('eachUserBufferTarget / badge-vs-snapshot parity (#454)', () => {
-  // A minimal live-connection stand-in: the enumerator only reads network.id and
-  // the lowercased-keyed channels map (has() for join-precedence, values().name to
-  // surface joined-but-history-less channels). Injected straight into the shared
-  // ircManager singleton — remember to clear it so sibling "offline" tests aren't
-  // poisoned by a lingering live connection.
+  // A minimal live-connection stand-in: the enumerator reads network.id, the
+  // lowercased-keyed channels map (values().name to surface joined-but-
+  // history-less channels), and the fold-aware isChannelJoined probe (#707)
+  // — stubbed here with the legacy fold, which is exact for these undeclared
+  // test networks. Injected straight into the shared ircManager singleton —
+  // remember to clear it so sibling "offline" tests aren't poisoned by a
+  // lingering live connection.
   type LiveConn = ReturnType<typeof ircManager.listConnections>[number];
   function stubLiveConn(netId: number, joinedChannels: string[]): LiveConn {
     const channels = new Map(joinedChannels.map((c) => [c.toLowerCase(), { name: c }]));
-    return { network: { id: netId }, channels } as unknown as LiveConn;
+    return {
+      network: { id: netId },
+      channels,
+      isChannelJoined: (name: string) => channels.has(name.toLowerCase()),
+    } as unknown as LiveConn;
   }
   function setLiveConn(uid: number, conn: LiveConn) {
     // connectionsForUser creates the inner map if absent — same seam the bouncer

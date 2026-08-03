@@ -1003,6 +1003,11 @@ ensureColumn('networks', 'connect_commands', 'TEXT');
 // create/reorder; ties fall back to id ASC so freshly migrated rows stay in
 // their original creation order. See schemaVersion < 6 backfill below.
 ensureColumn('networks', 'position', 'INTEGER NOT NULL DEFAULT 0');
+// The server-declared ISUPPORT CASEMAPPING, captured on connect (#707). NULL
+// until the network first declares one; target folding falls back to the
+// legacy Unicode-lowercase rule until then (db/casemapping.ts). A change is
+// what triggers the per-network re-fold (db/refoldBuffers.ts).
+ensureColumn('networks', 'casemapping', 'TEXT');
 ensureColumn('users', 'password_hash', 'TEXT');
 ensureColumn('users', 'last_seen_at', 'TEXT');
 // Account access state, orthogonal to role. A paused account keeps all its data

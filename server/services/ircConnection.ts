@@ -5,6 +5,8 @@ import IRC, { ircLineParser } from 'irc-framework';
 import type { Client as IrcClient } from 'irc-framework';
 import { insertMessage, hasMessageForTarget, hasConversationForTarget } from '../db/messages.js';
 import { renameBuffer as renameDmBuffer } from '../db/renameBuffer.js';
+import { refoldNetworkBuffers } from '../db/refoldBuffers.js';
+import { normalizeCasemapping } from '../db/casemapping.js';
 import type { Network } from '../db/networks.js';
 import {
   isClosed as isBufferClosed,
@@ -14,6 +16,10 @@ import {
   setChannelKey as setBufferChannelKey,
   deleteBuffer,
   listOpenDms,
+  networkCasemapping,
+  foldTarget,
+  foldTargetFor,
+  kindForTarget,
 } from '../db/buffers.js';
 import { listTargetsForNetwork as listFriendTargetsForNetwork } from '../db/contacts.js';
 import * as chanlistDb from '../db/chanlist.js';
@@ -477,6 +483,10 @@ export class IrcConnection {
   client: IrcClient;
   state: string;
   channels: Map<string, ChannelState>;
+  /** Lazily-built per-network-folded index over `channels` for
+   *  isChannelJoined. null = rebuild on next probe. MUST be nulled by every
+   *  channels-map mutation and by a CASEMAPPING change (the folds move). */
+  joinedFoldedCache: Set<string> | null;
   // Join keys awaiting their echo, keyed by lowercased channel. Nothing is
   // persisted on a join REQUEST (the buffers row is echo-written), so the key
   // rides here until the join lands; a forward (470) discards it. Lost on a
@@ -660,6 +670,7 @@ export class IrcConnection {
     this.client.requestCap('draft/multiline');
     this.state = 'disconnected';
     this.channels = new Map();
+    this.joinedFoldedCache = null;
     this.userModes = new Set();
     this.awayState = { active: false, message: null, since: null, autoSet: false, backAt: null };
     // Lowercase nicks we watch for presence, each tagged with why (DM peer
@@ -955,6 +966,21 @@ export class IrcConnection {
       // so a stray mid-session numeric can't graft onto a stale burst. The
       // raw line keeps its trailing CR; strip it so replay consumers get a
       // clean single-line payload.
+      // CASEMAPPING capture (#707) reads the RAW 005 tokens, NOT
+      // client.network.options: irc-framework pre-seeds options.CASEMAPPING
+      // to 'rfc1459' in its NetworkInfo constructor, so through the options
+      // bag "the server declared rfc1459" and "the server declared nothing"
+      // are indistinguishable — and storing the framework default would
+      // trigger a destructive registry merge on servers that declared
+      // something else on a later 005 line, or nothing at all. A token seen
+      // here is a declaration by construction.
+      if (rawCommand === '005') {
+        for (const param of msg?.params ?? []) {
+          if (typeof param === 'string' && param.startsWith('CASEMAPPING=')) {
+            this.adoptDeclaredCasemapping(param.slice('CASEMAPPING='.length));
+          }
+        }
+      }
       const burstLine = event.line.replace(/[\r\n]+$/, '');
       if (rawCommand === '001') this.registrationLines = [burstLine];
       else if (
@@ -989,10 +1015,7 @@ export class IrcConnection {
       // rejection, not a join failure — surface it inline in that channel so
       // the user sees why their message didn't land, instead of a misleading
       // "Couldn't join" toast (#283). publish() canonicalizes the channel case.
-      if (
-        channel &&
-        isOverloadedSpeakRejection(command, this.channels.has(channel.toLowerCase()))
-      ) {
+      if (channel && isOverloadedSpeakRejection(command, this.isChannelJoined(channel))) {
         this.handleSendRejection(channel, reason, { command, params });
         return;
       }
@@ -1959,6 +1982,29 @@ export class IrcConnection {
           if (stashedKey !== undefined) {
             setBufferChannelKey(this.network.user_id, this.network.id, eventChannel, stashedKey);
           }
+          // #707: adopt the WIRE spelling when the row's display name
+          // diverges beyond ASCII case — the state a refold merge leaves
+          // behind when the surviving twin wasn't the joined spelling
+          // ('#chat{dev}' survived on recency, the ircd echoes
+          // '#chat[dev]'). Left alone, the id-less control frames
+          // (channel-joined, names) fork a message-less ghost buffer
+          // client-side, since clients fold without the network rule. Both
+          // spellings resolve to this row, so this is renameBuffer's
+          // casing-only path: one UPDATE, one announce, clients rekey — and
+          // it converges permanently. Plain ASCII case differences (legacy
+          // folds equal) keep first-writer-wins display casing, as ever.
+          if (
+            record.target !== eventChannel &&
+            foldTarget(record.target) !== foldTarget(eventChannel)
+          ) {
+            const adopted = renameDmBuffer(
+              this.network.user_id,
+              this.network.id,
+              record.target,
+              eventChannel,
+            );
+            if (adopted?.renamed && adopted.open) this.announceBufferRenamed(adopted);
+          }
         } catch (_) {
           /* ignore */
         }
@@ -2019,6 +2065,7 @@ export class IrcConnection {
       });
       if (eventNick === c.user.nick) {
         this.channels.delete(eventChannel.toLowerCase());
+        this.joinedFoldedCache = null;
         this.publish({ type: 'channel-parted', target: channel });
         // No system-buffer "Parted #x" line — symmetric with the join above; the
         // part already shows in the channel buffer (#355).
@@ -2052,6 +2099,7 @@ export class IrcConnection {
       // channel that just kicked you reads as ban evasion to ops.
       if (eventKicked && c.user.nick && eventKicked.toLowerCase() === c.user.nick.toLowerCase()) {
         this.channels.delete(eventChannel.toLowerCase());
+        this.joinedFoldedCache = null;
         try {
           setBufferAutojoin(this.network.user_id, this.network.id, channel, false);
         } catch (_) {
@@ -2909,6 +2957,111 @@ export class IrcConnection {
     }
   }
 
+  // A CASEMAPPING token seen on a raw 005 line (#707) — a declaration by
+  // construction, never irc-framework's default (see the 'raw' handler). The
+  // declared fold is a property of the network ROW, not the socket: stored
+  // once, compared per token, and only a CHANGE does real work — a reconnect
+  // that re-declares the stored value is one cached compare and out. No
+  // latch, deliberately: the stored===declared compare is already idempotent,
+  // and a latch would freeze the first token of a burst against a correction
+  // on a later line. Unknown values store nothing: the network keeps the
+  // legacy fold rather than adopting a rule we can't implement.
+  //
+  // On a change, db/refoldBuffers stores the mapping and rewrites the
+  // registry in ONE transaction (a failed refold leaves the mapping unstored,
+  // so the next 005 retries) — drifted folds rewrite silently, rows that now
+  // fold together (`#foo[bar]`/`#foo{bar}` under rfc1459) merge, each merge
+  // announced like a DM nick-collision. In-memory per-target maps
+  // (unsendableTargets & co.) are keyed by the wire name, which a re-fold
+  // doesn't change, so they're left alone.
+  private adoptDeclaredCasemapping(rawValue: string): void {
+    const declared = normalizeCasemapping(rawValue);
+    if (!declared) return;
+    try {
+      const stored = networkCasemapping(this.network.id);
+      if (stored === declared) return;
+      // Synchronous by design (better-sqlite3), and bounded by the absorbed
+      // rows' history sizes: a merge repoints messages wholesale, so a
+      // case-twin with a very large history blocks the loop for the
+      // duration. Accepted with eyes open — it runs ONCE per network, on the
+      // first connect that declares the mapping — and the duration is logged
+      // so a slow one is visible rather than a mystery stall.
+      const startedAt = Date.now();
+      const merges = refoldNetworkBuffers(this.network.user_id, this.network.id, declared);
+      this.logNet(
+        `CASEMAPPING ${declared}${stored ? ` (was ${stored})` : ''}` +
+          (merges.length
+            ? `; merged ${merges.length} case-colliding buffer${merges.length === 1 ? '' : 's'}`
+            : '') +
+          ` (refold ${Date.now() - startedAt}ms)`,
+      );
+      for (const m of merges) {
+        // A closed survivor (both twins were closed) is never announced:
+        // clients hold no state for closed buffers, so there is nothing to
+        // correct — and a merged frame would make them materialize a sidebar
+        // row for a conversation closed everywhere.
+        if (m.survivorOpen) {
+          this.announceBufferRenamed({
+            from: m.absorbedTarget,
+            to: m.survivorTarget,
+            bufferId: m.survivorId,
+            merged: true,
+            mergedFromBufferId: m.absorbedId,
+            draftChanged: m.draftChanged,
+          });
+        }
+        // A merged DM must hand over its presence watch: the hydration seed
+        // ran at 001 (before this 005) against pre-refold rows, so the
+        // absorbed spelling holds a MONITOR slot for a registry row that no
+        // longer exists — stranded until reconnect, consuming the shared cap.
+        // The surviving spelling may never have been seeded at all (a closed
+        // survivor absorbed an open twin). Tracked-implies-open: a closed
+        // survivor gets no watch — the seed skips closed DMs, and a stray
+        // watch here would strand a capped slot on a hidden conversation.
+        // Both trackers refcount, so this is safe when the survivor was
+        // already watched. Per-target maps (unsendableTargets & co.) are
+        // left alone deliberately: they key by wire name, sends go out under
+        // the surviving buffer's name from here on, and the dead spelling's
+        // entries are inert residue until the socket closes.
+        if (kindForTarget(m.absorbedTarget) === 'dm') {
+          this.untrackDmPeer(m.absorbedTarget);
+          if (m.survivorOpen) this.trackDmPeer(m.survivorTarget);
+        }
+      }
+      // The folds themselves moved; any membership index built on the old
+      // rule is stale.
+      this.joinedFoldedCache = null;
+    } catch (e) {
+      console.warn('[casemapping] capture/refold failed:', (e as Error)?.message || e);
+    }
+  }
+
+  /** The one builder for the buffer-renamed announcement, shared by the DM
+   *  nick-follow and the casemapping refold so the frame shape cannot drift
+   *  between its two producers. `to` is ALWAYS the surviving buffer's final
+   *  name and `mergedFromBufferId` the absorbed row — clients identify the
+   *  absorbed side by that id, never by which of from/to it sat under
+   *  (docs §9.7: the two producers orient from/to differently). */
+  private announceBufferRenamed(r: {
+    from: string;
+    to: string;
+    bufferId: number;
+    merged: boolean;
+    mergedFromBufferId?: number;
+    draftChanged: boolean;
+  }): void {
+    this.publishEphemeral({
+      type: 'buffer-renamed',
+      target: r.to,
+      from: r.from,
+      to: r.to,
+      bufferId: r.bufferId,
+      merged: r.merged,
+      ...(r.mergedFromBufferId != null ? { mergedFromBufferId: r.mergedFromBufferId } : {}),
+      draftChanged: r.draftChanged,
+    });
+  }
+
   // ---- presence watch list (shared MONITOR + peer_presence_state rails) ----
   // weechat/irssi parity (#695): the DM buffer follows the person through a
   // /nick. The rename itself is one registry UPDATE (db/renameBuffer);
@@ -2974,18 +3127,10 @@ export class IrcConnection {
       this.untrackDmPeer(oldNick);
       this.trackDmPeer(newNick);
     }
-    this.publishEphemeral({
-      type: 'buffer-renamed',
-      target: result.to,
-      from: result.from,
-      to: result.to,
-      bufferId: result.bufferId,
-      merged: result.merged,
-      ...(result.mergedFromBufferId != null
-        ? { mergedFromBufferId: result.mergedFromBufferId }
-        : {}),
-      draftChanged: result.draftChanged,
-    });
+    // A closed DM renames silently: clients hold no state for closed buffers,
+    // so there is nothing to rekey — and a MERGED frame for one would make
+    // them materialize a sidebar row for a conversation closed everywhere.
+    if (result.open) this.announceBufferRenamed(result);
     // The DM's own "x is now known as y" line — same row shape the channel
     // loop above persists, no new renderer work anywhere.
     this.publish({
@@ -3194,6 +3339,7 @@ export class IrcConnection {
   private evictChannel(name: string, { forget = false }: { forget?: boolean } = {}): void {
     const canonical = canonicalChannelTarget(name, this.channels) ?? name;
     this.channels.delete(name.toLowerCase());
+    this.joinedFoldedCache = null;
     try {
       if (forget && !hasMessageForTarget(this.network.id, canonical)) {
         deleteBuffer(this.network.user_id, this.network.id, canonical);
@@ -3209,12 +3355,38 @@ export class IrcConnection {
     this.publish({ type: 'channel-parted', target: canonical });
   }
 
+  /** Fold-aware live membership (#707): is `name` one of this connection's
+   *  joined channels under the network's declared CASEMAPPING? The channels
+   *  map is keyed by the legacy-lowercased WIRE name, so a raw
+   *  `.has(x.toLowerCase())` probe has two failure modes on a declared
+   *  network — it misses a fold-variant spelling (`#foo{bar}` asked, joined
+   *  as `#foo[bar]`), and it over-folds Unicode (on an ascii network
+   *  `#Ärger` must NOT read joined via its distinct case-twin `#ärger`).
+   *  Folding BOTH sides with the network's rule is the one comparison that's
+   *  right everywhere; on an undeclared network it reduces to exactly the
+   *  old map probe. One fold + one Set probe per call — the folded index is
+   *  rebuilt lazily after any channels-map mutation or a mapping change,
+   *  because this backs per-buffer loops (snapshot shells, mark-all-read)
+   *  where a per-call scan would be O(buffers × channels) on the same
+   *  event-loop-sensitive path the snapshot-starvation fixes targeted. It is
+   *  the single definition every consumer must use instead of the
+   *  idiomatic-looking raw probe. */
+  isChannelJoined(name: string): boolean {
+    if (!this.joinedFoldedCache) {
+      const set = new Set<string>();
+      for (const ch of this.channels.values()) set.add(foldTargetFor(this.network.id, ch.name));
+      this.joinedFoldedCache = set;
+    }
+    return this.joinedFoldedCache.has(foldTargetFor(this.network.id, name));
+  }
+
   upsertChannel(name: string): ChannelState {
     const key = name.toLowerCase();
     let ch = this.channels.get(key);
     if (!ch) {
       ch = { name, topic: null, members: new Map(), modes: new Set() };
       this.channels.set(key, ch);
+      this.joinedFoldedCache = null;
     }
     if (!ch.modes) ch.modes = new Set();
     return ch;
@@ -4018,7 +4190,7 @@ export class IrcConnection {
   // the prompt appears where the user is actually typing) when we're in that
   // channel, else the server buffer. Ephemeral: status, not history.
   surfaceE2eNotice(notice: UserNotice, channel?: string): void {
-    const inChannel = !!channel && this.channels.has(channel.toLowerCase());
+    const inChannel = !!channel && this.isChannelJoined(channel);
     this.publishEphemeral({
       type: 'e2e',
       level: notice.level,
