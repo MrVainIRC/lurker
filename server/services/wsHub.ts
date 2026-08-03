@@ -1933,6 +1933,11 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           ev.bufferId,
         );
         fanOut(eventUserId, pinsChangedFrame(eventUserId, ev.networkId));
+        // The merge may have adopted the absorbed row's favorite onto the
+        // survivor (renameBuffer.absorbBufferRow) — clients hold favorites by
+        // bufferId, so without a re-publish they'd render a ghost entry for
+        // the absorbed id until the next favorites mutation or reconnect.
+        fanOut(eventUserId, favoritesChangedFrame(eventUserId));
         if (ev.draftChanged) {
           const draft = getDraftForBuffer(eventUserId, ev.bufferId);
           fanOut(eventUserId, {

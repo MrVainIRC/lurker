@@ -202,7 +202,7 @@ Authorization: Bearer <token>        (native; browsers ride the cookie)
 ### 4.3 Connect: the snapshot burst
 
 On every successful connect the server immediately sends a **burst of separate
-frames**, synchronously, in this order (`wsHub.ts` `sendSnapshotInner`, 2273):
+frames**, synchronously, in this order (`wsHub.ts` `sendSnapshotInner`, 2293):
 
 1. `{kind:'snapshot', protocolVersion, maxUploadBytes, networks, globalIgnores, cursor?}`
    — full live state for every network (see §5.1). `cursor` (present only on a
@@ -224,7 +224,7 @@ frames**, synchronously, in this order (`wsHub.ts` `sendSnapshotInner`, 2273):
 
 Render progressively from frame 1; don't wait for the end.
 
-**What frame 8 is for.** Until it arrives, "I have no row for this buffer _yet_"
+**What frame 7 is for.** Until it arrives, "I have no row for this buffer _yet_"
 and "there is no such buffer" are the same observation, and no amount of waiting
 separates them. After it arrives, **absence is proof**: a buffer key with no
 `backlog` frame is **not open** — for channels, DMs and `:server:` logs alike,
@@ -257,7 +257,7 @@ Two things that look like they'd answer the same question and don't:
   (§4.3) is the read — it answers for any target without creating, reopening, or
   joining anything.
 
-An older server never sends frame 8 (it's additive, and `protocolVersion` does
+An older server never sends frame 7 (it's additive, and `protocolVersion` does
 not move for it) — if you don't see one, keep whatever you do today rather than
 concluding anything. A truncated burst withholds it too: the server only sends
 it once the whole burst went out, so a snapshot that failed part-way through
