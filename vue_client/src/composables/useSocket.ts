@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import type { Ref } from 'vue';
-import { ref, onMounted, watch } from 'vue';
+import { ref, onMounted, watch, effectScope } from 'vue';
 import { useNetworksStore } from '../stores/networks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { useAuthStore } from '../stores/auth.js';
@@ -492,40 +492,70 @@ function primeEventPreviews(
 let previewTogglesWired = false;
 
 /**
+ * Owns the preview-toggle watcher, so no component does.
+ *
+ * ⚠⚠ DETACHED, and that is the entire point (#693). `watch` registers with whatever effect scope
+ * is ACTIVE when it runs — and `wirePreviewToggles` is called from `useSocket`'s `onMounted`,
+ * which runs with the calling component's instance current. So the watcher was adopted by
+ * whichever route mounted first, and stopped when that route unmounted; the `previewTogglesWired`
+ * latch below then guaranteed it was never rebuilt. Declaring the watcher at module level did NOT
+ * fix that, because declaration site is not ownership.
+ *
+ * Created here rather than inside the function so it exists before any component does, and
+ * detached so it is never collected into a parent scope even if that changes.
+ */
+let previewToggleScope = effectScope(true);
+
+/**
  * Re-prime what is ALREADY in the store when a preview setting is switched on.
  *
- * ⚠⚠ Module-level and wired once, deliberately — this lived in `MessageList` and could not fire
- * for the path almost everyone uses. Settings is a separate route with no `KeepAlive`, so
- * opening it destroys the chat view and the watcher with it; coming back mounts a fresh one
- * with no `immediate`, which therefore never observes the flip. Nor does the remount re-ingest
- * anything, because the buffer already has messages. The net effect was that turning the
- * setting on in the settings UI left every existing message without a preview, forever — the
- * exact outcome the watcher was written to prevent. It only ever worked via `/set` and
- * cross-device sync, which is why it survived QA.
+ * ⚠⚠ Wired once and owned by a module-level scope, deliberately — this lived in `MessageList` and
+ * could not fire for the path almost everyone uses. Settings is a separate route with no
+ * `KeepAlive`, so opening it destroys the chat view; a watcher owned by that view goes with it,
+ * and coming back mounts a fresh one with no `immediate`, which therefore never observes the
+ * flip. Nor does the remount re-ingest anything, because the buffer already has messages. The net
+ * effect was that turning the setting on in the settings UI left every existing message without a
+ * preview, forever — the exact outcome the watcher was written to prevent. It only ever worked
+ * via `/set` and cross-device sync, which is why it survived QA.
  *
  * Every loaded buffer, not just the active one: `MessageList` is not keyed per buffer, so
  * priming only what happens to be on screen left every other buffer blank for the session.
+ *
+ * Still called lazily rather than at module load: it reads Pinia stores, which do not exist until
+ * the app has installed Pinia.
  */
 function wirePreviewToggles(): void {
   if (previewTogglesWired) return;
   previewTogglesWired = true;
-  const config = useConfigStore();
-  const settings = useSettingsStore();
-  watch(
-    () => [
-      config.linkPreviews && settings.effective('chat.inline_media.enabled') === true,
-      config.linkPreviews && settings.effective('chat.link_previews.enabled') === true,
-    ],
-    ([inlineMedia, linkPreviews], previous) => {
-      // Only on a flip TO enabled. Turning one off needs no work: the rows stop rendering.
-      const gained = (inlineMedia && !previous?.[0]) || (linkPreviews && !previous?.[1]);
-      if (!gained) return;
-      const buffers = useBuffersStore();
-      for (const buf of Object.values(buffers.buffers)) {
-        primeEventPreviews(buf.messages, buf.networkId, buf.target);
-      }
-    },
-  );
+  previewToggleScope.run(() => {
+    const config = useConfigStore();
+    const settings = useSettingsStore();
+    watch(
+      () => [
+        config.linkPreviews && settings.effective('chat.inline_media.enabled') === true,
+        config.linkPreviews && settings.effective('chat.link_previews.enabled') === true,
+      ],
+      ([inlineMedia, linkPreviews], previous) => {
+        // Only on a flip TO enabled. Turning one off needs no work: the rows stop rendering.
+        const gained = (inlineMedia && !previous?.[0]) || (linkPreviews && !previous?.[1]);
+        if (!gained) return;
+        const buffers = useBuffersStore();
+        for (const buf of Object.values(buffers.buffers)) {
+          primeEventPreviews(buf.messages, buf.networkId, buf.target);
+        }
+      },
+    );
+  });
+}
+
+/**
+ * Test-only: tear the watcher down so a suite can re-wire it from a known state.
+ * A stopped scope cannot be re-run, so this mints a fresh one rather than reusing it.
+ */
+export function resetPreviewToggleWiring(): void {
+  previewToggleScope.stop();
+  previewToggleScope = effectScope(true);
+  previewTogglesWired = false;
 }
 
 function applySnapshot(snapshot: any[], globalIgnores: any[] = []): void {
