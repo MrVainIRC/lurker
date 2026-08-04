@@ -342,11 +342,21 @@ const reserveStyle = computed(() => {
   const w = props.preview.thumbWidth!;
   const h = props.preview.thumbHeight!;
   return {
-    // ⚠ `max(1, …)`: rounding a sliver's capped width down to `0px` would give the wrapper a 0x0
-    // box and, through `.in-reserve`'s `max-width: 100%`, an image with no width at all. Reached
-    // whenever the ratio is under 1/480 — a 2x1000 strip is degenerate either way, but a
-    // one-pixel box degrades and a zero-pixel one disappears.
-    width: `${Math.max(1, Math.round(Math.min(w, MAX_IMAGE_HEIGHT * (w / h))))}px`,
+    // ⚠⚠ FRACTIONAL, and never rounded to a whole pixel. `aspect-ratio` derives the height by
+    // DIVIDING this width by the ratio, so a rounding error is multiplied by `h / w` — and for the
+    // shapes the cap exists to hold, that multiplier is enormous. Measured: a 13x1200 sliver's
+    // exact 2.6px width rounds to 3px and the box becomes 277px tall; a 2x1000 one, floored to 1px
+    // to keep it from rounding to 0, becomes **500px** — more than double the ceiling the rounding
+    // was decorating. (No decode-time growth either way: the box is byte-independent whatever this
+    // number is. What breaks is `MAX_IMAGE_HEIGHT` meaning anything.)
+    //
+    // A fractional width keeps the cap exact and makes the zero case unreachable in one move,
+    // since `MAX_IMAGE_HEIGHT * (w / h)` is greater than zero for any real pair of dimensions —
+    // so the floor that caused the 500px box is gone rather than tuned. Three decimals to keep the
+    // attribute readable; the residual is `0.001 * h / w`, which is a tenth of a pixel on the
+    // worst shape above. `Number()` drops the trailing zeros `toFixed` adds, so the ordinary case
+    // stays `320px` rather than `320.000px`.
+    width: `${Number(Math.min(w, MAX_IMAGE_HEIGHT * (w / h)).toFixed(3))}px`,
     aspectRatio: `${w} / ${h}`,
   };
 });

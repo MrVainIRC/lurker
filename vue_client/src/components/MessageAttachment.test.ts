@@ -838,6 +838,15 @@ describe('MessageAttachment — a box that does not depend on bytes', () => {
     });
     expect(tiny.find('.dim-reserve').attributes('style')).toContain('width: 16px');
 
+    // ⚠⚠ A SLIVER, and the width stays fractional. `aspect-ratio` derives the height by dividing
+    // this width, so a rounding error is multiplied by h/w: 13x1200 rounded to a whole 3px makes
+    // the box 277px tall, and a 2x1000 floored to 1px makes it 500px — against a cap of 240. The
+    // fraction is what keeps `MAX_IMAGE_HEIGHT` true for the shapes it exists for (Copilot, #737).
+    const sliver = mount(MessageAttachment, {
+      props: { preview: preview({ ...IMAGE, thumbWidth: 13, thumbHeight: 1200 }) },
+    });
+    expect(sliver.find('.dim-reserve').attributes('style')).toContain('width: 2.6px');
+
     // In a strip the row already decides the height; a second box would fight it.
     const strip = mount(MessageAttachment, { props: { preview: unmeasured, inStrip: true } });
     expect(strip.find('.dim-reserve').exists()).toBe(false);

@@ -198,7 +198,11 @@ describe('dimensionsFromHead: the numbers a client reserves a box from', () => {
 
     // ⚠ Probe first: if sharp ever starts reading this buffer, the fallback stops being exercised
     // and the assertion below would pass through the branch it is not written to cover.
-    await expect(sharp(truncated).metadata()).rejects.toThrow(/corrupt header/);
+    // ⚠ Asserts THAT it rejects, never with what wording — libvips' message is its own business and
+    // varies by version and platform. It reads as an odd way to write `.rejects.toThrow()` because
+    // it is: the bare form trips `vitest(require-to-throw-message)`, and satisfying that lint rule
+    // is what pinned /corrupt header/ here in the first place (Copilot, #737).
+    await expect(sharp(truncated).metadata()).rejects.toBeInstanceOf(Error);
 
     expect(await dimensionsFromHead(truncated)).toEqual({ width: 120, height: 80 });
     expect(await dimensionsFromHead(Buffer.from('not an image at all'))).toBeNull();
