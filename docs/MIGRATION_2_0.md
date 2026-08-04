@@ -23,18 +23,18 @@ page is the diff, not a replacement for it.
 
 ### Verbs removed
 
-| Removed | Replacement |
-| --- | --- |
-| `set-contact` | `favorite-buffer` |
+| Removed          | Replacement         |
+| ---------------- | ------------------- |
+| `set-contact`    | `favorite-buffer`   |
 | `delete-contact` | `unfavorite-buffer` |
 
 ### Frames removed
 
-| Removed | Replacement |
-| --- | --- |
+| Removed                             | Replacement         |
+| ----------------------------------- | ------------------- |
 | `contacts-snapshot` (connect burst) | `favorites-changed` |
-| `contact-updated` | `favorites-changed` |
-| `contact-deleted` | `favorites-changed` |
+| `contact-updated`                   | `favorites-changed` |
+| `contact-deleted`                   | `favorites-changed` |
 
 **The failure mode to check for first:** a client that waits for
 `contacts-snapshot` during the connect burst before it considers itself hydrated
@@ -56,7 +56,7 @@ One flag, `favorite`, on the buffer itself:
 // server → client, in the connect burst and after every change
 {
   "kind": "favorites-changed",
-  "favorites": [{ "networkId": 1, "target": "#lurker", "bufferId": 42 }]
+  "favorites": [{ "networkId": 1, "target": "#lurker", "bufferId": 42 }],
 }
 ```
 
@@ -121,7 +121,7 @@ Use **`bufferId`**, a server-assigned integer that survives both:
   "to": "bob_",
   "bufferId": 42,
   "merged": false,
-  "mergedFromBufferId": null
+  "mergedFromBufferId": null,
 }
 ```
 
