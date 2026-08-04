@@ -90,6 +90,7 @@ import {
   unfavoriteBuffer,
   reorderFavorites,
   listFavoritesForUser,
+  isFavoriteDmPeer,
 } from '../db/favoriteBuffers.js';
 import { setNicklistCollapsed } from '../db/nicklistCollapsed.js';
 import { addBookmark, removeBookmark } from '../db/bookmarks.js';
@@ -1885,6 +1886,42 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
       .catch((err) => console.warn('[push] deliver failed:', err?.message || err));
   }
 
+  // Came-online push: fired from a peer-presence offline→online transition
+  // for the peer of a FAVORITED DM (someone under FRIENDS), when no client is
+  // visible (the in-app toast owns the visible case). The same
+  // enabled/quiet/away gates as message pushes apply, keyed off the
+  // friend_online settings namespace — the same key names the contacts-era
+  // push used, so preferences set back then revive untouched.
+  function maybePushFavoriteOnline(
+    userId: number,
+    networkId: number,
+    nick: string | null | undefined,
+  ): void {
+    if (!nick) return;
+    if (userHasVisibleClient(userId)) return;
+    if (!effectiveSetting(userId, 'notifications.friend_online.enabled')) return;
+    if (!isFavoriteDmPeer(userId, networkId, nick)) return;
+    if (pushQuietOrAway(userId)) return;
+    const network = ircManager.getConnection(userId, networkId)?.network;
+    pushService
+      .deliver(userId, {
+        kind: 'friend_online',
+        networkId,
+        networkName: network?.name || `net:${networkId}`,
+        // target is the friend's nick so a notification tap opens their DM.
+        target: nick,
+        // The contacts model had a display name distinct from the nick; a
+        // favorite IS its buffer, so they coincide now. Kept in the payload
+        // so shipped iOS builds' tap-routing sees the shape it expects.
+        displayName: nick,
+        // No `badge` here on purpose (#451 review): a friend coming online isn't
+        // a highlight, so the total can't have changed since the last message
+        // push set it. The SW no-ops when data.badge is absent, so omitting it
+        // avoids an O(buffers) scan that would only re-stamp the same number.
+      })
+      .catch((err) => console.warn('[push] friend-online deliver failed:', err?.message || err));
+  }
+
   ircManager.on('event', (rawEvent) => {
     // EnrichedEvent (from ircConnection) is a strict superset of MessageEvent.
     const event = rawEvent as MessageEvent & { userId: number; state?: string };
@@ -1986,6 +2023,11 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
     }
     fanOut(eventUserId, { ...decorated, kind: 'irc' });
     maybePush(eventUserId, decorated);
+    // A friend coming online is a presence transition, not a message, so it
+    // bypasses maybePush (no `notify`); push it on its own path.
+    if (event.type === 'peer-presence' && (event as { cameOnline?: boolean }).cameOnline) {
+      maybePushFavoriteOnline(eventUserId, event.networkId, event.nick);
+    }
     // A server-side path deleted a favorited buffer outright (evictChannel's
     // 470-forget is the one such path today) — the FK cascade took the
     // favorite row with it, so re-publish the authoritative list or every

@@ -31,7 +31,7 @@ import { useUploadsStore } from '../stores/uploads.js';
 import { makeClientId } from '../utils/clientId.js';
 import { useToastsStore } from '../stores/toasts.js';
 import { downloadTextFile } from '../utils/download.js';
-import { notifyForEvent } from './useHighlightNotifier.js';
+import { notifyForEvent, playSound } from './useHighlightNotifier.js';
 
 export interface AckResult {
   ok: boolean;
@@ -351,11 +351,54 @@ function applyEvent(event: any): void {
       );
       break;
     case 'peer-presence': {
+      // Capture the prior known state BEFORE applying the update — the
+      // came-online toast must fire only on a transition we actually witnessed.
+      const prevPeerState =
+        networks.states[event.networkId]?.peerPresence?.[String(event.nick).toLowerCase()]?.state ??
+        null;
       networks.applyPeerPresence(event.networkId, event.nick, {
         state: event.state,
         stateAt: event.stateAt,
         awayMessage: event.awayMessage,
       });
+      // Came-online notification for FRIENDS (favorited DMs): only on a real
+      // offline→online transition. The server also reports current state on
+      // the MONITOR seed and whenever a nick is freshly added to the watch,
+      // so keying purely off `state === 'online'` would fire when you add an
+      // already-online friend or on a first connect.
+      //
+      // In-app toast + sound only when the tab is visible — the hidden case is
+      // the server-side push's job (wsHub.maybePushFavoriteOnline), gated on
+      // the same Page Visibility signal, so exactly one of the two fires.
+      if (
+        event.state === 'online' &&
+        prevPeerState === 'offline' &&
+        typeof document !== 'undefined' &&
+        !document.hidden
+      ) {
+        const nick = String(event.nick);
+        const settings = useSettingsStore();
+        if (
+          useFavoritesStore().isFavorite(event.networkId, nick) &&
+          settings.effective('notifications.friend_online.enabled')
+        ) {
+          useToastsStore().push({
+            kind: 'notify',
+            title: `${nick} came online`,
+            body: '',
+            networkId: event.networkId,
+            target: event.nick,
+          });
+          // Optional sound, same enable/choice/volume model as the DM/highlight/
+          // always-notify toasts (shared playSound helper).
+          if (settings.effective('notifications.friend_online.sound.enabled')) {
+            playSound(
+              (settings.effective('notifications.friend_online.sound.choice') as string) || 'knock',
+              settings.effective('notifications.friend_online.sound.volume'),
+            );
+          }
+        }
+      }
       break;
     }
     case 'system': {

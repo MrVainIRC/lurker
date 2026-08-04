@@ -310,6 +310,11 @@ const NOTIFICATION_SIGNALS = [
     title: 'Always-notify channels',
     help: 'For every message in channels you have flagged via the channel context menu.',
   },
+  {
+    key: 'friend_online',
+    title: 'Friend online',
+    help: 'When the peer of a DM in your FRIENDS section comes online.',
+  },
 ];
 
 const notificationSignals = computed(() =>

@@ -46,6 +46,33 @@ describe('composeNotification', () => {
     );
   });
 
+  it('titles a friend-online transition with the nick (displayName == target now)', () => {
+    // Under buffer favorites the display name IS the nick, so the vestigial
+    // "(as nick)" branch never fires on real payloads.
+    expect(
+      composeNotification(
+        payload({ kind: 'friend_online', target: 'nostimo', displayName: 'nostimo', text: null }),
+      ),
+    ).toMatchObject({
+      title: 'nostimo came online (Libera)',
+      // No text on a presence transition — the title carries it.
+      body: '',
+    });
+  });
+
+  it('keeps the legacy displayName branch byte-compatible (crafted/stale payloads)', () => {
+    // The composition must keep matching sw.js's cached copy even for shapes
+    // the server no longer emits — the parity suite below runs the real worker.
+    expect(
+      composeNotification(
+        payload({ kind: 'friend_online', target: 'nostimo', displayName: 'Amiantos' }),
+      ).title,
+    ).toBe('Amiantos came online (as nostimo · Libera)');
+    expect(
+      composeNotification(payload({ kind: 'friend_online', displayName: null, target: '' })).title,
+    ).toBe('A friend came online (Libera)');
+  });
+
   it('falls back when a nick is missing', () => {
     expect(composeNotification(payload({ nick: null })).title).toBe('someone (Libera)');
     // The same fallback on the channel branch, which is a separate expression.
@@ -111,6 +138,27 @@ describe('parity with the service worker fallback', () => {
     [
       'always_notify with no nick',
       payload({ kind: 'always_notify', target: '#lurker', nick: null }),
+    ],
+    [
+      'friend_online (displayName == target, the only live shape)',
+      payload({ kind: 'friend_online', target: 'nostimo', displayName: 'nostimo' }),
+    ],
+    [
+      'friend_online under a legacy distinct display name',
+      payload({ kind: 'friend_online', target: 'nostimo', displayName: 'Amiantos' }),
+    ],
+    [
+      'friend_online with no display name',
+      payload({ kind: 'friend_online', target: 'nostimo', displayName: null }),
+    ],
+    [
+      'friend_online with no network',
+      payload({
+        kind: 'friend_online',
+        target: 'nostimo',
+        displayName: 'nostimo',
+        networkName: '',
+      }),
     ],
   ];
 
