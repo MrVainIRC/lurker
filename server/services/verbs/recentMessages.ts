@@ -4,7 +4,7 @@
 import { registerVerb } from '../verbRegistry.js';
 import { listMessagesCounted, hasOlderRow } from '../../db/messages.js';
 import { asPageUnit } from '../../../shared/eventFilter.js';
-import { decorateMessage } from '../wsHub.js';
+import { decorateMessage, bufferNotifyAlways } from '../wsHub.js';
 
 /** Authenticated caller context passed to every verb handler. */
 interface VerbContext {
@@ -67,7 +67,10 @@ registerVerb({
       before,
       limit,
     });
-    const events = rows.map((e) => decorateMessage(ctx.userId, e));
+    // One buffer per call, so the notify-always answer is constant across the
+    // page — hoist it out of the map (#679).
+    const notifyAlways = bufferNotifyAlways(ctx.userId, networkId, target);
+    const events = rows.map((e) => decorateMessage(ctx.userId, e, notifyAlways));
     const oldestId = events.length ? events[0].id : 0;
     return {
       messages: events,
