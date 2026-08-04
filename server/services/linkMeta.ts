@@ -474,7 +474,8 @@ const CHARSET_NAME = /^[a-z0-9][a-z0-9\-._:]*$/i;
  * every client. The old comment claimed latin1 was "close enough for the punctuation that
  * matters here"; it was inverted.
  *
- * The node 22 image ships full ICU, so `TextDecoder` also handles every registry alias
+ * The node runtime image ships full ICU (not a small-icu build), so `TextDecoder` handles
+ * every registry alias
  * (`cp1252`, `iso8859-1`, `us-ascii`) and the encodings the old triple had no answer for at
  * all — windows-1251, shift_jis, gbk, euc-kr. Each of those used to fall through to UTF-8;
  * worse, a *recognised* alias was strictly worse than sending nothing, because a non-matching
