@@ -88,6 +88,21 @@ describe('composeNotification', () => {
     expect(out.body).toBe('red and bold text');
   });
 
+  it('presence pushes never share a collapse tag with the peer’s messages', () => {
+    // Same buffer, different tag namespace: a connection flap must not
+    // replace an unread DM alert with "came online".
+    const dm = composeNotification(payload({ kind: 'dm', target: 'bob', nick: 'bob' }));
+    const presence = composeNotification(
+      payload({ kind: 'friend_online', target: 'bob', displayName: 'bob' }),
+    );
+    expect(presence.tag).not.toBe(dm.tag);
+    // ...but repeated flaps from the same peer DO collapse among themselves.
+    expect(
+      composeNotification(payload({ kind: 'friend_online', target: 'bob', displayName: 'bob' }))
+        .tag,
+    ).toBe(presence.tag);
+  });
+
   it('tags by buffer so a burst in one channel collapses', () => {
     const a = composeNotification(payload({ kind: 'highlight', target: '#lurker', text: 'one' }));
     const b = composeNotification(payload({ kind: 'highlight', target: '#lurker', text: 'two' }));
