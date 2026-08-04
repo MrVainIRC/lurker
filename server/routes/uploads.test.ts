@@ -879,6 +879,44 @@ describe('media uploads (#515)', () => {
     await waitForNoTemps();
   });
 
+  // The real-world shape of the case 3GPP support was added for. A Samsung voice memo
+  // arrives NAMED `.m4a` and CLAIMED as audio/x-m4a, but its bytes are a `3gp4`-brand
+  // container — so the claim decides nothing and the sniff picks the class, the served
+  // extension, and the scrub. Before #685 this 415'd.
+  it('accepts a Samsung voice memo whose name and claim both say m4a', async () => {
+    stub.shouldThrow = null;
+    const FINGERPRINT = 'com.sec.android.app.voicenote.common.util.VoiceRecorderData';
+    const ftyp = box(
+      'ftyp',
+      Buffer.concat([
+        Buffer.from('3gp4'),
+        Buffer.alloc(4),
+        Buffer.from('isom'),
+        Buffer.from('3gp4'),
+      ]),
+    );
+    const udta = box('udta', box('vrdt', Buffer.from(FINGERPRINT)));
+    const moov = box('moov', Buffer.concat([box('mvhd', Buffer.alloc(100)), udta]));
+    // mdat BEFORE moov, the way the recorder writes it.
+    const memo = Buffer.concat([ftyp, box('mdat', Buffer.alloc(1024, 0xcd)), moov]);
+    expect(memo.includes(Buffer.from(FINGERPRINT))).toBe(true);
+
+    const res = await agent.post('/api/uploads').attach('image', memo, {
+      filename: 'Voice 260804_013303.m4a',
+      contentType: 'audio/x-m4a',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.mime).toBe('video/3gpp');
+    // The honest container extension, NOT the `.m4a` the recorder and the client
+    // both claimed.
+    expect(stub.capturedMeta!.filename).toMatch(/\.3gp$/);
+    // And the recorder's fingerprint never left the machine.
+    expect(stub.capturedBytes!.includes(Buffer.from(FINGERPRINT))).toBe(false);
+    expect(stub.capturedBytes!.length).toBe(memo.length);
+    await waitForNoTemps();
+  });
+
   it('415s a type we cannot clean, naming what is allowed', async () => {
     const webm = Buffer.from([
       0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81, 0x01, 0x42, 0xf7, 0x81, 0x01, 0x42, 0xf2,

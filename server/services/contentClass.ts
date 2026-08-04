@@ -66,25 +66,37 @@ const IMAGE_SNIFF_MIMES = new Set([
 /**
  * The media we accept — i.e. the media we can clean (decision 21).
  *
- * All ISO-BMFF except mp3, which is why one box-walking scrubber covers four of the
- * five. Deliberately ABSENT: WebM/Ogg/FLAC/WAV. Not because they're dangerous — a
+ * All ISO-BMFF except mp3, which is why one box-walking scrubber covers seven of the
+ * eight. Deliberately ABSENT: WebM/Ogg/FLAC/WAV. Not because they're dangerous — a
  * WebM comes from a browser recorder and carries a muxer name and a date, not a
  * location — but because we have no scrubber for them yet, and "everything we
  * accept, we clean" is a better rule than "everything we accept, we clean, except
  * these four". They're each a small follow-up (EBML has a `Void` element that plays
  * the same role `free` does in MP4, so the trick transfers).
  *
- * MIMEs verified against file-type with real/synthesized containers. file-type
- * labels an ISO-BMFF file by its major `ftyp` brand, so the SAME box structure
- * surfaces under several MIMEs we handle identically:
- *   • `M4A ` brand            → audio/x-m4a
- *   • `M4B `/`F4A `/audio-only → audio/mp4
- *   • `3gp4`/`3gp5` brand      → video/3gpp   (Android voice recorders emit these,
- *                                              frequently with a `.m4a` extension)
- *   • `3g2*` brand             → video/3gpp2
- * They are all just ISO-BMFF boxes to walkBoxes, so accepting them costs a map entry
- * — refusing 415s a perfectly cleanable file. m4a-ish brands serve as `.m4a`; 3gpp
- * keeps its honest container extension.
+ * MIMEs verified against file-type 22 (`source/index.js`, the `ftyp` switch) with
+ * real and synthesized containers. file-type labels an ISO-BMFF file by its major
+ * `ftyp` brand, so ONE box structure surfaces under several MIMEs we handle
+ * identically:
+ *   • `M4A `                → audio/x-m4a
+ *   • `M4B `/`F4A `/`F4B `  → audio/mp4     (iTunes audiobooks, Flash audio)
+ *   • `3g2*`                → video/3gpp2
+ *   • any other `3g*`       → video/3gpp
+ *   • everything else       → video/mp4     (the switch's default branch)
+ *
+ * ⚠ That last line is the trap: `audio/mp4` is NOT "the audio-only MIME". An
+ * audio-only file with an `mp42`/`isom` brand — which is most of them — falls to the
+ * default and sniffs as `video/mp4`. Only the four brands above ever produce it.
+ *
+ * The 3GPP entries are not theoretical. Samsung's stock voice recorder
+ * (`com.sec.android.app.voicenote`) writes a `3gp4`-branded container holding AAC and
+ * names the file `.m4a`, so sharing a voice memo off a Galaxy used to 415 while the
+ * identical box structure under an `mp42` brand went through. The file we refused
+ * carried the recorder's app fingerprint, the Android version, and a UTC offset that
+ * pins the recorder's timezone — refusing it protected nobody, it just sent that
+ * metadata out via some other host. walkBoxes strips all of it, size-preserving.
+ *
+ * m4a-ish brands serve as `.m4a`; 3GPP keeps its honest container extension.
  */
 const MEDIA_MIMES = new Map<string, string>([
   ['video/mp4', 'mp4'],
@@ -98,7 +110,7 @@ const MEDIA_MIMES = new Map<string, string>([
 ]);
 
 /** Human list for the 415 — the error message is how a user discovers the policy. */
-export const ACCEPTED_SUMMARY = 'images, text, and audio/video (mp4, mov, m4v, m4a, 3gp, mp3)';
+export const ACCEPTED_SUMMARY = 'images, text, and audio/video (mp4, mov, m4v, m4a, 3gp, 3g2, mp3)';
 
 /**
  * Sniffed types that mean "this is text, I just recognized its dialect" — NOT a
