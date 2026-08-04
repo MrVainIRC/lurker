@@ -449,19 +449,49 @@ async function imageDimensions(
 ): Promise<{ width: number; height: number } | null> {
   try {
     const head = await bufferStream(res, { maxBytes: 64 * 1024 });
-    try {
-      const meta = await sharp(head.body).metadata();
-      if (meta.width && meta.height) return { width: meta.width, height: meta.height };
-    } catch {
-      // Fall through: sharp refusing a truncated container is the case below, not a dead end.
-    }
-    // ⚠ Second, never first. sharp handles more formats and is the better answer wherever it
-    // works; this must not shadow it with a narrower implementation that could disagree.
-    return dimensionsFromHeader(head.body);
+    return await dimensionsFromHead(head.body);
   } catch {
     // The read itself failed. No dimensions means no reservation, not no preview.
   }
   return null;
+}
+
+/**
+ * The measuring half, split out from the stream read so it can be TESTED.
+ *
+ * ⚠ Exported for the test alone, and that is worth one line of module surface: the resolver's
+ * only route to real image bytes is a network fetch, and the SSRF guard blocks loopback by
+ * design — so nothing that goes through `resolvePreview` can hand this function a real photo.
+ * Un-split, the EXIF rule below was a claim backed by a console probe and by nothing that runs.
+ */
+export async function dimensionsFromHead(
+  body: Buffer,
+): Promise<{ width: number; height: number } | null> {
+  try {
+    const meta = await sharp(body).metadata();
+    // ⚠⚠ `autoOrient`, NOT `width`/`height`. sharp reports the dimensions as STORED; a browser
+    // decodes with `image-orientation: from-image` and applies the EXIF rotation, so for the
+    // most ordinary photo on the platform — a phone JPEG with orientation 6 — the two disagree
+    // by a transpose. Measured on the sharp in this tree: stored 400x300, `autoOrient`
+    // {300,400}, and `.rotate()` (what the browser effectively does) 300x400.
+    //
+    // These numbers are a LAYOUT PROMISE, not a statistic: the client reserves the box from
+    // this ratio before any bytes arrive (MessageAttachment's `reserveStyle`), so a transposed
+    // pair means a portrait photo sits letterboxed in a landscape box — and on a column narrow
+    // enough for `max-width` to bite, the wrong ratio drags the reserved height down with it.
+    // `imagePipeline.ts` already calls `.rotate()` for the same reason; this is that rule on
+    // the measuring path.
+    const dims = meta.autoOrient ?? meta;
+    if (dims.width && dims.height) return { width: dims.width, height: dims.height };
+  } catch {
+    // Fall through: sharp refusing a truncated container is the case below, not a dead end.
+  }
+  // ⚠ Second, never first. sharp handles more formats and is the better answer wherever it
+  // works; this must not shadow it with a narrower implementation that could disagree.
+  // ⚠ This fallback reads stored dimensions and knows nothing of EXIF, so it can still return a
+  // transposed pair. It is reached only for a container sharp refuses at 64 KB — webp, gif and
+  // tiff — and the orientation tag in the wild is a JPEG phenomenon, which sharp measures.
+  return dimensionsFromHeader(body);
 }
 
 async function doResolve(raw: string, signal: AbortSignal): Promise<PreviewRecord> {
