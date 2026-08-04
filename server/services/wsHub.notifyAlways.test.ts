@@ -122,7 +122,11 @@ describe('notify-always lookups are hoisted out of N-row decorates (#679)', () =
     expect(spy()).toHaveBeenCalledTimes(1);
   });
 
-  it('a DM buffer still costs at most one lookup', () => {
+  // ⚠ ZERO, not "at most one". notify-always is a channel setting, and `decorateMessage`
+  // short-circuits before the query for anything else — so hoisting UNCONDITIONALLY would turn no
+  // queries into one for every DM and `:server:` slice, making the commonest backlog slower in
+  // the name of a speedup. The guard inside `bufferNotifyAlways` is what these pin.
+  it('never queries at all for a DM buffer', () => {
     for (let i = 0; i < 10; i++) seed('carol', `line ${i}`);
     spy().mockClear();
 
@@ -130,8 +134,26 @@ describe('notify-always lookups are hoisted out of N-row decorates (#679)', () =
 
     const events = frame.events as Array<{ notifyAlways?: boolean }>;
     expect(events).toHaveLength(10);
-    // notifyAlways is channel-only, so a DM is false regardless.
     expect(events.every((e) => e.notifyAlways === false)).toBe(true);
-    expect(spy().mock.calls.length).toBeLessThanOrEqual(1);
+    expect(spy()).not.toHaveBeenCalled();
+  });
+
+  it('never queries at all for a :server: buffer', () => {
+    for (let i = 0; i < 5; i++) seed(':server:', `line ${i}`);
+    spy().mockClear();
+
+    buildBufferBacklog(userId, networkId, ':server:');
+
+    expect(spy()).not.toHaveBeenCalled();
+  });
+
+  it('never queries for a DM resume slice either', () => {
+    for (let i = 0; i < 8; i++) seed('dave', `line ${i}`);
+    spy().mockClear();
+
+    const slice = buildResumeSlice(userId, networkId, 'dave', 0);
+
+    expect(slice.events).toHaveLength(8);
+    expect(spy()).not.toHaveBeenCalled();
   });
 });

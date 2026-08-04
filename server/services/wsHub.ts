@@ -512,6 +512,37 @@ function ignoreVerdictForEvent(
 // authoritative delivery gate — the union of those signals WITH the ignore/mute
 // veto folded in (see below), consulted by push delivery and by every live
 // client (web toast, native buzz).
+/**
+ * Whether a target can carry a notify-always setting at all.
+ *
+ * ONE definition, consulted by `decorateMessage`'s per-event guard and by `bufferNotifyAlways`
+ * below, so the guard and the hoisted lookup cannot drift into disagreeing — which would show up
+ * either as a query nothing reads, or as a hoisted answer the guard then throws away.
+ */
+function notifyAlwaysApplies(target: string): boolean {
+  return target.startsWith('#');
+}
+
+/**
+ * The notify-always answer for a whole single-buffer slice, or `undefined` when the target can't
+ * have one.
+ *
+ * ⚠ The guard matters as much as the hoist. `decorateMessage` short-circuits before the query for
+ * DMs and `:server:` buffers, so hoisting unconditionally would turn ZERO queries into one for
+ * exactly those slices — making the common DM backlog slower, not faster, in the name of a
+ * speedup. `undefined` keeps the per-event guard the authority: the `??` it feeds is only ever
+ * reached once `isChannel` has already passed, so it can never trigger the query it replaced.
+ */
+export function bufferNotifyAlways(
+  userId: number,
+  networkId: number,
+  target: string,
+): boolean | undefined {
+  return notifyAlwaysApplies(target)
+    ? getChannelNotifyAlways(userId, networkId, target)
+    : undefined;
+}
+
 // `channelNotifyAlways` lets a caller that decorates MANY rows of ONE buffer
 // pass the notify-always answer in, instead of paying a DB point query per row
 // for a value that's constant across the slice (#679 — 52k lookups / 51.9ms on
@@ -529,7 +560,7 @@ export function decorateMessage(
   const matchedRuleId = event.matchedRuleId ?? null;
   const dm = isDirect(event) && !event.self;
   const target = event.target || '';
-  const isChannel = target.startsWith('#');
+  const isChannel = notifyAlwaysApplies(target);
   // CTCP request/reply/echo lines are status, not conversation — never notify,
   // even when routed to a notify-always channel (otherwise running /ctcp from
   // such a channel would self-notify on your own echo). (#263)
@@ -829,7 +860,7 @@ export function buildBufferBacklog(
 ): WsPayload {
   const conn = ircManager.getConnection(userId, networkId);
   const rows = listMessagesCounted(networkId, target, countBy, { limit: 200 });
-  const notifyAlways = getChannelNotifyAlways(userId, networkId, target);
+  const notifyAlways = bufferNotifyAlways(userId, networkId, target);
   const events = rows.map((e) => decorateMessage(userId, e, notifyAlways));
   const oldestId = rows.length ? (rows[0].id ?? 0) : 0;
   return {
@@ -982,7 +1013,7 @@ export function buildResumeSlice(
   sinceId: number,
 ): { events: DecoratedEvent[]; reset: boolean; mode: BacklogMode; hasMoreOlder: boolean } {
   // One query for the whole slice, whichever branch below ships it (#679).
-  const notifyAlways = getChannelNotifyAlways(userId, networkId, target);
+  const notifyAlways = bufferNotifyAlways(userId, networkId, target);
   if (sinceId > 0) {
     // Ask whether the gap overflows BEFORE reading it. The truncation test used to
     // be "read RESUME_GAP_CAP rows, and if we filled the cap, is there another one
@@ -3462,7 +3493,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         };
         // Every mode below pages ONE buffer, so the notify-always answer is
         // constant across whichever slice we ship (#679).
-        const histNotifyAlways = getChannelNotifyAlways(userId, histNetworkId, histTarget);
+        const histNotifyAlways = bufferNotifyAlways(userId, histNetworkId, histTarget);
 
         if (mode === 'around') {
           // Detached jump path. The DB lookup enforces (networkId, target);
