@@ -484,6 +484,28 @@ function shrugBody(text: string): string {
   return trimmed ? `${trimmed} ${SHRUG}` : SHRUG;
 }
 
+/**
+ * A slash command's user-authored body, on its way to a channel or DM (#652).
+ *
+ * `||spoiler||` used to be rewritten on the plain-send path only, so the same input produced a
+ * click-to-reveal box when typed and literal pipes when sent through `/me`, `/msg`, `/notice` or
+ * `/shrug`. Silent and non-recoverable: the spoiler is already on the wire before the user sees
+ * it didn't work.
+ *
+ * ⚠⚠ Opt-in PER COMMAND, deliberately — never folded into `ackedSend`/`sendOrToast`. `/ns` and
+ * `/cs` route a raw PRIVMSG to NickServ/ChanServ whose body is usually `identify <password>`;
+ * rewriting bytes headed for an auth handshake is a bug, not a feature. Routing each chat command
+ * through this helper is what keeps those untouched by construction rather than by a guard
+ * somebody has to remember.
+ *
+ * ⚠ Only the PAYLOAD is rewritten. Every caller still hands the TYPED text to `toastSendFailure`
+ * and to input history, so a failed send shows something the user can read and copy, and up-arrow
+ * recalls `||…||` rather than raw control codes — the same split the plain path makes.
+ */
+function chatBody(text: string): string {
+  return applySpoilerMarkup(text);
+}
+
 // Strip a leading slash command (/me, /msg <who>) so chunk counting reflects
 // what irc-framework actually has to encode. For /me the relevant bytes are
 // the action body, not the slash-command prefix. For /msg the body goes to
@@ -501,17 +523,20 @@ function bodyForSplit(raw: string): { body: string; isAction: boolean } {
   const m = raw.match(/^\/(\w+)\s*(.*)$/s);
   if (!m) return { body: '', isAction: false };
   const cmd = m[1].toLowerCase();
-  if (cmd === 'me') return { body: m[2], isAction: true };
+  // ⚠ Every branch below counts the POST-rewrite bytes, for the same reason the plain path above
+  // does: the spoiler rewrite ADDS bytes (`\x0301,01` … `\x03`), so a message that fits before it
+  // may not after, and counting the typed form drifts the estimate LOW.
+  if (cmd === 'me') return { body: chatBody(m[2]), isAction: true };
   // /shrug produces a real PRIVMSG body, so it carries the same split/flood risk
   // a plain message does — count the kaomoji too, since it's part of what goes on
   // the wire. Built by the same helper the send path uses so the estimate and the
   // payload can't drift.
-  if (cmd === 'shrug') return { body: shrugBody(m[2]), isAction: false };
+  if (cmd === 'shrug') return { body: chatBody(shrugBody(m[2])), isAction: false };
   if (cmd === 'msg' || cmd === 'query') {
     // /msg <who> <body...> — drop the recipient nick from the body.
     const rest = m[2];
     const sp = rest.indexOf(' ');
-    return { body: sp >= 0 ? rest.slice(sp + 1) : '', isAction: false };
+    return { body: chatBody(sp >= 0 ? rest.slice(sp + 1) : ''), isAction: false };
   }
   return { body: '', isAction: false };
 }
@@ -2846,7 +2871,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // relay mark is per-(network, nick), so it needs an active network.
       return runRelay(argLine, networkId, target);
     case 'me':
-      return ackedSend({ type: 'action', networkId, target, text: argLine }, argLine);
+      return ackedSend({ type: 'action', networkId, target, text: chatBody(argLine) }, argLine);
     case 'ctcp': {
       // /ctcp <nick> <type> [args] — send a CTCP query (#263). The cell frames
       // and sends it, echoes locally, and routes the reply back to this buffer.
@@ -2891,7 +2916,8 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       if (!who) return true;
       const body = msgParts.join(' ');
       if (body) {
-        if (!ackedSend({ type: 'send', networkId, target: who, text: body }, body)) return false;
+        if (!ackedSend({ type: 'send', networkId, target: who, text: chatBody(body) }, body))
+          return false;
       }
       buffers.activate(networkId, who);
       return true;
@@ -3265,7 +3291,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
         localInfo(networkId, target, 'usage: /notice <target> <text>');
         return true;
       }
-      return ackedSend({ type: 'notice', networkId, target: who, text: body }, body);
+      return ackedSend({ type: 'notice', networkId, target: who, text: chatBody(body) }, body);
     }
     case 'slap': {
       // mIRC's classic: a CTCP ACTION with the canonical trout line, so it rides
@@ -3291,7 +3317,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
         return true;
       }
       const shrugText = shrugBody(argLine);
-      return ackedSend({ type: 'send', networkId, target, text: shrugText }, shrugText);
+      return ackedSend({ type: 'send', networkId, target, text: chatBody(shrugText) }, shrugText);
     }
     // Info/query commands. These already function via the raw fallback now that
     // unhandled server numerics surface in the server buffer (#269) — listing
