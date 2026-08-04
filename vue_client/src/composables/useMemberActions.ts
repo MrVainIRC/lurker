@@ -10,6 +10,7 @@ import { useContextMenu } from './useContextMenu.js';
 import { socketSend } from './useSocket.js';
 import { historyCountBy } from '../lib/historyPaging.js';
 import { addressNick } from './useComposerOverlay.js';
+import { isChannelTarget } from '../../../shared/channels.js';
 
 export interface MemberLike {
   nick: string;
@@ -193,8 +194,12 @@ export function useMemberActions(): MemberActionsAPI {
     // channel. Each sends a raw IRC line and lets the server's MODE/KICK echo
     // update state — the same path the /kick and /mode slash commands use, so
     // no optimistic mutation here. Never offered against yourself.
+    // ⚠ `typeof` first, not a cast. `isChannelTarget` deliberately returns a plain boolean rather
+    // than a `target is string` predicate (see shared/channels.ts), so it cannot narrow
+    // `string | null | undefined` on its own — and casting to satisfy that would let a non-string
+    // through unchecked. This is the guard the pre-#724 code already had; keep it.
     const channel =
-      typeof ctx.channel === 'string' && ctx.channel.startsWith('#') ? ctx.channel : null;
+      typeof ctx.channel === 'string' && isChannelTarget(ctx.channel) ? ctx.channel : null;
     const selfModes = Array.isArray(ctx.selfModes) ? ctx.selfModes : [];
     if (!isSelf && channel && hasAny(selfModes, MODERATE_MODES)) {
       const networkId = ctx.networkId;

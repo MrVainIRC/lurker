@@ -371,6 +371,7 @@ import { useContextMenu, type ContextMenuItem } from '../composables/useContextM
 import { useWhoisStore } from '../stores/whois.js';
 import { addressNick } from '../composables/useComposerOverlay.js';
 import { setViewedBuffer } from '../composables/useViewedBuffer.js';
+import { isChannelTarget } from '../../../shared/channels.js';
 
 // Extended BufferMessage fields accessed in the template and script
 // (beyond the core BufferMessage definition which uses [key: string]: unknown).
@@ -618,7 +619,7 @@ const nickSet = computed((): Set<string> => {
     const n = typeof mem === 'string' ? mem : mem.nick;
     if (n) set.add(n);
   }
-  if (b.target && !b.target.startsWith('#') && !b.target.startsWith(':server:')) {
+  if (b.target && !isChannelTarget(b.target) && !b.target.startsWith(':server:')) {
     set.add(b.target);
   }
   const sn = b.networkId != null ? networks.states[b.networkId]?.nick : undefined;
@@ -787,7 +788,7 @@ const selfModes = computed<string[]>(() => {
 function authorModes(m: ChatMessage | undefined): string[] | undefined {
   if (!showModePrefix.value || !m?.nick) return undefined;
   const b = buffer.value;
-  if (!b || !b.target?.startsWith('#')) return undefined;
+  if (!b || !isChannelTarget(b.target)) return undefined;
   return nickMember(m.nick)?.modes;
 }
 
@@ -1044,7 +1045,7 @@ const renderRows = computed((): RenderRow[] => {
 
   const networkId = buf?.networkId;
   const bufTarget = buf?.target ?? '';
-  const bufIsDm = !bufTarget.startsWith('#') && !bufTarget.startsWith(':server:');
+  const bufIsDm = !isChannelTarget(bufTarget) && !bufTarget.startsWith(':server:');
 
   for (let i = 0; i < list.length; i++) {
     // Cast to ChatMessage so template-used properties are typed; BufferMessage
@@ -1623,7 +1624,7 @@ function maybeBumpNewBelow() {
       target: tail.target,
       text: tail.text ?? '',
       type: tail.type,
-      isDm: !tail.target.startsWith('#') && !tail.target.startsWith(':server:'),
+      isDm: !isChannelTarget(tail.target) && !tail.target.startsWith(':server:'),
     });
   if (!tailIgnored && tail?.id != null) bumpNewBelow();
 }

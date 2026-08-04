@@ -66,6 +66,7 @@ import {
   certFingerprint,
   keyMatchesCert,
 } from '../utils/bouncerCert.js';
+import { isChannelTarget } from '../../shared/channels.js';
 
 const SERVER_NAME = 'lurker.bouncer';
 
@@ -461,7 +462,7 @@ export function isValidServerTime(s: string): boolean {
 type ChatBound = { star: true } | { iso: string };
 
 function isChannelName(target: string): boolean {
-  return target.startsWith('#') || target.startsWith('&');
+  return isChannelTarget(target);
 }
 
 // Network-services pseudo-users (NickServ/ChanServ/…). Playback replays their

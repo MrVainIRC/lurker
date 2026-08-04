@@ -89,6 +89,7 @@ import {
 import { getChannelConfig as getE2eChannelConfig } from '../db/e2e.js';
 import type { ChannelMode } from '../db/e2e.js';
 import { randomBytes } from 'node:crypto';
+import { isChannelTarget, CHANNEL_PREFIX_CLASS } from '../../shared/channels.js';
 
 // Optional source address for outbound IRC connections (LURKER_OUTGOING_ADDR),
 // passed to irc-framework as `outgoing_addr` → the socket's localAddress. Lets a
@@ -334,7 +335,7 @@ interface EnrichedEvent extends IrcEvent {
 
 function isDmTargetName(target: string | undefined | null): boolean {
   if (!target) return false;
-  return !target.startsWith('#') && !target.startsWith(':server:');
+  return !isChannelTarget(target) && !target.startsWith(':server:');
 }
 
 // Persisted timestamps prefer IRCv3 server-time (#450): irc-framework parses
@@ -1624,7 +1625,7 @@ export class IrcConnection {
       // IRCv3 server message id (#450) — the future react/reply anchor. Tag
       // keys arrive lowercased; draft/msgid covers pre-ratification servers.
       const msgid = tags?.msgid || tags?.['draft/msgid'] || undefined;
-      const targetIsChannel = eventTarget && eventTarget.startsWith('#');
+      const targetIsChannel = isChannelTarget(eventTarget);
       const type =
         eventType === 'action' ? 'action' : eventType === 'notice' ? 'notice' : 'message';
 
@@ -1678,7 +1679,7 @@ export class IrcConnection {
 
       let target: string;
       if (isServer) target = `:server:${this.network.id}`;
-      else if (targetIsChannel) target = eventTarget;
+      else if (eventTarget && targetIsChannel) target = eventTarget;
       else if (isNotice) {
         // A NOTICE addressed to us persists to the sender's buffer (its natural
         // home), like a PRIVMSG — so the buffer surfaces on first notice and the
@@ -1690,10 +1691,12 @@ export class IrcConnection {
         //   - EXCEPTION 1: a channel-context hint (the IRCv3 +draft/channel-context
         //     tag, or a leading "[#chan]" body prefix) for a channel we're in
         //     routes the notice to that channel.
-        //   - EXCEPTION 2: a notice NOT addressed to our nick (e.g. to an `&`/`!`/`+`
-        //     local channel, which Lurker routes as a non-channel, or a STATUSMSG
-        //     target) has no DM home — surface it in the server buffer rather than
-        //     fabricating a bogus DM with the sender.
+        //   - EXCEPTION 2: a notice NOT addressed to our nick and not placeable in a
+        //     channel — an oper broadcast (`$$*`), a mask target, a STATUSMSG whose
+        //     channel we aren't in — has no DM home, so surface it in the server
+        //     buffer rather than fabricating a bogus DM with the sender.
+        //     (This used to name `&`/`!`/`+` channels as the example; since #724 they
+        //     route as the channels they are and never reach here.)
         const ctx = resolveChannelContext(
           event.tags as Record<string, string> | undefined,
           eventMessage,
@@ -2318,7 +2321,7 @@ export class IrcConnection {
         return;
       }
 
-      if (!target || !target.startsWith('#')) return;
+      if (!target || !isChannelTarget(target)) return;
       const ch = this.channels.get(target.toLowerCase());
       // Apply per-user prefix modes (+o/-o, +v/-v, etc.) to the member map so
       // the snapshot keeps current modes after page reload.
@@ -2757,7 +2760,7 @@ export class IrcConnection {
       const typing = tags && tags['+typing'];
       if (!typing) return;
       const eventTarget = event.target as string | undefined;
-      const targetIsChannel = eventTarget && eventTarget.startsWith('#');
+      const targetIsChannel = isChannelTarget(eventTarget);
       const target = targetIsChannel ? eventTarget : eventNick;
       this.publishEphemeral({
         type: 'typing',
@@ -3746,6 +3749,7 @@ export class IrcConnection {
     const m = /^\s*xdcc\s+(?:send|get)\s+(#?\d+)/i.exec(text);
     if (!m) return;
     if (!dccEnabledForUser(this.network.user_id)) return;
+    // ⚠ NOT a channel test (#724): `#` here is the XDCC PACK-NUMBER sigil.
     const pack = m[1].startsWith('#') ? m[1] : `#${m[1]}`;
     insertDccTransfer(this.network.user_id, {
       network_id: this.network.id,
@@ -4306,11 +4310,23 @@ export class IrcConnection {
     const sub = (tokens.shift() || 'help').toLowerCase();
     // `#`-prefixed channels only — INCLUDING double-hash names like `##anime`
     // (the `length > 1` guard rejects only a bare lone `#`, which would otherwise
-    // persist a junk config row; #382 review #6). This is intentionally narrower
-    // than isChannelContext's `# & ! +`: Lurker's message routing treats `&`/`!`/
-    // `+` targets as DMs (see `targetIsChannel` in the message handler), so they
-    // can never be E2E channels here — accepting them would only enable a config
-    // whose inbound ciphertext would mis-route to a DM buffer (review #1 on #407).
+    // persist a junk config row; #382 review #6). Narrower than isChannelContext's
+    // `# & ! +`.
+    //
+    // ⚠⚠ The ORIGINAL reason for that gap is gone: it read "Lurker's message routing treats
+    // `&`/`!`/`+` targets as DMs, so they can never be E2E channels here", which #724 falsified —
+    // those targets now route as the channels they are. What keeps this `#`-only today is
+    // narrower and deliberate: these tokens are an `/e2e` ARGUMENT LINE that mixes channels,
+    // nicks and handle masks, and `nonChannel` below is derived by exclusion from this same
+    // test. Widening the prefix set would silently reclassify a mask like `+*!*@host` as a
+    // channel and drop it from the peer argument — a misparse with security consequences in the
+    // one subsystem where that matters most.
+    //
+    // ⚠ Known asymmetry this leaves, and the reason it is a follow-up rather than a shrug:
+    // `isChannelContext` (e2e/context.ts) and the inbound decrypt gate both accept `&local`, so
+    // such a channel can RECEIVE ciphertext it can never be configured to decrypt — `/e2e on`
+    // there answers "run this from a channel". Widening wants the arg grammar disambiguated
+    // first (positional, or an explicit `--channel`), not a wider prefix test.
     const channelToken = tokens.find((t) => t.startsWith('#') && t.length > 1);
     const nonChannel = tokens.filter((t) => !t.startsWith('#'));
     // The channel an op targets: an explicit #arg wins, else the issuing buffer
@@ -4606,6 +4622,12 @@ export class IrcConnection {
           // (db/e2e.ts matchAutotrustStmt), so reject anything else up front
           // rather than storing a rule that can never match (a dead rule the
           // user is told was "added").
+          // ⚠ `#`-only on purpose (#724), but NOT for the reason it might look like:
+          // `matchAutotrustStmt` (db/e2e.ts) is `scope = 'global' OR scope = ?`, a prefix-agnostic
+          // exact match that would happily match `&local`. What makes a non-`#` scope dead is
+          // upstream — `effectiveMode` gates on `getChannelConfig(...).enabled`, and `/e2e on`
+          // above cannot enable a non-`#` channel. So this validator stays aligned with `/e2e on`;
+          // widen the two together, and look at the config gate rather than the SQL.
           if (scope.toLowerCase() !== 'global' && !(scope.startsWith('#') && scope.length > 1)) {
             info(
               `/e2e autotrust add: scope must be 'global' or a #channel (got '${scope}')`,
@@ -5414,33 +5436,38 @@ export function canonicalChannelTarget(
   target: string | undefined,
   channels: Map<string, { name: string }>,
 ): string | undefined {
-  if (typeof target !== 'string' || !target.startsWith('#')) return target;
+  if (!target || !isChannelTarget(target)) return target;
   const known = channels.get(target.toLowerCase());
   return known ? known.name : target;
 }
 
 // Matches a conventional "[#chan] …" channel-context body prefix, also tolerating
-// (#chan), <#chan>, {#chan}. Restricted to `#` to match Lurker's routing, which
-// treats only `#` as a channel (`&`/`!`/`+` are routed as non-channels); the
-// captured name is validated against the joined set before use, and brackets
-// aren't required to pair since the joined-channel check is the real gate.
-const CHANNEL_CONTEXT_PREFIX = /^\s*[[(<{]\s*(#[^\])>}\s]+)\s*[\])>}]/;
+// (#chan), <#chan>, {#chan}. Accepts every channel prefix (#724) — it used to be
+// restricted to `#` "to match Lurker's routing, which treats only `#` as a
+// channel", which is the misclassification that has since been fixed. Widening
+// is safe here for the reason the old comment already gave: the captured name is
+// validated against the JOINED set before use, so a bracketed `[+nope]` in an
+// ordinary notice still resolves to nothing.
+const CHANNEL_CONTEXT_PREFIX = new RegExp(
+  `^\\s*[[(<{]\\s*([${CHANNEL_PREFIX_CLASS}][^\\])>}\\s]+)\\s*[\\])>}]`,
+);
 
 // A nick-addressed NOTICE sometimes belongs in a channel rather than a DM with
 // the sender: services announce per-channel info to your nick (Atheme ENTRYMSG,
 // ChanServ welcome) either via the IRCv3 +draft/channel-context client tag or a
 // conventional "[#chan] …" body prefix. Mirrors weechat's notice_welcome_redirect
 // and irssi's notice_channel_context: redirect to the referenced channel, but ONLY
-// when it's a `#` channel we're currently joined to (so a stray tag/prefix can't
-// fabricate a buffer), returning its canonical (joined) casing. The tag wins over
-// the body prefix. Returns null when there's no usable, joined `#`-channel context.
+// when it's a channel we're currently JOINED to (so a stray tag/prefix can't
+// fabricate a buffer), returning its canonical (joined) casing. Every channel
+// prefix qualifies since #724 — membership, not the prefix set, is the gate. The tag wins over
+// the body prefix. Returns null when there's no usable, joined-channel context.
 export function resolveChannelContext(
   tags: Record<string, string> | undefined,
   body: string | undefined,
   channels: Map<string, { name: string }>,
 ): string | null {
   const joinedChannel = (name: string | undefined): string | null => {
-    if (!name || !name.startsWith('#')) return null;
+    if (!name || !isChannelTarget(name)) return null;
     const known = channels.get(name.toLowerCase());
     return known ? known.name : null;
   };

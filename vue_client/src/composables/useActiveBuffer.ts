@@ -7,6 +7,7 @@ import { storeToRefs } from 'pinia';
 import { useNetworksStore } from '../stores/networks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { SYSTEM_KEY, virtualConfig } from '../lib/virtualBuffers.js';
+import { isChannelTarget } from '../../../shared/channels.js';
 
 export interface ActiveBufferState {
   activeKey: Ref<string | null>;
@@ -60,7 +61,7 @@ export function useActiveBuffer(): ActiveBufferState {
     return buf.topic ?? undefined;
   });
   const isServerBuffer = computed(() => !!active.value?.target?.startsWith(':server:'));
-  const isChannel = computed(() => !!active.value?.target?.startsWith('#'));
+  const isChannel = computed(() => isChannelTarget(active.value?.target));
   const bufferLabel = computed(() => {
     if (virtualCfg.value) return virtualCfg.value.label;
     const t = active.value?.target;

@@ -4,6 +4,7 @@
 import { defineStore } from 'pinia';
 import { socketSend } from '../composables/useSocket.js';
 import { idFor, useBuffersStore } from './buffers.js';
+import { isChannelTarget } from '../../../shared/channels.js';
 
 // Buffer favorites — the Friends/Contacts replacement. ONE per-user global
 // ordered list spanning networks; the sidebar renders it as two kind-filtered
@@ -56,7 +57,7 @@ export const useFavoritesStore = defineStore('favorites', {
         // knows '#', but the server counts '&'/'+'/'!' channels too
         // (kindForTarget) — a favorited &local must land under FAVORITES with
         // channel chrome, not under FRIENDS with a bogus presence dot.
-        if (/^[#&+!]/.test(buf.target)) channels.push(resolved);
+        if (isChannelTarget(buf.target)) channels.push(resolved);
         else friends.push(resolved);
       }
       return { friends, channels };

@@ -495,6 +495,109 @@ describe('MessageInput command dispatch', () => {
     });
   });
 
+  // ⚠ Find the RAW call by its verb rather than taking the last one: the composer also fires
+  // typing/draft sends around a submit, so `.at(-1)` is whichever of those landed last.
+  const rawLine = (verb: string): string | undefined =>
+    vi
+      .mocked(socketSend)
+      .mock.calls.map(([p]) => p as { type?: string; line?: string })
+      .filter((p) => p?.type === 'raw' && p.line?.startsWith(verb))
+      .at(-1)?.line;
+
+  // #724: commands whose first argument may be free text can't use the plain prefix test. `#`
+  // never starts a sentence, but `+` and `!` do — so the other three prefixes only address a
+  // channel when one by that name is actually open.
+  describe('channel-vs-free-text arguments (#724)', () => {
+    it('/part &local parts that channel when it exists', async () => {
+      const { buffers } = seedStores('#zebra');
+      buffers.buffers['1::&local'] = {
+        networkId: 1,
+        target: '&local',
+        members: [],
+        messages: [],
+      } as never;
+      const { el } = await mountComposer();
+
+      await type(el, '/part &local');
+      await enter(el);
+
+      expect(socketSend).toHaveBeenCalledWith({
+        type: 'part',
+        networkId: 1,
+        channel: '&local',
+        reason: '',
+      });
+    });
+
+    it('/part +brb leaves the CURRENT channel with that reason', async () => {
+      // No `+brb` buffer exists, so the argument is prose. Reading it as a channel would part a
+      // channel that isn't there and silently leave the user where they were.
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      await type(el, '/part +brb');
+      await enter(el);
+
+      expect(socketSend).toHaveBeenCalledWith({
+        type: 'part',
+        networkId: 1,
+        channel: '#zebra',
+        reason: '+brb',
+      });
+    });
+
+    it('/topic !!! maintenance !!! sets the current channel topic', async () => {
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      await type(el, '/topic !!! maintenance !!!');
+      await enter(el);
+
+      expect(rawLine('TOPIC')).toBe('TOPIC #zebra :!!! maintenance !!!');
+    });
+
+    it('/mode +local +m targets the channel, not the current buffer flags', async () => {
+      // `+local` satisfies the leading-sign flag heuristic AND is a channel name. With an open
+      // buffer by that name the channel reading wins; without one it is flags (next case).
+      const { buffers } = seedStores('#zebra');
+      buffers.buffers['1::+local'] = {
+        networkId: 1,
+        target: '+local',
+        members: [],
+        messages: [],
+      } as never;
+      const { el } = await mountComposer();
+
+      await type(el, '/mode +local +m');
+      await enter(el);
+
+      expect(rawLine('MODE')).toBe('MODE +local +m');
+    });
+
+    it('/mode +m still applies flags to the current channel', async () => {
+      // The positive control: no buffer is ever named `+m`, so real flags keep working.
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      await type(el, '/mode +m');
+      await enter(el);
+
+      expect(rawLine('MODE')).toBe('MODE #zebra +m');
+    });
+
+    it('/kick &local bob still takes the channel-first form', async () => {
+      // Unambiguous by shape: /kick's first argument is a nick or a channel, never prose, so it
+      // uses the plain prefix test and needs no open buffer.
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      await type(el, '/kick &local bob rude');
+      await enter(el);
+
+      expect(rawLine('KICK')).toBe('KICK &local bob :rude');
+    });
+  });
+
   // #412. Worth real coverage rather than trusting the switch: an unknown command
   // falls through to `default:`, which ships it as a RAW IRC line — so before this
   // existed, `/p cya` didn't fail loudly, it sent the server a bogus `p cya`.

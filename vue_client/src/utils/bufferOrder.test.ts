@@ -112,6 +112,42 @@ describe('flattenBufferOrder', () => {
   });
 });
 
+// #724: the sidebar sorted channels before DMs using a bare `#` test, so an `&`/`+`/`!` channel
+// filed among the DMs — and its sort key kept the sigil, so it sorted under punctuation instead
+// of by name.
+describe('non-# channels sort as channels', () => {
+  it('puts &, + and ! channels in the channel block, before DMs', () => {
+    const order = flattenBufferOrder({
+      networks: [{ id: 1 }],
+      buffers: makeBuffers({ '1': ['bob', '&local', '#zeta', '+nomodes', 'amy', '!ABCDEsafe'] }),
+      pins: makePins({}),
+    });
+    expect(order.map((e) => e.key)).toEqual([
+      srvKey(1),
+      // Channels, alphabetical by name with the sigil stripped:
+      // ABCDEsafe, local, nomodes, zeta
+      '1::!ABCDEsafe',
+      '1::&local',
+      '1::+nomodes',
+      '1::#zeta',
+      // …then the DMs.
+      '1::amy',
+      '1::bob',
+    ]);
+  });
+
+  it('sorts &local by its name, adjacent to #local', () => {
+    const order = flattenBufferOrder({
+      networks: [{ id: 1 }],
+      buffers: makeBuffers({ '1': ['#apple', '&banana', '#cherry'] }),
+      pins: makePins({}),
+    });
+    // Sigil-blind alphabetical: apple, banana, cherry. With the old `/^#+/` strip, `&banana`
+    // sorted on the literal `&` and led the list.
+    expect(order.map((e) => e.key)).toEqual([srvKey(1), '1::#apple', '1::&banana', '1::#cherry']);
+  });
+});
+
 describe('flattenUnreadOrder', () => {
   it('keeps only entries whose buffer has unread > 0, server pseudo-buffers included', () => {
     const args = {

@@ -7,6 +7,7 @@ import { useToastsStore } from './toasts.js';
 import { socketSend } from '../composables/useSocket.js';
 import { SYSTEM_KEY } from '../lib/virtualBuffers.js';
 import { historyCountBy } from '../lib/historyPaging.js';
+import { isChannelTarget } from '../../../shared/channels.js';
 
 const MAX_PER_BUFFER = 500;
 // The most rows one INCREMENTAL merge (prepend/append) may take from a single
@@ -197,7 +198,7 @@ export type BufferKind = 'channel' | 'dm' | 'server' | 'system';
 // are the system buffer today; network buffers split by target shape.
 function deriveKind(networkId: number | null, target: string): BufferKind {
   if (networkId == null) return 'system';
-  if (target.startsWith('#')) return 'channel';
+  if (isChannelTarget(target)) return 'channel';
   if (target.startsWith(':server:')) return 'server';
   return 'dm';
 }
@@ -477,7 +478,7 @@ export const useBuffersStore = defineStore('buffers', {
             (b) =>
               b.networkId === Number(networkId) &&
               b.target.toLowerCase() === lower &&
-              !b.target.startsWith('#') &&
+              !isChannelTarget(b.target) &&
               !b.target.startsWith(':'),
           ) ?? null
         );
@@ -1477,7 +1478,7 @@ export const useBuffersStore = defineStore('buffers', {
       // resulting peer-presence event flows back to update local state.
       // DMs only — channels (#…) and the flat sentinels (:server:, :system:) have
       // no peer to probe.
-      if (canonTarget && !canonTarget.startsWith('#') && !canonTarget.startsWith(':')) {
+      if (canonTarget && !isChannelTarget(canonTarget) && !canonTarget.startsWith(':')) {
         socketSend({ type: 'probe-presence', networkId, nick: canonTarget });
       }
     },

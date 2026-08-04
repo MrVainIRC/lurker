@@ -9,6 +9,7 @@ import { useWhoisStore } from '../stores/whois.js';
 import { useContextMenu } from './useContextMenu.js';
 import { useNotifyLadder } from './useNotifyLadder.js';
 import { socketSend } from './useSocket.js';
+import { isChannelTarget } from '../../../shared/channels.js';
 
 export interface BufferLike {
   // The server's stable buffer id, when the caller's store entry has learned
@@ -50,7 +51,7 @@ export function useBufferActions(): BufferActionsAPI {
     // channel labels, the channel notify ladder, and channel icons — and are
     // never offered the DM-only profile/note items (whois on '&local' is
     // nonsense the old '#'-only test allowed).
-    const isChannel = /^[#&+!]/.test(buf.target);
+    const isChannel = isChannelTarget(buf.target);
     const kind = isChannel ? 'Channel' : 'DM';
     const pinned = pins.isPinned(networkId, buf.target);
     // One flag, two labels: a favorited channel surfaces in the FAVORITES

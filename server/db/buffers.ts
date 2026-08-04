@@ -4,6 +4,7 @@
 import db from './index.js';
 import { encryptSecret, decryptSecret } from '../utils/secretCrypto.js';
 import { foldTargetWith, normalizeCasemapping } from './casemapping.js';
+import { isChannelTarget } from '../../shared/channels.js';
 import type { Casemapping } from './casemapping.js';
 
 // The buffer registry — the single owner of "does this buffer exist" and "is it
@@ -100,12 +101,10 @@ export function foldTargetFor(networkId: number | null, raw: string): string {
   return foldTargetWith(networkCasemapping(networkId), raw);
 }
 
-const CHANNEL_PREFIXES = new Set(['#', '&', '+', '!']);
-
 /** channel/dm classification by target shape (server/system rows are minted
  *  explicitly by their owners, never inferred). */
 export function kindForTarget(target: string): BufferKind {
-  return CHANNEL_PREFIXES.has(target[0] ?? '') ? 'channel' : 'dm';
+  return isChannelTarget(target) ? 'channel' : 'dm';
 }
 
 interface BufferRow {

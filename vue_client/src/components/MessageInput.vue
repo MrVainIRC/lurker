@@ -159,6 +159,7 @@ import { useToastsStore } from '../stores/toasts.js';
 import { useIgnoresStore, type IgnoreEntry } from '../stores/ignores.js';
 import { useRelayBotsStore } from '../stores/relayBots.js';
 import { useHighlightRulesStore, type HighlightRule } from '../stores/highlightRules.js';
+import { isChannelTarget } from '../../../shared/channels.js';
 import { parseIgnoreArgs } from '../../../shared/parseIgnore.js';
 import { parseHighlightArgs } from '../../../shared/parseHighlight.js';
 import { highlightRuleDetailParts } from '../utils/highlightFormat.js';
@@ -1238,6 +1239,9 @@ function onKeydown(e: KeyboardEvent): void {
   if (!buf || !active.value) return;
   const networkId = active.value.networkId;
 
+  // ⚠ `#`-only on purpose (#724): this asks what SIGIL the user typed, not whether a target is
+  // a channel. Tab after `&loc` completes nicks, which is the lesser evil — widening it would
+  // make a leading `+` or `!` in ordinary prose start completing channel names.
   const isChannel = token.startsWith('#');
   // Strip the sigil off both forms. '#' is part of a channel name so it stays in
   // the *result*, but neither sigil belongs in the *prefix* we match on: asking
@@ -1440,6 +1444,8 @@ function refreshPicker() {
   // typed so you get the full joined-channel list; the picker self-hides when
   // nothing matches (its v-if gates on candidate count), so a stray `#5` or a
   // channel you're not in just shows no popover.
+  // ⚠ `#`-only on purpose (#724): the picker trigger is a typed character, not a classification.
+  // Opening it on `+` or `!` would pop a channel popover mid-sentence.
   if (token.startsWith('#')) {
     closePicker();
     closeStrip();
@@ -2262,8 +2268,38 @@ const COMMANDS_LINES = [
   '  //text                 — send literal "/text" as a message (escape)',
 ];
 
-function isChannelTarget(t: string): boolean {
-  return typeof t === 'string' && t.startsWith('#');
+/**
+ * Whether a COMMAND ARGUMENT names a channel — `/part &local`, `/kick &local bob`.
+ *
+ * ⚠ Distinct from the completion sigil tests further up this file, which stay `#`-only on
+ * purpose: those ask "did the user type a `#`" about text being edited, and widening them would
+ * pop a channel picker on any `+` in ordinary prose. This one asks "is this token a channel
+ * name", which is the shared question.
+ */
+function isChannelArg(t: string | undefined): boolean {
+  return isChannelTarget(t);
+}
+
+/**
+ * The same question for commands whose first argument may instead be FREE TEXT — `/part [reason]`,
+ * `/topic [text]`.
+ *
+ * ⚠⚠ These cannot use the plain prefix test, and the reason is the mirror of why widening was
+ * right everywhere else. `#` is effectively never how a sentence starts, so reading a leading `#`
+ * as "this is a channel" is safe; `+` and `!` absolutely are — `/part +brb` would part a channel
+ * named `+brb` instead of leaving the current one with reason "+brb", and `/topic !!! maintenance
+ * !!!` would set the topic of a channel called `!!!`. Both fail silently and do the wrong thing.
+ *
+ * So: `#` always addresses a channel (unambiguous, and the long-standing behaviour), and the
+ * other three prefixes only do so when they name a channel this network actually has open. That
+ * keeps `/part &local` working where `&local` exists, without letting punctuation-led prose
+ * hijack the argument.
+ */
+function isChannelArgAmbiguous(t: string | undefined, networkId: number | null): boolean {
+  if (!t) return false;
+  if (t.startsWith('#')) return true;
+  if (!isChannelTarget(t)) return false;
+  return !!buffers.findByTarget(networkId, t);
 }
 
 // Shared builder for the op/voice/ban-family MODE shortcuts (/op, /voice, /ban,
@@ -2282,7 +2318,7 @@ function modeShortcut(
 ): boolean {
   let channel = isChannelTarget(target) ? target : null;
   let args = rest;
-  if (rest[0] && rest[0].startsWith('#')) {
+  if (isChannelArg(rest[0])) {
     channel = rest[0];
     args = rest.slice(1);
   }
@@ -2976,7 +3012,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // silently stayed put; a leading # now distinguishes the two.
       let channel;
       let reason;
-      if (rest[0] && rest[0].startsWith('#')) {
+      if (isChannelArgAmbiguous(rest[0], networkId)) {
         channel = rest[0];
         reason = line
           .slice(1 + cmd.length)
@@ -3029,7 +3065,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       let channel;
       let nick;
       let reason;
-      if (rest[0] && rest[0].startsWith('#')) {
+      if (isChannelArg(rest[0])) {
         channel = rest[0];
         nick = rest[1];
         reason = rest.slice(2).join(' ');
@@ -3058,13 +3094,12 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // /invite <#chan> <nick>     (channel-first, mirroring /kick)
       let channel;
       let nick;
-      if (rest[0] && rest[0].startsWith('#')) {
+      if (isChannelArg(rest[0])) {
         channel = rest[0];
         nick = rest[1];
       } else {
         nick = rest[0];
-        channel =
-          rest[1] && rest[1].startsWith('#') ? rest[1] : isChannelTarget(target) ? target : null;
+        channel = isChannelArg(rest[1]) ? rest[1] : isChannelTarget(target) ? target : null;
       }
       if (!nick) {
         localInfo(networkId, target, 'usage: /invite <nick> [#channel]');
@@ -3084,7 +3119,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // /topic <#chan> [text]         — set/get on another channel
       let channel;
       let body;
-      if (rest[0] && rest[0].startsWith('#')) {
+      if (isChannelArgAmbiguous(rest[0], networkId)) {
         channel = rest[0];
         body = line
           .slice(1 + cmd.length)
@@ -3117,7 +3152,12 @@ function handleCommand(line: string, networkId: number | null, target: string): 
         localInfo(networkId, target, 'usage: /mode [target] <flags> [args]');
         return true;
       }
-      const looksLikeFlagsOnly = /^[+-]/.test(rest[0]);
+      // ⚠ `+local` is both a valid flag string and a valid channel name, so the leading-sign
+      // heuristic alone sent `/mode +local +m` as flags against the CURRENT buffer (#724). Same
+      // disambiguation /part and /topic use: a channel wins only when one by that name is open,
+      // so real flags (`+m`, `-nt`) are untouched — no buffer is ever called that.
+      const looksLikeFlagsOnly =
+        /^[+-]/.test(rest[0]) && !isChannelArgAmbiguous(rest[0], networkId);
       if (looksLikeFlagsOnly && isChannelTarget(target)) {
         return sendOrToast(
           { type: 'raw', networkId, line: `MODE ${target} ${rest.join(' ')}` },
@@ -3239,7 +3279,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // is optional; otherwise the current channel is used.
       let channel = isChannelTarget(target) ? target : null;
       let args = rest;
-      if (rest[0] && rest[0].startsWith('#')) {
+      if (isChannelArg(rest[0])) {
         channel = rest[0];
         args = rest.slice(1);
       }

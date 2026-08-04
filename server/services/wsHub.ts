@@ -9,6 +9,7 @@ import type { LogLine } from './systemLog.js';
 import type { MessageEvent } from '../db/messages.js';
 import type { PageUnit } from '../../shared/eventFilter.js';
 import { asPageUnit } from '../../shared/eventFilter.js';
+import { isChannelTarget } from '../../shared/channels.js';
 import { WebSocketServer } from 'ws';
 import cookie from 'cookie';
 import cookieParser from 'cookie-parser';
@@ -464,7 +465,7 @@ export function reopensClosedBuffer(type: string, id: unknown): boolean {
 // DMs. Shared by isDirect (event path) and computeUnreadFor (read-state counts)
 // so the two never drift on what counts as a DM.
 function isDmTarget(target: string): boolean {
-  return !!target && !target.startsWith('#') && !target.startsWith(':server:');
+  return !!target && !isChannelTarget(target) && !target.startsWith(':server:');
 }
 
 function isDirect(event: MessageEvent): boolean {
@@ -520,7 +521,11 @@ function ignoreVerdictForEvent(
  * either as a query nothing reads, or as a hoisted answer the guard then throws away.
  */
 function notifyAlwaysApplies(target: string): boolean {
-  return target.startsWith('#');
+  // ⚠ All four channel prefixes, not just `#` (#724). `set-channel-notify-always` has accepted
+  // any of them since it moved to `kindForTarget`, so a `#`-only test here meant the setting
+  // could be STORED for an `&`/`+`/`!` channel and then never consulted when a message arrived —
+  // the toggle looked on and did nothing.
+  return isChannelTarget(target);
 }
 
 /**
@@ -782,7 +787,7 @@ export function computeTotalHighlights(userId: number): number {
 // #channel to parted. Centralized so the four snapshot/backlog sites can't drift
 // (channel-case folding already bit this codebase — see #289/#269).
 function channelJoined(target: string, conn?: JoinedProbe | null): boolean {
-  return target.startsWith('#') ? !!conn?.isChannelJoined(target) : true;
+  return isChannelTarget(target) ? !!conn?.isChannelJoined(target) : true;
 }
 
 // The one membership surface (IrcConnection.isChannelJoined): fold-aware per
@@ -1380,6 +1385,11 @@ export function handleOpenBuffer(
     send(ws, buildBufferBacklog(userId, networkId, row.target, countBy));
     send(ws, { kind: 'buffer-opened', networkId, target: row.target, bufferId: row.id });
     announceOpen(ws, userId, networkId, row.target, conn, row.id);
+    // ⚠ `#`-only on purpose, and NOT an oversight in the #724 sweep: this branch JOINs a channel
+    // that has no registry row yet, and the join wiring below only exists for `#`. Widening it made
+    // `open-buffer` on a never-visited `&local` mint an open kind='channel' row that never receives
+    // a JOIN — a permanently dead buffer, which two tests in wsHub.test.ts exist to prevent.
+    // `/join &local` reaches the real join path and works; this is the click-an-unvisited-row case.
   } else if (requested.startsWith('#')) {
     // No row yet — the JOIN echo mints it — so this is the one ack that
     // cannot carry a bufferId; the id arrives with the channel's first frames.
@@ -2908,7 +2918,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         if (unfavoriteBuffer(userId, networkId, target)) {
           fanOut(userId, favoritesChangedFrame(userId));
         }
-        if (target.startsWith('#')) {
+        if (isChannelTarget(target)) {
           // Send PART if connected; partChannel also lowers autojoin. If
           // disconnected, partChannel is a no-op, so lower autojoin here to
           // keep the channel from auto-rejoining the next time the network
@@ -3290,7 +3300,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         // Only channels have a nicklist; server/DM buffers are never tracked.
         // (The guard runs on the RESOLVED target, so the id form is policed
         // identically to the name form.)
-        if (!networkId || !target.startsWith('#')) break;
+        if (!networkId || !isChannelTarget(target)) break;
         const collapsed = !!msg.collapsed;
         setNicklistCollapsed(userId, networkId, target, collapsed);
         fanOut(userId, {
