@@ -387,7 +387,10 @@ describe('MessageAttachment — inline image', () => {
     const wrapper = mount(MessageAttachment, { props: { preview: IMAGE } });
     const img = wrapper.find('img.inline-image');
     expect(img.attributes('src')).toBe('/api/link-preview/media/tok2');
-    // Load-bearing: these reserve the box before the bytes arrive.
+    // ⚠ These do NOT reserve the box, whatever this comment used to say — `.inline-image` sets
+    // `width: auto`, which beats the presentational hint and leaves an unloaded image with no box
+    // at all in Blink (lurker#705). The wrapper is the reserver; these stay for the UA ratio,
+    // which is what still sizes the image inside that box.
     expect(img.attributes('width')).toBe('800');
     expect(img.attributes('height')).toBe('600');
   });

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import sharp from 'sharp';
 import { setupTestDb } from '../test-utils/testApp.js';
 import type { PreviewRecord } from '../db/linkPreviews.js';
 
@@ -9,6 +10,7 @@ const ctx = setupTestDb('link-preview-service');
 
 let resolvePreview: typeof import('./linkPreview.js').resolvePreview;
 let toDescriptor: typeof import('./linkPreview.js').toDescriptor;
+let dimensionsFromHead: typeof import('./linkPreview.js').dimensionsFromHead;
 let getCachedPreview: typeof import('../db/linkPreviews.js').getCachedPreview;
 let putPreview: typeof import('../db/linkPreviews.js').putPreview;
 let OK_TTL_MS: number;
@@ -18,7 +20,7 @@ const SAVED_FLAG = process.env.LURKER_LINK_PREVIEWS;
 beforeAll(async () => {
   process.env.LURKER_LINK_PREVIEWS = 'on';
   ({ getCachedPreview, putPreview, OK_TTL_MS } = await import('../db/linkPreviews.js'));
-  ({ resolvePreview, toDescriptor } = await import('./linkPreview.js'));
+  ({ resolvePreview, toDescriptor, dimensionsFromHead } = await import('./linkPreview.js'));
 });
 
 afterAll(() => {
@@ -152,6 +154,54 @@ describe('toDescriptor', () => {
       // kind describes something that can't exist: a play button wired to nothing.
       expect(`${bad} → ${d.kind}`).toBe(`${bad} → page`);
     }
+  });
+});
+
+describe('dimensionsFromHead: the numbers a client reserves a box from', () => {
+  // ⚠⚠ These are a LAYOUT PROMISE, not a statistic. The client reserves an image's box from this
+  // ratio before any bytes arrive (MessageAttachment's `reserveStyle`, lurker#705), so a pair that
+  // disagrees with what the browser decodes is a permanently wrong-shaped box rather than a jump.
+  async function jpeg(w: number, h: number, orientation?: number) {
+    const img = sharp({ create: { width: w, height: h, channels: 3, background: '#888' } });
+    return await (orientation ? img.withMetadata({ orientation }) : img).jpeg().toBuffer();
+  }
+
+  it('reports what the BROWSER will decode, not what the file stores', async () => {
+    // A phone photo shot in portrait: stored landscape, with orientation 6 telling the decoder to
+    // rotate it. Browsers honour that (`image-orientation: from-image` is the default) and sharp's
+    // `metadata()` does not — so reading `meta.width`/`meta.height` hands the client a transposed
+    // box for the most ordinary photo on the platform. `imagePipeline.ts` already calls `.rotate()`
+    // for the same reason; this is that rule on the measuring path.
+    const rotated = await jpeg(400, 300, 6);
+
+    // ⚠ The probe is checked BEFORE it is trusted: sharp silently drops the tag on some write
+    // paths (`withExifMerge` did, in the console probe that first tried this), and a fixture with
+    // orientation 1 makes the assertion below pass against the very bug it guards.
+    expect((await sharp(rotated).metadata()).orientation).toBe(6);
+
+    expect(await dimensionsFromHead(rotated)).toEqual({ width: 300, height: 400 });
+
+    // And the ordinary case is untouched — no tag, no transpose.
+    expect(await dimensionsFromHead(await jpeg(400, 300))).toEqual({ width: 400, height: 300 });
+  });
+
+  it('falls back to the header reader for a container sharp refuses', async () => {
+    // The 64 KB truncation case (#697): webp/gif/tiff declare a total length and their loaders
+    // reject a short file before decoding it. A real photo is far past the cap, so this is the
+    // ordinary path for a pasted WebP — not an edge case.
+    const webp = await sharp({
+      create: { width: 120, height: 80, channels: 3, background: '#111' },
+    })
+      .webp()
+      .toBuffer();
+    const truncated = webp.subarray(0, 40);
+
+    // ⚠ Probe first: if sharp ever starts reading this buffer, the fallback stops being exercised
+    // and the assertion below would pass through the branch it is not written to cover.
+    await expect(sharp(truncated).metadata()).rejects.toThrow(/corrupt header/);
+
+    expect(await dimensionsFromHead(truncated)).toEqual({ width: 120, height: 80 });
+    expect(await dimensionsFromHead(Buffer.from('not an image at all'))).toBeNull();
   });
 });
 

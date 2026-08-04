@@ -342,7 +342,11 @@ const reserveStyle = computed(() => {
   const w = props.preview.thumbWidth!;
   const h = props.preview.thumbHeight!;
   return {
-    width: `${Math.round(Math.min(w, MAX_IMAGE_HEIGHT * (w / h)))}px`,
+    // ⚠ `max(1, …)`: rounding a sliver's capped width down to `0px` would give the wrapper a 0x0
+    // box and, through `.in-reserve`'s `max-width: 100%`, an image with no width at all. Reached
+    // whenever the ratio is under 1/480 — a 2x1000 strip is degenerate either way, but a
+    // one-pixel box degrades and a zero-pixel one disappears.
+    width: `${Math.max(1, Math.round(Math.min(w, MAX_IMAGE_HEIGHT * (w / h))))}px`,
     aspectRatio: `${w} / ${h}`,
   };
 });
@@ -355,8 +359,10 @@ const reserveStyle = computed(() => {
  *
  *   - Setting a non-empty `alt` on failure re-triggers frame construction in Gecko and DROPS the
  *     attribute-derived aspect ratio, collapsing a measured 240px box to an 18px text line —
- *     222px of uncompensated shrink that plain `alt=""` does not suffer. The old shape held 240px
- *     in Blink, WebKit and Gecko alike.
+ *     222px of uncompensated shrink that plain `alt=""` does not suffer. (⚠ That measurement was
+ *     taken when the `<img>` was the reserver. It no longer is — the wrapper holds the box and an
+ *     `alt` swap cannot reach it — so this particular collapse is now structurally impossible.
+ *     Kept as the record of why the flag was tried, not as a live constraint.)
  *   - The reset that was supposed to clear the flag could never fire: `mintProxyToken` is an HMAC
  *     over the URL, so a re-delivered answer carries a byte-identical `src` and the watch on it
  *     never runs. And an `ok` preview is never re-asked at all, so the flag was permanent — a
@@ -364,8 +370,12 @@ const reserveStyle = computed(() => {
  *   - Dropping `role`/`tabindex` on failure removed them from an element that may currently HOLD
  *     focus, dumping a keyboard user back to `<body>` mid-strip.
  *
- * The byte-independence rule this file serves is already satisfied without any of it: the
- * width/height attributes survive a failed load, and `.dim-reserve` pins the one shape that has none.
+ * The byte-independence rule this file serves is already satisfied without any of it, and since
+ * lurker#705 it is satisfied MORE strongly than this paragraph used to claim: the reservation does
+ * not depend on the image element at all — `.dim-reserve` holds the box for every non-strip image,
+ * from the descriptor, whether the bytes arrive or not. (The old claim, that "the width/height
+ * attributes survive a failed load", was doubly wrong: those attributes reserve nothing once author
+ * CSS sets `width: auto`, so what survived a failed load was nothing at all in Blink.)
  * A broken-image glyph in a correctly-sized box is a smaller problem than every one of the above.
  */
 
