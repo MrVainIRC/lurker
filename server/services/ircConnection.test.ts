@@ -351,17 +351,27 @@ describe('resolveChannelContext (#439)', () => {
     expect(resolveChannelContext(undefined, '[info] something', channels)).toBe(null);
   });
 
-  it('only resolves `#` channels, not `&`/`!`/`+` (matches Lurker routing)', () => {
-    // Even when "joined" to a non-# channel, channel-context must not redirect to
-    // it — Lurker routes `&`/`!`/`+` targets as non-channels.
+  it('resolves every channel prefix once joined, not just `#` (#724)', () => {
+    // This test used to assert the opposite, on the rationale that "Lurker routes `&`/`!`/`+`
+    // targets as non-channels" — which was the bug, not a decision. Now that both tiers classify
+    // all four prefixes, a channel-context tag naming a joined `&local` must resolve to it;
+    // refusing would strand the notice in the server buffer instead of its channel.
     const withLocal = new Map([
       ['#christian', { name: '#Christian' }],
       ['&local', { name: '&local' }],
     ]);
     expect(resolveChannelContext({ '+draft/channel-context': '&local' }, 'x', withLocal)).toBe(
-      null,
+      '&local',
     );
-    expect(resolveChannelContext(undefined, '[&local] hi', withLocal)).toBe(null);
+    expect(resolveChannelContext(undefined, '[&local] hi', withLocal)).toBe('&local');
+  });
+
+  it('still refuses a channel prefix we are NOT joined to', () => {
+    // The membership check is what keeps this safe — widening the prefix set must not turn any
+    // bracketed `[+foo]` in a notice body into a redirect target.
+    const channels = new Map([['#christian', { name: '#Christian' }]]);
+    expect(resolveChannelContext({ '+draft/channel-context': '&nope' }, 'x', channels)).toBe(null);
+    expect(resolveChannelContext(undefined, '[+nope] hi', channels)).toBe(null);
   });
 });
 

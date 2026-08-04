@@ -157,12 +157,32 @@ describe('notify-always lookups are hoisted out of N-row decorates (#679)', () =
 
     const frame = buildBufferBacklog(userId, networkId, '&local');
 
-    const events = frame.events as Array<{ notifyAlways?: boolean; notify?: boolean }>;
+    const events = frame.events as Array<{
+      notifyAlways?: boolean;
+      notify?: boolean;
+      dm?: boolean;
+    }>;
     expect(events).toHaveLength(4);
     expect(events.every((e) => e.notifyAlways === true)).toBe(true);
-    expect(events.every((e) => e.notify === true)).toBe(true);
     // And it still costs exactly one lookup, like any other channel.
     expect(spy()).toHaveBeenCalledTimes(1);
+  });
+
+  // ⚠⚠ The assertion that makes the one above mean anything. `decorateMessage` sets
+  // `dm = isDirect(event)`, which routed through a `#`-only `isDmTarget` — so an `&local` message
+  // was ALREADY dm:true, `contentNotify` was already true, and widening the notify-always test
+  // changed `notify` for nothing. A `notify === true` assertion passes either way and hides that.
+  // The DM misclassification is also the worse bug: `isDmTarget` feeds `computeUnreadFor`, where
+  // every unread line in a "DM" counts as a highlight.
+  it('does not treat a &-prefixed channel as a DM', () => {
+    for (let i = 0; i < 3; i++) seed('&notdm', `line ${i}`);
+    const frame = buildBufferBacklog(userId, networkId, '&notdm');
+
+    const events = frame.events as Array<{ dm?: boolean; notify?: boolean }>;
+    expect(events).toHaveLength(3);
+    expect(events.every((e) => e.dm === false)).toBe(true);
+    // With no notify-always set and no highlight, an ordinary channel line is not notify-worthy.
+    expect(events.every((e) => e.notify === false)).toBe(true);
   });
 
   it('never queries for a DM resume slice either', () => {

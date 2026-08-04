@@ -241,9 +241,6 @@ describe('case-insensitive buffer identity (#327)', () => {
   });
 });
 
-// Feeds the PWA app-icon badge (#451). The sum must track each buffer's
-// server-owned `highlighted` count and inherit applyReadState's active-buffer
-// suppression, so the focused conversation never inflates the badge.
 // #724: deriveKind tested a bare `#`, so an `&`/`+`/`!` channel was kinded a DM — and that
 // cascaded. The nicklist pane keys off kind, and activate() fires a `probe-presence` for DMs,
 // which meant WHOIS-probing the channel NAME as if it were a nick.
@@ -299,6 +296,9 @@ describe('non-# channels are kinded as channels (#724)', () => {
   });
 });
 
+// Feeds the PWA app-icon badge (#451). The sum must track each buffer's
+// server-owned `highlighted` count and inherit applyReadState's active-buffer
+// suppression, so the focused conversation never inflates the badge.
 describe('totalHighlights', () => {
   it('is zero with only the seeded system buffer', () => {
     const store = useBuffersStore();

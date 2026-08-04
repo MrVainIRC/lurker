@@ -368,6 +368,7 @@ import {
   isPeerAway as derivePeerAway,
 } from '../utils/peerPresence.js';
 import { isChannelTarget } from '../../../shared/channels.js';
+import { bufferSortKey } from '../utils/bufferOrder.js';
 
 const networks = useNetworksStore();
 const buffers = useBuffersStore();
@@ -505,11 +506,16 @@ function bufferOrder(buf: Buffer): number {
   return 1;
 }
 
-// Strip leading hashes so ##anime sorts next to #anime, not before #aardvark
+// Strip leading sigils so ##anime sorts next to #anime, not before #aardvark
 // (raw localeCompare would weight every leading '#' as sort-significant).
-function sortKey(target: string): string {
-  return target.replace(/^#+/, '').toLowerCase();
-}
+//
+// ⚠⚠ This is the RENDERED sidebar's key, and `bufferOrder.ts`'s `bufferSortKey` is the one
+// keyboard nav and the quick switcher use — whose docblock promises they "walk the same order
+// the user sees in the sidebar". Two implementations of one rule: they must be changed together
+// or the promise quietly breaks, which is exactly what happened when only one of them learned
+// about `&`/`+`/`!` (#724). Delegated rather than re-implemented so there is nothing to keep in
+// sync next time.
+const sortKey = bufferSortKey;
 
 // A favorited buffer renders in its FRIENDS/FAVORITES section instead of its
 // network group (dedupe, matching the old FRIENDS behavior) — filtered from

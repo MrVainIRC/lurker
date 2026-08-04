@@ -2280,6 +2280,28 @@ function isChannelArg(t: string | undefined): boolean {
   return isChannelTarget(t);
 }
 
+/**
+ * The same question for commands whose first argument may instead be FREE TEXT — `/part [reason]`,
+ * `/topic [text]`.
+ *
+ * ⚠⚠ These cannot use the plain prefix test, and the reason is the mirror of why widening was
+ * right everywhere else. `#` is effectively never how a sentence starts, so reading a leading `#`
+ * as "this is a channel" is safe; `+` and `!` absolutely are — `/part +brb` would part a channel
+ * named `+brb` instead of leaving the current one with reason "+brb", and `/topic !!! maintenance
+ * !!!` would set the topic of a channel called `!!!`. Both fail silently and do the wrong thing.
+ *
+ * So: `#` always addresses a channel (unambiguous, and the long-standing behaviour), and the
+ * other three prefixes only do so when they name a channel this network actually has open. That
+ * keeps `/part &local` working where `&local` exists, without letting punctuation-led prose
+ * hijack the argument.
+ */
+function isChannelArgAmbiguous(t: string | undefined, networkId: number | null): boolean {
+  if (!t) return false;
+  if (t.startsWith('#')) return true;
+  if (!isChannelTarget(t)) return false;
+  return !!buffers.findByTarget(networkId, t);
+}
+
 // Shared builder for the op/voice/ban-family MODE shortcuts (/op, /voice, /ban,
 // …). The channel defaults to the current buffer; an explicit #chan may lead
 // the args (so `/op #other alice` works from anywhere). Each nick/mask consumes
@@ -2990,7 +3012,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // silently stayed put; a leading # now distinguishes the two.
       let channel;
       let reason;
-      if (isChannelArg(rest[0])) {
+      if (isChannelArgAmbiguous(rest[0], networkId)) {
         channel = rest[0];
         reason = line
           .slice(1 + cmd.length)
@@ -3097,7 +3119,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // /topic <#chan> [text]         — set/get on another channel
       let channel;
       let body;
-      if (isChannelArg(rest[0])) {
+      if (isChannelArgAmbiguous(rest[0], networkId)) {
         channel = rest[0];
         body = line
           .slice(1 + cmd.length)

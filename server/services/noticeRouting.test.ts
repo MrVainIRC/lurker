@@ -222,11 +222,13 @@ describe('NOTICE routing (#439)', () => {
 
   it('routes a notice not addressed to our nick to the server buffer (no bogus DM)', () => {
     const { conn, publish } = harness();
-    // A NOTICE to an `&` local channel Lurker does not route as a channel, and
-    // not addressed to us → server buffer, not a fabricated DM with the sender.
+    // ⚠ Retargeted by #724. This used to send a NOTICE to `&admin` to the SERVER buffer, on the
+    // rationale that "Lurker does not route `&` as a channel" — the bug. An `&` channel is a
+    // channel, so its notice belongs in its own buffer; a target we genuinely can't place is what
+    // must fall back to the server buffer, which the case below covers.
     emitNotice(conn, { nick: 'LogBot', target: '&admin', message: 'audit log line' });
     expect(publish).toHaveBeenCalledWith(
-      expect.objectContaining({ target: ':server:1', type: 'notice' }),
+      expect.objectContaining({ target: '&admin', type: 'notice' }),
     );
   });
 

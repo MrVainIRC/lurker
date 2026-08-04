@@ -29,13 +29,31 @@
 export const CHANNEL_PREFIX_CHARS = '#&+!';
 const CHANNEL_PREFIXES = new Set(CHANNEL_PREFIX_CHARS);
 
+// ⚠ A plain boolean, deliberately NOT a `target is string` type predicate. Most callers pass an
+// already-`string` target, and a predicate would narrow the ELSE branch of those to `never` —
+// so `!isChannelTarget(t)` would stop compiling wherever `t` is used afterwards, which is most of
+// the DM paths. The handful of callers holding `string | undefined` guard once themselves.
 export function isChannelTarget(target: string | null | undefined): boolean {
   return typeof target === 'string' && CHANNEL_PREFIXES.has(target[0] ?? '');
 }
 
+/**
+ * The prefix set as a regex character-class BODY (no brackets), for callers that must match a
+ * channel name inside a larger pattern rather than test a whole target.
+ *
+ * ⚠ Escaped, because it gets interpolated into a class — `]`, `\`, `^` or `-` would otherwise
+ * change the class's meaning instead of being matched literally. None of the four prefixes needs
+ * it today; the escape is what makes adding a fifth safe.
+ */
+export const CHANNEL_PREFIX_CLASS = CHANNEL_PREFIX_CHARS.replace(/[\\\]^-]/g, '\\$&');
+
+// Hoisted, not built per call: this runs inside a sort comparator (twice per comparison in
+// `bufferSortKey`) and once per row in the quick switcher, on every sidebar rebuild.
+const CHANNEL_PREFIX_RE = new RegExp(`^[${CHANNEL_PREFIX_CLASS}]+`);
+
 /** Strip every leading channel sigil — for sort keys and display, never for addressing. */
 export function stripChannelPrefix(target: string): string {
-  return target.replace(new RegExp(`^[${CHANNEL_PREFIX_CHARS}]+`), '');
+  return target.replace(CHANNEL_PREFIX_RE, '');
 }
 
 // Normalize an array of channel names: trim, lowercase, drop blanks, dedupe.
