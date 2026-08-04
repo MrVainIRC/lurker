@@ -342,6 +342,159 @@ describe('MessageInput command dispatch', () => {
     });
   });
 
+  // #652: `||spoiler||` was rewritten on the plain-send path only, so the same input produced a
+  // click-to-reveal box when typed and literal pipes when sent through a command. Silent and
+  // non-recoverable — the spoiler is on the wire before the user can see it didn't work.
+  describe('||spoiler|| markup in commands (#652)', () => {
+    const OPEN = '\x0301,01';
+    const CLOSE = '\x03';
+
+    it('/me rewrites the spoiler in the ACTION body', async () => {
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      await type(el, '/me says ||surprise||');
+      await enter(el);
+
+      expect(socketSendWithAck).toHaveBeenCalledWith({
+        type: 'action',
+        networkId: 1,
+        target: '#zebra',
+        text: `says ${OPEN}surprise${CLOSE}`,
+      });
+    });
+
+    it('/msg rewrites the spoiler, and never the recipient', async () => {
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      await type(el, '/msg bob ||surprise||');
+      await enter(el);
+
+      expect(socketSendWithAck).toHaveBeenCalledWith({
+        type: 'send',
+        networkId: 1,
+        target: 'bob',
+        text: `${OPEN}surprise${CLOSE}`,
+      });
+    });
+
+    it('/notice rewrites the spoiler in the NOTICE body', async () => {
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      await type(el, '/notice bob ||surprise||');
+      await enter(el);
+
+      expect(socketSendWithAck).toHaveBeenCalledWith({
+        type: 'notice',
+        networkId: 1,
+        target: 'bob',
+        text: `${OPEN}surprise${CLOSE}`,
+      });
+    });
+
+    it('/shrug rewrites the spoiler and keeps the kaomoji', async () => {
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      await type(el, '/shrug ||surprise||');
+      await enter(el);
+
+      expect(socketSendWithAck).toHaveBeenCalledWith({
+        type: 'send',
+        networkId: 1,
+        target: '#zebra',
+        text: `${OPEN}surprise${CLOSE} ¯\\_(ツ)_/¯`,
+      });
+    });
+
+    // ⚠⚠ The reason the rewrite is opt-in per command rather than folded into ackedSend /
+    // sendOrToast. These route a raw PRIVMSG to a service, and the body is usually
+    // `identify <password>` — rewriting bytes headed for an auth handshake is a bug.
+    it('/ns and /cs send their body VERBATIM', async () => {
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      await type(el, '/ns identify hunter||2||');
+      await enter(el);
+      expect(socketSend).toHaveBeenCalledWith({
+        type: 'raw',
+        networkId: 1,
+        line: 'PRIVMSG NickServ :identify hunter||2||',
+      });
+
+      await type(el, '/cs op #zebra ||x||');
+      await enter(el);
+      expect(socketSend).toHaveBeenCalledWith({
+        type: 'raw',
+        networkId: 1,
+        line: 'PRIVMSG ChanServ :op #zebra ||x||',
+      });
+    });
+
+    // The split estimator drives the outgoing-flood GATE, not just the indicator — a body it
+    // counts as >1 chunk is held back for split confirmation instead of being sent. So bytes it
+    // counts that the send path never puts on the wire can stall a message that would have gone
+    // out fine.
+    //
+    // 150 single-letter words at MESSAGE_MAX_BYTES 350: the send path collapses the separators
+    // and puts 299 bytes on the wire (one chunk), while slicing at the first space preserved the
+    // doubled runs for 448 (two chunks) — enough to trip the gate on a message that fits.
+    it('does not stall a /msg whose extra bytes are whitespace the send path collapses', async () => {
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      const body = Array.from({ length: 150 }, () => 'a').join('  ');
+      await type(el, `/msg bob ${body}`);
+      await enter(el);
+
+      expect(socketSendWithAck).toHaveBeenCalledWith({
+        type: 'send',
+        networkId: 1,
+        target: 'bob',
+        text: Array.from({ length: 150 }, () => 'a').join(' '),
+      });
+    });
+
+    // The same collapsing, shown directly on a short body.
+    //
+    // ⚠ The expected text keeps its TRAILING SPACE, and that is not a typo. `/\s+/` on a string
+    // ending in whitespace yields a final empty element, which `join(' ')` turns back into one
+    // space. Asserting the tidy form here would be asserting something the composer doesn't send,
+    // and the estimator's job is to match the payload byte-for-byte, not to improve it.
+    it('counts a /msg body the way the send path builds it', async () => {
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      await type(el, '/msg bob   hello   world  ');
+      await enter(el);
+
+      expect(socketSendWithAck).toHaveBeenCalledWith({
+        type: 'send',
+        networkId: 1,
+        target: 'bob',
+        text: 'hello world ',
+      });
+    });
+
+    // A command with no `||` must be byte-identical to what it was before.
+    it('leaves a body without spoiler markup untouched', async () => {
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      await type(el, '/me waves');
+      await enter(el);
+
+      expect(socketSendWithAck).toHaveBeenCalledWith({
+        type: 'action',
+        networkId: 1,
+        target: '#zebra',
+        text: 'waves',
+      });
+    });
+  });
+
   // #412. Worth real coverage rather than trusting the switch: an unknown command
   // falls through to `default:`, which ships it as a RAW IRC line — so before this
   // existed, `/p cya` didn't fail loudly, it sent the server a bogus `p cya`.
