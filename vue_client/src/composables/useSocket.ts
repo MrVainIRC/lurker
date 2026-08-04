@@ -387,7 +387,9 @@ function applyEvent(event: any): void {
             title: `${nick} came online`,
             body: '',
             networkId: event.networkId,
-            target: event.nick,
+            // The normalized string, not the raw payload field — click-routing
+            // downstream shouldn't meet whatever type the wire happened to carry.
+            target: nick,
           });
           // Optional sound, same enable/choice/volume model as the DM/highlight/
           // always-notify toasts (shared playSound helper).

@@ -1898,6 +1898,10 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
     nick: string | null | undefined,
   ): void {
     if (!nick) return;
+    // Same early bail the message path uses: deliver() runs ensureVapid()
+    // BEFORE its own empty-subscription check, so without this every
+    // came-online event on a push-less account still does VAPID + DB work.
+    if (!pushService.hasSubscriptions(userId)) return;
     if (userHasVisibleClient(userId)) return;
     if (!effectiveSetting(userId, 'notifications.friend_online.enabled')) return;
     if (!isFavoriteDmPeer(userId, networkId, nick)) return;
