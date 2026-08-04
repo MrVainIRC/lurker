@@ -97,8 +97,14 @@ export function missingRequired(
 }
 
 // What the upload route accepts: images, text, and the media we can strip metadata
-// from (mp4/mov/m4v/m4a/3gp/3g2/mp3 — see server/services/contentClass.ts). ONE
-// definition, so the file picker's `accept` and the drag-drop gate can't drift apart.
+// from (mp4/mov/m4v/m4a/m4b/3gp/3g2/mp3 — see server/services/contentClass.ts).
+//
+// This is the file PICKER's `accept` attribute, and nothing else. The drop and paste
+// gates deliberately do not share it — they go through the looser isUploadableType()
+// below, whose job is to ignore things that obviously aren't uploads rather than to
+// enforce policy. (An earlier version of this comment claimed the two shared "ONE
+// definition"; they never did, and reading it that way would make the looser gate
+// look like a bug to be fixed.)
 //
 // Extensions are listed alongside the MIME types because browsers disagree about
 // what they call an .m4a (audio/x-m4a vs audio/mp4) and macOS greys out anything
