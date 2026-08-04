@@ -64,6 +64,21 @@ export function listFavoritesForUser(userId: number): FavoriteEntry[] {
   return listForUserStmt.all(userId) as FavoriteEntry[];
 }
 
+const isFavoriteStmt = db.prepare(`
+  SELECT 1 FROM favorite_buffers WHERE user_id = ? AND buffer_id = ?
+`);
+
+/** Is this nick the peer of a favorited DM buffer? The friend-online
+ *  notification's gate — the successor to the contacts model's per-contact
+ *  notify flag, now simply "they're under FRIENDS". Fold-aware via
+ *  resolveBuffer; kind-checked so a favorited channel whose name happens to
+ *  arrive here can never read as a person. */
+export function isFavoriteDmPeer(userId: number, networkId: number, nick: string): boolean {
+  const buffer = resolveBuffer(userId, networkId, nick);
+  if (!buffer || buffer.kind !== 'dm') return false;
+  return isFavoriteStmt.get(userId, buffer.id) !== undefined;
+}
+
 // Renumber a user's favorites dense 0..n-1, preserving order. Exported (unlike
 // the pins twin) because a network delete cascades favorite rows away through
 // buffers and leaves holes mid-sequence; the route re-densifies before it

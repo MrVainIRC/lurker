@@ -1375,6 +1375,54 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
   },
 
   {
+    // Same key names the contacts-era friend-online settings used: stored
+    // user_settings rows were orphaned (never purged) when the friends system
+    // left, so re-registering the names revives every preference untouched.
+    key: 'notifications.friend_online.enabled',
+    label: 'Friend online notifications',
+    category: 'notifications',
+    group: 'alerts',
+    type: 'bool',
+    default: true,
+    description:
+      'Toast me when a friend — the peer of a DM in your FRIENDS section — comes online.',
+  },
+  {
+    key: 'notifications.friend_online.sound.enabled',
+    label: 'Friend online sound',
+    category: 'notifications',
+    group: 'alerts',
+    type: 'bool',
+    default: false,
+    description:
+      'Play a short sound when a friend comes online. Off by default. Dependent on ' +
+      'notifications.friend_online.enabled.',
+  },
+  {
+    key: 'notifications.friend_online.sound.choice',
+    label: 'Friend online sound choice',
+    category: 'notifications',
+    group: 'alerts',
+    type: 'enum',
+    choices: ['ping', 'chime', 'pop', 'beep', 'knock', 'plink'],
+    default: 'knock',
+    description:
+      'Which bundled sound to play when a friend comes online. Distinct default ' +
+      'from the highlight/DM sounds so a friend signing on is recognizable by ear.',
+  },
+  {
+    key: 'notifications.friend_online.sound.volume',
+    label: 'Friend online sound volume',
+    category: 'notifications',
+    group: 'alerts',
+    type: 'int',
+    min: 0,
+    max: 100,
+    default: 60,
+    description: 'Playback volume for the friend-online sound, 0–100.',
+  },
+
+  {
     key: 'notifications.always_notify.enabled',
     label: 'Always-notify channel notifications',
     category: 'notifications',

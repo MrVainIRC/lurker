@@ -165,6 +165,26 @@ describe('cascade', () => {
   });
 });
 
+describe('isFavoriteDmPeer', () => {
+  it('true only for the fold-matched peer of a favorited DM buffer', () => {
+    const hana = createUser('fav-hana');
+    const netH = mkNet(hana.id, 'h');
+    ensureBuffer(hana.id, netH!.id, 'pal');
+    ensureBuffer(hana.id, netH!.id, '#chan');
+    ensureBuffer(hana.id, netH!.id, 'stranger');
+    favorites.favoriteBuffer(hana.id, netH!.id, 'pal');
+    favorites.favoriteBuffer(hana.id, netH!.id, '#chan');
+
+    expect(favorites.isFavoriteDmPeer(hana.id, netH!.id, 'pal')).toBe(true);
+    // Fold-aware: the server relays its own casing on presence events.
+    expect(favorites.isFavoriteDmPeer(hana.id, netH!.id, 'PAL')).toBe(true);
+    // A favorited CHANNEL is never a person, and a non-favorite DM never gates in.
+    expect(favorites.isFavoriteDmPeer(hana.id, netH!.id, '#chan')).toBe(false);
+    expect(favorites.isFavoriteDmPeer(hana.id, netH!.id, 'stranger')).toBe(false);
+    expect(favorites.isFavoriteDmPeer(hana.id, netH!.id, 'never-seen')).toBe(false);
+  });
+});
+
 describe('favoritesChangedFrame (wsHub)', () => {
   it('ships the full global entry list — the burst seed and every correction', async () => {
     const iris = createUser('fav-iris');

@@ -21,7 +21,7 @@
 
 import { stripFormatting } from './textMatch.js';
 
-export type PushPayloadKind = 'dm' | 'highlight' | 'always_notify';
+export type PushPayloadKind = 'dm' | 'highlight' | 'always_notify' | 'friend_online';
 
 /**
  * The semantic push payload wsHub hands to pushService. Deliberately typed (it
@@ -39,6 +39,9 @@ export interface PushPayload {
   text?: string | null;
   time?: string;
   messageId?: number | null;
+  /** friend_online only. Under buffer favorites it always equals `target` —
+   *  the field survives for the sw.js/iOS payload shape (and its parity test). */
+  displayName?: string | null;
   /** Unread-highlight total for the app icon; absent when it can't have changed. */
   badge?: number;
 }
@@ -54,22 +57,48 @@ export interface NotificationContent {
   tag: string;
 }
 
+// "nostimo came online (Libera)". Byte-for-byte the composition sw.js's
+// legacyTitle applies (the parity suite runs the real worker against this).
+// The "(as nick)" branch is vestigial under buffer favorites — displayName
+// always equals target now — but a stale cached worker still carries it, so
+// the server keeps the identical expression rather than a simplification the
+// worker would disagree with on a crafted payload.
+function friendOnlineTitle(payload: PushPayload): string {
+  const name = payload.displayName || 'A friend';
+  const parts: string[] = [];
+  if (payload.target && String(payload.target).toLowerCase() !== name.toLowerCase()) {
+    parts.push(`as ${payload.target}`);
+  }
+  if (payload.networkName) parts.push(payload.networkName);
+  return `${name} came online${parts.length ? ` (${parts.join(' · ')})` : ''}`;
+}
+
 function title(payload: PushPayload): string {
   // A DM is already identified by its sender, so the target would just repeat the
   // nick; a channel highlight needs to say where it happened.
   if (payload.kind === 'dm') {
     return `${payload.nick || 'someone'}${payload.networkName ? ' (' + payload.networkName + ')' : ''}`;
   }
+  if (payload.kind === 'friend_online') return friendOnlineTitle(payload);
   return `${payload.nick || 'someone'} in ${payload.target || ''}`;
 }
 
 export function composeNotification(payload: PushPayload): NotificationContent {
   return {
     title: title(payload),
+    // friend_online carries no text, so its body is empty — the title says it all.
     // Strip mIRC formatting codes (\x03 colors, \x02 bold, …): a native alert
     // renders body as plain text, so the codes would otherwise arrive as literal
     // control chars on the lock screen (#606).
     body: stripFormatting(payload.text || ''),
-    tag: `${payload.networkId || 0}::${payload.target || ''}`,
+    // Presence transitions collapse among THEMSELVES, never with the peer's
+    // message notifications: the shared per-buffer tag meant "bob came online"
+    // silently REPLACED an unread "bob: hey" alert on a connection flap (the
+    // collapse key swaps content instead of stacking). A contacts-era quirk,
+    // fixed on revival rather than inherited.
+    tag:
+      payload.kind === 'friend_online'
+        ? `${payload.networkId || 0}::${payload.target || ''}::presence`
+        : `${payload.networkId || 0}::${payload.target || ''}`,
   };
 }

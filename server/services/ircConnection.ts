@@ -2799,8 +2799,8 @@ export class IrcConnection {
       stateAt: row?.stateAt || null,
       awayMessage: row?.awayMessage || null,
       // True only on a real offline→online transition (see markPeerEvent).
-      // Reserved for the came-online push (returning with buffer favorites);
-      // currently unconsumed. The client ignores it.
+      // wsHub reads this to fire the favorited-DM came-online push; the
+      // client computes its own transition for the toast and ignores it.
       cameOnline,
     });
   }
