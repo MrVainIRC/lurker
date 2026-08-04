@@ -512,7 +512,19 @@ function ignoreVerdictForEvent(
 // authoritative delivery gate — the union of those signals WITH the ignore/mute
 // veto folded in (see below), consulted by push delivery and by every live
 // client (web toast, native buzz).
-export function decorateMessage(userId: number, event: MessageEvent): DecoratedEvent {
+// `channelNotifyAlways` lets a caller that decorates MANY rows of ONE buffer
+// pass the notify-always answer in, instead of paying a DB point query per row
+// for a value that's constant across the slice (#679 — 52k lookups / 51.9ms on
+// a 104-buffer resume, vs 19 lookups / 0.047ms hoisted). Only the DB answer is
+// hoisted; the per-event guards below (CTCP, self, channel) still run per row.
+// Omit it on the single-event live path, which is what the function was written
+// for, and on any slice spanning multiple buffers (search results) where the
+// answer genuinely varies per row.
+export function decorateMessage(
+  userId: number,
+  event: MessageEvent,
+  channelNotifyAlways?: boolean,
+): DecoratedEvent {
   const matched = !!event.matched;
   const matchedRuleId = event.matchedRuleId ?? null;
   const dm = isDirect(event) && !event.self;
@@ -526,7 +538,9 @@ export function decorateMessage(userId: number, event: MessageEvent): DecoratedE
     !isStatus &&
     isChannel &&
     !event.self &&
-    getChannelNotifyAlways(userId, event.networkId, target);
+    // `??`, not `||`: a hoisted `false` is a real answer and must not fall
+    // through to the query it was computed to replace.
+    (channelNotifyAlways ?? getChannelNotifyAlways(userId, event.networkId, target));
   // Content says this line is notification-worthy: a highlight, a DM, or a
   // notify-always channel.
   const contentNotify = !isStatus && (matched || dm || notifyAlways);
@@ -815,7 +829,8 @@ export function buildBufferBacklog(
 ): WsPayload {
   const conn = ircManager.getConnection(userId, networkId);
   const rows = listMessagesCounted(networkId, target, countBy, { limit: 200 });
-  const events = rows.map((e) => decorateMessage(userId, e));
+  const notifyAlways = getChannelNotifyAlways(userId, networkId, target);
+  const events = rows.map((e) => decorateMessage(userId, e, notifyAlways));
   const oldestId = rows.length ? (rows[0].id ?? 0) : 0;
   return {
     kind: 'backlog',
@@ -966,6 +981,8 @@ export function buildResumeSlice(
   target: string,
   sinceId: number,
 ): { events: DecoratedEvent[]; reset: boolean; mode: BacklogMode; hasMoreOlder: boolean } {
+  // One query for the whole slice, whichever branch below ships it (#679).
+  const notifyAlways = getChannelNotifyAlways(userId, networkId, target);
   if (sinceId > 0) {
     // Ask whether the gap overflows BEFORE reading it. The truncation test used to
     // be "read RESUME_GAP_CAP rows, and if we filled the cap, is there another one
@@ -987,7 +1004,7 @@ export function buildResumeSlice(
       // older than what we shipped).
       const anchor = gap.length ? (gap[0].id ?? sinceId + 1) : sinceId + 1;
       return {
-        events: gap.map((e) => decorateMessage(userId, e)),
+        events: gap.map((e) => decorateMessage(userId, e, notifyAlways)),
         reset: false,
         mode: 'append',
         hasMoreOlder: hasOlderRow(networkId, target, anchor),
@@ -998,7 +1015,7 @@ export function buildResumeSlice(
   const latest = listMessages(networkId, target, { limit: RESUME_LATEST_LIMIT });
   const oldestId = latest.length ? (latest[0].id ?? 0) : 0;
   return {
-    events: latest.map((e) => decorateMessage(userId, e)),
+    events: latest.map((e) => decorateMessage(userId, e, notifyAlways)),
     // Only signal a replace on a real resume. First connect (sinceId<=0) lands
     // on the client's empty-buffer seed path, which already replaces — flagging
     // reset there is harmless but needlessly noisy.
@@ -3443,6 +3460,9 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           token,
           speakers,
         };
+        // Every mode below pages ONE buffer, so the notify-always answer is
+        // constant across whichever slice we ship (#679).
+        const histNotifyAlways = getChannelNotifyAlways(userId, histNetworkId, histTarget);
 
         if (mode === 'around') {
           // Detached jump path. The DB lookup enforces (networkId, target);
@@ -3461,7 +3481,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           // clamped 1..500). Total slice length tops out at 2*limit + 1.
           const halfLimit = limit;
           const slice = listMessagesAround(histNetworkId, histTarget, anchorId, halfLimit, countBy);
-          const events = slice.events.map((e) => decorateMessage(userId, e));
+          const events = slice.events.map((e) => decorateMessage(userId, e, histNotifyAlways));
           send(ws, {
             ...baseReply,
             anchorId,
@@ -3483,7 +3503,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
             break;
           }
           const rows = listMessagesCounted(histNetworkId, histTarget, countBy, { afterId, limit });
-          const events = rows.map((e) => decorateMessage(userId, e));
+          const events = rows.map((e) => decorateMessage(userId, e, histNotifyAlways));
           const newestId = events.length ? events[events.length - 1].id : afterId;
           send(ws, {
             ...baseReply,
@@ -3505,7 +3525,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
           // restored for a shell (fresh-connect shells omit it, so this is the
           // only place a reloaded client gets its per-buffer recall back).
           const rows = listMessagesCounted(histNetworkId, histTarget, countBy, { limit });
-          const events = rows.map((e) => decorateMessage(userId, e));
+          const events = rows.map((e) => decorateMessage(userId, e, histNotifyAlways));
           const oldestId = events.length ? events[0].id : 0;
           send(ws, {
             ...baseReply,
