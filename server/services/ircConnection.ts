@@ -3436,7 +3436,10 @@ export class IrcConnection {
     const prefix = this.client.network?.options?.PREFIX as
       | { symbol: string; mode: string }[]
       | undefined;
-    if (!Array.isArray(prefix)) return DEFAULT_PREFIX_MODES;
+    // A FRESH Set on the fallback path too, matching listModes(). Handing out the shared
+    // module-level constant would let one connection's accidental mutation reach every other
+    // connection that ever fell back.
+    if (!Array.isArray(prefix)) return new Set(DEFAULT_PREFIX_MODES);
     return new Set(prefix.map((p) => p.mode).filter(Boolean));
   }
 
