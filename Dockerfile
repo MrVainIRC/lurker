@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MPL-2.0
 
 # Stage 1: Build Vue client
-FROM node:22-slim AS vue-builder
+FROM node:22-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46 AS vue-builder
 
 WORKDIR /app/vue_client
 
@@ -30,7 +30,7 @@ RUN npm run build
 # Pinned to node:22 specifically (rather than lts) because better-sqlite3
 # 11.x ships prebuilds for Node 22 but not Node 24 (which the lts tag
 # currently resolves to). Bump when better-sqlite3 catches up.
-FROM node:22-slim AS server-deps
+FROM node:22-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46 AS server-deps
 
 WORKDIR /app
 
@@ -38,7 +38,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 
 # Stage 3: Runtime image
-FROM node:22-slim
+FROM node:22-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
 
 WORKDIR /app
 
