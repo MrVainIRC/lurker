@@ -145,10 +145,19 @@ Optional, and worth adopting alongside the above. Where present and valid,
 that doesn't resolve to one of your buffers drops the verb — the same outcome as
 an unknown name.
 
-Accepting the id form: `mark-read`, `clear-buffer` / `unclear-buffer`,
-`pin-buffer` / `unpin-buffer`, `reorder-pins` (as `bufferIds:[…]`),
+Accepting the id form in place of `networkId` + `target`: `mark-read`,
+`clear-buffer` / `unclear-buffer`, `pin-buffer` / `unpin-buffer`,
 `favorite-buffer` / `unfavorite-buffer`, `set-nicklist-collapsed`,
 `set-channel-notify-always`, `draft-set` / `draft-clear`, `input-history-add`.
+
+Two list verbs don't follow that rule, and both will silently do nothing if you
+assume they do:
+
+- **`reorder-pins`** takes `bufferIds:[…]` instead of `targets:[…]`, but still
+  **requires `networkId`** — pins are ordered within one network, so the id form
+  replaces the targets, not the network. Omit it and the verb is dropped.
+- **`reorder-favorites`** is the opposite: id-form **only**, and takes no
+  `networkId` at all, because favorites span networks.
 
 Verbs addressing IRC **entities** rather than buffers stay name-only — `send`,
 `action`, `notice`, `join`, `part`, `typing`, `e2e`, `ctcp` — because the name is
