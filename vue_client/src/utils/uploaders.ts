@@ -97,12 +97,18 @@ export function missingRequired(
 }
 
 // What the upload route accepts: images, text, and the media we can strip metadata
-// from (mp4/mov/m4v/m4a/mp3 — see server/services/contentClass.ts). ONE definition,
-// so the file picker's `accept` and the drag-drop gate can't drift apart.
+// from (mp4/mov/m4v/m4a/3gp/3g2/mp3 — see server/services/contentClass.ts). ONE
+// definition, so the file picker's `accept` and the drag-drop gate can't drift apart.
 //
 // Extensions are listed alongside the MIME types because browsers disagree about
 // what they call an .m4a (audio/x-m4a vs audio/mp4) and macOS greys out anything
 // the attribute doesn't match, with no "All Files" escape.
+//
+// The 3GPP entries are for a file HONESTLY named `.3gp`. The case that motivated
+// accepting the format — a Samsung voice memo — is a 3GPP container the recorder
+// names `.m4a`, so it already got through on the `.m4a` entry above; a picker that
+// then greyed out the same bytes under their real extension would be the drift this
+// comment exists to prevent.
 export const ACCEPTED_FILE_TYPES = [
   'image/*',
   'text/plain',
@@ -110,6 +116,8 @@ export const ACCEPTED_FILE_TYPES = [
   'video/mp4',
   'video/quicktime',
   'video/x-m4v',
+  'video/3gpp',
+  'video/3gpp2',
   'audio/mpeg',
   'audio/mp4',
   'audio/x-m4a',
@@ -117,6 +125,8 @@ export const ACCEPTED_FILE_TYPES = [
   '.mov',
   '.m4v',
   '.m4a',
+  '.3gp',
+  '.3g2',
   '.mp3',
 ].join(',');
 

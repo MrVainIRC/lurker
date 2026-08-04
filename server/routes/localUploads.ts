@@ -58,6 +58,13 @@ const INLINE_MIME = new Set<string>([
   'video/x-m4v',
   'audio/x-m4a',
   'audio/mp4',
+  // 3GPP is the same ISO-BMFF box structure under a different `ftyp` brand, and the
+  // files that reach us are Samsung voice memos holding ordinary AAC — verified
+  // playing in Chrome from a real recording. Leaving them out of this set would have
+  // accepted the upload and then forced it to Downloads, which is a worse answer than
+  // the 415 was.
+  'video/3gpp',
+  'video/3gpp2',
 ]);
 
 // file-type recommends >= 4100 bytes to recognize every supported signature.
