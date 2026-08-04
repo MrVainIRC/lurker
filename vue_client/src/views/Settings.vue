@@ -293,6 +293,7 @@ watch(
     if (!hash) return;
     await nextTick();
     await nextTick();
+    // ⚠ NOT a channel test (#724): this `#` is the URL fragment marker. Left alone on purpose.
     const target = hash.startsWith('#') ? hash.slice(1) : hash;
     const root = contentEl.value;
     if (!root) return;

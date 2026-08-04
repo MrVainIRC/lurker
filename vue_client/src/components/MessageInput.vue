@@ -159,6 +159,7 @@ import { useToastsStore } from '../stores/toasts.js';
 import { useIgnoresStore, type IgnoreEntry } from '../stores/ignores.js';
 import { useRelayBotsStore } from '../stores/relayBots.js';
 import { useHighlightRulesStore, type HighlightRule } from '../stores/highlightRules.js';
+import { isChannelTarget } from '../../../shared/channels.js';
 import { parseIgnoreArgs } from '../../../shared/parseIgnore.js';
 import { parseHighlightArgs } from '../../../shared/parseHighlight.js';
 import { highlightRuleDetailParts } from '../utils/highlightFormat.js';
@@ -1238,6 +1239,9 @@ function onKeydown(e: KeyboardEvent): void {
   if (!buf || !active.value) return;
   const networkId = active.value.networkId;
 
+  // ⚠ `#`-only on purpose (#724): this asks what SIGIL the user typed, not whether a target is
+  // a channel. Tab after `&loc` completes nicks, which is the lesser evil — widening it would
+  // make a leading `+` or `!` in ordinary prose start completing channel names.
   const isChannel = token.startsWith('#');
   // Strip the sigil off both forms. '#' is part of a channel name so it stays in
   // the *result*, but neither sigil belongs in the *prefix* we match on: asking
@@ -1440,6 +1444,8 @@ function refreshPicker() {
   // typed so you get the full joined-channel list; the picker self-hides when
   // nothing matches (its v-if gates on candidate count), so a stray `#5` or a
   // channel you're not in just shows no popover.
+  // ⚠ `#`-only on purpose (#724): the picker trigger is a typed character, not a classification.
+  // Opening it on `+` or `!` would pop a channel popover mid-sentence.
   if (token.startsWith('#')) {
     closePicker();
     closeStrip();
@@ -2262,8 +2268,16 @@ const COMMANDS_LINES = [
   '  //text                 — send literal "/text" as a message (escape)',
 ];
 
-function isChannelTarget(t: string): boolean {
-  return typeof t === 'string' && t.startsWith('#');
+/**
+ * Whether a COMMAND ARGUMENT names a channel — `/part &local`, `/kick &local bob`.
+ *
+ * ⚠ Distinct from the completion sigil tests further up this file, which stay `#`-only on
+ * purpose: those ask "did the user type a `#`" about text being edited, and widening them would
+ * pop a channel picker on any `+` in ordinary prose. This one asks "is this token a channel
+ * name", which is the shared question.
+ */
+function isChannelArg(t: string | undefined): boolean {
+  return isChannelTarget(t);
 }
 
 // Shared builder for the op/voice/ban-family MODE shortcuts (/op, /voice, /ban,
@@ -2282,7 +2296,7 @@ function modeShortcut(
 ): boolean {
   let channel = isChannelTarget(target) ? target : null;
   let args = rest;
-  if (rest[0] && rest[0].startsWith('#')) {
+  if (isChannelArg(rest[0])) {
     channel = rest[0];
     args = rest.slice(1);
   }
@@ -2976,7 +2990,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // silently stayed put; a leading # now distinguishes the two.
       let channel;
       let reason;
-      if (rest[0] && rest[0].startsWith('#')) {
+      if (isChannelArg(rest[0])) {
         channel = rest[0];
         reason = line
           .slice(1 + cmd.length)
@@ -3029,7 +3043,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       let channel;
       let nick;
       let reason;
-      if (rest[0] && rest[0].startsWith('#')) {
+      if (isChannelArg(rest[0])) {
         channel = rest[0];
         nick = rest[1];
         reason = rest.slice(2).join(' ');
@@ -3058,13 +3072,12 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // /invite <#chan> <nick>     (channel-first, mirroring /kick)
       let channel;
       let nick;
-      if (rest[0] && rest[0].startsWith('#')) {
+      if (isChannelArg(rest[0])) {
         channel = rest[0];
         nick = rest[1];
       } else {
         nick = rest[0];
-        channel =
-          rest[1] && rest[1].startsWith('#') ? rest[1] : isChannelTarget(target) ? target : null;
+        channel = isChannelArg(rest[1]) ? rest[1] : isChannelTarget(target) ? target : null;
       }
       if (!nick) {
         localInfo(networkId, target, 'usage: /invite <nick> [#channel]');
@@ -3084,7 +3097,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // /topic <#chan> [text]         — set/get on another channel
       let channel;
       let body;
-      if (rest[0] && rest[0].startsWith('#')) {
+      if (isChannelArg(rest[0])) {
         channel = rest[0];
         body = line
           .slice(1 + cmd.length)
@@ -3239,7 +3252,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // is optional; otherwise the current channel is used.
       let channel = isChannelTarget(target) ? target : null;
       let args = rest;
-      if (rest[0] && rest[0].startsWith('#')) {
+      if (isChannelArg(rest[0])) {
         channel = rest[0];
         args = rest.slice(1);
       }

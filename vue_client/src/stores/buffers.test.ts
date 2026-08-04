@@ -244,6 +244,61 @@ describe('case-insensitive buffer identity (#327)', () => {
 // Feeds the PWA app-icon badge (#451). The sum must track each buffer's
 // server-owned `highlighted` count and inherit applyReadState's active-buffer
 // suppression, so the focused conversation never inflates the badge.
+// #724: deriveKind tested a bare `#`, so an `&`/`+`/`!` channel was kinded a DM — and that
+// cascaded. The nicklist pane keys off kind, and activate() fires a `probe-presence` for DMs,
+// which meant WHOIS-probing the channel NAME as if it were a nick.
+describe('non-# channels are kinded as channels (#724)', () => {
+  const line = (target: string, id: number) => ({
+    networkId: 1,
+    target,
+    id,
+    type: 'message',
+    nick: 'bob',
+    body: 'x',
+  });
+
+  it('kinds &, + and ! targets as channels', () => {
+    const store = useBuffersStore();
+    store.pushMessage(line('&local', 1));
+    store.pushMessage(line('+nomodes', 2));
+    store.pushMessage(line('!ABCDEsafe', 3));
+    store.pushMessage(line('bob', 4));
+
+    expect(store.byKey('1::&local')!.kind).toBe('channel');
+    expect(store.byKey('1::+nomodes')!.kind).toBe('channel');
+    expect(store.byKey('1::!ABCDEsafe')!.kind).toBe('channel');
+    expect(store.byKey('1::bob')!.kind).toBe('dm');
+  });
+
+  it('does not WHOIS-probe a &channel as if its name were a nick', () => {
+    const store = useBuffersStore();
+    store.pushMessage(line('&local', 1));
+    vi.mocked(socketSend).mockClear();
+
+    store.activate(1, '&local');
+
+    // The probe is DMs-only. Sending it for a channel asks the server to WHOIS `&local`.
+    const probes = vi
+      .mocked(socketSend)
+      .mock.calls.filter(([p]) => (p as { type?: string })?.type === 'probe-presence');
+    expect(probes).toEqual([]);
+  });
+
+  it('still probes a real DM', () => {
+    // Positive control: without this, "no probe" could just mean activate() did nothing at all.
+    const store = useBuffersStore();
+    store.pushMessage(line('bob', 1));
+    vi.mocked(socketSend).mockClear();
+
+    store.activate(1, 'bob');
+
+    const probes = vi
+      .mocked(socketSend)
+      .mock.calls.filter(([p]) => (p as { type?: string })?.type === 'probe-presence');
+    expect(probes).toHaveLength(1);
+  });
+});
+
 describe('totalHighlights', () => {
   it('is zero with only the seeded system buffer', () => {
     const store = useBuffersStore();

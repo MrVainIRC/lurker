@@ -70,6 +70,11 @@ export function seedFavoritesFromContacts(db: Database.Database): number {
     const raw = (nick || '').trim();
     // A channel-shaped or sentinel "nick" can't have been a real DM target;
     // skip rather than mint a mis-kinded buffer.
+    //
+    // ⚠ The prefix set is spelled out here rather than calling the shared `isChannelTarget`, and
+    // deliberately so: a migration has to keep classifying rows the way it did the day it ran. If
+    // the shared notion of a channel prefix ever changes, an already-migrated database must not
+    // retroactively disagree with itself about what v19 did. Do not "clean this up".
     if (!raw || raw.startsWith(':') || /^[#&+!]/.test(raw)) continue;
     const mappingRow = casemappingStmt.get(networkId) as { casemapping: string | null } | undefined;
     if (!mappingRow) continue; // network row gone mid-migration; nothing to favorite

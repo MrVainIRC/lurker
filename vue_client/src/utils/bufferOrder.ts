@@ -7,6 +7,8 @@
 // alphabetically). Used by keyboard navigation so prev/next-channel and the
 // quick switcher walk the same order the user sees in the sidebar.
 
+import { isChannelTarget, stripChannelPrefix } from '../../../shared/channels.js';
+
 interface BufferEntry {
   target: string;
 }
@@ -65,15 +67,14 @@ function isServerTarget(target: string): boolean {
   return typeof target === 'string' && target.startsWith(':server:');
 }
 
-function isChannelTarget(target: string): boolean {
-  return typeof target === 'string' && target.startsWith('#');
-}
-
 // Alphabetical sort key for a buffer: leading channel sigils stripped, ASCII-
 // lowercased (matching the house case-folding style). Exported so the quick
 // switcher's smart sort (#393) alphabetises identically to the sidebar.
+//
+// ⚠ All four sigils, not just `#` (#724) — the comment always said "channel sigils", but the
+// pattern stripped only one of them, so `&local` sorted under `&` instead of alongside `#local`.
 export function bufferSortKey(target: string): string {
-  return target.replace(/^#+/, '').toLowerCase();
+  return stripChannelPrefix(target).toLowerCase();
 }
 
 function bufferOrder(target: string): number {

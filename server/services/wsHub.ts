@@ -9,6 +9,7 @@ import type { LogLine } from './systemLog.js';
 import type { MessageEvent } from '../db/messages.js';
 import type { PageUnit } from '../../shared/eventFilter.js';
 import { asPageUnit } from '../../shared/eventFilter.js';
+import { isChannelTarget } from '../../shared/channels.js';
 import { WebSocketServer } from 'ws';
 import cookie from 'cookie';
 import cookieParser from 'cookie-parser';
@@ -520,7 +521,11 @@ function ignoreVerdictForEvent(
  * either as a query nothing reads, or as a hoisted answer the guard then throws away.
  */
 function notifyAlwaysApplies(target: string): boolean {
-  return target.startsWith('#');
+  // ⚠ All four channel prefixes, not just `#` (#724). `set-channel-notify-always` has accepted
+  // any of them since it moved to `kindForTarget`, so a `#`-only test here meant the setting
+  // could be STORED for an `&`/`+`/`!` channel and then never consulted when a message arrived —
+  // the toggle looked on and did nothing.
+  return isChannelTarget(target);
 }
 
 /**

@@ -10,6 +10,7 @@ import { useContextMenu } from './useContextMenu.js';
 import { socketSend } from './useSocket.js';
 import { historyCountBy } from '../lib/historyPaging.js';
 import { addressNick } from './useComposerOverlay.js';
+import { isChannelTarget } from '../../../shared/channels.js';
 
 export interface MemberLike {
   nick: string;
@@ -193,8 +194,7 @@ export function useMemberActions(): MemberActionsAPI {
     // channel. Each sends a raw IRC line and lets the server's MODE/KICK echo
     // update state — the same path the /kick and /mode slash commands use, so
     // no optimistic mutation here. Never offered against yourself.
-    const channel =
-      typeof ctx.channel === 'string' && ctx.channel.startsWith('#') ? ctx.channel : null;
+    const channel = isChannelTarget(ctx.channel as string) ? (ctx.channel as string) : null;
     const selfModes = Array.isArray(ctx.selfModes) ? ctx.selfModes : [];
     if (!isSelf && channel && hasAny(selfModes, MODERATE_MODES)) {
       const networkId = ctx.networkId;

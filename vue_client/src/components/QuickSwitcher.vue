@@ -50,6 +50,7 @@ import { useRecentBuffersStore } from '../stores/recentBuffers.js';
 import { useNickColors } from '../composables/useNickColors.js';
 import { flattenBufferOrder, bufferSortKey } from '../utils/bufferOrder.js';
 import { smartSortRows } from '../utils/switcherSort.js';
+import { isChannelTarget } from '../../../shared/channels.js';
 
 interface Row {
   networkId: string | number;
@@ -86,7 +87,7 @@ function isServerTarget(t: string) {
   return t.startsWith(':server:');
 }
 function isDmTarget(t: string) {
-  return !isServerTarget(t) && !t.startsWith('#');
+  return !isServerTarget(t) && !isChannelTarget(t);
 }
 
 function netById(id: string | number) {

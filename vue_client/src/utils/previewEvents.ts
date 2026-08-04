@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { useIgnoresStore } from '../stores/ignores.js';
+import { isChannelTarget } from '../../../shared/channels.js';
 
 export interface PrimableEvent {
   type?: string;
@@ -58,7 +59,7 @@ export function previewableEventTexts(
         text: e.text,
         type: e.type,
         // The same derivation MessageList uses; a store lookup would need the buffer.
-        isDm: !target.startsWith('#') && !target.startsWith(':server:'),
+        isDm: !isChannelTarget(target) && !target.startsWith(':server:'),
       });
       if (verdict.hide) continue;
     }

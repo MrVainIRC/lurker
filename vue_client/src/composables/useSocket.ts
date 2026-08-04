@@ -32,6 +32,7 @@ import { makeClientId } from '../utils/clientId.js';
 import { useToastsStore } from '../stores/toasts.js';
 import { downloadTextFile } from '../utils/download.js';
 import { notifyForEvent, playSound } from './useHighlightNotifier.js';
+import { isChannelTarget } from '../../../shared/channels.js';
 
 export interface AckResult {
   ok: boolean;
@@ -307,7 +308,7 @@ function applyEvent(event: any): void {
       // toast with a one-click Join. The durable record for the latter lives in
       // the system buffer (logged server-side), so the long TTL is just a
       // convenience window, not the only chance to act.
-      if (typeof event.target === 'string' && event.target.startsWith('#')) {
+      if (isChannelTarget(event.target as string)) {
         buffers.pushMessage(event);
         break;
       }
