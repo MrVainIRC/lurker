@@ -49,6 +49,22 @@ updates:
           - minor
           - patch
 
+  # Docs site (vitepress + wrangler)
+  - package-ecosystem: npm
+    directory: /docs
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+      semver-minor-days: 7
+      semver-patch-days: 3
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
   # GitHub Actions
   - package-ecosystem: github-actions
     directory: /
@@ -60,3 +76,15 @@ updates:
       actions:
         patterns:
           - '*'
+
+  # Docker base image. REQUIRED, not optional: the Dockerfile pins
+  # node:22-slim by digest for supply-chain reasons, which also freezes the
+  # Debian package set inside it. Without dependabot rewriting that digest the
+  # base image silently rots and stops receiving OS security patches — the pin
+  # would trade one risk for a worse one.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
