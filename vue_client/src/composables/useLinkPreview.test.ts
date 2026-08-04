@@ -343,6 +343,95 @@ describe('re-asking after expiresAt', () => {
   });
 });
 
+describe('cache eviction keeps ref identity (#694)', () => {
+  const BOUND = 2000; // MAX_CACHE_ENTRIES
+
+  /** Fill the cache with resolved values, then prime once more to make eviction run.
+   *  ⚠ Two steps, deliberately: `evictIfNeeded` runs INSIDE `primePreviews`, before that batch's
+   *  answers have come back, so the prime that overflows the ceiling is never the prime that
+   *  reclaims. A test that floods and asserts in one step sees nothing evicted. */
+  async function floodPastCeiling(
+    count: number,
+    trigger = 'https://e.test/trigger',
+  ): Promise<void> {
+    const flood = Array.from({ length: count }, (_, i) => `https://e.test/flood-${i}`);
+    primePreviews(
+      flood.map((u) => `x ${u}`),
+      BOTH,
+    );
+    await settle();
+    primePreviews([trigger], BOTH);
+    await settle();
+  }
+
+  it('refills the ref a mounted row is holding, rather than minting a fresh one', async () => {
+    // ⚠⚠ The trap this test exists to avoid: asserting that a FRESH `useLinkPreview()` read comes
+    // back correct passes against the bug, because the fresh read gets the new object. The row on
+    // screen is holding the old one. So the ref is captured ONCE, up front, and every assertion
+    // below is made through that captured object — which is what MessageAttachments does.
+    const victim = 'https://e.test/victim';
+    primePreviews([`see ${victim}`], BOTH);
+    const held = useLinkPreview(victim); // the mounted row captures the Ref OBJECT
+    await settle();
+    expect(held.value?.title).toBe('T');
+
+    await floodPastCeiling(BOUND + 100);
+
+    // Identity survived: the row is still watching the object the cache holds.
+    expect(useLinkPreview(victim)).toBe(held);
+    // Its value was reclaimed — that is the eviction.
+    expect(held.value).toBeNull();
+
+    // And a re-prime delivers into THAT object. Under the bug the answer landed in a fresh ref
+    // and this stayed null for the life of the tab.
+    primePreviews([`see ${victim} again`], BOTH);
+    await settle();
+    expect(held.value?.title).toBe('T');
+  });
+
+  it('still bounds the number of resolved values', async () => {
+    // The ceiling has to keep doing its job — the fix must not become "never reclaim anything".
+    const held: Array<ReturnType<typeof useLinkPreview>> = [];
+    const urls = Array.from({ length: BOUND + 200 }, (_, i) => `https://e.test/bounded-${i}`);
+    primePreviews(
+      urls.map((u) => `x ${u}`),
+      BOTH,
+    );
+    for (const u of urls) held.push(useLinkPreview(u));
+    await settle();
+    expect(held.filter((r) => r.value != null).length).toBe(BOUND + 200);
+
+    primePreviews(['https://e.test/bounded-trigger'], BOTH);
+    await settle();
+
+    const stillHeld = held.filter((r) => r.value != null).length;
+    expect(stillHeld).toBeLessThanOrEqual(BOUND);
+    // Oldest-first: the reclaimed ones are at the front.
+    expect(held[0].value).toBeNull();
+    expect(held.at(-1)!.value).not.toBeNull();
+  });
+
+  it('re-pins the anchor when eviction blanks a card', async () => {
+    // Nulling a value changes a row's height, so it owes `previewRevision` a bump.
+    //
+    // ⚠ Isolating that bump takes care: an ARRIVING ANSWER bumps `previewRevision` too
+    // (unconditionally, see `flush`), so a trigger that fetches anything cannot tell the two
+    // apart. The trigger here is a URL already in `asked`, so `primePreviews` skips it — nothing
+    // is queued, no flush runs, and the only thing left that can move the counter is eviction.
+    const settled = 'https://e.test/already-answered';
+    primePreviews([settled], BOTH);
+    await settle();
+
+    const quiet = previewRevision.value;
+    primePreviews([settled], BOTH); // same URL again: no queue, no answer, no eviction yet
+    await settle();
+    expect(previewRevision.value).toBe(quiet);
+
+    await floodPastCeiling(BOUND + 100, settled);
+    expect(previewRevision.value).toBeGreaterThan(quiet);
+  });
+});
+
 describe('is an answer still coming?', () => {
   // ⚠⚠ The distinction the reveal gate in `MessageAttachments` rests on. That component holds a
   // message's whole attachment block back until every URL in it has settled, so it has to tell
