@@ -61,6 +61,7 @@ export default defineConfig({
           text: 'Developers',
           items: [
             { text: 'Client Protocol & API', link: '/CLIENT_PROTOCOL' },
+            { text: 'Client Migration: 1.1.x → 2.0', link: '/MIGRATION_2_0' },
             { text: 'MCP & HTTP API', link: '/MCP' },
             { text: 'IRCv3 Support', link: '/IRCV3' },
           ],
