@@ -194,7 +194,12 @@ export function useMemberActions(): MemberActionsAPI {
     // channel. Each sends a raw IRC line and lets the server's MODE/KICK echo
     // update state — the same path the /kick and /mode slash commands use, so
     // no optimistic mutation here. Never offered against yourself.
-    const channel = isChannelTarget(ctx.channel as string) ? (ctx.channel as string) : null;
+    // ⚠ `typeof` first, not a cast. `isChannelTarget` deliberately returns a plain boolean rather
+    // than a `target is string` predicate (see shared/channels.ts), so it cannot narrow
+    // `string | null | undefined` on its own — and casting to satisfy that would let a non-string
+    // through unchecked. This is the guard the pre-#724 code already had; keep it.
+    const channel =
+      typeof ctx.channel === 'string' && isChannelTarget(ctx.channel) ? ctx.channel : null;
     const selfModes = Array.isArray(ctx.selfModes) ? ctx.selfModes : [];
     if (!isSelf && channel && hasAny(selfModes, MODERATE_MODES)) {
       const networkId = ctx.networkId;

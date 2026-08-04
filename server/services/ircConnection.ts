@@ -5457,8 +5457,9 @@ const CHANNEL_CONTEXT_PREFIX = new RegExp(
 // ChanServ welcome) either via the IRCv3 +draft/channel-context client tag or a
 // conventional "[#chan] …" body prefix. Mirrors weechat's notice_welcome_redirect
 // and irssi's notice_channel_context: redirect to the referenced channel, but ONLY
-// when it's a `#` channel we're currently joined to (so a stray tag/prefix can't
-// fabricate a buffer), returning its canonical (joined) casing. The tag wins over
+// when it's a channel we're currently JOINED to (so a stray tag/prefix can't
+// fabricate a buffer), returning its canonical (joined) casing. Every channel
+// prefix qualifies since #724 — membership, not the prefix set, is the gate. The tag wins over
 // the body prefix. Returns null when there's no usable, joined-channel context.
 export function resolveChannelContext(
   tags: Record<string, string> | undefined,
