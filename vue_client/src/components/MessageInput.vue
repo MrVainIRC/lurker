@@ -526,6 +526,12 @@ function bodyForSplit(raw: string): { body: string; isAction: boolean } {
   // ⚠ Every branch below counts the POST-rewrite bytes, for the same reason the plain path above
   // does: the spoiler rewrite ADDS bytes (`\x0301,01` … `\x03`), so a message that fits before it
   // may not after, and counting the typed form drifts the estimate LOW.
+  //
+  // ⚠ …and each branch reproduces its command's own whitespace handling, because `computeChunks`
+  // drives the outgoing-flood GATE, not just the indicator: bytes counted here that the send path
+  // never puts on the wire can hard-block a message that would have gone out fine. /me needs
+  // nothing for that — `\s*` above eats the leading run, and `chunksForLine` parks a TRAILING run
+  // in `pendingWs` and never charges for it — so m[2] is counted as-is.
   if (cmd === 'me') return { body: chatBody(m[2]), isAction: true };
   // /shrug produces a real PRIVMSG body, so it carries the same split/flood risk
   // a plain message does — count the kaomoji too, since it's part of what goes on
@@ -533,10 +539,16 @@ function bodyForSplit(raw: string): { body: string; isAction: boolean } {
   // payload can't drift.
   if (cmd === 'shrug') return { body: chatBody(shrugBody(m[2])), isAction: false };
   if (cmd === 'msg' || cmd === 'query') {
-    // /msg <who> <body...> — drop the recipient nick from the body.
-    const rest = m[2];
-    const sp = rest.indexOf(' ');
-    return { body: chatBody(sp >= 0 ? rest.slice(sp + 1) : ''), isAction: false };
+    // /msg <who> <body...> — drop the recipient nick from the body. Split-and-rejoin rather than
+    // slicing at the first space, because that is exactly what the send path does:
+    // `const [cmd, ...rest] = line.slice(1).split(/\s+/)`, then `msgParts.join(' ')`. That
+    // collapses internal whitespace runs, so slicing counted bytes that never reach the wire.
+    //
+    // ⚠ NOT trimmed, unlike /me above. The send path doesn't trim either, and `split(/\s+/)` on
+    // a trailing-space string yields a final empty element — so `/msg bob hi ` really does put
+    // `hi ` on the wire. The estimator's job is to match the payload, not to tidy it.
+    const words = m[2].split(/\s+/);
+    return { body: chatBody(words.slice(1).join(' ')), isAction: false };
   }
   return { body: '', isAction: false };
 }

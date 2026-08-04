@@ -433,6 +433,51 @@ describe('MessageInput command dispatch', () => {
       });
     });
 
+    // The split estimator drives the outgoing-flood GATE, not just the indicator — a body it
+    // counts as >1 chunk is held back for split confirmation instead of being sent. So bytes it
+    // counts that the send path never puts on the wire can stall a message that would have gone
+    // out fine.
+    //
+    // 150 single-letter words at MESSAGE_MAX_BYTES 350: the send path collapses the separators
+    // and puts 299 bytes on the wire (one chunk), while slicing at the first space preserved the
+    // doubled runs for 448 (two chunks) — enough to trip the gate on a message that fits.
+    it('does not stall a /msg whose extra bytes are whitespace the send path collapses', async () => {
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      const body = Array.from({ length: 150 }, () => 'a').join('  ');
+      await type(el, `/msg bob ${body}`);
+      await enter(el);
+
+      expect(socketSendWithAck).toHaveBeenCalledWith({
+        type: 'send',
+        networkId: 1,
+        target: 'bob',
+        text: Array.from({ length: 150 }, () => 'a').join(' '),
+      });
+    });
+
+    // The same collapsing, shown directly on a short body.
+    //
+    // ⚠ The expected text keeps its TRAILING SPACE, and that is not a typo. `/\s+/` on a string
+    // ending in whitespace yields a final empty element, which `join(' ')` turns back into one
+    // space. Asserting the tidy form here would be asserting something the composer doesn't send,
+    // and the estimator's job is to match the payload byte-for-byte, not to improve it.
+    it('counts a /msg body the way the send path builds it', async () => {
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      await type(el, '/msg bob   hello   world  ');
+      await enter(el);
+
+      expect(socketSendWithAck).toHaveBeenCalledWith({
+        type: 'send',
+        networkId: 1,
+        target: 'bob',
+        text: 'hello world ',
+      });
+    });
+
     // A command with no `||` must be byte-identical to what it was before.
     it('leaves a body without spoiler markup untouched', async () => {
       seedStores('#zebra');
