@@ -151,6 +151,16 @@ async function flush(): Promise<void> {
           // The one place a cache entry gains a value, so the one place `heldValues` grows.
           if (entry.value == null) heldValues++;
           entry.value = preview;
+          // ⚠ Refresh recency on every fill. `Map` preserves INSERTION order and eviction walks
+          // it oldest-first, so without this a re-primed URL keeps its original position — and
+          // once the cache is saturated, `evictIfNeeded` below reclaims the answer in the very
+          // flush that delivered it. A URL that fell out could never come back.
+          //
+          // ⚠⚠ Delete-then-set re-inserts the SAME Ref OBJECT, so this moves the key's position
+          // without touching identity. That is the one thing this file must never do (#694), and
+          // it is not being done here: no row loses the object it is watching.
+          cache.delete(preview.url);
+          cache.set(preview.url, entry);
           if (preview.status === 'ok') {
             retry.delete(preview.url);
           } else {
@@ -178,6 +188,13 @@ async function flush(): Promise<void> {
       // gate, and every gate that opens grows a row. `pendingRevision` marks exactly those paths,
       // so the two are bumped together wherever a gate can open — never in `primePreviews`'s
       // queueing branch, which only ever ADDS to the pending set and so can only close one.
+      //
+      // ⚠ Reclaim HERE, where values actually land, not only on the next prime. `heldValues`
+      // grows in this loop and nowhere else, so leaving eviction to `primePreviews` meant one
+      // large ingest — a history page, or switching previews on over a loaded buffer — could sit
+      // arbitrarily far above the ceiling until some later message happened to prime again. The
+      // two bumps below already cover any row this blanks.
+      evictIfNeeded();
       previewRevision.value++;
       pendingRevision.value++;
       scheduleReask();
@@ -348,6 +365,10 @@ let heldValues = 0;
  * Returns whether eviction BLANKED a card that was rendering — i.e. whether it changed a row's
  * height and so owes the scroll anchor a re-pin.
  *
+ * Called from BOTH `flush` (where values land, so the ceiling binds immediately) and
+ * `primePreviews` (which catches anything the flush path missed). The return value only matters
+ * to the latter; `flush` bumps both revisions unconditionally anyway.
+ *
  * ⚠ Not "did it evict anything". Once a long-lived tab saturates the cache, eviction runs on
  * essentially every prime — and reporting that as a layout event fired a re-pin (two forced
  * synchronous layouts over an unvirtualised 500-row list) on every incoming message, to
@@ -454,9 +475,13 @@ export function primePreviews(
   // an unconditional bump changes no observable behaviour — the computed re-evaluates to the same
   // value, so a `watch` never fires — it only burns the work. A test would have to count
   // evaluations from outside the computed, which nothing here can do.
-  // ⚠ Eviction is no longer a term here (#694): it only reclaims entries that already hold a
-  // value, and `previewPending` is false for those both before and after, so it cannot change
-  // any URL's pending state. It could when it deleted entries outright.
+  // ⚠ Eviction is no longer a term here (#694). The invariant is directional: it can no longer
+  // move a URL from pending to SETTLED, which is the transition that opens a reveal gate, because
+  // it only touches entries already holding a value and `previewPending` is false for those.
+  //
+  // It CAN move one the other way — blanking a value for a URL still sitting in `queue` makes
+  // `previewPending` true again — but that only ever CLOSES a gate, which shrinks a block rather
+  // than growing one, and the same prime that queued it already bumped via `queued`.
   if (queued) pendingRevision.value++;
   // ⚠ Eviction CAN change what renders — nulling a value blanks a card that was drawing one — so
   // it owes the anchor a re-pin. That happens during a history-page ingest, which is exactly when

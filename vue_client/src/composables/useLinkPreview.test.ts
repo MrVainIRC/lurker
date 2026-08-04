@@ -389,6 +389,22 @@ describe('cache eviction keeps ref identity (#694)', () => {
     expect(held.value?.title).toBe('T');
   });
 
+  it('binds the ceiling as soon as the answers land, not on the next prime', async () => {
+    // `heldValues` only grows in `flush`, so eviction driven solely from `primePreviews` left one
+    // large ingest — a history page, or switching previews on over a loaded buffer — sitting
+    // above the ceiling until some later message happened to prime again. No second prime here.
+    const held: Array<ReturnType<typeof useLinkPreview>> = [];
+    const urls = Array.from({ length: BOUND + 300 }, (_, i) => `https://e.test/single-${i}`);
+    primePreviews(
+      urls.map((u) => `x ${u}`),
+      BOTH,
+    );
+    for (const u of urls) held.push(useLinkPreview(u));
+    await settle();
+
+    expect(held.filter((r) => r.value != null).length).toBeLessThanOrEqual(BOUND);
+  });
+
   it('still bounds the number of resolved values', async () => {
     // The ceiling has to keep doing its job — the fix must not become "never reclaim anything".
     const held: Array<ReturnType<typeof useLinkPreview>> = [];
@@ -399,7 +415,6 @@ describe('cache eviction keeps ref identity (#694)', () => {
     );
     for (const u of urls) held.push(useLinkPreview(u));
     await settle();
-    expect(held.filter((r) => r.value != null).length).toBe(BOUND + 200);
 
     primePreviews(['https://e.test/bounded-trigger'], BOTH);
     await settle();
