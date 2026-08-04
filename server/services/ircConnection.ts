@@ -1691,10 +1691,12 @@ export class IrcConnection {
         //   - EXCEPTION 1: a channel-context hint (the IRCv3 +draft/channel-context
         //     tag, or a leading "[#chan]" body prefix) for a channel we're in
         //     routes the notice to that channel.
-        //   - EXCEPTION 2: a notice NOT addressed to our nick (e.g. to an `&`/`!`/`+`
-        //     local channel, which Lurker routes as a non-channel, or a STATUSMSG
-        //     target) has no DM home — surface it in the server buffer rather than
-        //     fabricating a bogus DM with the sender.
+        //   - EXCEPTION 2: a notice NOT addressed to our nick and not placeable in a
+        //     channel — an oper broadcast (`$$*`), a mask target, a STATUSMSG whose
+        //     channel we aren't in — has no DM home, so surface it in the server
+        //     buffer rather than fabricating a bogus DM with the sender.
+        //     (This used to name `&`/`!`/`+` channels as the example; since #724 they
+        //     route as the channels they are and never reach here.)
         const ctx = resolveChannelContext(
           event.tags as Record<string, string> | undefined,
           eventMessage,
@@ -4308,13 +4310,23 @@ export class IrcConnection {
     const sub = (tokens.shift() || 'help').toLowerCase();
     // `#`-prefixed channels only — INCLUDING double-hash names like `##anime`
     // (the `length > 1` guard rejects only a bare lone `#`, which would otherwise
-    // persist a junk config row; #382 review #6). This is intentionally narrower
-    // than isChannelContext's `# & ! +`: Lurker's message routing treats `&`/`!`/
-    // `+` targets as DMs (see `targetIsChannel` in the message handler), so they
-    // can never be E2E channels here — accepting them would only enable a config
-    // whose inbound ciphertext would mis-route to a DM buffer (review #1 on #407).
-    // ⚠ `#`-only on purpose (#724): these tokens are free CTCP text, so widening would claim
-    // any leading `+` or `!` word as a channel name. A misparse here mis-routes the reply.
+    // persist a junk config row; #382 review #6). Narrower than isChannelContext's
+    // `# & ! +`.
+    //
+    // ⚠⚠ The ORIGINAL reason for that gap is gone: it read "Lurker's message routing treats
+    // `&`/`!`/`+` targets as DMs, so they can never be E2E channels here", which #724 falsified —
+    // those targets now route as the channels they are. What keeps this `#`-only today is
+    // narrower and deliberate: these tokens are an `/e2e` ARGUMENT LINE that mixes channels,
+    // nicks and handle masks, and `nonChannel` below is derived by exclusion from this same
+    // test. Widening the prefix set would silently reclassify a mask like `+*!*@host` as a
+    // channel and drop it from the peer argument — a misparse with security consequences in the
+    // one subsystem where that matters most.
+    //
+    // ⚠ Known asymmetry this leaves, and the reason it is a follow-up rather than a shrug:
+    // `isChannelContext` (e2e/context.ts) and the inbound decrypt gate both accept `&local`, so
+    // such a channel can RECEIVE ciphertext it can never be configured to decrypt — `/e2e on`
+    // there answers "run this from a channel". Widening wants the arg grammar disambiguated
+    // first (positional, or an explicit `--channel`), not a wider prefix test.
     const channelToken = tokens.find((t) => t.startsWith('#') && t.length > 1);
     const nonChannel = tokens.filter((t) => !t.startsWith('#'));
     // The channel an op targets: an explicit #arg wins, else the issuing buffer
@@ -4610,9 +4622,12 @@ export class IrcConnection {
           // (db/e2e.ts matchAutotrustStmt), so reject anything else up front
           // rather than storing a rule that can never match (a dead rule the
           // user is told was "added").
-          // ⚠ `#`-only on purpose (#724): this mirrors what db/e2e.ts matchAutotrustStmt can
-          // actually match. Widening the VALIDATOR alone would store rules that never fire —
-          // the dead-rule outcome this guard exists to prevent. Widen both together or neither.
+          // ⚠ `#`-only on purpose (#724), but NOT for the reason it might look like:
+          // `matchAutotrustStmt` (db/e2e.ts) is `scope = 'global' OR scope = ?`, a prefix-agnostic
+          // exact match that would happily match `&local`. What makes a non-`#` scope dead is
+          // upstream — `effectiveMode` gates on `getChannelConfig(...).enabled`, and `/e2e on`
+          // above cannot enable a non-`#` channel. So this validator stays aligned with `/e2e on`;
+          // widen the two together, and look at the config gate rather than the SQL.
           if (scope.toLowerCase() !== 'global' && !(scope.startsWith('#') && scope.length > 1)) {
             info(
               `/e2e autotrust add: scope must be 'global' or a #channel (got '${scope}')`,
@@ -5444,7 +5459,7 @@ const CHANNEL_CONTEXT_PREFIX = new RegExp(
 // and irssi's notice_channel_context: redirect to the referenced channel, but ONLY
 // when it's a `#` channel we're currently joined to (so a stray tag/prefix can't
 // fabricate a buffer), returning its canonical (joined) casing. The tag wins over
-// the body prefix. Returns null when there's no usable, joined `#`-channel context.
+// the body prefix. Returns null when there's no usable, joined-channel context.
 export function resolveChannelContext(
   tags: Record<string, string> | undefined,
   body: string | undefined,

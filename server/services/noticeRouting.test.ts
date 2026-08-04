@@ -220,15 +220,28 @@ describe('NOTICE routing (#439)', () => {
     expect(publish).toHaveBeenCalledWith(expect.objectContaining({ target: 'caseserv' }));
   });
 
-  it('routes a notice not addressed to our nick to the server buffer (no bogus DM)', () => {
+  it('routes a notice to an `&` channel into that channel (#724)', () => {
     const { conn, publish } = harness();
-    // ⚠ Retargeted by #724. This used to send a NOTICE to `&admin` to the SERVER buffer, on the
-    // rationale that "Lurker does not route `&` as a channel" — the bug. An `&` channel is a
-    // channel, so its notice belongs in its own buffer; a target we genuinely can't place is what
-    // must fall back to the server buffer, which the case below covers.
+    // ⚠ Retargeted by #724. This used to expect the SERVER buffer, on the stated rationale that
+    // "Lurker does not route `&` as a channel" — which was the bug. An `&` channel is a channel,
+    // so its notice belongs in its own buffer.
     emitNotice(conn, { nick: 'LogBot', target: '&admin', message: 'audit log line' });
     expect(publish).toHaveBeenCalledWith(
       expect.objectContaining({ target: '&admin', type: 'notice' }),
+    );
+  });
+
+  it('still falls back to the server buffer for a target it cannot place', () => {
+    // ⚠⚠ The branch the case above USED to cover, restored rather than dropped. Retargeting that
+    // test left `else target = ':server:'` in the notice handler with no coverage at all — the
+    // other `:server:` assertions in this file exercise the no-nick and closed-mirror branches,
+    // which are different code. This is the live case: an oper broadcast has a real sender, a
+    // target that is neither our nick nor any channel, and so no DM home. Fabricating a DM with
+    // the sender is the outcome the fallback exists to prevent.
+    const { conn, publish } = harness();
+    emitNotice(conn, { nick: 'oper', target: '$$*', message: 'global operator broadcast' });
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({ target: ':server:1', type: 'notice' }),
     );
   });
 

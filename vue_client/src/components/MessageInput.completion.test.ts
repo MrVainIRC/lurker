@@ -509,7 +509,6 @@ describe('MessageInput command dispatch', () => {
   // channel when one by that name is actually open.
   describe('channel-vs-free-text arguments (#724)', () => {
     it('/part &local parts that channel when it exists', async () => {
-      seedStores('#zebra');
       const { buffers } = seedStores('#zebra');
       buffers.buffers['1::&local'] = {
         networkId: 1,
@@ -555,6 +554,35 @@ describe('MessageInput command dispatch', () => {
       await enter(el);
 
       expect(rawLine('TOPIC')).toBe('TOPIC #zebra :!!! maintenance !!!');
+    });
+
+    it('/mode +local +m targets the channel, not the current buffer flags', async () => {
+      // `+local` satisfies the leading-sign flag heuristic AND is a channel name. With an open
+      // buffer by that name the channel reading wins; without one it is flags (next case).
+      const { buffers } = seedStores('#zebra');
+      buffers.buffers['1::+local'] = {
+        networkId: 1,
+        target: '+local',
+        members: [],
+        messages: [],
+      } as never;
+      const { el } = await mountComposer();
+
+      await type(el, '/mode +local +m');
+      await enter(el);
+
+      expect(rawLine('MODE')).toBe('MODE +local +m');
+    });
+
+    it('/mode +m still applies flags to the current channel', async () => {
+      // The positive control: no buffer is ever named `+m`, so real flags keep working.
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+
+      await type(el, '/mode +m');
+      await enter(el);
+
+      expect(rawLine('MODE')).toBe('MODE #zebra +m');
     });
 
     it('/kick &local bob still takes the channel-first form', async () => {

@@ -3152,7 +3152,12 @@ function handleCommand(line: string, networkId: number | null, target: string): 
         localInfo(networkId, target, 'usage: /mode [target] <flags> [args]');
         return true;
       }
-      const looksLikeFlagsOnly = /^[+-]/.test(rest[0]);
+      // ⚠ `+local` is both a valid flag string and a valid channel name, so the leading-sign
+      // heuristic alone sent `/mode +local +m` as flags against the CURRENT buffer (#724). Same
+      // disambiguation /part and /topic use: a channel wins only when one by that name is open,
+      // so real flags (`+m`, `-nt`) are untouched — no buffer is ever called that.
+      const looksLikeFlagsOnly =
+        /^[+-]/.test(rest[0]) && !isChannelArgAmbiguous(rest[0], networkId);
       if (looksLikeFlagsOnly && isChannelTarget(target)) {
         return sendOrToast(
           { type: 'raw', networkId, line: `MODE ${target} ${rest.join(' ')}` },
