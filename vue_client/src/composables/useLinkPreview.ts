@@ -148,7 +148,19 @@ async function flush(): Promise<void> {
         const entry = cache.get(preview.url);
         if (entry) {
           answered.add(preview.url);
+          // The one place a cache entry gains a value, so the one place `heldValues` grows.
+          if (entry.value == null) heldValues++;
           entry.value = preview;
+          // ⚠ Refresh recency on every fill. `Map` preserves INSERTION order and eviction walks
+          // it oldest-first, so without this a re-primed URL keeps its original position — and
+          // once the cache is saturated, `evictIfNeeded` below reclaims the answer in the very
+          // flush that delivered it. A URL that fell out could never come back.
+          //
+          // ⚠⚠ Delete-then-set re-inserts the SAME Ref OBJECT, so this moves the key's position
+          // without touching identity. That is the one thing this file must never do (#694), and
+          // it is not being done here: no row loses the object it is watching.
+          cache.delete(preview.url);
+          cache.set(preview.url, entry);
           if (preview.status === 'ok') {
             retry.delete(preview.url);
           } else {
@@ -176,6 +188,13 @@ async function flush(): Promise<void> {
       // gate, and every gate that opens grows a row. `pendingRevision` marks exactly those paths,
       // so the two are bumped together wherever a gate can open — never in `primePreviews`'s
       // queueing branch, which only ever ADDS to the pending set and so can only close one.
+      //
+      // ⚠ Reclaim HERE, where values actually land, not only on the next prime. `heldValues`
+      // grows in this loop and nowhere else, so leaving eviction to `primePreviews` meant one
+      // large ingest — a history page, or switching previews on over a loaded buffer — could sit
+      // arbitrarily far above the ceiling until some later message happened to prime again. The
+      // two bumps below already cover any row this blanks.
+      evictIfNeeded();
       previewRevision.value++;
       pendingRevision.value++;
       scheduleReask();
@@ -334,26 +353,59 @@ function runReask(): void {
 const MAX_CACHE_ENTRIES = 2000;
 
 /**
- * Returns whether eviction removed a URL that was still PENDING — i.e. whether it can have opened
- * a reveal gate.
+ * Number of cache entries currently holding a resolved value.
  *
- * ⚠ Not "did it evict anything". Once a long-lived tab saturates the cache, `while (size > MAX)`
- * trims to exactly the ceiling, so EVERY prime that creates an entry evicts one — and reporting
- * that as a layout event fired a re-pin (two forced synchronous layouts over an unvirtualised
- * 500-row list) on essentially every incoming message, to compensate for a growth that had not
- * happened. Only an evicted URL that something was still waiting on can change what renders.
+ * Tracked rather than counted on demand because the map itself no longer shrinks (see
+ * `evictIfNeeded`), so a count would be O(every URL the tab has ever seen) on every prime.
+ * Exactly one place assigns a value — `flush` — which is what makes the counter maintainable.
+ */
+let heldValues = 0;
+
+/**
+ * Returns whether eviction BLANKED a card that was rendering — i.e. whether it changed a row's
+ * height and so owes the scroll anchor a re-pin.
+ *
+ * Called from BOTH `flush` (where values land, so the ceiling binds immediately) and
+ * `primePreviews` (which catches anything the flush path missed). The return value only matters
+ * to the latter; `flush` bumps both revisions unconditionally anyway.
+ *
+ * ⚠ Not "did it evict anything". Once a long-lived tab saturates the cache, eviction runs on
+ * essentially every prime — and reporting that as a layout event fired a re-pin (two forced
+ * synchronous layouts over an unvirtualised 500-row list) on every incoming message, to
+ * compensate for a growth that had not happened.
+ *
+ * ⚠⚠ The ref OBJECT is never deleted, only its value (#694). `MessageAttachments` captures the
+ * Ref object in a computed keyed on the message text, so a mounted row goes on watching whichever
+ * object it first received — the same rule `forgetForRetry` and `dropIfExpired` already state.
+ * Deleting the entry and minting a fresh one on the next prime delivered the answer into an
+ * object nothing was watching: a fresh read showed `ok` while the row on screen stayed blank for
+ * the life of the tab. Nulling in place means a re-prime REFILLS the object the row is holding.
+ *
+ * Two consequences worth knowing:
+ *   - A pending URL is never evicted, by construction: `previewPending` is false for anything
+ *     holding a value, and only value-holders are reclaimed. So eviction can no longer strand an
+ *     in-flight answer, and can no longer open a reveal gate — the caller's `pendingRevision`
+ *     term for that is gone.
+ *   - The ceiling now bounds RESOLVED VALUES, not map entries. The map keeps one null-valued ref
+ *     per distinct URL the tab has seen (~200 bytes), which is the price of never breaking
+ *     identity. The `LinkPreview` payloads — the actual weight — are still bounded.
  */
 function evictIfNeeded(): boolean {
-  let openedGate = false;
-  while (cache.size > MAX_CACHE_ENTRIES) {
-    const oldest = cache.keys().next().value;
-    if (oldest === undefined) break;
-    if (previewPending(oldest)) openedGate = true;
-    cache.delete(oldest);
-    asked.delete(oldest);
-    retry.delete(oldest);
+  if (heldValues <= MAX_CACHE_ENTRIES) return false;
+  let blanked = false;
+  // Oldest-first: `Map` preserves insertion order, and the oldest value is the one least likely
+  // to still be on screen.
+  for (const [url, entry] of cache) {
+    if (heldValues <= MAX_CACHE_ENTRIES) break;
+    if (entry.value == null) continue; // already reclaimed, or never answered
+    entry.value = null;
+    heldValues--;
+    blanked = true;
+    // Re-open the URL to priming, so the next ingest that mentions it refills THIS object.
+    asked.delete(url);
+    retry.delete(url);
   }
-  return openedGate;
+  return blanked;
 }
 
 /** Drop entries whose server-side TTL has lapsed, so they can be asked about again.
@@ -408,7 +460,7 @@ export function primePreviews(
     }
   }
   if (queued && flushTimer === null) flushTimer = setTimeout(() => void flush(), FLUSH_MS);
-  const evictionOpenedGate = evictIfNeeded();
+  const evictionBlanked = evictIfNeeded();
   // ⚠ CONDITIONAL, and that matters more than it looks. This runs for every live message, whether
   // or not it carries a URL, and every mounted `MessageAttachments` is an eager subscriber to a
   // computed that reads this ref — so an unconditional bump made one ordinary line of channel
@@ -423,11 +475,18 @@ export function primePreviews(
   // an unconditional bump changes no observable behaviour — the computed re-evaluates to the same
   // value, so a `watch` never fires — it only burns the work. A test would have to count
   // evaluations from outside the computed, which nothing here can do.
-  if (queued || evictionOpenedGate) pendingRevision.value++;
-  // ⚠ Eviction can OPEN a reveal gate — it makes a URL non-pending without any answer arriving —
-  // so the block paints with nothing having bumped `previewRevision`. That happens during a
-  // history-page ingest, which is exactly when a scrolled-up reader is being anchored.
-  if (evictionOpenedGate) previewRevision.value++;
+  // ⚠ Eviction is no longer a term here (#694). The invariant is directional: it can no longer
+  // move a URL from pending to SETTLED, which is the transition that opens a reveal gate, because
+  // it only touches entries already holding a value and `previewPending` is false for those.
+  //
+  // It CAN move one the other way — blanking a value for a URL still sitting in `queue` makes
+  // `previewPending` true again — but that only ever CLOSES a gate, which shrinks a block rather
+  // than growing one, and the same prime that queued it already bumped via `queued`.
+  if (queued) pendingRevision.value++;
+  // ⚠ Eviction CAN change what renders — nulling a value blanks a card that was drawing one — so
+  // it owes the anchor a re-pin. That happens during a history-page ingest, which is exactly when
+  // a scrolled-up reader is being anchored.
+  if (evictionBlanked) previewRevision.value++;
 }
 
 /**
@@ -515,6 +574,7 @@ export function resetLinkPreviewCache(): void {
   previewRevision.value = 0;
   pendingRevision.value = 0;
   cache.clear();
+  heldValues = 0;
   asked.clear();
   retry.clear();
   queue = new Set();
