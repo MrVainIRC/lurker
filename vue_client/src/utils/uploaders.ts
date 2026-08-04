@@ -104,11 +104,12 @@ export function missingRequired(
 // what they call an .m4a (audio/x-m4a vs audio/mp4) and macOS greys out anything
 // the attribute doesn't match, with no "All Files" escape.
 //
-// The 3GPP entries are for a file HONESTLY named `.3gp`. The case that motivated
-// accepting the format — a Samsung voice memo — is a 3GPP container the recorder
-// names `.m4a`, so it already got through on the `.m4a` entry above; a picker that
-// then greyed out the same bytes under their real extension would be the drift this
-// comment exists to prevent.
+// So every accepted MIME needs its extensions listed too, or the dialog greys out a
+// file the server would have taken. `.3gp`/`.3g2` are for a file HONESTLY named — the
+// Samsung voice memo that motivated 3GPP support is a 3GPP container the recorder
+// calls `.m4a`, so it already got through on the `.m4a` entry. `.m4b`/`.f4a`/`.f4b`
+// are the three brands `audio/mp4` was added for, and have no other entry covering
+// them at all.
 export const ACCEPTED_FILE_TYPES = [
   'image/*',
   'text/plain',
@@ -125,6 +126,9 @@ export const ACCEPTED_FILE_TYPES = [
   '.mov',
   '.m4v',
   '.m4a',
+  '.m4b',
+  '.f4a',
+  '.f4b',
   '.3gp',
   '.3g2',
   '.mp3',
