@@ -467,6 +467,22 @@ describe('MessageAttachment — growth the list can react to', () => {
     await wrapper.find('video').trigger('loadedmetadata');
     expect(wrapper.emitted('measured')).toHaveLength(1);
   });
+
+  it('tells the list when an image decodes, even though its box was reserved', async () => {
+    // ⚠⚠ The NET, and it is deliberately kept rather than reasoned away. This emit was deleted
+    // once on the argument that a reserved box makes late growth impossible, and the box being
+    // reserved was itself false in Blink (0x0 until the bytes landed) — so the one thing that
+    // would have noticed lurker#705 had been removed on the strength of the belief the bug
+    // disproves. `reserveStyle` should now make this redundant; "should" is why it stays.
+    //
+    // It costs nothing when redundant: `repinAfterPreviewGrowth(true)` in MessageList returns
+    // immediately unless the reader is at the tail, and for one who is, the correction is an
+    // idempotent `scrollTop = scrollHeight`.
+    seedSettings();
+    const wrapper = mount(MessageAttachment, { props: { preview: IMAGE } });
+    await wrapper.find('img.inline-image').trigger('load');
+    expect(wrapper.emitted('measured')).toHaveLength(1);
+  });
 });
 
 describe('MessageAttachments — arrangement', () => {
@@ -778,33 +794,53 @@ describe('MessageAttachment — a box that does not depend on bytes', () => {
     src: '/api/link-preview/media/tokX',
   });
 
-  it('reserves the box on a WRAPPER, and only for an unmeasured image outside a strip', () => {
-    // ⚠ All three cases in ONE test, deliberately. Split apart, the two negative cases asserted
+  it('reserves the box on a WRAPPER for every image outside a strip, measured or not', () => {
+    // ⚠ All three cases in ONE test, deliberately. Split apart, the negative case asserted
     // `not.toContain(...)` and stayed green with the binding deleted entirely — vacuous against
-    // the very mutation they look like they guard.
+    // the very mutation it looks like it guards.
     //
-    // `imageDimensions` returns null for a format sharp can't parse in the 64 KB it reads — ico
-    // and bmp both arrive as `kind: 'image'` with null dimensions. With no width/height attributes
-    // there is no ratio to reserve a box from, so the element lays out at the UA default and grows
-    // on decode: video's pre-465f838 bug, still live for images.
-    //
-    // ⚠⚠ The height is on the WRAPPER and that is the assertion that matters. Pinned on the
+    // ⚠⚠ The geometry is on the WRAPPER and that is the assertion that matters. Pinned on the
     // `<img>`, the empty letterbox around a 16x16 favicon became part of a 240px-tall control
     // that calls `stopPropagation` — swallowing the row tap that is the only opener of the
     // message-actions sheet on touch. A wrapper with no handlers leaves those pixels to the row.
+    //
+    // `imageDimensions` returns null for a format sharp can't parse in the 64 KB it reads — ico
+    // and bmp both arrive as `kind: 'image'` with null dimensions. With no ratio to derive a box
+    // from, that case falls back to the flat height `.dim-fallback` carries.
     const lone = mount(MessageAttachment, { props: { preview: unmeasured } });
     expect(lone.find('.dim-reserve').exists()).toBe(true);
     expect(lone.find('.dim-reserve img.inline-image').exists()).toBe(true);
+    expect(lone.find('.dim-reserve').classes()).toContain('dim-fallback');
+    expect(lone.find('.dim-reserve').attributes('style')).toBeUndefined();
 
-    // A measured image keeps its own aspect — the descriptor arrives atomically with the decision
-    // to render at all, so natural aspect costs nothing and a fixed box would only waste space.
+    // ⚠⚠ lurker#705. A MEASURED image used to get no wrapper box at all, on the belief that its
+    // width/height attributes reserved one — which is false wherever author CSS sets `width:
+    // auto` (this component does). Measured against a `src` that never resolves: Safari reserved
+    // 319x240, Chrome reserved 0x0, and the 240px it gained at decode time is what stopped a
+    // buffer opening at its own tail. The wrapper now carries a definite width and the ratio.
     const measured = mount(MessageAttachment, { props: { preview: IMAGE } });
-    expect(measured.find('.dim-reserve').exists()).toBe(false);
+    const box = measured.find('.dim-reserve');
+    expect(box.exists()).toBe(true);
+    expect(box.classes()).not.toContain('dim-fallback');
+    // 800x600 (see IMAGE): 240 * 4/3 = 320px of width, so the height lands on the 240 cap exactly
+    // as the loaded image would. The cap is applied to the WIDTH because `max-height` cannot bite
+    // until the natural width is known — which is the whole reason the old box arrived late.
+    expect(box.attributes('style')).toContain('width: 320px');
+    expect(box.attributes('style')).toContain('aspect-ratio: 800 / 600');
 
-    // In a strip the row already decides the height; a second fixed box would fight it.
+    // Never upscaled: a 16x16 favicon takes its own width, not the 240px cap. (`.dim-fallback`
+    // has no ratio to do this with, which is why an unmeasured image gets the flat box instead.)
+    const tiny = mount(MessageAttachment, {
+      props: { preview: preview({ ...IMAGE, thumbWidth: 16, thumbHeight: 16 }) },
+    });
+    expect(tiny.find('.dim-reserve').attributes('style')).toContain('width: 16px');
+
+    // In a strip the row already decides the height; a second box would fight it.
     const strip = mount(MessageAttachment, { props: { preview: unmeasured, inStrip: true } });
     expect(strip.find('.dim-reserve').exists()).toBe(false);
     expect(strip.find('img').classes()).toContain('strip-item');
+    const measuredStrip = mount(MessageAttachment, { props: { preview: IMAGE, inStrip: true } });
+    expect(measuredStrip.find('.dim-passthrough').attributes('style')).toBeUndefined();
   });
 });
 

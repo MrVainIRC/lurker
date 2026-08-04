@@ -4,26 +4,42 @@
 -->
 
 <template>
-  <!-- Direct media: no card, no chrome. A frame around an image is furniture around content.
-       `width`/`height` are the server's real pixel dimensions, and they're load-bearing rather
-       than decorative — the browser derives the intrinsic aspect ratio from them and reserves
-       the right box BEFORE any bytes arrive. -->
-  <!-- ⚠ The RESERVER is this span, not the image. When the server could not measure an image
-       there is no ratio to reserve a box from, and pinning the height on the `<img>` itself made
-       its empty letterbox part of the image: a 16x16 favicon.ico became a 240px-tall,
-       full-column-wide element carrying `role="button"` and a handler that calls
-       `stopPropagation`, so a tap anywhere in the ~99% of it that is background opened the
-       lightbox AND swallowed the row click — which on touch is the only thing that opens the
-       message-actions sheet. The height belongs to a wrapper that has no handlers, so those
-       pixels keep belonging to the row. Same defect class as the `@click.stop` note below,
-       re-created by a fixed box instead of by a modifier. -->
+  <!-- Direct media: no card, no chrome. A frame around an image is furniture around content. -->
+  <!-- ⚠⚠ THE RESERVER IS THIS SPAN, ALWAYS — never the `<img>`, and never its width/height
+       attributes. Those attributes were believed to reserve the box "BEFORE any bytes arrive";
+       measured in both engines against a `src` that never resolves, they do not:
+
+         Safari   pending 319x240   loaded 319x240
+         Chrome   pending   0x0     loaded 319x240      (attrs 1841x1384)
+
+       `.inline-image` sets `width: auto; height: auto` (below), which beats the attributes'
+       presentational hints and leaves only the UA `aspect-ratio`. An `<img>` that has not loaded
+       and carries `alt=""` "represents nothing" per HTML, and Blink honours that literally:
+       no box at all. WebKit keeps one from the ratio, which is the whole of lurker#705 — every
+       inline image in Chrome jumped 0 -> 240px at DECODE time, long after the atomic reveal's
+       `previewRevision` re-pin had run, so a buffer opened at the tail landed 240px short of it.
+
+       So the wrapper carries the geometry for every non-strip image, derived from the server's
+       dimensions rather than from bytes: `reserveStyle` resolves to exactly the box the loaded
+       image occupies. In a strip the row's fixed height governs and the wrapper stays out of the
+       way — see `dim-passthrough`.
+
+       ⚠ Geometry on the WRAPPER also keeps the empty letterbox out of the image: pinned on the
+       `<img>`, a 16x16 favicon.ico became a 240px-tall, full-column-wide element carrying
+       `role="button"` and a handler that calls `stopPropagation`, so a tap anywhere in the ~99%
+       of it that is background opened the lightbox AND swallowed the row click — which on touch
+       is the only thing that opens the message-actions sheet. A wrapper has no handlers, so those
+       pixels keep belonging to the row. Same defect class as the `@click.stop` note below. -->
   <span
     v-if="preview.kind === 'image' && preview.src"
-    :class="needsReservedBox ? 'dim-reserve' : 'dim-passthrough'"
+    :class="
+      inStrip ? 'dim-passthrough' : hasDimensions ? 'dim-reserve' : 'dim-reserve dim-fallback'
+    "
+    :style="reserveStyle"
   >
     <img
       class="inline-image"
-      :class="{ 'strip-item': inStrip, 'in-reserve': needsReservedBox }"
+      :class="{ 'strip-item': inStrip, 'in-reserve': !inStrip }"
       :src="preview.src"
       :width="preview.thumbWidth || undefined"
       :height="preview.thumbHeight || undefined"
@@ -33,6 +49,7 @@
       :role="viewerEnabled ? 'button' : undefined"
       :tabindex="viewerEnabled ? 0 : undefined"
       :aria-label="viewerEnabled ? imageLabel : undefined"
+      @load="$emit('measured')"
       @click="onImageClick"
       @keydown.enter.prevent="activate"
       @keydown.space.prevent="activate"
@@ -197,13 +214,17 @@ const props = defineProps<{
   inStrip?: boolean;
 }>();
 
-// ⚠ `measured` is emitted by VIDEO and AUDIO only, and the image `@load` emit that used to sit
-// beside them is deliberately gone. Every rendered image now has its box before any bytes: the
-// server's width/height attributes, `.strip-item`'s row height, or `.dim-reserve`'s wrapper. So
-// `@load` could no longer report growth — but it still fired `repinAfterPreviewGrowth(true)`,
-// which for a reader at the live tail runs `scrollToBottom()`. With the atomic reveal landing a
-// message's images in one flush, a five-image message meant five scroll corrections for growth
-// that cannot happen.
+// ⚠⚠ `measured` is emitted by IMAGE, VIDEO and AUDIO. The image `@load` emit was removed once,
+// on the reasoning that "every rendered image now has its box before any bytes" and so `@load`
+// could no longer report growth — the cost cited was five idempotent scroll corrections for a
+// five-image message. The premise was false in Blink (see the template: pending 0x0), the
+// removal took away the only thing that would have NOTICED, and lurker#705 is what that cost.
+//
+// It is back as a NET, and it is kept even though `reserveStyle` should now make it redundant.
+// A correction while pinned is `scrollTop = scrollHeight` — idempotent, invisible, and cheap
+// enough that "this growth cannot happen" is not worth betting a scroll position on. The guard
+// that makes it safe lives in the list: `repinAfterPreviewGrowth(true)` returns immediately
+// unless the reader is at the tail, so a scrolled-up reader is never moved by a late decode.
 // `activate` rather than opening the viewer here: what a click MEANS depends on the
 // arrangement, and the arrangement is the parent's business. A tap on one image of a strip
 // should open the whole strip as a gallery, and only the parent knows what the strip holds.
@@ -280,20 +301,51 @@ const heading = computed(() => {
 /**
  * Whether the server could measure this image.
  *
- * The `width`/`height` attributes are what reserve the box before any bytes arrive, so their
- * ABSENCE is the one case where an inline image's height depends on the decode — see `.dim-reserve`.
  * `imageDimensions` fails legitimately and not rarely: an exotic format, or a header sharp can't
- * parse inside the 64 KB it reads.
+ * parse inside the 64 KB it reads — ico and bmp both arrive as `kind: 'image'` with null
+ * dimensions. Measured or not, the box is reserved either way; this only picks WHICH box.
  */
 const hasDimensions = computed(() => !!props.preview.thumbWidth && !!props.preview.thumbHeight);
 
+/** The tallest a lone image gets. Mirrors `.inline-image`'s `max-height`, and `.dim-fallback`. */
+const MAX_IMAGE_HEIGHT = 240;
+
 /**
- * Whether this image needs a wrapper to hold its height open.
+ * The box this image will occupy, resolved from the server's dimensions instead of from bytes.
  *
- * Only outside a strip: the strip row already fixes the height there, and a second fixed box
- * would fight it.
+ * Null in the two cases that must not carry geometry: inside a strip, where the row's fixed
+ * height governs and a second box would fight it, and for an unmeasured image, which has no
+ * ratio to derive one from and falls back to `.dim-fallback`'s flat height.
+ *
+ * ⚠⚠ The HEIGHT CAP IS APPLIED AS A WIDTH, and that is what makes this exact rather than
+ * approximate. `max-height` cannot bite until the natural width is known — it is the reason the
+ * loaded box (319x240) is one no pre-load layout could have guessed — so the same cap, applied to
+ * the width as `MAX_IMAGE_HEIGHT * ratio`, reproduces the post-load result with no bytes:
+ *
+ *   width  = min(naturalWidth, MAX_IMAGE_HEIGHT * ratio)   here
+ *   width  = min(that, 100%)                               via `.dim-reserve`'s `max-width`
+ *   height = width / ratio                                 via `aspect-ratio`
+ *
+ * Each term is a constraint that would otherwise be discovered late: `naturalWidth` stops a 16x16
+ * favicon being upscaled to a blurry 240px, the cap holds a portrait shot, and `max-width` clamps
+ * a wide one to the column — with `aspect-ratio` carrying the height down with it, so a narrow
+ * viewport stays exact too.
+ *
+ * ⚠ The column term is a SEPARATE `max-width` declaration rather than a third argument to a CSS
+ * `min()`, which is what this returned first. `min()` is universally supported and would have
+ * worked in every browser — but happy-dom's style parser drops a declaration it can't parse, so
+ * the assertion in MessageAttachment.test.ts saw an empty width and could not have failed if the
+ * binding were deleted. Two plain declarations are observable by the test that guards them.
  */
-const needsReservedBox = computed(() => !props.inStrip && !hasDimensions.value);
+const reserveStyle = computed(() => {
+  if (props.inStrip || !hasDimensions.value) return null;
+  const w = props.preview.thumbWidth!;
+  const h = props.preview.thumbHeight!;
+  return {
+    width: `${Math.round(Math.min(w, MAX_IMAGE_HEIGHT * (w / h)))}px`,
+    aspectRatio: `${w} / ${h}`,
+  };
+});
 
 /**
  * ⚠⚠ THERE IS DELIBERATELY NO `@error` HANDLING, and that is a decision rather than an omission.
@@ -391,41 +443,53 @@ function activate(): void {
   /* Capped so one tall screenshot can't push the rest of the conversation off screen. The
      viewer is one click away for the full thing. */
   max-height: 240px;
-  /* ⚠ Both `auto`, and both needed. The `width`/`height` attributes give the browser the
-     intrinsic ratio to reserve space with; these let it SCALE that box down proportionally to
-     fit inside max-width/max-height. Without `width: auto` a portrait image hits the height
-     cap and keeps its attribute width, which is squashing rather than scaling. */
+  /* ⚠ Both `auto`, and both needed — for SCALING, which is all they were ever doing. They let the
+     box shrink proportionally inside max-width/max-height; without `width: auto` a portrait image
+     hits the height cap and keeps its attribute width, which is squashing rather than scaling.
+     ⚠⚠ What they do NOT do, and were long claimed to do, is leave the width/height attributes
+     free to reserve space: author styles beat presentational hints, so these two declarations are
+     precisely why an unloaded image had no box in Blink. The reservation lives on the wrapper
+     (see the template); these stay because a loaded image still has to fit the box it was given. */
   width: auto;
   height: auto;
   object-fit: contain;
   border-radius: var(--radius-md);
   display: block;
 }
-/* ⚠ The height lives on the WRAPPER, and the image sizes itself inside it.
-   With no width/height attributes there is no intrinsic ratio to reserve a box from, so the
-   element lays out at the UA default for a replaced element with no dimensions and grows to its
-   real size on decode — the one shape whose height would otherwise depend on bytes rather than on
-   its descriptor. 240px matches the `max-height` a measured image is scaled into, so the fallback
-   and the normal case agree on the tallest a lone image gets.
-   Putting it here rather than on the `<img>` is what keeps the empty area around a small image
-   from becoming a click target — see the template. */
-/* When no box needs reserving the wrapper generates NO box at all, so layout, flex participation
-   and the strip's sizing behave exactly as they did when the image was the direct child. */
+/* In a strip the ROW's fixed height is the reservation, so the wrapper generates no box at all
+   and layout, flex participation and the strip's snap points behave exactly as they did when the
+   image was the direct child (MessageAttachments' `.filmstrip :deep(.inline-image)` depends on
+   this — a snap point on a `display: contents` span would have nothing to align). */
 .dim-passthrough {
   display: contents;
 }
+/* Everywhere else the wrapper IS the box. Measured images get their geometry inline from
+   `reserveStyle` (a definite width plus `aspect-ratio`); `.dim-fallback` below covers the rest. */
 .dim-reserve {
   display: block;
-  height: 240px;
+  /* The column clamp, and the third term of the box `reserveStyle` computes — kept here rather
+     than inline because it is the one constraint that isn't knowable from the descriptor.
+     `aspect-ratio` carries the height down with the width when it bites, so the box stays exact
+     on a narrow viewport instead of only on a wide one. */
+  max-width: 100%;
   /* ⚠ NO fill, deliberately. It had one — the reasoning was that a lazily-loaded empty box reads
      as a hole punched in the conversation. QA read it the other way round: a panel-coloured
      rectangle is what a link-preview CARD looks like, so an image that merely hadn't been
      measured announced itself as a different kind of object entirely. Direct media has no chrome
      anywhere else in this component, and reserved space is not a thing to advertise. */
 }
-/* Inside the reserve the image is bounded by the box and never scaled up: sharp decodes
-   jpeg/png/webp/tiff/gif/svg/heif/raw, so ico and bmp arrive as `kind: 'image'` with null
-   dimensions, and a 16x16 favicon stretched to 240px would be 15x blurry. */
+/* No dimensions from the server means no ratio to derive a box from, so the one flat height that
+   remains honest is the tallest a lone image gets. 240px matches `.inline-image`'s `max-height`
+   and `MAX_IMAGE_HEIGHT`, so the fallback and the measured case agree on that ceiling. */
+.dim-fallback {
+  height: 240px;
+}
+/* Inside the reserve the image is bounded by the box and never scaled up. For a measured image
+   the two agree exactly — `reserveStyle` derives the box from the same ratio the image decodes
+   to — so this is what makes the arrival a no-op rather than a resize. For an unmeasured one it
+   is a real constraint: sharp decodes jpeg/png/webp/tiff/gif/svg/heif/raw, so ico and bmp arrive
+   as `kind: 'image'` with null dimensions, and a 16x16 favicon stretched to 240px would be 15x
+   blurry. */
 .inline-image.in-reserve {
   max-height: 100%;
   max-width: 100%;
