@@ -78,7 +78,7 @@ updates:
           - '*'
 
   # Docker base image. REQUIRED, not optional: the Dockerfile pins
-  # node:22-slim by digest for supply-chain reasons, which also freezes the
+  # node:24-slim by digest for supply-chain reasons, which also freezes the
   # Debian package set inside it. Without dependabot rewriting that digest the
   # base image silently rots and stops receiving OS security patches — the pin
   # would trade one risk for a worse one.
