@@ -2325,13 +2325,14 @@ export class IrcConnection {
       let memberModesChanged = false;
       let chanModesChanged = false;
       const listModes = this.listModes();
+      const prefixModes = this.prefixModes();
       if (ch) {
         for (const m of eventModes) {
           if (!m || !m.mode) continue;
           const sign = m.mode[0];
           const letter = m.mode.slice(1);
           // Per-user prefix mode: lands on the member, not on the channel.
-          if (m.param && isPrefixMode(letter)) {
+          if (m.param && prefixModes.has(letter)) {
             const member = ch.members.get(m.param.toLowerCase());
             if (!member) continue;
             const set = new Set(member.modes);
@@ -3408,10 +3409,38 @@ export class IrcConnection {
   // This is the same categorisation weechat/irssi/gamja use. Parameter modes
   // like +k/+l are NOT list modes, so they still land in the (+...) display.
   // Member-prefix modes (o/v/h, plus q/a where an ircd uses them as prefixes)
-  // are filtered earlier by isPrefixMode(), so they never reach this set.
+  // are filtered earlier by prefixModes(), so they never reach this set.
   private listModes(): Set<string> {
     const chanmodes = this.client.network?.options?.CHANMODES as string[] | undefined;
     return new Set((chanmodes?.[0] ?? 'beI').split(''));
+  }
+
+  // Member-prefix (membership) modes, from the server's ISUPPORT PREFIX token —
+  // the same 005 origin listModes() reads CHANMODES from, so the two agree
+  // per-ircd. irc-framework parses `PREFIX=(ov)@+` into {symbol, mode} pairs
+  // (registration.js), and leaves the RAW STRING in place when the token is
+  // malformed — hence the Array.isArray check rather than a truthiness test.
+  //
+  // This used to be a hardcoded q/a/o/h/v set, which disagreed with solanum:
+  // there +q is a quiet LIST mode, not an owner prefix, so a live
+  // `MODE #chan +q <mask>` was routed into the member-prefix branch and dropped
+  // before listModes() was ever consulted — making listModes effectively dead
+  // code for `q`. It only ever LOOKED right because quiet masks (!/@/*) never
+  // match a member nick; a bare-nick quiet on a joined member would have minted
+  // a phantom owner badge.
+  //
+  // A server that declares an empty PREFIX genuinely has no membership modes,
+  // so an empty array is honoured rather than falling back (same intent as
+  // listModes' `??`). The fallback covers pre-005 and malformed tokens only.
+  private prefixModes(): Set<string> {
+    const prefix = this.client.network?.options?.PREFIX as
+      | { symbol: string; mode: string }[]
+      | undefined;
+    // A FRESH Set on the fallback path too, matching listModes(). Handing out the shared
+    // module-level constant would let one connection's accidental mutation reach every other
+    // connection that ever fell back.
+    if (!Array.isArray(prefix)) return new Set(DEFAULT_PREFIX_MODES);
+    return new Set(prefix.map((p) => p.mode).filter(Boolean));
   }
 
   publishLag(): void {
@@ -5211,10 +5240,10 @@ export class IrcConnection {
   }
 }
 
-const PREFIX_MODES = new Set(['q', 'a', 'o', 'h', 'v']);
-function isPrefixMode(letter: string): boolean {
-  return PREFIX_MODES.has(letter);
-}
+// Pre-005 / malformed-PREFIX fallback for prefixModes(). The widest common set,
+// so a member mode isn't misread as a channel flag before ISUPPORT lands; once
+// the server declares PREFIX, that wins.
+const DEFAULT_PREFIX_MODES = new Set(['q', 'a', 'o', 'h', 'v']);
 
 // Decide how a channel +k / -k MODE change should update the persisted key.
 // Returns null for "leave the stored key alone" — the two cases that must NOT

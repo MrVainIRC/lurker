@@ -2243,6 +2243,134 @@ describe('channel mode display (status bar)', () => {
     expect(modes).not.toContain('secret');
   });
 
+  // #486: prefix/membership modes come from ISUPPORT PREFIX, not a hardcode.
+  // solanum/Libera declare `q` as a quiet LIST mode and leave it out of PREFIX;
+  // the old q/a/o/h/v hardcode routed `+q` into the member branch, dropping it
+  // before listModes() was consulted.
+  function solanumIsupport(conn: IrcConnection): void {
+    const options = conn.client.network.options as { CHANMODES?: unknown; PREFIX?: unknown };
+    // `q` in group A (list), and absent from PREFIX — solanum's actual shape.
+    options.CHANMODES = ['eIbq', 'k', 'flj', 'CFLMPQScgimnprstz'];
+    options.PREFIX = [
+      { symbol: '@', mode: 'o' },
+      { symbol: '+', mode: 'v' },
+    ];
+  }
+
+  it('routes solanum +q to the list-mode path, not the member-prefix path (#486)', () => {
+    const conn = makeConn();
+    solanumIsupport(conn);
+    const ch = conn.upsertChannel('#chan');
+    // A joined member whose nick is exactly the quiet's parameter. This is the
+    // case the hardcode got wrong: a bare-nick quiet matched a real member, so
+    // `troll` was handed a phantom owner-style `q` badge.
+    ch.members.set('troll', {
+      nick: 'troll',
+      modes: [],
+      away: false,
+      user: null,
+      host: null,
+      account: null,
+    });
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.client.emit('mode', {
+      target: '#chan',
+      modes: [{ mode: '+n' }, { mode: '+q', param: 'troll' }],
+      raw_modes: '+nq',
+      raw_params: ['troll'],
+    });
+
+    // No phantom badge: +q never reached the member branch.
+    expect(ch.members.get('troll')?.modes).toEqual([]);
+    // And it was excluded from the status bar as the list mode it is.
+    const modes = latestModes(publish);
+    expect(modes).toContain('n');
+    expect(modes).not.toContain('q');
+  });
+
+  it('still treats +q as a member prefix when the server declares it in PREFIX', () => {
+    const conn = makeConn();
+    // UnrealIRCd-shaped: q IS an owner prefix here, and not a list mode.
+    const options = conn.client.network.options as { CHANMODES?: unknown; PREFIX?: unknown };
+    options.CHANMODES = ['beI', 'k', 'l', 'imnpst'];
+    options.PREFIX = [
+      { symbol: '~', mode: 'q' },
+      { symbol: '@', mode: 'o' },
+      { symbol: '+', mode: 'v' },
+    ];
+    const ch = conn.upsertChannel('#chan');
+    ch.members.set('owner', {
+      nick: 'owner',
+      modes: [],
+      away: false,
+      user: null,
+      host: null,
+      account: null,
+    });
+    conn.publish = vi.fn<(event: unknown) => void>();
+
+    conn.client.emit('mode', {
+      target: '#chan',
+      modes: [{ mode: '+q', param: 'owner' }],
+      raw_modes: '+q',
+      raw_params: ['owner'],
+    });
+
+    expect(ch.members.get('owner')?.modes).toEqual(['q']);
+  });
+
+  it('falls back to the common prefix set before ISUPPORT PREFIX arrives', () => {
+    const conn = makeConn();
+    // No PREFIX declared yet (pre-005). +o must still land on the member.
+    const ch = conn.upsertChannel('#chan');
+    ch.members.set('bob', {
+      nick: 'bob',
+      modes: [],
+      away: false,
+      user: null,
+      host: null,
+      account: null,
+    });
+    conn.publish = vi.fn<(event: unknown) => void>();
+
+    conn.client.emit('mode', {
+      target: '#chan',
+      modes: [{ mode: '+o', param: 'bob' }],
+      raw_modes: '+o',
+      raw_params: ['bob'],
+    });
+
+    expect(ch.members.get('bob')?.modes).toEqual(['o']);
+  });
+
+  it('falls back rather than trusting a malformed PREFIX token', () => {
+    const conn = makeConn();
+    // irc-framework leaves the raw string in place when `(modes)symbols` fails
+    // to parse — Array.isArray, not truthiness, is what keeps this safe.
+    (conn.client.network.options as { PREFIX?: unknown }).PREFIX = 'garbage';
+    const ch = conn.upsertChannel('#chan');
+    ch.members.set('bob', {
+      nick: 'bob',
+      modes: [],
+      away: false,
+      user: null,
+      host: null,
+      account: null,
+    });
+    conn.publish = vi.fn<(event: unknown) => void>();
+
+    conn.client.emit('mode', {
+      target: '#chan',
+      modes: [{ mode: '+o', param: 'bob' }],
+      raw_modes: '+o',
+      raw_params: ['bob'],
+    });
+
+    expect(ch.members.get('bob')?.modes).toEqual(['o']);
+  });
+
   it('drops a channel mode when it is removed (-k)', () => {
     const conn = makeConn();
     conn.upsertChannel('#chan');
