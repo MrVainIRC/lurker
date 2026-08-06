@@ -122,7 +122,7 @@
           class="icon"
           title="Members"
           aria-label="Members"
-          @click="screen = 'members'"
+          @click="goMembers"
         >
           <i class="fa-solid fa-users"></i>
         </button>
@@ -151,7 +151,7 @@
     <!-- Screen: members -->
     <section v-else-if="screen === 'members'" class="screen members-screen">
       <header class="bar">
-        <button class="icon back" title="Back" @click="screen = 'buffer'">
+        <button class="icon back" title="Back" @click="router.back()">
           <i class="fa-solid fa-arrow-left"></i>
         </button>
         <span class="title">{{ bufferLabel }} — members</span>
@@ -226,11 +226,13 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import type { Network } from '../stores/networks.js';
 import type { BufferLike } from '../composables/useBufferActions.js';
 import { useNetworksStore } from '../stores/networks.js';
 import { useSocket } from '../composables/useSocket.js';
 import { useChatBootstrap } from '../composables/useChatBootstrap.js';
+import { pushBuffer } from '../composables/useBufferRoute.js';
 import { useActiveBuffer } from '../composables/useActiveBuffer.js';
 import { useBufferSearchScope } from '../composables/useBufferSearchScope.js';
 import { useBufferActions } from '../composables/useBufferActions.js';
@@ -253,6 +255,7 @@ import SearchModal from '../components/SearchModal.vue';
 import NickNoteModal from '../components/NickNoteModal.vue';
 import UserProfileModal from '../components/UserProfileModal.vue';
 import MediaViewerModal from '../components/MediaViewerModal.vue';
+import { screenForRoute } from '../utils/mobileScreen.js';
 import { useNickNotesStore } from '../stores/nickNotes.js';
 import { useDccStore } from '../stores/dcc.js';
 import { useWhoisStore } from '../stores/whois.js';
@@ -269,6 +272,8 @@ import { SYSTEM_KEY } from '../lib/virtualBuffers.js';
 
 const networks = useNetworksStore();
 const buffers = useBuffersStore();
+const router = useRouter();
+const route = useRoute();
 const auth = useAuthStore();
 
 // Admin panel entry in the mobile top bar.
@@ -309,22 +314,33 @@ function openSystemConsole() {
   // Route through activate() (not networks.activateSystem) so the system buffer
   // gets the full read-state lifecycle: divider snapshot + mark-read on entry.
   buffers.activate(null, SYSTEM_KEY);
-  // The activeKey watcher only fires on value change. If the user is
-  // already on `:system:` (e.g. they hit Back to the list, then re-tap
-  // the logo), the watcher won't advance them — drive the screen
-  // directly so the second tap behaves like the first.
-  screen.value = 'buffer';
+  openActiveBuffer();
 }
 
-// `list` (default) → tap a buffer → `buffer` → tap members icon → `members`.
-// Back arrows walk the stack backwards. We don't sync this to the URL — the
-// flow is short and stateful, and a URL would expose us to bookmarks that
-// land on the buffer screen with no active buffer.
 const channelListModal = reactive(useChannelListModal());
 const joinChannelModal = reactive(useJoinChannelModal());
 const viewer = reactive(useMediaViewer());
 const networkEditor = reactive(useNetworkEditor());
-const screen = ref('list');
+
+// `/` → list, `/buffer/<id>` → buffer, `/buffer/<id>/members` → members.
+//
+// DERIVED, never assigned (#744/#200). It used to be a ref nudged from four
+// places, which is what made the mobile shell and the URL able to disagree: the
+// list screen had no history entry of its own, so a back gesture from it popped
+// to a BUFFER url and the auto-advance watcher dutifully hauled the user into
+// that buffer, on top of the list they'd just asked for. With the route as the
+// single source, "which screen" and "which URL" cannot come apart, and the
+// platform back gesture walks members → buffer → list for free.
+//
+// The activeKey clause keeps a cold launch honest: `/buffer/7` is a real screen
+// the instant it's routed, but the buffer behind it arrives over the WS a beat
+// later, and rendering an empty buffer shell in the meantime looks broken. Wait
+// on the list, exactly as the old auto-advance did. useBufferRoute owns the
+// other end of that wait — it drops the URL back to `/` if the id never lands.
+const screen = computed(() => {
+  const v = screenForRoute(route.params.id, route.name === 'buffer-members', !!activeKey.value);
+  return v;
+});
 const showBookmarks = ref(false);
 const showTopic = ref(false);
 const showUploads = ref(false);
@@ -423,53 +439,49 @@ function closeNetworkForm() {
   networkEditor.close();
 }
 
-// BufferList calls buffers.activate() directly on click; we react to the
-// activeKey flip rather than intercepting the click so the same store state
-// drives both layouts. Auto-advance from list (the natural buffer-open
-// flow) AND from members (Send DM out of the nick menu flips activeKey to a
-// new DM buffer — the members screen for the old channel would otherwise be
-// stranded). The buffer screen itself doesn't auto-advance — we let in-
-// buffer activations (e.g. a user explicitly switching) drop the user
-// straight into the new buffer without re-triggering the watcher's screen
-// change since they're already on that screen.
-watch(activeKey, (next) => {
-  if (next && (screen.value === 'list' || screen.value === 'members')) {
-    screen.value = 'buffer';
-  } else if (next === null && screen.value !== 'list') {
-    // The active buffer went away (closed it, or its network was removed) while
-    // we were viewing it — activeKey only nulls in those "no buffer" cases, so
-    // fall back to the list instead of stranding the user on an empty buffer or
-    // members screen (#137). Buffer-to-buffer switches set activeKey directly
-    // (no null transition), so this never flickers mid-switch.
-    screen.value = 'list';
-  }
+// Send DM out of a nick menu flips activeKey to a new DM buffer while the user
+// is on the members screen; the route has to follow or they'd be left looking
+// at the old channel's member list. Every other activation path already
+// navigates (useBufferRoute's binding, or openActiveBuffer above).
+watch(activeKey, () => {
+  if (route.name === 'buffer-members') openActiveBuffer();
 });
 
-// Re-tapping the *same* buffer the user was last in doesn't change activeKey
-// so the watcher above doesn't fire. Catch the bubbled click here as a
-// belt-and-suspenders advance: if a row was hit and a buffer is active, go
-// to the buffer screen. Vue event bubbling runs BufferList's @click first,
-// so by the time we read activeKey it's already up to date.
+// Navigate to whichever buffer is active NOW.
+//
+// Needed wherever an activation might not CHANGE activeKey, because
+// useBufferRoute's activeKey → URL binding is a watcher and correctly does
+// nothing when there's no change: re-tapping the buffer you were last in, or
+// re-tapping the Lurker logo while already on `:system:`. Both are a
+// navigation from the user's point of view even though no state moved.
+function openActiveBuffer() {
+  const id = (activeBuf.value as { id?: number } | null)?.id;
+  if (id != null) pushBuffer(router, id);
+}
+
 function onBufferListClick(e: MouseEvent) {
   // :not(.section-head): the FRIENDS/FAVORITES headers are inert labels — a
   // tap on one must not teleport into whatever buffer was last active.
   const hit = (e.target as Element).closest('.channels li, .net-head:not(.section-head)');
   if (!hit) return;
-  if (activeKey.value) screen.value = 'buffer';
+  // BufferList's own @click ran first (Vue event bubbling), so activeKey is
+  // already up to date by the time we read it.
+  openActiveBuffer();
 }
 
 function goList() {
-  screen.value = 'list';
+  void router.push('/');
+}
+
+function goMembers() {
+  if (route.params.id) void router.push(`/buffer/${route.params.id}/members`);
 }
 
 const onJumpToMessage = useJumpToMessage({
   pendingScrollId,
-  // Mobile shell stacks list → buffer → members. Tapping a search result or
-  // notification needs to forward us onto the buffer screen so the message
-  // we just jumped to is actually visible.
-  afterActivate: () => {
-    screen.value = 'buffer';
-  },
+  // A search hit or notification for the buffer the user is ALREADY in doesn't
+  // move activeKey, so nothing would carry them off the list to see it.
+  afterActivate: openActiveBuffer,
 });
 
 useChatBootstrap({ onJump: onJumpToMessage });
