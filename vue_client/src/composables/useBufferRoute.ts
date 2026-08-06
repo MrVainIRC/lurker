@@ -9,6 +9,7 @@ import { useToastsStore } from '../stores/toasts.js';
 import { SYSTEM_KEY } from '../lib/virtualBuffers.js';
 import { connected } from './useSocket.js';
 import { whenReady } from '../lib/deferredReady.js';
+import { shouldPushBuffer } from '../utils/bufferNav.js';
 
 // Two-way binding between the active buffer and the URL (#744), so every buffer
 // has a direct link and browser back/forward walks between them. On an installed
@@ -121,13 +122,15 @@ export function useBufferRoute(): void {
       if (id === 'pending') return; // no server id yet — see above
       if (id === 'system') {
         clearPending();
-        if (route.name !== 'system') void router.replace('/system');
+        // Push, not replace. Opening the console is a navigation like any other
+        // buffer switch, and replacing swallows the entry the user came from —
+        // read a channel, tap the logo, press Back, and the channel is gone.
+        // It also beats MobileChat's own push (this watcher flushes first), so
+        // making it a replace here overrode the correct behaviour there.
+        if (route.name !== 'system') void router.push('/system');
         return;
       }
-      // Already there. This is the loop guard for the inbound direction: a
-      // route-driven activation produces an outbound target identical to the
-      // route that caused it, and stops here.
-      if (routeId() === id || inFlightId === id) return;
+      if (!shouldPushBuffer(id, routeId(), inFlightId)) return;
       clearPending();
       pushBuffer(router, id);
     },
@@ -191,6 +194,12 @@ export function useBufferRoute(): void {
             ttlMs: 5000,
           });
           void router.replace('/');
+          // Desktop has no "nothing selected" screen — #355's landing rule —
+          // and its mount-time fallback already declined, correctly, because
+          // the URL named a buffer at the time. Nothing re-runs it, so without
+          // this a stale bookmark ends on the blank pane that rule exists to
+          // prevent. Harmless on mobile: `/` still derives the list.
+          if (networks.activeKey == null) buffers.activate(null, SYSTEM_KEY);
         },
       );
     },

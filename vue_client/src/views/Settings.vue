@@ -16,7 +16,7 @@
 <template>
   <div class="settings-page">
     <header class="bar">
-      <RouterLink to="/" class="back">← back</RouterLink>
+      <RouterLink :to="chatEntry" class="back">← back</RouterLink>
       <h1>settings</h1>
     </header>
 
@@ -46,6 +46,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue';
 import type { Component } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import { canGoBack } from '../utils/routerBack.js';
 import { useSettingsStore } from '../stores/settings.js';
 import { useAuthStore } from '../stores/auth.js';
 import { useConfigStore } from '../stores/config.js';
@@ -70,6 +71,16 @@ const auth = useAuthStore();
 const config = useConfigStore();
 const route = useRoute();
 const router = useRouter();
+
+// Where "← back" returns to, captured ONCE on entry rather than read at click
+// time. Since #744 the chat URL names a specific buffer, so a hard-coded `/`
+// silently drops it — you return to chat still looking at #foo while the URL
+// says `/`, and copying or refreshing then lands somewhere else. Reading
+// history.state.back live wouldn't do either: every settings category is its
+// own push (SettingsSidebar), so it would walk back through the categories
+// browsed instead of leaving. Falls back to `/` when Settings was opened cold.
+const chatEntry =
+  (canGoBack() ? (window.history.state as { back?: string } | null)?.back : null) ?? '/';
 
 const error = ref('');
 

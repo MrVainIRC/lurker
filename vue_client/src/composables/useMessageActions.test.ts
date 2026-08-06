@@ -155,6 +155,15 @@ describe('copy link to message (#744)', () => {
     return other({ target, ...over });
   }
 
+  it('uses the id the row carries, without a store lookup', () => {
+    // Server message events ship bufferId, and buildActions runs for every
+    // rendered row — so the common path must not go through findByTarget.
+    const actions = useMessageActions().buildActions(
+      other({ target: '#chan', bufferId: 7 }), // no buffer registered in the store
+    );
+    expect(actions.map((a) => a.key)).toContain('link');
+  });
+
   it('offers the link once the buffer has a server id', () => {
     const actions = useMessageActions().buildActions(inBuffer('#chan', 7));
     expect(actions.map((a) => a.key)).toEqual(['reply', 'copy', 'link', 'save', 'ignore']);

@@ -151,7 +151,7 @@
     <!-- Screen: members -->
     <section v-else-if="screen === 'members'" class="screen members-screen">
       <header class="bar">
-        <button class="icon back" title="Back" @click="router.back()">
+        <button class="icon back" title="Back" @click="goBufferFromMembers">
           <i class="fa-solid fa-arrow-left"></i>
         </button>
         <span class="title">{{ bufferLabel }} — members</span>
@@ -256,6 +256,7 @@ import NickNoteModal from '../components/NickNoteModal.vue';
 import UserProfileModal from '../components/UserProfileModal.vue';
 import MediaViewerModal from '../components/MediaViewerModal.vue';
 import { screenForRoute } from '../utils/mobileScreen.js';
+import { backOrPush } from '../utils/routerBack.js';
 import { useNickNotesStore } from '../stores/nickNotes.js';
 import { useDccStore } from '../stores/dcc.js';
 import { useWhoisStore } from '../stores/whois.js';
@@ -491,6 +492,13 @@ function onBufferListClick(e: MouseEvent) {
 
 function goList() {
   void router.push('/');
+}
+
+// The members screen has its own URL now, so it can be the FIRST entry of a
+// document (refresh, or a shared link) — in which case back() either does
+// nothing or leaves Lurker. Fall back to the buffer it belongs to.
+function goBufferFromMembers() {
+  backOrPush(router, route.params.id ? `/buffer/${route.params.id}` : '/');
 }
 
 function goMembers() {

@@ -2143,12 +2143,20 @@ function holdCentred(el: HTMLElement, target: HTMLElement, id: number | string):
   const until = performance.now() + SCROLL_HOLD_MS;
   let released = false;
   // The moment the user takes over, stop — being dragged back to a row you're
-  // scrolling away from is worse than the drift.
+  // scrolling away from is worse than the drift. Keyboard and pointer count as
+  // taking over too: this same component binds PageUp/PageDown to scroll, and a
+  // scrollbar drag is a mousedown, so listening for touch and wheel alone would
+  // fight all of them for over a second.
   const release = () => {
     released = true;
   };
-  el.addEventListener('touchstart', release, { passive: true, once: true });
-  el.addEventListener('wheel', release, { passive: true, once: true });
+  const RELEASE_ON = ['touchstart', 'wheel', 'pointerdown', 'keydown'] as const;
+  for (const evt of RELEASE_ON) {
+    (evt === 'keydown' ? window : el).addEventListener(evt, release, {
+      passive: true,
+      once: true,
+    });
+  }
 
   const tick = () => {
     if (released || props.pendingScrollId !== id) return finish();
@@ -2166,8 +2174,9 @@ function holdCentred(el: HTMLElement, target: HTMLElement, id: number | string):
     else finish();
   };
   function finish(): void {
-    el.removeEventListener('touchstart', release);
-    el.removeEventListener('wheel', release);
+    for (const evt of RELEASE_ON) {
+      (evt === 'keydown' ? window : el).removeEventListener(evt, release);
+    }
   }
   requestAnimationFrame(tick);
 }

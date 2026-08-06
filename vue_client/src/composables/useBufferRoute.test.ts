@@ -310,8 +310,11 @@ describe('useBufferRoute — URL to active buffer', () => {
     start();
     await activate(':system:');
 
-    expect(h.replace).toHaveBeenCalledWith('/system');
-    expect(h.push).not.toHaveBeenCalled();
+    // PUSH, not replace: opening the console is a navigation like any other
+    // buffer switch. Replacing swallowed the entry the user came from, so
+    // reading a channel then opening the console lost the channel from history.
+    expect(h.push).toHaveBeenCalledWith('/system');
+    expect(h.replace).not.toHaveBeenCalled();
   });
 
   it('drops a non-numeric /buffer/<junk> back to /', async () => {
@@ -392,9 +395,13 @@ describe('useBufferRoute — URL to active buffer', () => {
 
     await vi.advanceTimersByTimeAsync(10_000);
 
-    expect(h.activate).not.toHaveBeenCalled();
     expect(h.toast).toHaveBeenCalledTimes(1);
     expect(h.replace).toHaveBeenCalledWith('/');
+    // And it lands SOMEWHERE. Desktop has no "nothing selected" screen, and its
+    // mount-time fallback already declined because the URL named a buffer at
+    // the time; nothing re-runs it, so a stale bookmark used to end on the
+    // blank pane that #355's landing rule exists to prevent.
+    expect(h.activate).toHaveBeenCalledWith(null, ':system:');
   });
 
   it('does not toast for a stale wait once the user has navigated on', async () => {

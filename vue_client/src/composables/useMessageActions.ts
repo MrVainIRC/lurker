@@ -16,9 +16,12 @@ export interface MessageLike {
   // bookmark gate in buildActions.
   networkId?: number | null;
   network_id?: number | null;
-  // The buffer the line belongs to. Present on every real message row; used to
-  // resolve the buffer id the "Copy link" action addresses.
+  // The buffer the line belongs to. Present on every real message row; the
+  // fallback for resolving the buffer id "Copy link" addresses.
   target?: string;
+  // buffers(id), as it rides on the server's message events — the direct
+  // answer, when the row came from the server rather than being minted here.
+  bufferId?: number;
 }
 
 export interface MessageContext {
@@ -83,14 +86,22 @@ export function useMessageActions(): MessageActionsAPI {
   //     jump in server buffer") — a link there would open the buffer and then
   //     toast at the user instead of scrolling
   //
-  // Resolving through findByTarget is an exact-key hit for every row rendered
-  // in a buffer (the O(n) folded scan only runs on a miss), which is what keeps
-  // this cheap enough to call per row from buildActions.
+  // Prefers the id the row already carries — server message events ship
+  // `bufferId` and the store keeps the event object whole, so the usual case
+  // needs no lookup at all. That matters because buildActions runs for EVERY
+  // rendered row (up to MAX_PER_BUFFER of them) on every re-render, and
+  // findByTarget's exact-key fast path degrades to an O(buffers) folded scan
+  // whenever the message's server-cased target differs from the buffer key —
+  // the #327 case — which would make it O(rows x buffers) per render.
+  // findByTarget stays as the fallback for rows minted locally.
   function messageLink(message: MessageLike): string | null {
     const networkId = message.networkId ?? message.network_id;
     if (message.id == null || networkId == null) return null;
     if (!message.target || message.target.startsWith(':server:')) return null;
-    const bufferId = buffers.findByTarget(networkId, message.target)?.id;
+    const bufferId =
+      typeof message.bufferId === 'number'
+        ? message.bufferId
+        : buffers.findByTarget(networkId, message.target)?.id;
     if (bufferId == null) return null;
     return `${window.location.origin}/buffer/${bufferId}?msg=${message.id}`;
   }
