@@ -385,6 +385,18 @@ export const useBuffersStore = defineStore('buffers', {
   getters: {
     list: (state) => Object.values(state.buffers),
     byKey: (state) => (k: string) => state.buffers[k] || null,
+    // Buffer by its server id — the REACTIVE counterpart to bufferKeyForId
+    // above. Both answer the same question, and the split is deliberate:
+    // bufferKeyForId reads the module-level keyById Map, which is the right
+    // shape for the hot frame-application path (O(1), no proxy) but is invisible
+    // to Vue, so a watcher built on it never re-fires when an id is learned.
+    // Anything reactive — the URL route resolver waiting on a cold-start deep
+    // link (#744) — has to come through here instead. O(buffers) per call, which
+    // is why it's for the route paths and not for frame application.
+    byId: (state) => (id: number) => {
+      for (const b of Object.values(state.buffers)) if (b.id === id) return b;
+      return null;
+    },
     // App-wide highlight total — the sum of every buffer's server-owned
     // `highlighted` count: channel mentions, every unread DM, and notable system
     // lines (see the server's computeUnreadFor). The active buffer always reads

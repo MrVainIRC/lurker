@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
-import { onBeforeUnmount, onMounted, watch } from 'vue';
+import { onBeforeUnmount, onMounted } from 'vue';
 import { useNetworksStore } from '../stores/networks.js';
 import { useSettingsStore } from '../stores/settings.js';
 import { useBuffersStore } from '../stores/buffers.js';
@@ -13,13 +13,8 @@ import { onJumpIntent } from './useJumpIntent.js';
 import { connected } from './useSocket.js';
 import { startAppBadge } from './useAppBadge.js';
 import { startBufferHydration } from './useBufferHydration.js';
+import { whenReady } from '../lib/deferredReady.js';
 import type { JumpTarget } from './useJumpToMessage.js';
-
-// How long to wait for the app to become able to honor a cold-start deep link
-// before giving up. networks.fetchAll() (REST) has resolved by the time we look,
-// but buffers + the socket come up asynchronously over the WS — and loadAround()
-// no-ops while the socket is closed — so we hold the jump until both land.
-const COLD_START_JUMP_TIMEOUT_MS = 10000;
 
 // The bus/notification payload is a jump target plus a `kind` discriminator
 // shared with the service-worker message channel; it IS what jump() consumes.
@@ -31,13 +26,87 @@ export interface ChatBootstrapOptions {
   onJump?: (data: JumpPayload) => void;
 }
 
+/** Rewrite the query string in place, leaving path and hash alone.
+ *
+ *  Carries the CURRENT history.state through rather than passing null: since
+ *  #744 there is a real history stack under `/buffer/<id>`, and vue-router keeps
+ *  its position/scroll bookkeeping in that state. Blanking it would leave the
+ *  entry the user is standing on unable to resolve a later go(delta). */
+function stripQuery(params: URLSearchParams): void {
+  const qs = params.toString();
+  window.history.replaceState(
+    window.history.state,
+    '',
+    window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash,
+  );
+}
+
+/** The buffer id a `/buffer/<id>` path names, or null for any other route.
+ *  Deliberately strict: a non-integer segment is "not a buffer route", never
+ *  NaN, which downstream `== null` checks would wave through. */
+function bufferIdFromPath(pathname: string): number | null {
+  const m = /^\/buffer\/([^/]+)\/?$/.exec(pathname);
+  if (!m) return null;
+  const n = Number(decodeURIComponent(m[1]));
+  return Number.isInteger(n) ? n : null;
+}
+
+// `/buffer/<id>?msg=<id>` — useBufferRoute owns activating the buffer, so the
+// only thing left here is the message to scroll to. Resolving the id needs the
+// same wait as the legacy form (buffers arrive over the WS after the route
+// does), but NOT the same failure toast: useBufferRoute is watching the same id
+// and already reports it, so this one gives up quietly rather than double-
+// toasting the one event.
+function consumeRouteJump(
+  bufferId: number,
+  params: URLSearchParams,
+  buffers: ReturnType<typeof useBuffersStore>,
+  onJump: (data: JumpPayload) => void,
+): () => void {
+  const noop = (): void => {};
+  const msg = params.get('msg');
+  const messageId = msg != null && msg !== '' ? Number(msg) : null;
+  // Strip ?msg immediately so a manual refresh doesn't re-jump. The PATH stays
+  // — it's the buffer the user is now looking at, not a consumed intent.
+  params.delete('msg');
+  stripQuery(params);
+  if (!Number.isFinite(messageId)) return noop;
+
+  // byId (not the module-level bufferKeyForId index) so the wait below is
+  // reactive — see the note on the store getter. The record already carries
+  // networkId/target, so there is no key to take apart.
+  const resolve = (): JumpPayload | null => {
+    const buf = buffers.byId(bufferId);
+    // networkId null == an app-scoped buffer (the system console), which has no
+    // per-message jump.
+    if (!buf || buf.networkId == null) return null;
+    return { kind: 'jump', networkId: buf.networkId, target: buf.target, messageId };
+  };
+  return whenReady(
+    () => connected.value && resolve() != null,
+    () => {
+      const payload = resolve();
+      if (payload) onJump(payload);
+    },
+  );
+}
+
 // The service worker can only hand a launched-from-closed PWA its jump target
 // through the URL (a postMessage would race the not-yet-registered listener and
-// be dropped), so the notificationclick handler writes /?net&buf&msg. Nothing
-// read it back before — the user just landed on the default screen. Recover it
-// here, strip it so a refresh doesn't re-jump, and fire it through the same
-// onJump the warm push path uses once the app can actually honor it. Returns a
-// disposer for the deferred-readiness watch/timer.
+// be dropped). Two forms exist:
+//
+//   /buffer/<id>?msg=<id>      current (#744) — a real route. useBufferRoute
+//                              activates the buffer; all this has to recover is
+//                              the message to scroll to.
+//   /?net&buf&msg              legacy. A service worker updates on its own
+//                              schedule, so an installed client keeps minting
+//                              this form until its worker rolls over — this
+//                              branch has to stay for at least a release, and
+//                              is removable once that's had time to propagate.
+//
+// Either way: recover the intent, strip it so a refresh doesn't re-jump, and
+// fire it through the same onJump the warm push path uses once the app can
+// actually honor it. Returns a disposer for the deferred-readiness watch/timer.
 export function consumeColdStartJump(
   buffers: ReturnType<typeof useBuffersStore>,
   onJump: (data: JumpPayload) => void,
@@ -45,8 +114,10 @@ export function consumeColdStartJump(
   const noop = (): void => {};
   // new URLSearchParams(string) never throws, so no guard is needed.
   const params = new URLSearchParams(window.location.search);
+  const routeBufferId = bufferIdFromPath(window.location.pathname);
   const net = params.get('net');
   const buf = params.get('buf');
+  if (routeBufferId != null) return consumeRouteJump(routeBufferId, params, buffers, onJump);
   if (!net || !buf) return noop;
   const networkId = Number(net);
   if (!Number.isFinite(networkId)) return noop;
@@ -56,12 +127,7 @@ export function consumeColdStartJump(
   params.delete('net');
   params.delete('buf');
   params.delete('msg');
-  const qs = params.toString();
-  window.history.replaceState(
-    null,
-    '',
-    window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash,
-  );
+  stripQuery(params);
 
   // Validate msg the same way as networkId: a malformed ?msg=foo must become a
   // null "open the conversation" intent, not NaN — NaN slips past the
@@ -70,40 +136,22 @@ export function consumeColdStartJump(
   const messageId = parsed != null && Number.isFinite(parsed) ? parsed : null;
 
   const payload: JumpPayload = { kind: 'jump', networkId, target: buf, messageId };
-  const ready = (): boolean => connected.value && buffers.isOpen(networkId, buf);
-  if (ready()) {
-    onJump(payload);
-    return noop;
-  }
-
-  let done = false;
-  // Watch the boolean directly (not a fresh [a, b] array, which compares
-  // unequal every tick) so the callback runs only when readiness actually flips.
-  const stop = watch(ready, (ok) => {
-    if (!ok) return;
-    cleanup();
-    onJump(payload);
-  });
-  const timer = setTimeout(() => {
-    cleanup();
-    // The buffer never re-opened (e.g. a channel/DM closed before the app was
-    // killed). The URL is already stripped, so without this the intent would
-    // vanish silently. Surface it instead of leaving the user on the default
-    // screen wondering why the notification did nothing.
-    useToastsStore().push({
-      kind: 'info',
-      title: messageId != null ? 'Couldn’t open that message' : 'Couldn’t open that conversation',
-      body: '',
-      ttlMs: 5000,
-    });
-  }, COLD_START_JUMP_TIMEOUT_MS);
-  function cleanup(): void {
-    if (done) return;
-    done = true;
-    stop();
-    clearTimeout(timer);
-  }
-  return cleanup;
+  return whenReady(
+    () => connected.value && buffers.isOpen(networkId, buf),
+    () => onJump(payload),
+    () => {
+      // The buffer never re-opened (e.g. a channel/DM closed before the app was
+      // killed). The URL is already stripped, so without this the intent would
+      // vanish silently. Surface it instead of leaving the user on the default
+      // screen wondering why the notification did nothing.
+      useToastsStore().push({
+        kind: 'info',
+        title: messageId != null ? 'Couldn’t open that message' : 'Couldn’t open that conversation',
+        body: '',
+        ttlMs: 5000,
+      });
+    },
+  );
 }
 
 // Shared post-login bootstrap for the chat shells (Desktop + Mobile).

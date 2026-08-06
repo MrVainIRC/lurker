@@ -1932,6 +1932,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         networkId: decorated.networkId,
         networkName: network?.name || `net:${decorated.networkId}`,
         target: decorated.target,
+        bufferId: decorated.bufferId,
         nick: decorated.nick,
         text: decorated.text,
         time: decorated.time,
@@ -1972,6 +1973,13 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         networkName: network?.name || `net:${networkId}`,
         // target is the friend's nick so a notification tap opens their DM.
         target: nick,
+        // The DM row is guaranteed to exist — isFavoriteDmPeer above resolved
+        // one to check the favorite — so this always lands, letting a cold tap
+        // launch straight into /buffer/<id> (#744). resolveBuffer, not
+        // getBuffer: identity is all that's wanted, and getBuffer materializes
+        // the full record including +k key decryption, which throws outright on
+        // a rotated key-id. No push path should be able to fail that way.
+        bufferId: resolveBuffer(userId, networkId, nick)?.id,
         // The contacts model had a display name distinct from the nick; a
         // favorite IS its buffer, so they coincide now. Kept in the payload
         // so shipped iOS builds' tap-routing sees the shape it expects.

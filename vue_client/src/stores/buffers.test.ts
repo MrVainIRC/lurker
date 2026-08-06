@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { nextTick, watch } from 'vue';
 import { setActivePinia, createPinia } from 'pinia';
 
 // buffers.ts reaches into the networks/toasts stores and the socket. The actions
@@ -1139,5 +1140,54 @@ describe('userhostFor — the DM header identity', () => {
       self: true,
     });
     expect(store.userhostFor(3, 'dave')).toBeNull();
+  });
+});
+
+describe('byId — the reactive counterpart to the keyById index', () => {
+  it('resolves a buffer by its server id', () => {
+    const store = useBuffersStore();
+    store.ensure(1, '#chan', 7);
+
+    expect(store.byId(7)?.target).toBe('#chan');
+    expect(store.byId(999)).toBeNull();
+  });
+
+  it('re-fires a watcher when a buffer arrives — the whole reason it exists', async () => {
+    // The module-level keyById Map is invisible to Vue, so a watcher built on
+    // bufferKeyForId never re-runs when an id is learned. That silently broke
+    // the cold-start deep link (#744): the socket connects FIRST, buffers land
+    // after, and the resolver had already taken its only look. This getter must
+    // track reactive state instead — asserted here against the real store,
+    // because a test double is free to be more reactive than production is.
+    const store = useBuffersStore();
+    const seen: boolean[] = [];
+    const stop = watch(
+      () => store.byId(7) != null,
+      (found) => seen.push(found),
+    );
+
+    store.ensure(1, '#chan', 7);
+    await nextTick();
+    stop();
+
+    expect(seen).toEqual([true]);
+  });
+
+  it('re-fires when an already-open buffer LEARNS its id', async () => {
+    // The optimistic path: "Send DM" materializes the buffer, and the row id
+    // only arrives with the server's answer.
+    const store = useBuffersStore();
+    store.ensure(1, 'newpal');
+    const seen: boolean[] = [];
+    const stop = watch(
+      () => store.byId(9) != null,
+      (found) => seen.push(found),
+    );
+
+    store.ensure(1, 'newpal', 9);
+    await nextTick();
+    stop();
+
+    expect(seen).toEqual([true]);
   });
 });
