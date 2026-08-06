@@ -66,28 +66,39 @@ export function themeNameError(raw: string): string {
   return '';
 }
 
-// The Light palette. Derived from the dark (Monokai Pro) defaults via the same
-// OKLCH mapping the iOS client uses for its light-mode nick/mIRC palettes
-// (lurker-ios NickColor.swift: hue preserved exactly, chroma held, lightness
-// remapped — every chromatic value clears WCAG 3:1 large-text on the light
-// canvas). Neutrals mirror the dark theme rather than inverting it: light bg
-// is dark's fg family (#fcfcfa) and light ink is dark's bg (#212022).
+// The Light palette, from two sources:
+//
+// NEUTRALS + SEMANTIC COLORS follow the "Monokai Light" tmTheme (the classic
+// Sublime Monokai palette adapted to white — the closest thing to an upstream
+// light Monokai). Its exact value is used wherever it clears WCAG 3:1 on
+// white; the rest (that port kept several dark-theme accents verbatim) are
+// darkened along their own hue until they do: orange #FD971F→#d57f1a, green
+// #6AAF19→#63a317, cyan #28C6E4→#20a0b9, purple #AE81FF→#a77cf5, comment gray
+// #9F9F8F→#949485. The tmTheme defines no yellow, so `warn` keeps the OKLCH
+// derivation below.
+//
+// NICK + mIRC PALETTES stay the OKLCH mapping the iOS client uses for its
+// light mode (lurker-ios NickColor.swift: Monokai Pro hues preserved exactly,
+// lightness remapped, everything ≥3:1): the tmTheme has no counterpart to the
+// 19-hue nick spread, and the mIRC chromatic slots track the nick palette by
+// design (colored text harmonises with colored nicks).
 const LIGHT_OVERRIDES: Record<string, SettingValue> = {
-  'look.color.bg': '#fcfcfa',
-  'look.color.bg_soft': '#f1eff3',
-  'look.color.fg': '#212022',
-  'look.color.fg_muted': '#7a797c',
-  'look.color.accent': '#7061b1', // light of #a99dec
-  'look.color.good': '#688f2d', //   light of #b3db82
-  'look.color.warn': '#a68500', //   light of #f9d978
-  'look.color.bad': '#b52d55', //    light of #ed6c89
-  'look.color.border': '#dcdade',
-  'look.color.message.alt_fg': '#4f4e51',
-  'look.color.member.owner': '#b52d55', //  light of #ed6c89
-  'look.color.member.admin': '#b95417', //  light of #fc9867
-  'look.color.member.op': '#7061b1', //     light of #a99dec
-  'look.color.member.halfop': '#00919e', // light of #78dce8
-  'look.color.member.voice': '#688f2d', //  light of #b3db82
+  'look.color.bg': '#ffffff', //     tmTheme background
+  'look.color.bg_soft': '#ededed', // tmTheme inactiveSelection
+  'look.color.fg': '#000000', //     tmTheme foreground
+  'look.color.fg_muted': '#949485', // tmTheme comment #9F9F8F, clamped to 3:1
+  'look.color.accent': '#a77cf5', // tmTheme purple #AE81FF, clamped to 3:1
+  'look.color.good': '#63a317', //   tmTheme green #6AAF19, clamped to 3:1
+  'look.color.warn': '#a68500', //   OKLCH light of #f9d978 (no tmTheme yellow)
+  'look.color.bad': '#f92672', //    tmTheme pink, exact (3.79:1)
+  'look.color.border': '#e0e0e0', // tmTheme invisibles
+  'look.color.message.alt_fg': '#3a3a3a', // slightly dimmed from the black fg
+  // Same role pairing as dark (owner=bad, op=accent, voice=good).
+  'look.color.member.owner': '#f92672', //  tmTheme pink, exact
+  'look.color.member.admin': '#d57f1a', //  tmTheme orange #FD971F, clamped
+  'look.color.member.op': '#a77cf5', //     tmTheme purple, clamped
+  'look.color.member.halfop': '#20a0b9', // tmTheme cyan #28C6E4, clamped
+  'look.color.member.voice': '#63a317', //  tmTheme green, clamped
   // Same 19 hues as the dark nick palette, same order, lightness remapped.
   'look.nick.colors': [
     '#c40553',
