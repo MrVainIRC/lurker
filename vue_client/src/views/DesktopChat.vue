@@ -355,14 +355,24 @@ const buffers = useBuffersStore();
 useSocket();
 
 // Land on the system buffer instead of a blank "No messages yet." pane when
-// nothing else is active on load (#355) — but not over the top of a deep link
-// that hasn't resolved yet. See shouldOpenSystemBufferOnLoad for why the route
-// half of that test is load-bearing.
-onMounted(() => {
-  if (shouldOpenSystemBufferOnLoad(networks.activeKey, route.params.id)) {
-    buffers.activate(null, SYSTEM_KEY);
-  }
-});
+// nothing else is active (#355) — but not over the top of a deep link that
+// hasn't resolved yet. See shouldOpenSystemBufferOnLoad for why the route half
+// of that test is load-bearing.
+//
+// A watcher rather than a one-shot onMounted, because the interesting case
+// arrives LATE: a stale bookmark declines this rule at mount (the URL names a
+// buffer), then fails to resolve and drops the route back to `/` ten seconds
+// later with nothing active. A one-shot never sees that, and desktop is left on
+// the blank pane this rule exists to prevent.
+watch(
+  () => [networks.activeKey, route.params.id] as const,
+  () => {
+    if (shouldOpenSystemBufferOnLoad(networks.activeKey, route.params.id)) {
+      buffers.activate(null, SYSTEM_KEY);
+    }
+  },
+  { immediate: true },
+);
 const {
   active,
   activeBuf,

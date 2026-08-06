@@ -14,6 +14,8 @@ import { connected } from './useSocket.js';
 import { startAppBadge } from './useAppBadge.js';
 import { startBufferHydration } from './useBufferHydration.js';
 import { whenReady } from '../lib/deferredReady.js';
+import type { Router } from 'vue-router';
+import { useRouter } from 'vue-router';
 import type { JumpTarget } from './useJumpToMessage.js';
 
 // The bus/notification payload is a jump target plus a `kind` discriminator
@@ -26,19 +28,16 @@ export interface ChatBootstrapOptions {
   onJump?: (data: JumpPayload) => void;
 }
 
-/** Rewrite the query string in place, leaving path and hash alone.
+/** Drop the consumed deep-link params, leaving path and hash alone.
  *
- *  Carries the CURRENT history.state through rather than passing null: since
- *  #744 there is a real history stack under `/buffer/<id>`, and vue-router keeps
- *  its position/scroll bookkeeping in that state. Blanking it would leave the
- *  entry the user is standing on unable to resolve a later go(delta). */
-function stripQuery(params: URLSearchParams): void {
-  const qs = params.toString();
-  window.history.replaceState(
-    window.history.state,
-    '',
-    window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash,
-  );
+ *  Goes through the ROUTER, not raw replaceState. A raw call updates the
+ *  address bar while vue-router's own recorded location keeps the consumed
+ *  `?msg` — and that stale location is what gets written into history.state.back
+ *  on the next push, which Settings captures as its return target. Clicking
+ *  "← back" from Settings then navigated to the un-stripped URL and re-fired the
+ *  jump, defeating the "strip it so a refresh doesn't re-jump" guarantee. */
+function stripQuery(router: Router, params: URLSearchParams): void {
+  void router.replace({ query: Object.fromEntries(params.entries()) });
 }
 
 /** The buffer id a `/buffer/<id>` path names, or null for any other route.
@@ -61,6 +60,7 @@ function consumeRouteJump(
   bufferId: number,
   params: URLSearchParams,
   buffers: ReturnType<typeof useBuffersStore>,
+  router: Router,
   onJump: (data: JumpPayload) => void,
 ): () => void {
   const noop = (): void => {};
@@ -69,7 +69,7 @@ function consumeRouteJump(
   // Strip ?msg immediately so a manual refresh doesn't re-jump. The PATH stays
   // — it's the buffer the user is now looking at, not a consumed intent.
   params.delete('msg');
-  stripQuery(params);
+  stripQuery(router, params);
   if (!Number.isFinite(messageId)) return noop;
 
   // byId (not the module-level bufferKeyForId index) so the wait below is
@@ -109,6 +109,7 @@ function consumeRouteJump(
 // actually honor it. Returns a disposer for the deferred-readiness watch/timer.
 export function consumeColdStartJump(
   buffers: ReturnType<typeof useBuffersStore>,
+  router: Router,
   onJump: (data: JumpPayload) => void,
 ): () => void {
   const noop = (): void => {};
@@ -117,7 +118,8 @@ export function consumeColdStartJump(
   const routeBufferId = bufferIdFromPath(window.location.pathname);
   const net = params.get('net');
   const buf = params.get('buf');
-  if (routeBufferId != null) return consumeRouteJump(routeBufferId, params, buffers, onJump);
+  if (routeBufferId != null)
+    return consumeRouteJump(routeBufferId, params, buffers, router, onJump);
   if (!net || !buf) return noop;
   const networkId = Number(net);
   if (!Number.isFinite(networkId)) return noop;
@@ -127,7 +129,7 @@ export function consumeColdStartJump(
   params.delete('net');
   params.delete('buf');
   params.delete('msg');
-  stripQuery(params);
+  stripQuery(router, params);
 
   // Validate msg the same way as networkId: a malformed ?msg=foo must become a
   // null "open the conversation" intent, not NaN — NaN slips past the
@@ -163,6 +165,7 @@ export function useChatBootstrap({ onJump }: ChatBootstrapOptions = {}): void {
   const networks = useNetworksStore();
   const settings = useSettingsStore();
   const buffers = useBuffersStore();
+  const router = useRouter();
   const onboarding = useOnboarding();
   const disposers: Array<() => void> = [];
 
@@ -179,7 +182,7 @@ export function useChatBootstrap({ onJump }: ChatBootstrapOptions = {}): void {
       }),
     );
     disposers.push(onJumpIntent(onJump));
-    disposers.push(consumeColdStartJump(buffers, onJump));
+    disposers.push(consumeColdStartJump(buffers, router, onJump));
   }
 
   onMounted(async () => {

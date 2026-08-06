@@ -37,20 +37,27 @@ import { shouldPushBuffer } from '../utils/bufferNav.js';
 // value rather than the lagging route.
 let inFlightId: number | null = null;
 
+/** The buffer id the CURRENT route names, or null. Only the buffer route counts:
+ *  `/buffer/7/members` carries id 7 too, and treating that as "already there"
+ *  would strand a jump to the buffer you're on behind the member list. */
+function currentRouteBufferId(router: Router): number | null {
+  const current = router.currentRoute.value;
+  if (current.name !== 'buffer') return null;
+  const raw = current.params.id;
+  if (typeof raw !== 'string') return null;
+  const n = Number(raw);
+  return Number.isInteger(n) ? n : null;
+}
+
 /** Navigate to a buffer, unless we're already there or already on the way. */
 export function pushBuffer(router: Router, id: number): void {
-  if (inFlightId === id) return;
-  // Already the current route. vue-router would reject this as a duplicated
-  // navigation anyway, but it is reached on every single buffer open — the
-  // watcher pushes, the route lands, and the click handler then asks for the
-  // same place ~30ms later — so it is worth not starting the navigation at all.
-  //
-  // Match the NAME too: `/buffer/7/members` carries id 7 as well, and treating
-  // that as "already there" would make this a no-op from the members screen —
-  // so a jump to the buffer you're already in (a toast, a search hit) couldn't
-  // get you back off the member list.
-  const current = router.currentRoute.value;
-  if (current.name === 'buffer' && current.params.id === String(id)) return;
+  // The SAME predicate the watcher uses, deliberately. This function used to
+  // re-check the route unconditionally, which quietly overrode it: with a push
+  // to another buffer in flight, shouldPushBuffer correctly says "navigate" and
+  // this said "already there" off the stale route — so the user's last
+  // activation was dropped and the in-flight one landed instead. Two guards for
+  // one decision is what made that possible; now there is one.
+  if (!shouldPushBuffer(id, currentRouteBufferId(router), inFlightId)) return;
   inFlightId = id;
   void router.push(`/buffer/${id}`).finally(() => {
     if (inFlightId === id) inFlightId = null;
@@ -193,13 +200,13 @@ export function useBufferRoute(): void {
             body: '',
             ttlMs: 5000,
           });
+          // Drop the dead URL. Nothing is activated here on purpose: doing so
+          // fired the outbound watcher, which pushed /system before this
+          // replace had finalized and cancelled it — leaving the dead
+          // /buffer/<id> one Back press away, where it would time out and toast
+          // all over again. Landing somewhere is the shell's business, and
+          // DesktopChat re-runs its rule when the route settles at `/`.
           void router.replace('/');
-          // Desktop has no "nothing selected" screen — #355's landing rule —
-          // and its mount-time fallback already declined, correctly, because
-          // the URL named a buffer at the time. Nothing re-runs it, so without
-          // this a stale bookmark ends on the blank pane that rule exists to
-          // prevent. Harmless on mobile: `/` still derives the list.
-          if (networks.activeKey == null) buffers.activate(null, SYSTEM_KEY);
         },
       );
     },

@@ -95,7 +95,7 @@ vi.mock('../stores/buffers.js', () => ({
     networkId == null ? target : `${networkId}::${target}`,
 }));
 
-import { useBufferRoute } from './useBufferRoute.js';
+import { useBufferRoute, pushBuffer } from './useBufferRoute.js';
 
 const Harness = defineComponent({
   setup() {
@@ -251,6 +251,53 @@ describe('useBufferRoute — active buffer to URL', () => {
   });
 });
 
+describe('pushBuffer — one guard, not two', () => {
+  /** A router parked at `at`, whose pushes stay in flight until released. */
+  function pendingRouter(at: string) {
+    const pushes: string[] = [];
+    let release!: () => void;
+    const settled = new Promise<void>((r) => (release = r));
+    const m = /^\/buffer\/(\d+)$/.exec(at);
+    return {
+      pushes,
+      release,
+      router: {
+        currentRoute: {
+          value: { name: m ? 'buffer' : 'chat', params: m ? { id: m[1] } : {} },
+        },
+        push: (to: string) => {
+          pushes.push(to);
+          return settled;
+        },
+      } as any,
+    };
+  }
+
+  it('navigates to the current route when a push elsewhere is in flight', async () => {
+    // The route lags a push — the whole reason an in-flight target is tracked.
+    // pushBuffer used to re-check the route ANYWAY, so with /buffer/8 in flight
+    // a re-activation of #a (id 7, which the route still names) read as
+    // "already there" and was dropped; /buffer/8 then landed and the inbound
+    // binding moved the user to #b. Two guards for one decision.
+    const { router, pushes, release } = pendingRouter('/buffer/7');
+
+    pushBuffer(router, 8); // in flight, route still says 7
+    pushBuffer(router, 7); // the user comes back to #a before it lands
+
+    expect(pushes).toEqual(['/buffer/8', '/buffer/7']);
+    release();
+    await Promise.resolve();
+  });
+
+  it('still skips a push to where we already are', async () => {
+    const { router, pushes, release } = pendingRouter('/buffer/7');
+    pushBuffer(router, 7);
+    expect(pushes).toEqual([]);
+    release();
+    await Promise.resolve();
+  });
+});
+
 describe('useBufferRoute — URL to active buffer', () => {
   it('activates the buffer a launch URL names', async () => {
     known('1::#chan', 7);
@@ -397,11 +444,13 @@ describe('useBufferRoute — URL to active buffer', () => {
 
     expect(h.toast).toHaveBeenCalledTimes(1);
     expect(h.replace).toHaveBeenCalledWith('/');
-    // And it lands SOMEWHERE. Desktop has no "nothing selected" screen, and its
-    // mount-time fallback already declined because the URL named a buffer at
-    // the time; nothing re-runs it, so a stale bookmark used to end on the
-    // blank pane that #355's landing rule exists to prevent.
-    expect(h.activate).toHaveBeenCalledWith(null, ':system:');
+    // And NOTHING else navigates. Activating a landing buffer here fired the
+    // outbound watcher, which pushed /system before this replace had finalized
+    // and cancelled it — leaving the dead /buffer/<id> one Back press away,
+    // where it would time out and toast all over again. Choosing where to land
+    // is the shell's job (DesktopChat's rule re-runs when the route settles).
+    expect(h.activate).not.toHaveBeenCalled();
+    expect(h.push).not.toHaveBeenCalled();
   });
 
   it('does not toast for a stale wait once the user has navigated on', async () => {

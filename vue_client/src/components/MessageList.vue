@@ -2167,7 +2167,15 @@ function holdCentred(el: HTMLElement, target: HTMLElement, id: number | string):
       const box = el.getBoundingClientRect();
       const drift = rect.top + rect.height / 2 - (box.top + box.height / 2);
       if (Math.abs(drift) > SCROLL_DRIFT_PX) {
+        // Give up once the scroller stops moving. A target within half a
+        // viewport of either end of the slice can never BE centred — scrollTop
+        // clamps — so the drift check stays true forever and this would force a
+        // style+layout pass every frame for the full hold, on exactly the large
+        // slices that motivated it. Jumping to the oldest or newest message in
+        // a buffer hits this every time.
+        const before = el.scrollTop;
         node.scrollIntoView({ block: 'center', behavior: 'auto' });
+        if (el.scrollTop === before) return finish();
       }
     }
     if (performance.now() < until) requestAnimationFrame(tick);

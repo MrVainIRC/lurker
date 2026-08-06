@@ -28,6 +28,22 @@ function installWindow(search: string): void {
 }
 
 const currentSearch = (): string => (globalThis as any).window.location.search;
+
+// Stands in for vue-router: consumeColdStartJump strips the deep-link params
+// through it now (a raw replaceState left the router's own location holding the
+// consumed ?msg, which then leaked into Settings' back target and re-fired the
+// jump). Mirrors the URL the same way the real router does.
+const replaceCalls: Array<Record<string, string>> = [];
+const fakeRouter = () =>
+  ({
+    replace: ({ query }: { query: Record<string, string> }) => {
+      replaceCalls.push(query);
+      const qs = new URLSearchParams(query).toString();
+      const loc = (globalThis as any).window.location;
+      loc.search = qs ? `?${qs}` : '';
+      return Promise.resolve();
+    },
+  }) as any;
 const openBuffers = { isOpen: () => true } as any;
 
 beforeEach(() => {
@@ -44,7 +60,7 @@ describe('consumeColdStartJump', () => {
     installWindow('?net=1&buf=%23chan&msg=42');
     const onJump = vi.fn<(payload: unknown) => void>();
 
-    consumeColdStartJump(openBuffers, onJump);
+    consumeColdStartJump(openBuffers, fakeRouter(), onJump);
 
     expect(onJump).toHaveBeenCalledWith({
       kind: 'jump',
@@ -61,7 +77,7 @@ describe('consumeColdStartJump', () => {
     installWindow('?net=2&buf=alice');
     const onJump = vi.fn<(payload: unknown) => void>();
 
-    consumeColdStartJump(openBuffers, onJump);
+    consumeColdStartJump(openBuffers, fakeRouter(), onJump);
 
     expect(onJump).toHaveBeenCalledWith({
       kind: 'jump',
@@ -76,7 +92,7 @@ describe('consumeColdStartJump', () => {
     installWindow('?net=1&buf=%23x&msg=foo');
     const onJump = vi.fn<(payload: unknown) => void>();
 
-    consumeColdStartJump(openBuffers, onJump);
+    consumeColdStartJump(openBuffers, fakeRouter(), onJump);
 
     expect(onJump).toHaveBeenCalledWith({
       kind: 'jump',
@@ -86,12 +102,27 @@ describe('consumeColdStartJump', () => {
     });
   });
 
+  it('strips THROUGH the router, not raw history', () => {
+    // A raw replaceState updates the address bar while vue-router's own
+    // recorded location keeps the consumed ?msg — and that stale location is
+    // what lands in history.state.back on the next push, which Settings
+    // captures as its return target. "← back" then replayed the jump.
+    h.connected.value = true;
+    installWindow('?net=1&buf=%23chan&msg=42');
+    replaceCalls.length = 0;
+
+    consumeColdStartJump(openBuffers, fakeRouter(), vi.fn<(p: unknown) => void>());
+
+    expect(replaceCalls).toHaveLength(1);
+    expect(replaceCalls[0]).not.toHaveProperty('msg');
+  });
+
   it('does nothing and leaves unrelated params when there is no deep link', () => {
     h.connected.value = true;
     installWindow('?foo=bar');
     const onJump = vi.fn<(payload: unknown) => void>();
 
-    consumeColdStartJump(openBuffers, onJump);
+    consumeColdStartJump(openBuffers, fakeRouter(), onJump);
 
     expect(onJump).not.toHaveBeenCalled();
     expect(currentSearch()).toBe('?foo=bar');
@@ -105,7 +136,7 @@ describe('consumeColdStartJump', () => {
       installWindow('?net=1&buf=%23chan&msg=42');
       const onJump = vi.fn<(payload: unknown) => void>();
 
-      dispose = consumeColdStartJump(openBuffers, onJump);
+      dispose = consumeColdStartJump(openBuffers, fakeRouter(), onJump);
 
       // Not fired yet, but the URL is already cleaned so a refresh can't double it.
       expect(onJump).not.toHaveBeenCalled();
