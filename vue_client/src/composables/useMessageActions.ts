@@ -3,6 +3,7 @@
 
 import type { ContextMenuItem } from './useContextMenu.js';
 import { useBookmarksStore } from '../stores/bookmarks.js';
+import { useBuffersStore } from '../stores/buffers.js';
 import { useContextMenu } from './useContextMenu.js';
 
 export interface MessageLike {
@@ -15,6 +16,9 @@ export interface MessageLike {
   // bookmark gate in buildActions.
   networkId?: number | null;
   network_id?: number | null;
+  // The buffer the line belongs to. Present on every real message row; used to
+  // resolve the buffer id the "Copy link" action addresses.
+  target?: string;
 }
 
 export interface MessageContext {
@@ -23,7 +27,7 @@ export interface MessageContext {
   onIgnore(message: MessageLike): void;
 }
 
-export type MessageActionKey = 'reply' | 'copy' | 'save' | 'ignore';
+export type MessageActionKey = 'reply' | 'copy' | 'link' | 'save' | 'ignore';
 
 export interface MessageAction {
   key: MessageActionKey;
@@ -65,7 +69,31 @@ export interface MessageActionsAPI {
 // `context` shape: { networkId, onReply(message), onIgnore(message) }
 export function useMessageActions(): MessageActionsAPI {
   const bookmarks = useBookmarksStore();
+  const buffers = useBuffersStore();
   const menu = useContextMenu();
+
+  // Absolute permalink to one message, or null when the line can't have one.
+  // The buffer route addresses by server id (#744), so this needs the message's
+  // id AND its buffer's — and it deliberately refuses the two kinds of line a
+  // link couldn't actually land on:
+  //
+  //   - app-scoped system lines (networkId null), which have no buffer route
+  //     that a per-message jump accepts
+  //   - `:server:` consoles, which useJumpToMessage rejects outright ("Cannot
+  //     jump in server buffer") — a link there would open the buffer and then
+  //     toast at the user instead of scrolling
+  //
+  // Resolving through findByTarget is an exact-key hit for every row rendered
+  // in a buffer (the O(n) folded scan only runs on a miss), which is what keeps
+  // this cheap enough to call per row from buildActions.
+  function messageLink(message: MessageLike): string | null {
+    const networkId = message.networkId ?? message.network_id;
+    if (message.id == null || networkId == null) return null;
+    if (!message.target || message.target.startsWith(':server:')) return null;
+    const bufferId = buffers.findByTarget(networkId, message.target)?.id;
+    if (bufferId == null) return null;
+    return `${window.location.origin}/buffer/${bufferId}?msg=${message.id}`;
+  }
 
   function buildActions(message: MessageLike | null | undefined): MessageAction[] {
     if (!message) return [];
@@ -81,6 +109,12 @@ export function useMessageActions(): MessageActionsAPI {
 
     if (message.text) {
       actions.push({ key: 'copy', label: 'Copy text', icon: 'fa-regular fa-copy' });
+    }
+
+    // Sits next to Copy text because it's the other "take this away with you"
+    // action: a permalink to bookmark, or to open in a new window.
+    if (messageLink(message)) {
+      actions.push({ key: 'link', label: 'Copy link to message', icon: 'fa-solid fa-link' });
     }
 
     // Bookmarks need a stable server id AND an owning network.
@@ -123,6 +157,14 @@ export function useMessageActions(): MessageActionsAPI {
           navigator.clipboard.writeText(String(message.text || '')).catch(() => {});
         }
         break;
+      case 'link': {
+        // Fire-and-forget with no tick, matching its neighbour above — the
+        // action bar renders stateless descriptors, and useCopyFeedback calls
+        // out the copy-message action as deliberately not that shape.
+        const url = messageLink(message);
+        if (url && navigator.clipboard) navigator.clipboard.writeText(url).catch(() => {});
+        break;
+      }
       case 'save':
         bookmarks.toggle(message);
         break;
