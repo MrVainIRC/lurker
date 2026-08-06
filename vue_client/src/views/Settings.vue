@@ -79,8 +79,15 @@ const router = useRouter();
 // history.state.back live wouldn't do either: every settings category is its
 // own push (SettingsSidebar), so it would walk back through the categories
 // browsed instead of leaving. Falls back to `/` when Settings was opened cold.
-const chatEntry =
-  (canGoBack() ? (window.history.state as { back?: string } | null)?.back : null) ?? '/';
+//
+// Settings-internal entries are rejected, not just missing ones: vue-router
+// state survives a reload, so after an intra-settings refresh state.back names
+// the PREVIOUS CATEGORY — a back link that switches categories once and then
+// goes dead, with no other way out of the Settings shell. `/` always exits.
+const entryCandidate = canGoBack()
+  ? (window.history.state as { back?: string } | null)?.back
+  : null;
+const chatEntry = entryCandidate && !entryCandidate.startsWith('/settings') ? entryCandidate : '/';
 
 const error = ref('');
 

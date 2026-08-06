@@ -257,6 +257,7 @@ import UserProfileModal from '../components/UserProfileModal.vue';
 import MediaViewerModal from '../components/MediaViewerModal.vue';
 import { screenForRoute } from '../utils/mobileScreen.js';
 import { backOrPush } from '../utils/routerBack.js';
+import { shouldLeaveMembers } from '../utils/bufferNav.js';
 import { useNickNotesStore } from '../stores/nickNotes.js';
 import { useDccStore } from '../stores/dcc.js';
 import { useWhoisStore } from '../stores/whois.js';
@@ -458,8 +459,15 @@ function closeNetworkForm() {
 // is on the members screen; the route has to follow or they'd be left looking
 // at the old channel's member list. Every other activation path already
 // navigates (useBufferRoute's binding, or openActiveBuffer above).
+//
+// Guarded by shouldLeaveMembers: a cold refresh of /buffer/:id/members also
+// lands here — the snapshot resolves and useBufferRoute activates the buffer
+// this route already names — and navigating for THAT bounced the user to the
+// chat screen before the members screen ever rendered.
 watch(activeKey, () => {
-  if (route.name === 'buffer-members') openActiveBuffer();
+  if (route.name !== 'buffer-members') return;
+  const buf = activeBuf.value as { id?: number } | null;
+  if (shouldLeaveMembers(buf?.id, route.params.id)) openActiveBuffer();
 });
 
 // Navigate to whichever buffer is active NOW.
@@ -500,6 +508,15 @@ function onBufferListClick(e: MouseEvent) {
 }
 
 function goList() {
+  // Backing out of an optimistically opened buffer can't be a navigation: it
+  // has no URL, so the route may already BE `/` (Send DM from the list), where
+  // a push is a no-op and the screen would stay locked on the DM. Clear the
+  // active pointer instead — the buffer keeps its place in the list, and the
+  // URL binding normalizes whatever route we're on.
+  if (activeLacksId.value) {
+    networks.clearActive();
+    return;
+  }
   void router.push('/');
 }
 
@@ -511,7 +528,13 @@ function goBufferFromMembers() {
 }
 
 function goMembers() {
-  if (route.params.id) void router.push(`/buffer/${route.params.id}/members`);
+  // The ACTIVE buffer's id, not route.params.id: the button belongs to the
+  // buffer on screen, and the two can disagree — a channel shown via
+  // activeLacksId before its row id lands leaves the route naming the PREVIOUS
+  // buffer, so the route form opened the wrong channel's member list. While
+  // the id is missing there is nothing to route to; the button no-ops.
+  const buf = activeBuf.value as { id?: number } | null;
+  if (buf?.id != null) void router.push(`/buffer/${buf.id}/members`);
 }
 
 const onJumpToMessage = useJumpToMessage({

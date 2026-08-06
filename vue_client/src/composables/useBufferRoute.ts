@@ -8,7 +8,7 @@ import { useBuffersStore, bufferKey } from '../stores/buffers.js';
 import { useToastsStore } from '../stores/toasts.js';
 import { SYSTEM_KEY } from '../lib/virtualBuffers.js';
 import { connected } from './useSocket.js';
-import { whenReady } from '../lib/deferredReady.js';
+import { whenReady } from './deferredReady.js';
 import { shouldPushBuffer } from '../utils/bufferNav.js';
 
 // Two-way binding between the active buffer and the URL (#744), so every buffer
@@ -20,11 +20,12 @@ import { shouldPushBuffer } from '../utils/bufferNav.js';
 // This sits alongside navHistory (#309, Cmd+[ / ]) rather than replacing it. The
 // two are deliberately independent: navHistory is a BUFFER trail with its own
 // cursor, dead-buffer skipping and a 100-entry cap; browser history is the
-// LOCATION stack. Neither drives the other, so they cannot desync. A hop driven
-// from here lands in navHistory as an ordinary visit (recordVisit's
-// consecutive-dupe collapse absorbs the degenerate case), and navHistory's own
+// LOCATION stack. Neither reads the other, and neither needs the other to
+// agree: a hop driven from here lands in navHistory as an ordinary visit —
+// which, like any visit recorded from a back position, truncates navHistory's
+// forward branch (recordVisit's contract) — and navHistory's own
 // back()/forward() go through activate() and so push a URL like any other
-// navigation — which is right, since a nav-history hop IS a navigation.
+// navigation, which is right, since a nav-history hop IS a navigation.
 
 // The buffer id of a navigation we've started but that hasn't landed yet.
 //
@@ -55,8 +56,11 @@ export function pushBuffer(router: Router, id: number): void {
   // re-check the route unconditionally, which quietly overrode it: with a push
   // to another buffer in flight, shouldPushBuffer correctly says "navigate" and
   // this said "already there" off the stale route — so the user's last
-  // activation was dropped and the in-flight one landed instead. Two guards for
-  // one decision is what made that possible; now there is one.
+  // activation was dropped and the in-flight one landed instead. Two independent
+  // guards for one decision is what made that possible; now the predicate is
+  // shared. The route READER is not: this one name-gates to 'buffer' (a
+  // deliberate push from the member list must leave it), where the watcher's
+  // routeId() counts the members route as "already there" — see its comment.
   if (!shouldPushBuffer(id, currentRouteBufferId(router), inFlightId)) return;
   inFlightId = id;
   void router.push(`/buffer/${id}`).finally(() => {
@@ -85,6 +89,14 @@ export function useBufferRoute(): void {
   // The id currently in the URL, or null at `/`. Params are strings; anything
   // non-numeric (a hand-typed /buffer/foo) is treated as "no buffer" rather
   // than parsed to NaN, which would silently match nothing downstream.
+  //
+  // Deliberately NOT name-gated, unlike pushBuffer's currentRouteBufferId:
+  // `/buffer/7/members` answers 7 here. The outbound watcher is the only
+  // caller, and for it the members route IS "already there" — an activation
+  // echoing back onto its own members entry (Back onto one, or a members deep
+  // link resolving) must not push the chat screen over the member list. The
+  // name-gated twin exists for the opposite case; unifying the two re-breaks
+  // whichever side the merge favours.
   function routeId(): number | null {
     const raw = route.params.id;
     if (typeof raw !== 'string' || raw === '') return null;
@@ -126,7 +138,17 @@ export function useBufferRoute(): void {
         if (route.path !== '/') void router.replace('/');
         return;
       }
-      if (id === 'pending') return; // no server id yet — see above
+      if (id === 'pending') {
+        // No server id yet — see above. But the ACTIVATION is real, so it
+        // cancels a pending resolution like every other branch: without this,
+        // opening an optimistic DM while a dead /buffer/<id> was still waiting
+        // left its 10s timer armed, and the timeout's routeId() guard can't
+        // suppress it — an id-less buffer can't move the URL, so the route
+        // still names the dead id — landing a spurious "couldn't open" toast
+        // and a replace('/') on top of the user's composing session.
+        clearPending();
+        return;
+      }
       if (id === 'system') {
         clearPending();
         // Push, not replace. Opening the console is a navigation like any other
@@ -177,7 +199,21 @@ export function useBufferRoute(): void {
       // the shell isn't showing; an unknown NUMERIC id already ends the same
       // way, via the timeout below.
       if (id == null) {
-        if (route.params.id != null) void router.replace('/');
+        if (route.params.id != null) {
+          void router.replace('/');
+          return;
+        }
+        // At `/`. An id-ADDRESSABLE active buffer stays active (see the note
+        // below on not deactivating) — but an id-LESS one (an optimistic DM)
+        // cannot be named by any URL, so the mobile shell shows it on every
+        // route via activeLacksId. Landing on `/` while it is active therefore
+        // means the user backed out of it (the platform gesture, or goList
+        // normalizing) — hold it and the shell is pinned on the DM screen with
+        // a dead back button. Deactivate, exactly as if the buffer had closed;
+        // it stays in the store and the list.
+        const activeKey = networks.activeKey;
+        const active = activeKey ? buffers.byKey(activeKey) : null;
+        if (active && active.networkId != null && active.id == null) networks.clearActive();
         return;
       }
 

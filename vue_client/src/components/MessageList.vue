@@ -2158,10 +2158,18 @@ function holdCentred(el: HTMLElement, target: HTMLElement, id: number | string):
     });
   }
 
+  // Cached across frames: rows are keyed, so the node only changes when a
+  // re-render actually replaces it — which isConnected detects. Without the
+  // cache every frame of the hold pays an attribute-selector scan over the
+  // whole slice even when nothing is drifting (the common case).
+  let node: HTMLElement | null = target;
   const tick = () => {
-    if (released || props.pendingScrollId !== id) return finish();
-    // Re-query: a re-render can replace the node under us.
-    const node = el.querySelector(`[data-msg-id="${id}"]`) as HTMLElement | null;
+    // el.isConnected: the scroller can be unmounted mid-hold (buffer switch,
+    // screen change) — stop instead of measuring detached rects to deadline.
+    if (released || props.pendingScrollId !== id || !el.isConnected) return finish();
+    if (!node || !node.isConnected) {
+      node = el.querySelector(`[data-msg-id="${id}"]`) as HTMLElement | null;
+    }
     if (node) {
       const rect = node.getBoundingClientRect();
       const box = el.getBoundingClientRect();

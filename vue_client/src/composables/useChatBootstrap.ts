@@ -13,7 +13,7 @@ import { onJumpIntent } from './useJumpIntent.js';
 import { connected } from './useSocket.js';
 import { startAppBadge } from './useAppBadge.js';
 import { startBufferHydration } from './useBufferHydration.js';
-import { whenReady } from '../lib/deferredReady.js';
+import { whenReady } from './deferredReady.js';
 import type { Router } from 'vue-router';
 import { useRouter } from 'vue-router';
 import type { JumpTarget } from './useJumpToMessage.js';
@@ -35,9 +35,17 @@ export interface ChatBootstrapOptions {
  *  `?msg` — and that stale location is what gets written into history.state.back
  *  on the next push, which Settings captures as its return target. Clicking
  *  "← back" from Settings then navigated to the un-stripped URL and re-fired the
- *  jump, defeating the "strip it so a refresh doesn't re-jump" guarantee. */
+ *  jump, defeating the "strip it so a refresh doesn't re-jump" guarantee.
+ *
+ *  The hash is carried through explicitly: to router.replace an absent `hash`
+ *  on a location object means "no hash", not "keep the current one", so the
+ *  raw-replaceState code this replaced preserved the fragment and the plain
+ *  form silently dropped it. */
 function stripQuery(router: Router, params: URLSearchParams): void {
-  void router.replace({ query: Object.fromEntries(params.entries()) });
+  void router.replace({
+    query: Object.fromEntries(params.entries()),
+    hash: window.location.hash,
+  });
 }
 
 /** The buffer id a `/buffer/<id>` path names, or null for any other route.
@@ -71,11 +79,16 @@ function consumeRouteJump(
 ): () => void {
   const noop = (): void => {};
   const msg = params.get('msg');
-  const messageId = msg != null && msg !== '' ? Number(msg) : null;
-  // Strip ?msg immediately so a manual refresh doesn't re-jump. The PATH stays
-  // — it's the buffer the user is now looking at, not a consumed intent.
+  // A plain /buffer/<id> carries no intent — and therefore gets NO strip: the
+  // unconditional version issued a do-nothing same-location replace through
+  // the router pipeline on every bookmark, refresh and shell swap.
+  if (msg == null || msg === '') return noop;
+  // Strip ?msg immediately so a manual refresh doesn't re-jump — a malformed
+  // one included, consumed to nothing rather than left to re-parse. The PATH
+  // stays: it's the buffer the user is now looking at, not a consumed intent.
   params.delete('msg');
   stripQuery(router, params);
+  const messageId = Number(msg);
   if (!Number.isFinite(messageId)) return noop;
 
   // byId (not the module-level bufferKeyForId index) so the wait below is
@@ -91,6 +104,14 @@ function consumeRouteJump(
   return whenReady(
     () => connected.value && resolve() != null,
     () => {
+      // The wait can outlive the user's patience. If they navigated anywhere
+      // else in-shell during it — back to the list, another buffer, /system —
+      // the disposer never ran (all chat routes share one shell), and firing
+      // now would yank them to the link's buffer and detach it for an intent
+      // they've moved past. The route is the truth about where they are;
+      // useBufferRoute's parallel wait re-checks its own the same way.
+      const current = router.currentRoute.value;
+      if (current.name !== 'buffer' || current.params.id !== String(bufferId)) return;
       const payload = resolve();
       if (payload) onJump(payload);
     },

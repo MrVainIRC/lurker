@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { describe, it, expect } from 'vitest';
-import { shouldPushBuffer } from './bufferNav.js';
+import { shouldPushBuffer, shouldLeaveMembers } from './bufferNav.js';
 
 describe('shouldPushBuffer', () => {
   it('navigates to somewhere new', () => {
@@ -27,5 +27,26 @@ describe('shouldPushBuffer', () => {
     // inbound binding drags the user to #b. The in-flight target is the only
     // honest comparison while one exists.
     expect(shouldPushBuffer(7, 7, 8)).toBe(true);
+  });
+});
+
+describe('shouldLeaveMembers', () => {
+  it('holds when the activation IS the buffer the members route names', () => {
+    // Cold refresh of /buffer/7/members: the snapshot resolves and
+    // useBufferRoute activates buffer 7 — the route already names it, and
+    // navigating for that bounced the user to the chat screen before the
+    // members screen ever rendered.
+    expect(shouldLeaveMembers(7, '7')).toBe(false);
+  });
+
+  it('leaves for an activation of a different buffer', () => {
+    // Send DM out of the nick menu: holding would leave the user staring at
+    // the old channel's member list.
+    expect(shouldLeaveMembers(8, '7')).toBe(true);
+  });
+
+  it('leaves for an id-less activation, which can never be the routed buffer', () => {
+    expect(shouldLeaveMembers(undefined, '7')).toBe(true);
+    expect(shouldLeaveMembers(null, '7')).toBe(true);
   });
 });

@@ -40,9 +40,16 @@ const h = vi.hoisted(() => ({
 function applyPath(to: string): void {
   const [path] = to.split('?');
   h.s.route.path = path;
+  const members = /^\/buffer\/([^/]+)\/members$/.exec(path);
   const m = /^\/buffer\/([^/]+)$/.exec(path);
-  h.s.route.params = m ? { id: m[1] } : {};
-  h.s.route.name = m ? 'buffer' : path === '/system' ? 'system' : 'chat';
+  h.s.route.params = members ? { id: members[1] } : m ? { id: m[1] } : {};
+  h.s.route.name = members
+    ? 'buffer-members'
+    : m
+      ? 'buffer'
+      : path === '/system'
+        ? 'system'
+        : 'chat';
 }
 
 vi.mock('vue-router', () => ({
@@ -127,7 +134,13 @@ beforeEach(() => {
   h.s = reactive({
     route: { path: '/', name: 'chat' as string, params: {} as Record<string, string> },
     connected: true,
-    networks: { activeKey: null as string | null },
+    networks: {
+      activeKey: null as string | null,
+      // As on the real store: deactivate without closing anything.
+      clearActive() {
+        this.activeKey = null;
+      },
+    },
     buffers: {} as Record<string, { id?: number; networkId: number | null; target: string }>,
   });
   h.push.mockReset();
@@ -393,6 +406,39 @@ describe('useBufferRoute — URL to active buffer', () => {
     expect(h.s.networks.activeKey).toBe('1::#chan');
   });
 
+  it('DOES deactivate an id-less buffer when the URL lands on /', async () => {
+    // The back-gesture lock. An optimistic DM has no URL, so the mobile shell
+    // shows it on EVERY route via activeLacksId — landing on `/` while it is
+    // active can only mean the user backed out of it (the platform gesture, or
+    // goList normalizing). Holding it pinned the shell on the DM screen with a
+    // back button that moved the URL and nothing else.
+    known('1::#chan', 7);
+    start();
+    await activate('1::#chan');
+    known('1::pal'); // no id
+    await activate('1::pal'); // URL stays /buffer/7 — nothing can name the DM
+
+    applyPath('/'); // the back gesture
+    await nextTick();
+
+    expect(h.s.networks.activeKey).toBeNull();
+  });
+
+  it('does not push when an activation echoes onto its own members route', async () => {
+    // Back onto a /buffer/7/members history entry (or a members deep link
+    // resolving): the inbound side activates buffer 7, and the outbound
+    // watcher must read the members route as "already there" — pushing
+    // /buffer/7 here ejects the user from the member list they just reached.
+    // This is why routeId() is NOT name-gated; see its divergence note.
+    known('1::#a', 7);
+    start();
+    applyPath('/buffer/7/members');
+    await nextTick();
+
+    expect(h.activate).toHaveBeenCalledWith(1, '#a');
+    expect(h.push).not.toHaveBeenCalled();
+  });
+
   it('defers an unresolvable id until the buffer arrives over the socket', async () => {
     vi.useFakeTimers();
     h.s.connected = false;
@@ -470,5 +516,23 @@ describe('useBufferRoute — URL to active buffer', () => {
 
     expect(h.activate).toHaveBeenCalledWith(1, '#chan');
     expect(h.toast).not.toHaveBeenCalled();
+  });
+
+  it('cancels a dead-id wait when an id-less buffer activates', async () => {
+    // Send DM mid-wait: the optimistic buffer cannot move the URL, so the
+    // timeout's routeId() guard alone can never suppress the stale toast —
+    // the route still names the dead id. The 'pending' branch has to cancel
+    // the wait like every other activation does.
+    vi.useFakeTimers();
+    applyPath('/buffer/999');
+    start();
+    await nextTick();
+
+    known('1::newpal'); // no id
+    await activate('1::newpal');
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(h.toast).not.toHaveBeenCalled();
+    expect(h.replace).not.toHaveBeenCalled();
   });
 });

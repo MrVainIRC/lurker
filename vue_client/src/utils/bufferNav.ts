@@ -30,3 +30,27 @@ export function shouldPushBuffer(
 ): boolean {
   return (inFlightId != null ? inFlightId : routeId) !== id;
 }
+
+/**
+ * On the members screen, should this activation carry the user off it?
+ *
+ * Two activations reach a mounted members route and they must diverge:
+ *
+ *   - Send DM out of the nick menu: a DIFFERENT buffer became active, and
+ *     holding would leave the user staring at the old channel's member list.
+ *     Navigate.
+ *   - A cold refresh (or bookmark/share) of `/buffer/:id/members`: the
+ *     snapshot resolves and useBufferRoute activates the buffer the route
+ *     ALREADY NAMES. Navigating here bounces to the chat screen the moment
+ *     the app loads, and the members screen the URL asked for never renders.
+ *     Hold.
+ *
+ * An id-less activation (an optimistic DM) can never be the routed buffer, so
+ * it navigates — where its no-address handling takes over.
+ */
+export function shouldLeaveMembers(
+  activeBufferId: number | null | undefined,
+  routeIdParam: unknown,
+): boolean {
+  return activeBufferId == null || String(activeBufferId) !== routeIdParam;
+}

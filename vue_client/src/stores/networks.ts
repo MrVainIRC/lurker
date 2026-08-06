@@ -173,6 +173,13 @@ export const useNetworksStore = defineStore('networks', {
       // sentinel target, matching the buffers store's key() helper.
       this.activeKey = networkId == null ? target : `${networkId}::${target}`;
     },
+    // Leave no buffer active WITHOUT closing anything — the buffer stays in the
+    // store and the list. Exists for backing out of an optimistically created
+    // buffer (#744): it has no server row id, so no URL can name it, and "back
+    // to the list" can only be expressed by clearing the active pointer.
+    clearActive() {
+      this.activeKey = null;
+    },
     // Virtual buffers (the system console) aren't tied to an IRC network.
     // They use a flat sentinel key (no `::`) so the existing
     // `${networkId}::${target}` parsers ignore them.

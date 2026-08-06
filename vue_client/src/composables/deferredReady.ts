@@ -1,6 +1,9 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
+// Lives in composables/, not lib/: it leans on Vue's watch, and lib/ is
+// documented (AGENTS.md) as framework-free logic. Not a use* composable — it
+// needs no component context — but this is the Vue-coupled directory.
 import { watch } from 'vue';
 
 // How long to wait for the app to become able to honor a cold-start deep link

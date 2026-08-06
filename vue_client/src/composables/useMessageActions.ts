@@ -94,7 +94,12 @@ export function useMessageActions(): MessageActionsAPI {
   // whenever the message's server-cased target differs from the buffer key —
   // the #327 case — which would make it O(rows x buffers) per render.
   // findByTarget stays as the fallback for rows minted locally.
-  function messageLink(message: MessageLike): string | null {
+  //
+  // Split in two — linkBufferId answers "can this line link, and to which
+  // buffer", messageLink formats the URL — so buildActions' per-row
+  // eligibility test stays allocation-free: building the string just to test
+  // truthiness was waste at that call frequency.
+  function linkBufferId(message: MessageLike): number | null {
     const networkId = message.networkId ?? message.network_id;
     if (message.id == null || networkId == null) return null;
     if (!message.target || message.target.startsWith(':server:')) return null;
@@ -102,6 +107,11 @@ export function useMessageActions(): MessageActionsAPI {
       typeof message.bufferId === 'number'
         ? message.bufferId
         : buffers.findByTarget(networkId, message.target)?.id;
+    return bufferId ?? null;
+  }
+
+  function messageLink(message: MessageLike): string | null {
+    const bufferId = linkBufferId(message);
     if (bufferId == null) return null;
     return `${window.location.origin}/buffer/${bufferId}?msg=${message.id}`;
   }
@@ -124,7 +134,7 @@ export function useMessageActions(): MessageActionsAPI {
 
     // Sits next to Copy text because it's the other "take this away with you"
     // action: a permalink to bookmark, or to open in a new window.
-    if (messageLink(message)) {
+    if (linkBufferId(message) != null) {
       actions.push({ key: 'link', label: 'Copy link to message', icon: 'fa-solid fa-link' });
     }
 
