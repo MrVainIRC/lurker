@@ -2123,6 +2123,80 @@ defineExpose({ scrollByPage });
 // the jump, which is the main reason a *delivered* jump fails to scroll on mobile.
 const SCROLL_RETRY_FRAMES = 60;
 
+// How long to keep the jump target centred after the first scroll.
+//
+// Landing on the row isn't enough. A jump renders a whole slice at once, and
+// this pane deliberately disables browser scroll anchoring (see overflow-anchor
+// below — it picks bad anchors when older history prepends). So as images and
+// wrapped text ABOVE the target finish resolving, everything below shifts down
+// while scrollTop stays put, and the row the user asked for drifts off screen.
+// Re-centre while that settles.
+//
+// Measured on device, not assumed: a jump into a 1870-event slice took 74
+// corrections before it stopped moving. A smaller slice took none — which is
+// why the drift only showed up sometimes, and why it can't be reasoned away.
+const SCROLL_HOLD_MS = 1200;
+// Don't fight sub-pixel noise, do fix a row that has moved meaningfully.
+const SCROLL_DRIFT_PX = 8;
+
+function holdCentred(el: HTMLElement, target: HTMLElement, id: number | string): void {
+  const until = performance.now() + SCROLL_HOLD_MS;
+  let released = false;
+  // The moment the user takes over, stop — being dragged back to a row you're
+  // scrolling away from is worse than the drift. Keyboard and pointer count as
+  // taking over too: this same component binds PageUp/PageDown to scroll, and a
+  // scrollbar drag is a mousedown, so listening for touch and wheel alone would
+  // fight all of them for over a second.
+  const release = () => {
+    released = true;
+  };
+  const RELEASE_ON = ['touchstart', 'wheel', 'pointerdown', 'keydown'] as const;
+  for (const evt of RELEASE_ON) {
+    (evt === 'keydown' ? window : el).addEventListener(evt, release, {
+      passive: true,
+      once: true,
+    });
+  }
+
+  // Cached across frames: rows are keyed, so the node only changes when a
+  // re-render actually replaces it — which isConnected detects. Without the
+  // cache every frame of the hold pays an attribute-selector scan over the
+  // whole slice even when nothing is drifting (the common case).
+  let node: HTMLElement | null = target;
+  const tick = () => {
+    // el.isConnected: the scroller can be unmounted mid-hold (buffer switch,
+    // screen change) — stop instead of measuring detached rects to deadline.
+    if (released || props.pendingScrollId !== id || !el.isConnected) return finish();
+    if (!node || !node.isConnected) {
+      node = el.querySelector(`[data-msg-id="${id}"]`) as HTMLElement | null;
+    }
+    if (node) {
+      const rect = node.getBoundingClientRect();
+      const box = el.getBoundingClientRect();
+      const drift = rect.top + rect.height / 2 - (box.top + box.height / 2);
+      if (Math.abs(drift) > SCROLL_DRIFT_PX) {
+        // Give up once the scroller stops moving. A target within half a
+        // viewport of either end of the slice can never BE centred — scrollTop
+        // clamps — so the drift check stays true forever and this would force a
+        // style+layout pass every frame for the full hold, on exactly the large
+        // slices that motivated it. Jumping to the oldest or newest message in
+        // a buffer hits this every time.
+        const before = el.scrollTop;
+        node.scrollIntoView({ block: 'center', behavior: 'auto' });
+        if (el.scrollTop === before) return finish();
+      }
+    }
+    if (performance.now() < until) requestAnimationFrame(tick);
+    else finish();
+  };
+  function finish(): void {
+    for (const evt of RELEASE_ON) {
+      (evt === 'keydown' ? window : el).removeEventListener(evt, release);
+    }
+  }
+  requestAnimationFrame(tick);
+}
+
 watch(
   () => props.pendingScrollId,
   async (id) => {
@@ -2140,9 +2214,13 @@ watch(
         return;
       }
       stickToBottom.value = false;
-      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      // 'auto', not 'smooth': a jump is a teleport, and an animated scroll over
+      // a slice this size is both meaningless and fragile — it races the layout
+      // settling below and loses.
+      target.scrollIntoView({ block: 'center', behavior: 'auto' });
       target.classList.add('scroll-target');
       setTimeout(() => target.classList.remove('scroll-target'), 1500);
+      holdCentred(el, target as HTMLElement, id);
     };
     tryScroll();
   },

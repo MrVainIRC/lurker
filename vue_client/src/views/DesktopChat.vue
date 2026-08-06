@@ -301,7 +301,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import type { Network } from '../stores/networks.js';
 import { useBuffersStore, type Buffer } from '../stores/buffers.js';
 import { SYSTEM_KEY } from '../lib/virtualBuffers.js';
@@ -335,6 +335,7 @@ import UserProfileModal from '../components/UserProfileModal.vue';
 import MediaViewerModal from '../components/MediaViewerModal.vue';
 import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts.js';
 import { useNicklistCollapseStore } from '../stores/nicklistCollapse.js';
+import { shouldOpenSystemBufferOnLoad } from '../utils/defaultBuffer.js';
 import { useNickNotesStore } from '../stores/nickNotes.js';
 import { useDccStore } from '../stores/dcc.js';
 import { useWhoisStore } from '../stores/whois.js';
@@ -353,14 +354,6 @@ const buffers = useBuffersStore();
 // the socket never opens: red status light + no buffers (#355 regression).
 useSocket();
 
-// Land on the system buffer instead of a blank "No messages yet." pane when
-// nothing else is active on load (#355). The last-active buffer isn't persisted,
-// so activeKey is null on every fresh load; the system buffer always exists in
-// the store, so this is always a valid target. Guarded on null so a deep-link /
-// push-jump that set a buffer first still wins.
-onMounted(() => {
-  if (networks.activeKey == null) buffers.activate(null, SYSTEM_KEY);
-});
 const {
   active,
   activeBuf,
@@ -576,6 +569,34 @@ function onChatClick(e: MouseEvent) {
 const onJumpToMessage = useJumpToMessage({ pendingScrollId });
 
 const router = useRouter();
+const route = useRoute();
+
+// Land on the system buffer instead of a blank "No messages yet." pane when
+// nothing else is active (#355) — but not over the top of a deep link that
+// hasn't resolved yet. See shouldOpenSystemBufferOnLoad for why the route half
+// of that test is load-bearing.
+//
+// A watcher rather than a one-shot onMounted, because the interesting case
+// arrives LATE: a stale bookmark declines this rule at mount (the URL names a
+// buffer), then fails to resolve and drops the route back to `/` ten seconds
+// later with nothing active. A one-shot never sees that, and desktop is left on
+// the blank pane this rule exists to prevent.
+//
+// MUST stay below `route` above. `immediate: true` evaluates the getter
+// synchronously inside watch(), and <script setup> preserves statement order —
+// declared any earlier this throws a temporal-dead-zone ReferenceError during
+// setup and the desktop shell never mounts at all. Neither vue-tsc (it cannot
+// see through the closure) nor the suite (nothing mounts this component) catches
+// it, so the ordering is load-bearing and invisible.
+watch(
+  () => [networks.activeKey, route.params.id] as const,
+  () => {
+    if (shouldOpenSystemBufferOnLoad(networks.activeKey, route.params.id)) {
+      buffers.activate(null, SYSTEM_KEY);
+    }
+  },
+  { immediate: true },
+);
 // Collapsed-only footer affordance: the settings cog normally lives on the
 // LURKER sidebar row, but that whole list is unmounted when the sidebar is
 // collapsed (BufferList v-if), so the rail offers the cog here instead (#355).

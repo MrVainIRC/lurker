@@ -35,6 +35,11 @@ export interface PushPayload {
   networkId: number;
   networkName: string;
   target: string;
+  /** buffers(id) the notification points at, so a tap on a COLD app can launch
+   *  straight into `/buffer/<id>` (#744) instead of a name-carrying query
+   *  string. Optional: a handful of synthetic events are never persisted and so
+   *  have no row, and sw.js falls back to the name form for those. */
+  bufferId?: number;
   nick?: string | null;
   text?: string | null;
   time?: string;
