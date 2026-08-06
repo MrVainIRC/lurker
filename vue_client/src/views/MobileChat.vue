@@ -340,12 +340,20 @@ const networkEditor = reactive(useNetworkEditor());
 // later, and rendering an empty buffer shell in the meantime looks broken. Wait
 // on the list, exactly as the old auto-advance did. useBufferRoute owns the
 // other end of that wait — it drops the URL back to `/` if the id never lands.
+// True while the active buffer is a real IRC buffer the server hasn't given a
+// row id yet — an optimistically opened DM. Nothing can route to it.
+const activeLacksId = computed(() => {
+  const buf = activeBuf.value as { id?: number; networkId?: number | null } | null;
+  return !!buf && buf.networkId != null && buf.id == null;
+});
+
 const screen = computed(() =>
   screenForRoute(
     route.params.id,
     route.name === 'buffer-members',
     !!activeKey.value,
     route.name === 'system',
+    activeLacksId.value,
   ),
 );
 const showBookmarks = ref(false);
@@ -474,10 +482,11 @@ function openActiveBuffer() {
     return;
   }
   // Active but not addressable yet — a DM opened optimistically has no row id
-  // until the server answers. Leave whatever sub-screen we're on rather than
-  // sitting on it (the member list of the channel we just left, say); the URL
-  // binding pushes the real route the moment the id lands.
-  if (route.name !== 'chat') void router.push('/');
+  // until the server answers. Deliberately does NOT navigate: pushing `/` here
+  // dropped the user on the buffer list with a DM they could not reach from it
+  // (no id to route to, and the server only mints the row once a message is
+  // sent — which needs the composer). `screen` shows it via activeLacksId
+  // instead, until the id lands and the URL binding routes to it properly.
 }
 
 function onBufferListClick(e: MouseEvent) {

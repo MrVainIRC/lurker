@@ -46,7 +46,13 @@ function stripQuery(router: Router, params: URLSearchParams): void {
 function bufferIdFromPath(pathname: string): number | null {
   const m = /^\/buffer\/([^/]+)\/?$/.exec(pathname);
   if (!m) return null;
-  const n = Number(decodeURIComponent(m[1]));
+  // NOT decodeURIComponent: a buffer id is an integer, so there is nothing to
+  // decode — and a mangled link like `/buffer/%` reaches the client verbatim
+  // (the SPA fallback serves it, and vue-router swallows its own decode error),
+  // where decoding threw URIError inside this synchronous setup path and left
+  // the whole chat shell unrendered. Number() on anything unexpected is NaN,
+  // which is already the "not a buffer route" answer.
+  const n = Number(m[1]);
   return Number.isInteger(n) ? n : null;
 }
 

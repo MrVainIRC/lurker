@@ -20,6 +20,15 @@ describe('screenForRoute', () => {
     expect(screenForRoute(id, isMembers as boolean, active as boolean)).toBe(expected);
   });
 
+  it('shows an optimistically opened buffer that has no address yet', () => {
+    // "Send DM" to a nick never messaged before creates a buffer with no row id,
+    // and the server only mints one when a message is sent. Routing to `/`
+    // stranded the user on the list with a DM they could not reach from it —
+    // the composer they needed was on the screen they could not get to.
+    expect(screenForRoute(undefined, false, true, false, true)).toBe('buffer');
+    expect(screenForRoute('7', true, true, false, true)).toBe('buffer');
+  });
+
   it('holds on the list while a routed buffer is still resolving', () => {
     // Cold launch from a bookmark or a notification: the route names a buffer
     // several seconds before the WS delivers it. Showing the buffer screen with

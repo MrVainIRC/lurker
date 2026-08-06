@@ -354,25 +354,6 @@ const buffers = useBuffersStore();
 // the socket never opens: red status light + no buffers (#355 regression).
 useSocket();
 
-// Land on the system buffer instead of a blank "No messages yet." pane when
-// nothing else is active (#355) — but not over the top of a deep link that
-// hasn't resolved yet. See shouldOpenSystemBufferOnLoad for why the route half
-// of that test is load-bearing.
-//
-// A watcher rather than a one-shot onMounted, because the interesting case
-// arrives LATE: a stale bookmark declines this rule at mount (the URL names a
-// buffer), then fails to resolve and drops the route back to `/` ten seconds
-// later with nothing active. A one-shot never sees that, and desktop is left on
-// the blank pane this rule exists to prevent.
-watch(
-  () => [networks.activeKey, route.params.id] as const,
-  () => {
-    if (shouldOpenSystemBufferOnLoad(networks.activeKey, route.params.id)) {
-      buffers.activate(null, SYSTEM_KEY);
-    }
-  },
-  { immediate: true },
-);
 const {
   active,
   activeBuf,
@@ -589,6 +570,33 @@ const onJumpToMessage = useJumpToMessage({ pendingScrollId });
 
 const router = useRouter();
 const route = useRoute();
+
+// Land on the system buffer instead of a blank "No messages yet." pane when
+// nothing else is active (#355) — but not over the top of a deep link that
+// hasn't resolved yet. See shouldOpenSystemBufferOnLoad for why the route half
+// of that test is load-bearing.
+//
+// A watcher rather than a one-shot onMounted, because the interesting case
+// arrives LATE: a stale bookmark declines this rule at mount (the URL names a
+// buffer), then fails to resolve and drops the route back to `/` ten seconds
+// later with nothing active. A one-shot never sees that, and desktop is left on
+// the blank pane this rule exists to prevent.
+//
+// MUST stay below `route` above. `immediate: true` evaluates the getter
+// synchronously inside watch(), and <script setup> preserves statement order —
+// declared any earlier this throws a temporal-dead-zone ReferenceError during
+// setup and the desktop shell never mounts at all. Neither vue-tsc (it cannot
+// see through the closure) nor the suite (nothing mounts this component) catches
+// it, so the ordering is load-bearing and invisible.
+watch(
+  () => [networks.activeKey, route.params.id] as const,
+  () => {
+    if (shouldOpenSystemBufferOnLoad(networks.activeKey, route.params.id)) {
+      buffers.activate(null, SYSTEM_KEY);
+    }
+  },
+  { immediate: true },
+);
 // Collapsed-only footer affordance: the settings cog normally lives on the
 // LURKER sidebar row, but that whole list is unmounted when the sidebar is
 // collapsed (BufferList v-if), so the rail offers the cog here instead (#355).

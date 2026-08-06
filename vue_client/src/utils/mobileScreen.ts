@@ -31,11 +31,20 @@ export function screenForRoute(
   isMembers: boolean,
   hasActiveBuffer: boolean,
   isSystem = false,
+  activeLacksId = false,
 ): MobileScreen {
   // `/system` names the app-scoped buffer without an id — it exists before the
   // server answers, so it stays reachable while disconnected, which is when its
   // connection log is what you want.
   if (isSystem) return 'buffer';
+  // The one honest exception to "screen and URL cannot disagree": a buffer
+  // opened optimistically has NO ADDRESS yet, so no route can name it. "Send
+  // DM" to a nick never messaged before creates exactly that, and the server
+  // only mints the row when a message is sent — which needs the composer, on
+  // the screen the user would otherwise never reach. Showing it under whatever
+  // URL we came from beats a dead end; the moment the id lands the URL binding
+  // pushes the real route and this stops applying.
+  if (activeLacksId) return 'buffer';
   if (!id || !hasActiveBuffer) return 'list';
   return isMembers ? 'members' : 'buffer';
 }

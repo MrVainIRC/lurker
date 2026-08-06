@@ -12,8 +12,8 @@ vi.mock('./useSocket.js', () => ({ connected: h.connected }));
 
 import { consumeColdStartJump } from './useChatBootstrap.js';
 
-function installWindow(search: string): void {
-  const loc = { pathname: '/', search, hash: '' };
+function installWindow(search: string, pathname = '/'): void {
+  const loc = { pathname, search, hash: '' };
   (globalThis as any).window = {
     location: loc,
     history: {
@@ -44,7 +44,12 @@ const fakeRouter = () =>
       return Promise.resolve();
     },
   }) as any;
-const openBuffers = { isOpen: () => true } as any;
+const openBuffers = { isOpen: () => true, byId: () => null } as any;
+// Resolves buffer 7, for the route form.
+const byIdBuffers = {
+  isOpen: () => true,
+  byId: (id: number) => (id === 7 ? { networkId: 1, target: '#chan', id: 7 } : null),
+} as any;
 
 beforeEach(() => {
   h.connected.value = false;
@@ -52,6 +57,57 @@ beforeEach(() => {
 });
 afterEach(() => {
   delete (globalThis as any).window;
+});
+
+describe('consumeColdStartJump — the /buffer/<id> route form', () => {
+  // Every other test in this file loads at `/`, so the entire route branch —
+  // bufferIdFromPath, consumeRouteJump, its strip and its deliberate silent
+  // give-up — went uncovered. That is how a URIError that blanks the whole chat
+  // shell got through.
+  it('does not throw on a mangled path', () => {
+    h.connected.value = true;
+    installWindow('', '/buffer/%');
+
+    // `%` survives to the client verbatim and vue-router still matches the
+    // route, so this runs; decoding it threw URIError inside setup and left the
+    // shell unrendered.
+    expect(() =>
+      consumeColdStartJump(openBuffers, fakeRouter(), vi.fn<(p: unknown) => void>()),
+    ).not.toThrow();
+  });
+
+  it('does not throw on a non-numeric id', () => {
+    h.connected.value = true;
+    installWindow('?msg=42', '/buffer/nonsense');
+    expect(() =>
+      consumeColdStartJump(openBuffers, fakeRouter(), vi.fn<(p: unknown) => void>()),
+    ).not.toThrow();
+  });
+
+  it('fires the jump for a resolvable buffer route', () => {
+    h.connected.value = true;
+    installWindow('?msg=42', '/buffer/7');
+    const onJump = vi.fn<(payload: unknown) => void>();
+
+    consumeColdStartJump(byIdBuffers, fakeRouter(), onJump);
+
+    expect(onJump).toHaveBeenCalledWith({
+      kind: 'jump',
+      networkId: 1,
+      target: '#chan',
+      messageId: 42,
+    });
+  });
+
+  it('does not jump when the route names a buffer but no message', () => {
+    h.connected.value = true;
+    installWindow('', '/buffer/7');
+    const onJump = vi.fn<(payload: unknown) => void>();
+
+    consumeColdStartJump(byIdBuffers, fakeRouter(), onJump);
+
+    expect(onJump).not.toHaveBeenCalled();
+  });
 });
 
 describe('consumeColdStartJump', () => {
