@@ -66,47 +66,50 @@ export function themeNameError(raw: string): string {
   return '';
 }
 
-// The Light palette, from two sources:
+// The Light palette = the OFFICIAL Monokai Pro Light filter wherever it
+// defines a value, verified against the monokai.theme-monokai-pro-vscode
+// 2.0.13 theme files (independently mirrored by mbadolato/iTerm2-Color-Schemes
+// and Gogh; every accent clears WCAG 3:1 on its own background):
 //
-// NEUTRALS + SEMANTIC COLORS follow the "Monokai Light" tmTheme (the classic
-// Sublime Monokai palette adapted to white — the closest thing to an upstream
-// light Monokai). Its exact value is used wherever it clears WCAG 3:1 on
-// white; the rest (that port kept several dark-theme accents verbatim) are
-// darkened along their own hue until they do: orange #FD971F→#d57f1a, green
-// #6AAF19→#63a317, cyan #28C6E4→#20a0b9, purple #AE81FF→#a77cf5, comment gray
-// #9F9F8F→#949485. The tmTheme defines no yellow, so `warn` keeps the OKLCH
-// derivation below.
+//   bg #faf4f2 · panels #ede7e5 · border #e0dad9 · fg #29242a
+//   semi-muted #706b6e · comment #a59fa0
+//   red #e14775 · orange #e16032 · yellow #cc7a0a
+//   green #269d69 · cyan #1c8ca8 · purple #7058be
 //
-// NICK + mIRC PALETTES stay the OKLCH mapping the iOS client uses for its
-// light mode (lurker-ios NickColor.swift: Monokai Pro hues preserved exactly,
-// lightness remapped, everything ≥3:1): the tmTheme has no counterpart to the
-// 19-hue nick spread, and the mIRC chromatic slots track the nick palette by
-// design (colored text harmonises with colored nicks).
+// fg_muted takes the semi-muted tier, not the comment tier: comments are
+// 2.4:1 on this bg, and our muted role (timestamps, system events) matches
+// the dark theme's ~5:1, which #706b6e does.
+//
+// Hues Monokai Pro Light does NOT define — the extended nick spread and the
+// mIRC slots that borrow from it — keep the OKLCH mapping the iOS client uses
+// (lurker-ios NickColor.swift: dark hue preserved, lightness remapped, ≥3:1).
 const LIGHT_OVERRIDES: Record<string, SettingValue> = {
-  'look.color.bg': '#ffffff', //     tmTheme background
-  'look.color.bg_soft': '#ededed', // tmTheme inactiveSelection
-  'look.color.fg': '#000000', //     tmTheme foreground
-  'look.color.fg_muted': '#949485', // tmTheme comment #9F9F8F, clamped to 3:1
-  'look.color.accent': '#a77cf5', // tmTheme purple #AE81FF, clamped to 3:1
-  'look.color.good': '#63a317', //   tmTheme green #6AAF19, clamped to 3:1
-  'look.color.warn': '#a68500', //   OKLCH light of #f9d978 (no tmTheme yellow)
-  'look.color.bad': '#f92672', //    tmTheme pink, exact (3.79:1)
-  'look.color.border': '#e0e0e0', // tmTheme invisibles
-  'look.color.message.alt_fg': '#3a3a3a', // slightly dimmed from the black fg
-  // Same role pairing as dark (owner=bad, op=accent, voice=good).
-  'look.color.member.owner': '#f92672', //  tmTheme pink, exact
-  'look.color.member.admin': '#d57f1a', //  tmTheme orange #FD971F, clamped
-  'look.color.member.op': '#a77cf5', //     tmTheme purple, clamped
-  'look.color.member.halfop': '#20a0b9', // tmTheme cyan #28C6E4, clamped
-  'look.color.member.voice': '#63a317', //  tmTheme green, clamped
-  // Same 19 hues as the dark nick palette, same order, lightness remapped.
+  'look.color.bg': '#faf4f2',
+  'look.color.bg_soft': '#ede7e5',
+  'look.color.fg': '#29242a',
+  'look.color.fg_muted': '#706b6e',
+  'look.color.accent': '#7058be', // purple, like dark's lavender accent
+  'look.color.good': '#269d69',
+  'look.color.warn': '#cc7a0a',
+  'look.color.bad': '#e14775',
+  'look.color.border': '#e0dad9',
+  'look.color.message.alt_fg': '#4c474c', // between fg and fg_muted, like dark's
+  // Same role pairing as dark (owner=red, op=accent-purple, voice=green).
+  'look.color.member.owner': '#e14775',
+  'look.color.member.admin': '#e16032',
+  'look.color.member.op': '#7058be',
+  'look.color.member.halfop': '#1c8ca8',
+  'look.color.member.voice': '#269d69',
+  // Same 19 hues as the dark nick palette, same order. The six entries that
+  // ARE Monokai Pro accents take the official light accents; the extended
+  // hues in between keep their OKLCH light variants.
   'look.nick.colors': [
-    '#c40553',
-    '#b95417',
-    '#a78500',
-    '#5f9118',
-    '#00919e',
-    '#7260b6',
+    '#e14775', // official ← #ff6188
+    '#e16032', // official ← #fc9867
+    '#cc7a0a', // official ← #ffd866
+    '#269d69', // official ← #a9dc76
+    '#1c8ca8', // official ← #78dce8
+    '#7058be', // official ← #ab9df2
     '#b52d55',
     '#9a5f30',
     '#a68500',
@@ -121,21 +124,22 @@ const LIGHT_OVERRIDES: Record<string, SettingValue> = {
     '#4268c5',
     '#3163c0',
   ],
-  // Chromatic slots take the light variant of the same nick-palette hue the
-  // dark default borrows; the mono slots keep their var() derivations. Slot 1
-  // stays literal black — correct on a light canvas, and still never var(--bg).
+  // Chromatic slots track the nick palette like the dark defaults do: slots
+  // whose dark value is a Pro accent take the official light accent, the rest
+  // keep OKLCH. Mono slots keep their var() derivations. Slot 1 stays literal
+  // black — correct on a light canvas, and still never var(--bg).
   'look.color.mirc_colors': [
     'var(--fg)', //                                       0  white
     '#000000', //                                         1  black — NOT var(--bg)
     '#3163c0', //                                         2  navy
-    '#5f9118', //                                         3  green
-    '#c40553', //                                         4  red
+    '#269d69', //                                         3  green (official)
+    '#e14775', //                                         4  red (official)
     '#b52d55', //                                         5  maroon
-    '#7260b6', //                                         6  purple
-    '#b95417', //                                         7  orange
-    '#a78500', //                                         8  yellow
+    '#7058be', //                                         6  purple (official)
+    '#e16032', //                                         7  orange (official)
+    '#cc7a0a', //                                         8  yellow (official)
     '#688f2d', //                                         9  lime
-    '#00919e', //                                         10 teal
+    '#1c8ca8', //                                         10 teal (official)
     '#409ba9', //                                         11 cyan
     '#4268c5', //                                         12 blue
     '#c12d5b', //                                         13 magenta
