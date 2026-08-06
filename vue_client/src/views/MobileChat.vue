@@ -314,7 +314,9 @@ function openSystemConsole() {
   // Route through activate() (not networks.activateSystem) so the system buffer
   // gets the full read-state lifecycle: divider snapshot + mark-read on entry.
   buffers.activate(null, SYSTEM_KEY);
-  openActiveBuffer();
+  // By NAME, not id: this is the one buffer that has to open before the server
+  // has answered — which is exactly when its connection log is worth reading.
+  void router.push('/system');
 }
 
 const channelListModal = reactive(useChannelListModal());
@@ -337,10 +339,14 @@ const networkEditor = reactive(useNetworkEditor());
 // later, and rendering an empty buffer shell in the meantime looks broken. Wait
 // on the list, exactly as the old auto-advance did. useBufferRoute owns the
 // other end of that wait — it drops the URL back to `/` if the id never lands.
-const screen = computed(() => {
-  const v = screenForRoute(route.params.id, route.name === 'buffer-members', !!activeKey.value);
-  return v;
-});
+const screen = computed(() =>
+  screenForRoute(
+    route.params.id,
+    route.name === 'buffer-members',
+    !!activeKey.value,
+    route.name === 'system',
+  ),
+);
 const showBookmarks = ref(false);
 const showTopic = ref(false);
 const showUploads = ref(false);
@@ -455,8 +461,22 @@ watch(activeKey, () => {
 // re-tapping the Lurker logo while already on `:system:`. Both are a
 // navigation from the user's point of view even though no state moved.
 function openActiveBuffer() {
-  const id = (activeBuf.value as { id?: number } | null)?.id;
-  if (id != null) pushBuffer(router, id);
+  const buf = activeBuf.value as { id?: number; networkId?: number | null } | null;
+  if (!buf) return;
+  // App-scoped (the system console) routes by name — it may have no row id yet.
+  if (buf.networkId == null) {
+    void router.push('/system');
+    return;
+  }
+  if (buf.id != null) {
+    pushBuffer(router, buf.id);
+    return;
+  }
+  // Active but not addressable yet — a DM opened optimistically has no row id
+  // until the server answers. Leave whatever sub-screen we're on rather than
+  // sitting on it (the member list of the channel we just left, say); the URL
+  // binding pushes the real route the moment the id lands.
+  if (route.name !== 'chat') void router.push('/');
 }
 
 function onBufferListClick(e: MouseEvent) {

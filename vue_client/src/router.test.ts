@@ -22,6 +22,9 @@ describe('chat routes', () => {
     expect(byName.get('chat')).toBe('/');
     expect(byName.get('buffer')).toBe('/buffer/:id');
     expect(byName.get('buffer-members')).toBe('/buffer/:id/members');
+    // Named, not id-addressed: the app-scoped console has to be reachable
+    // before the server has handed out any row ids.
+    expect(byName.get('system')).toBe('/system');
   });
 
   it('resolves a buffer path to its id param', () => {
@@ -37,6 +40,11 @@ describe('chat routes', () => {
   it('distinguishes the members screen by name, not by path sniffing', () => {
     expect(router.resolve('/buffer/42/members').name).toBe('buffer-members');
     expect(router.resolve('/buffer/42/members').params.id).toBe('42');
+  });
+
+  it('keeps /system out of the id-addressed space', () => {
+    expect(router.resolve('/system').name).toBe('system');
+    expect(router.resolve('/system').params.id).toBeUndefined();
   });
 
   it('does not swallow other routes', () => {

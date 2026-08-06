@@ -6,6 +6,7 @@ import { useRoute, useRouter, type Router } from 'vue-router';
 import { useNetworksStore } from '../stores/networks.js';
 import { useBuffersStore, bufferKey } from '../stores/buffers.js';
 import { useToastsStore } from '../stores/toasts.js';
+import { SYSTEM_KEY } from '../lib/virtualBuffers.js';
 import { connected } from './useSocket.js';
 import { whenReady } from '../lib/deferredReady.js';
 
@@ -42,7 +43,13 @@ export function pushBuffer(router: Router, id: number): void {
   // navigation anyway, but it is reached on every single buffer open — the
   // watcher pushes, the route lands, and the click handler then asks for the
   // same place ~30ms later — so it is worth not starting the navigation at all.
-  if (router.currentRoute.value.params.id === String(id)) return;
+  //
+  // Match the NAME too: `/buffer/7/members` carries id 7 as well, and treating
+  // that as "already there" would make this a no-op from the members screen —
+  // so a jump to the buffer you're already in (a toast, a search hit) couldn't
+  // get you back off the member list.
+  const current = router.currentRoute.value;
+  if (current.name === 'buffer' && current.params.id === String(id)) return;
   inFlightId = id;
   void router.push(`/buffer/${id}`).finally(() => {
     if (inFlightId === id) inFlightId = null;
@@ -91,10 +98,15 @@ export function useBufferRoute(): void {
     // buffer is active but has no server id yet) must not collapse into one
     // value, or the transition between them wouldn't fire the watcher and the
     // URL would be left naming a buffer that is gone.
-    (): 'none' | 'pending' | number => {
+    (): 'none' | 'pending' | 'system' | number => {
       const key = networks.activeKey;
       if (!key) return 'none';
-      return buffers.byKey(key)?.id ?? 'pending';
+      const buf = buffers.byKey(key);
+      if (!buf) return 'pending';
+      // App-scoped (networkId null) — addressable by name, and deliberately not
+      // by row id, which it may not have yet. See the /system route.
+      if (buf.networkId == null) return 'system';
+      return buf.id ?? 'pending';
     },
     (id) => {
       if (id === 'none') {
@@ -107,6 +119,11 @@ export function useBufferRoute(): void {
         return;
       }
       if (id === 'pending') return; // no server id yet — see above
+      if (id === 'system') {
+        clearPending();
+        if (route.name !== 'system') void router.replace('/system');
+        return;
+      }
       // Already there. This is the loop guard for the inbound direction: a
       // route-driven activation produces an outbound target identical to the
       // route that caused it, and stops here.
@@ -132,11 +149,27 @@ export function useBufferRoute(): void {
   }
 
   watch(
-    () => route.params.id,
+    // Name AND id: `/`, `/system` and `/buffer/:id` are three destinations, and
+    // two of them carry no id at all. A string rather than an array because the
+    // callback only needs to know that something moved.
+    () => `${String(route.name)}|${String(route.params.id ?? '')}`,
     () => {
+      if (route.name === 'system') {
+        clearPending();
+        if (networks.activeKey !== SYSTEM_KEY) buffers.activate(null, SYSTEM_KEY);
+        return;
+      }
       const id = routeId();
       clearPending();
-      if (id == null) return; // at `/` — see note below on not deactivating
+      // At `/` (see the note below on not deactivating) — or at a hand-typed
+      // `/buffer/nonsense`, which names no buffer we could ever resolve. Drop
+      // that back to `/` rather than leaving the address bar asserting a buffer
+      // the shell isn't showing; an unknown NUMERIC id already ends the same
+      // way, via the timeout below.
+      if (id == null) {
+        if (route.params.id != null) void router.replace('/');
+        return;
+      }
 
       if (open(id)) return;
       // Unknown id. Either a cold start where buffers haven't arrived over the

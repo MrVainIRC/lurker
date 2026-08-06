@@ -42,6 +42,7 @@ function applyPath(to: string): void {
   h.s.route.path = path;
   const m = /^\/buffer\/([^/]+)$/.exec(path);
   h.s.route.params = m ? { id: m[1] } : {};
+  h.s.route.name = m ? 'buffer' : path === '/system' ? 'system' : 'chat';
 }
 
 vi.mock('vue-router', () => ({
@@ -124,7 +125,7 @@ const start = () => (wrapper = mount(Harness));
 
 beforeEach(() => {
   h.s = reactive({
-    route: { path: '/', params: {} as Record<string, string> },
+    route: { path: '/', name: 'chat' as string, params: {} as Record<string, string> },
     connected: true,
     networks: { activeKey: null as string | null },
     buffers: {} as Record<string, { id?: number; networkId: number | null; target: string }>,
@@ -290,6 +291,41 @@ describe('useBufferRoute — URL to active buffer', () => {
 
     expect(h.activate).not.toHaveBeenCalled();
     expect(h.toast).not.toHaveBeenCalled();
+  });
+
+  it('activates the system buffer from /system, and routes back to it by name', async () => {
+    h.s.buffers[':system:'] = { networkId: null, target: ':system:' }; // no id yet
+    start();
+    h.s.route.name = 'system';
+    h.s.route.path = '/system';
+    await nextTick();
+
+    expect(h.activate).toHaveBeenCalledWith(null, ':system:');
+  });
+
+  it('sends an active app-scoped buffer to /system rather than an id', async () => {
+    // It may have no row id at all before the socket connects, so an id-based
+    // URL would make the connection log unreachable exactly when it's wanted.
+    h.s.buffers[':system:'] = { networkId: null, target: ':system:' };
+    start();
+    await activate(':system:');
+
+    expect(h.replace).toHaveBeenCalledWith('/system');
+    expect(h.push).not.toHaveBeenCalled();
+  });
+
+  it('drops a non-numeric /buffer/<junk> back to /', async () => {
+    known('1::#chan', 7);
+    start();
+    await activate('1::#chan');
+    h.replace.mockReset();
+
+    applyPath('/buffer/nonsense');
+    await nextTick();
+
+    // Otherwise the address bar keeps asserting a buffer the shell isn't
+    // showing; an unknown NUMERIC id already ends the same way, on timeout.
+    expect(h.replace).toHaveBeenCalledWith('/');
   });
 
   it('does not deactivate when navigating to /', async () => {

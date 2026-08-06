@@ -8,7 +8,8 @@
 export type MobileScreen = 'list' | 'buffer' | 'members';
 
 /**
- * `/` → list, `/buffer/<id>` → buffer, `/buffer/<id>/members` → members.
+ * `/` → list, `/buffer/<id>` → buffer, `/buffer/<id>/members` → members,
+ * `/system` → buffer (the app-scoped console).
  *
  * `isMembers` is the route NAME test (`buffer-members`), not a path-suffix
  * sniff — the three screens are three route records.
@@ -29,7 +30,12 @@ export function screenForRoute(
   id: unknown,
   isMembers: boolean,
   hasActiveBuffer: boolean,
+  isSystem = false,
 ): MobileScreen {
+  // `/system` names the app-scoped buffer without an id — it exists before the
+  // server answers, so it stays reachable while disconnected, which is when its
+  // connection log is what you want.
+  if (isSystem) return 'buffer';
   if (!id || !hasActiveBuffer) return 'list';
   return isMembers ? 'members' : 'buffer';
 }

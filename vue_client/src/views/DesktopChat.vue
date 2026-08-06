@@ -301,7 +301,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import type { Network } from '../stores/networks.js';
 import { useBuffersStore, type Buffer } from '../stores/buffers.js';
 import { SYSTEM_KEY } from '../lib/virtualBuffers.js';
@@ -335,6 +335,7 @@ import UserProfileModal from '../components/UserProfileModal.vue';
 import MediaViewerModal from '../components/MediaViewerModal.vue';
 import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts.js';
 import { useNicklistCollapseStore } from '../stores/nicklistCollapse.js';
+import { shouldOpenSystemBufferOnLoad } from '../utils/defaultBuffer.js';
 import { useNickNotesStore } from '../stores/nickNotes.js';
 import { useDccStore } from '../stores/dcc.js';
 import { useWhoisStore } from '../stores/whois.js';
@@ -354,12 +355,13 @@ const buffers = useBuffersStore();
 useSocket();
 
 // Land on the system buffer instead of a blank "No messages yet." pane when
-// nothing else is active on load (#355). The last-active buffer isn't persisted,
-// so activeKey is null on every fresh load; the system buffer always exists in
-// the store, so this is always a valid target. Guarded on null so a deep-link /
-// push-jump that set a buffer first still wins.
+// nothing else is active on load (#355) — but not over the top of a deep link
+// that hasn't resolved yet. See shouldOpenSystemBufferOnLoad for why the route
+// half of that test is load-bearing.
 onMounted(() => {
-  if (networks.activeKey == null) buffers.activate(null, SYSTEM_KEY);
+  if (shouldOpenSystemBufferOnLoad(networks.activeKey, route.params.id)) {
+    buffers.activate(null, SYSTEM_KEY);
+  }
 });
 const {
   active,
@@ -576,6 +578,7 @@ function onChatClick(e: MouseEvent) {
 const onJumpToMessage = useJumpToMessage({ pendingScrollId });
 
 const router = useRouter();
+const route = useRoute();
 // Collapsed-only footer affordance: the settings cog normally lives on the
 // LURKER sidebar row, but that whole list is unmounted when the sidebar is
 // collapsed (BufferList v-if), so the rail offers the cog here instead (#355).

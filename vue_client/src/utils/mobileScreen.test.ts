@@ -5,6 +5,13 @@ import { describe, it, expect } from 'vitest';
 import { screenForRoute } from './mobileScreen.js';
 
 describe('screenForRoute', () => {
+  it('shows the system console from /system, with or without an id', () => {
+    // The app-scoped buffer routes by name because it exists before the server
+    // answers — reachable while disconnected, which is when its log matters.
+    expect(screenForRoute(undefined, false, true, true)).toBe('buffer');
+    expect(screenForRoute(undefined, false, false, true)).toBe('buffer');
+  });
+
   it.each([
     ['at /', undefined, false, true, 'list'],
     ['on a buffer', '7', false, true, 'buffer'],

@@ -40,6 +40,12 @@ const routes: RouteRecordRaw[] = [
   // The routes only name WHICH buffer; useBufferRoute owns the activation and
   // the reverse (activeKey → URL) direction.
   { path: '/', name: 'chat', component: chatShell, meta: { requiresAuth: true } },
+  // The app-scoped system buffer (#355) gets a NAMED path rather than an id.
+  // It is the one buffer that exists before the server answers — the store
+  // seeds it at boot — so addressing it by row id would make it unreachable
+  // exactly when it matters most: while disconnected, which is when the
+  // connection log it carries is what you want to read.
+  { path: '/system', name: 'system', component: chatShell, meta: { requiresAuth: true } },
   { path: '/buffer/:id', name: 'buffer', component: chatShell, meta: { requiresAuth: true } },
   {
     path: '/buffer/:id/members',
