@@ -32,6 +32,20 @@ const COLOR_VARS: Record<string, string> = {
 
 let installed = false;
 
+// UA hint for scrollbars / form controls / system surfaces, derived from the
+// effective background rather than any theme metadata — a hand-picked palette
+// deserves the right chrome as much as the built-in Light theme does. Perceived
+// luminance (ITU-R BT.601) on plain hex; anything else (var(), color-mix())
+// keeps the dark default.
+function colorSchemeFor(bg: string): 'light' | 'dark' {
+  const hex = /^#(?:([0-9a-f]{3})|([0-9a-f]{6}))$/i.exec(bg.trim());
+  if (!hex) return 'dark';
+  const digits = hex[2] ?? hex[1].replace(/./g, (c) => c + c);
+  const n = parseInt(digits, 16);
+  const luma = 0.299 * ((n >> 16) & 0xff) + 0.587 * ((n >> 8) & 0xff) + 0.114 * (n & 0xff);
+  return luma > 140 ? 'light' : 'dark';
+}
+
 export function useTheme(): void {
   if (installed) return;
   installed = true;
@@ -56,5 +70,6 @@ export function useTheme(): void {
       macSmoothing ? 'subpixel-antialiased' : 'auto',
     );
     root.style.setProperty('--font-smoothing-moz', 'auto');
+    root.style.colorScheme = colorSchemeFor(String(settings.effective('look.color.bg')));
   });
 }

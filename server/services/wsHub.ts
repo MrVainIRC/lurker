@@ -18,6 +18,7 @@ import type { IrcConnection } from './ircConnection.js';
 import { e2eManager } from './e2e/manager.js';
 import { MAX_IMPORT_BYTES } from './e2e/portable.js';
 import settingsService from './settingsService.js';
+import themesService from './themesService.js';
 import highlightRulesService from './highlightRulesService.js';
 import draftsService from './draftsService.js';
 import * as systemLog from './systemLog.js';
@@ -2168,7 +2169,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
     }
   });
 
-  settingsService.on('event', ({ userId, changes }) => {
+  settingsService.on('event', ({ userId, changes, resets }) => {
     // #627: the raw setting isn't the effective cap — it still has to clear the
     // transport ceiling and any operator-baked policy cap. The user's OWN change
     // already has a delivery path right here, so recompute rather than leaving
@@ -2178,6 +2179,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
     fanOut(userId, {
       kind: 'settings',
       changes: changes || {},
+      ...(Array.isArray(resets) && resets.length ? { resets } : {}),
       ...(touchedCap
         ? {
             maxUploadBytes: effectiveUploadCapBytes(userId, findUserById(userId)?.role === 'admin'),
@@ -2196,6 +2198,13 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
 
   highlightRulesService.on('change', ({ userId }) => {
     fanOut(userId, { kind: 'highlight-rules-changed' });
+  });
+
+  // Saved theme presets changed (create/update/delete, this or another device).
+  // Refetch-on-any-change like highlight rules: the list is small and the event
+  // needs no payload contract that way.
+  themesService.on('change', ({ userId }: { userId: number }) => {
+    fanOut(userId, { kind: 'themes-changed' });
   });
 
   // System-console fan-out. User-scoped lines reach just that user's tabs;

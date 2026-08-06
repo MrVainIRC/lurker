@@ -30,6 +30,8 @@ import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import type { Statement, RunResult } from 'better-sqlite3';
 import db from '../db/index.js';
 import { EXPORT_TABLES, EXPORT_FORMAT_VERSION, IMPORT_ORDER } from '../db/exportSchema.js';
+import { isBuiltinThemeId } from '../../shared/themePresets.js';
+import { THEME_POINTER_KEYS } from './themesService.js';
 import { encryptSecret } from '../utils/secretCrypto.js';
 import {
   importRow as importBufferRow,
@@ -322,6 +324,29 @@ function insertTable(
       const mapped = idMaps.uploader_config?.get(oldId);
       if (mapped === undefined) continue;
       row.value = JSON.stringify(mapped);
+    }
+
+    // Same in-VALUE rewrite for the theme pointers: their value is a user_themes
+    // row id as a decimal STRING (or a built-in id, which travels as-is). A
+    // pointer whose theme didn't survive the trip drops and falls back to its
+    // registry default — the resolver treats that as the built-in Dark theme.
+    if (
+      table === 'user_settings' &&
+      typeof row.key === 'string' &&
+      THEME_POINTER_KEYS.includes(row.key)
+    ) {
+      let oldId: unknown;
+      try {
+        oldId = JSON.parse(String(row.value));
+      } catch {
+        continue;
+      }
+      if (typeof oldId !== 'string') continue;
+      if (!isBuiltinThemeId(oldId)) {
+        const mapped = idMaps.user_themes?.get(Number(oldId));
+        if (mapped === undefined) continue;
+        row.value = JSON.stringify(String(mapped));
+      }
     }
 
     // Route ignore rules through the service rather than a raw INSERT, so a

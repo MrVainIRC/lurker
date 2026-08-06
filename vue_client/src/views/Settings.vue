@@ -54,6 +54,7 @@ import { useSocket } from '../composables/useSocket.js';
 import { CATEGORIES, GROUPS, REGISTRY, categoryVisible } from '../utils/settingsRegistry.js';
 import SettingsSidebar from '../components/SettingsSidebar.vue';
 import RegistryPane from '../components/settings-panes/RegistryPane.vue';
+import AppearancePane from '../components/settings-panes/AppearancePane.vue';
 import NotificationsPane from '../components/settings-panes/NotificationsPane.vue';
 import HighlightsPane from '../components/settings-panes/HighlightsPane.vue';
 import IgnoresPane from '../components/settings-panes/IgnoresPane.vue';
@@ -94,6 +95,7 @@ const error = ref('');
 // One component per bespoke category. Registry-driven categories all share
 // RegistryPane and pick out their items by `categoryId` prop.
 const BESPOKE_PANES: Record<string, Component> = {
+  appearance: AppearancePane,
   notifications: NotificationsPane,
   highlights: HighlightsPane,
   ignores: IgnoresPane,
@@ -132,7 +134,9 @@ interface SettingsSubsection {
 
 const appearanceSubsections = computed<SettingsSubsection[]>(() => {
   const seen = new Set<string>();
-  const subsections: SettingsSubsection[] = [];
+  // Themes leads the pane but isn't a registry group — ThemesSection renders
+  // its own [data-setting-group="themes"] heading for the scroll-spy.
+  const subsections: SettingsSubsection[] = [{ id: 'themes', label: 'Themes' }];
   for (const opt of REGISTRY) {
     if (opt.category !== 'appearance') continue;
     const id = opt.group || '_';

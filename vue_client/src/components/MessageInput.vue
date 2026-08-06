@@ -143,6 +143,10 @@ import { parseNetworkCommand } from '../lib/commands/network.js';
 import { splitSetArgs, coerceSettingValue, formatSettingValue } from '../lib/commands/settings.js';
 import { parseRelayCommand } from '../lib/commands/relay.js';
 import { parseDccCommand } from '../lib/commands/dcc.js';
+import { parseThemeCommand } from '../lib/commands/theme.js';
+import { useThemesStore } from '../stores/themes.js';
+import { themeNameError } from '../../../shared/themePresets.js';
+import type { ThemePreset } from '../../../shared/themePresets.js';
 import { formatColumns } from '../lib/commands/output.js';
 import { REGISTRY, getOption, optionVisible, CATEGORIES } from '../utils/settingsRegistry.js';
 import type { SettingOption } from '../../../shared/settingsRegistry.js';
@@ -2257,6 +2261,8 @@ const COMMANDS_LINES = [
   '      e.g. /dcc   ·   /dcc accept 3   ·   /dcc reject 3   ·   /dcc cancel 3',
   '  /set <key> <value…>    — change a setting; /set (or /set ?) lists all keys',
   '  /get <key>             — read a setting back (output in the system buffer)',
+  '  /theme [list]          — theme presets: apply/save/delete <name>, mode [single|system]',
+  '      e.g. /theme apply Light   ·   /theme save My Theme   ·   /theme use dark Ocean',
   '  /raw <line>            — send a raw IRC line (alias: /quote)',
   '  /e2e <sub>             — end-to-end encryption for a channel (experimental; /e2e help)',
   '      on [#chan] [auto|normal|quiet]   ·   off [#chan]   ·   mode <auto|normal|quiet>',
@@ -2473,6 +2479,97 @@ async function runDcc(argLine: string, networkId: number | null, target: string)
 function dccListRow(t: DccTransfer): string[] {
   const pct = t.advertised_size > 0 ? `${percentReceived(t)}%` : '';
   return [`#${t.id}`, t.filename, t.state, t.peer_nick, pct];
+}
+
+// /theme — theme presets over the themes store (slash-command-first; the
+// Themes section in Settings > Appearance is a GUI over the same operations).
+// User-wide like /set, so it runs from anywhere including the system buffer.
+// REST-backed + async → fire-and-forget from handleCommand, reports when
+// settled.
+async function runTheme(argLine: string, networkId: number | null, target: string): Promise<void> {
+  const cmd = parseThemeCommand(argLine);
+  const reply = (msg: string) => localInfo(networkId, target, msg);
+  if (cmd.kind === 'error') return reply(`/theme: ${cmd.message}`);
+  const themes = useThemesStore();
+  const findByName = (name: string): ThemePreset | null =>
+    themes.all.find((t) => t.name.toLowerCase() === name.toLowerCase()) || null;
+
+  if (cmd.kind === 'list') {
+    const drift = settings.themeDriftKeys.length;
+    reply(`themes (${themes.all.length}):`);
+    for (const t of themes.all) {
+      const active = t.id === themes.activeThemeId;
+      const marks = [
+        t.builtin ? 'built-in' : '',
+        active ? (drift ? 'active, modified' : 'active') : '',
+      ]
+        .filter(Boolean)
+        .join(' — ');
+      reply(`  ${active ? '*' : ' '} ${t.name}${marks ? `  (${marks})` : ''}`);
+    }
+    const mode = settings.effective('look.theme.mode');
+    if (mode === 'system') {
+      const slotName = (key: string) =>
+        themes.byId(String(settings.effective(key) ?? ''))?.name || 'Dark';
+      reply(
+        `  mode: system (light → ${slotName('look.theme.light')}, dark → ${slotName('look.theme.dark')})`,
+      );
+    } else {
+      reply('  mode: single (/theme mode system follows the OS light/dark setting)');
+    }
+    return;
+  }
+
+  try {
+    if (cmd.kind === 'apply') {
+      const t = findByName(cmd.name);
+      if (!t) return reply(`/theme: no theme named "${cmd.name}" — /theme lists them`);
+      await themes.applyTheme(t.id);
+      return reply(`applied theme ${t.name}.`);
+    }
+    if (cmd.kind === 'save') {
+      const err = themeNameError(cmd.name);
+      if (err) return reply(`/theme save: ${err}`);
+      // Snapshot BEFORE re-pointing: applyTheme clears the overrides that make
+      // up the drift being saved.
+      const values = themes.snapshotCurrent();
+      const existing = findByName(cmd.name);
+      if (existing) {
+        await themes.update(Number(existing.id), { values });
+        await themes.applyTheme(existing.id);
+        return reply(`updated theme ${existing.name} with the current look.`);
+      }
+      const created = await themes.create(cmd.name, values);
+      await themes.applyTheme(String(created.id));
+      return reply(`saved current look as theme ${created.name}.`);
+    }
+    if (cmd.kind === 'delete') {
+      const t = findByName(cmd.name);
+      if (!t) return reply(`/theme: no theme named "${cmd.name}" — /theme lists them`);
+      if (t.builtin) return reply(`/theme: ${t.name} is built-in and can't be deleted`);
+      const wasActive = t.id === themes.activeThemeId;
+      await themes.remove(Number(t.id));
+      return reply(`deleted theme ${t.name}.${wasActive ? ' Reverted to Dark.' : ''}`);
+    }
+    if (cmd.kind === 'mode') {
+      if (cmd.mode === null) {
+        return reply(`look.theme.mode = ${settings.effective('look.theme.mode')}`);
+      }
+      await settings.setValue('look.theme.mode', cmd.mode);
+      return reply(`theme mode set to ${cmd.mode}.`);
+    }
+    // use <light|dark> <name>
+    const t = findByName(cmd.name);
+    if (!t) return reply(`/theme: no theme named "${cmd.name}" — /theme lists them`);
+    await settings.setValue(`look.theme.${cmd.slot}`, t.id);
+    const hint =
+      settings.effective('look.theme.mode') === 'single'
+        ? ' (takes effect in system mode — /theme mode system)'
+        : '';
+    return reply(`${cmd.slot}-mode theme set to ${t.name}.${hint}`);
+  } catch (e: any) {
+    reply(`/theme: ${e?.message || 'failed'}`);
+  }
 }
 
 function runIgnore(argLine: string, networkId: number | null, target: string): boolean {
@@ -2886,6 +2983,10 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // REST-backed + async, so fire-and-forget like /network; it reports into
       // the buffer when it settles.
       void runDcc(argLine, networkId, target);
+      return true;
+    case 'theme':
+      // Theme presets. App-scoped like /set; async like /dcc.
+      void runTheme(argLine, networkId, target);
       return true;
   }
 

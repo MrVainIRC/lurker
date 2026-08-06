@@ -7,6 +7,7 @@ import { useNetworksStore } from '../stores/networks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { useAuthStore } from '../stores/auth.js';
 import { useSettingsStore } from '../stores/settings.js';
+import { useThemesStore } from '../stores/themes.js';
 import { primePreviews } from './useLinkPreview.js';
 import { previewableEventTexts } from '../utils/previewEvents.js';
 import { useConfigStore } from '../stores/config.js';
@@ -725,6 +726,15 @@ function handleMessage(raw: string): void {
   if (payload.kind === 'settings') {
     const settings = useSettingsStore();
     settings.applyRemote(payload);
+    return;
+  }
+  if (payload.kind === 'themes-changed') {
+    // Saved theme list changed somewhere (this device's own writes included —
+    // harmless double-fetch). Refetch like highlight rules: small list, no
+    // payload contract to keep in sync.
+    useThemesStore()
+      .fetchAll()
+      .catch(() => {});
     return;
   }
   if (payload.kind === 'highlight-rules-changed') {

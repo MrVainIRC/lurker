@@ -569,6 +569,27 @@ function migrate() {
     CREATE INDEX IF NOT EXISTS idx_user_bookmarks_user_msg
       ON user_bookmarks(user_id, message_id DESC);
 
+    -- Saved theme presets: per-user snapshots of the \`themed\` settings-registry
+    -- keys (shared/settingsRegistry.ts), stored as one JSON object per theme.
+    -- The built-in Dark/Light themes are code (shared/themePresets.ts), never
+    -- rows here. values_json is validated against the registry on every write
+    -- (services/themesService.ts). name is NOCASE + unique per user so "ocean"
+    -- and "Ocean" can't coexist; the service checks first for a friendly error,
+    -- the constraint backstops races. The look.theme.* user_settings values
+    -- reference id as a decimal string; deleting a theme resets any pointer
+    -- aimed at it (service-side), so no FK exists for that relationship.
+    CREATE TABLE IF NOT EXISTS user_themes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      name TEXT NOT NULL COLLATE NOCASE,
+      values_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      UNIQUE (user_id, name),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_themes_user ON user_themes(user_id);
+
     -- Per-user bearer tokens for the HTTP API + MCP server. token_hash is the
     -- hex SHA-256 of the raw token; the raw value is shown once at creation
     -- time and never stored. scope is 'read' (read-only verbs) or 'read-write'
