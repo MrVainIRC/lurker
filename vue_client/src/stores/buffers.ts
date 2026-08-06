@@ -328,6 +328,38 @@ function makeBuffer(networkId: number | string | null, target: string): Buffer {
 // doesn't refetch forever. Detached and in-flight buffers are never "in need"
 // — the jump slice is deliberate, and a pending fetch will resolve or be
 // failed by failInFlightHistory on socket close.
+/**
+ * Trim an `around` slice to at most `max` rows while KEEPING THE ANCHOR, with as
+ * much context either side as the budget allows.
+ *
+ * The naive `slice(-max)` keeps the newest rows, which is right for a `latest`
+ * reply and wrong for this one: the point of an around slice is the anchor and
+ * its surroundings. Reports which end(s) were trimmed so the pager flags stay
+ * honest — unlike the tail-only case, either end can now lose rows.
+ */
+export function windowAroundAnchor(
+  events: BufferMessage[],
+  anchorId: unknown,
+  max: number,
+): { events: BufferMessage[]; trimmedOlder: boolean; trimmedNewer: boolean } {
+  if (events.length <= max) return { events, trimmedOlder: false, trimmedNewer: false };
+  const idx = typeof anchorId === 'number' ? events.findIndex((e) => e.id === anchorId) : -1;
+  // Anchor not in the slice (or not told what it is) — nothing to centre on, so
+  // the newest rows are as good a choice as any.
+  if (idx === -1) return { events: events.slice(-max), trimmedOlder: true, trimmedNewer: false };
+  const half = Math.floor(max / 2);
+  // Clamp at both ends so an anchor near either edge still yields a full window
+  // rather than a short one.
+  let start = Math.max(0, idx - half);
+  const end = Math.min(events.length, start + max);
+  start = Math.max(0, end - max);
+  return {
+    events: events.slice(start, end),
+    trimmedOlder: start > 0,
+    trimmedNewer: end < events.length,
+  };
+}
+
 export function bufferNeedsHydration(buf: Buffer): boolean {
   if (buf.networkId == null) return false;
   if (buf.detached || buf.loadingHistory) return false;
@@ -823,13 +855,21 @@ export const useBuffersStore = defineStore('buffers', {
       const filtered = (payload.events || []).filter(
         (e: BufferMessage) => e.type !== 'away' && e.type !== 'back',
       );
-      buf.messages = filtered.slice(-MAX_PER_BUFFER);
+      // Centred on the anchor, NOT `slice(-MAX)`. An `around` window is
+      // symmetrical about the anchor by construction (the server sends up to
+      // halfLimit either side), and a busy channel's noise easily pushes it past
+      // the ring — 963 rows for a 200-row request was the case that exposed
+      // this. Keeping the tail throws away the older half, which lands the
+      // anchor a handful of rows from the top with no context above it, and when
+      // more than MAX rows follow the anchor it discards the anchor itself and
+      // the jump reports that it couldn't find the message.
+      const win = windowAroundAnchor(filtered, payload.anchorId, MAX_PER_BUFFER);
+      buf.messages = win.events;
       buf.oldestId = buf.messages[0]?.id ?? null;
       buf.newestId = buf.messages[buf.messages.length - 1]?.id ?? null;
-      // Same eviction rule as applyLatestReplace: an `around` window tops out at
-      // 2×limit+1 rows, which already exceeds the ring at the default limit.
-      buf.hasMoreOlder = filtered.length > buf.messages.length || !!payload.hasMoreOlder;
-      buf.hasMoreNewer = !!payload.hasMoreNewer;
+      // Trimming can now happen at EITHER end, so each flag follows its own end.
+      buf.hasMoreOlder = win.trimmedOlder || !!payload.hasMoreOlder;
+      buf.hasMoreNewer = win.trimmedNewer || !!payload.hasMoreNewer;
       buf.pendingHistoryToken = null;
       buf.loadingHistory = false;
     },

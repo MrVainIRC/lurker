@@ -30,7 +30,7 @@ vi.mock('../composables/useSocket.js', () => ({
   socketSend: vi.fn<(payload: unknown) => boolean>(),
 }));
 
-import { useBuffersStore, bufferNeedsHydration } from './buffers.js';
+import { useBuffersStore, bufferNeedsHydration, windowAroundAnchor } from './buffers.js';
 import { useSettingsStore } from './settings.js';
 import { socketSend } from '../composables/useSocket.js';
 
@@ -1189,5 +1189,102 @@ describe('byId — the reactive counterpart to the keyById index', () => {
     stop();
 
     expect(seen).toEqual([true]);
+  });
+});
+
+describe('windowAroundAnchor — trimming an around slice', () => {
+  const ev = (id: number) => ({ id, networkId: 1, target: '#c', type: 'message' }) as any;
+  const run = (n: number, anchor: unknown, max: number) =>
+    windowAroundAnchor(
+      Array.from({ length: n }, (_, i) => ev(i + 1)),
+      anchor,
+      max,
+    );
+
+  it('leaves a slice that already fits', () => {
+    const r = run(10, 5, 500);
+    expect(r.events).toHaveLength(10);
+    expect(r.trimmedOlder).toBe(false);
+    expect(r.trimmedNewer).toBe(false);
+  });
+
+  it('centres the window on the anchor', () => {
+    // THE bug: `slice(-max)` kept the newest rows, so a 963-row around slice
+    // trimmed to 500 left the anchor ~18 rows from the top with no context
+    // above it — "loaded high up in the list, but not at the message".
+    const r = run(963, 482, 500);
+    const ids = r.events.map((e: any) => e.id);
+    expect(ids).toContain(482);
+    // Roughly centred: a comfortable block of context on each side.
+    expect(ids.indexOf(482)).toBeGreaterThan(200);
+    expect(ids.length - ids.indexOf(482)).toBeGreaterThan(200);
+    expect(r.trimmedOlder).toBe(true);
+    expect(r.trimmedNewer).toBe(true);
+  });
+
+  it('keeps the anchor when it sits near the start', () => {
+    const r = run(963, 3, 500);
+    expect(r.events.map((e: any) => e.id)).toContain(3);
+    expect(r.events).toHaveLength(500);
+    expect(r.trimmedOlder).toBe(false);
+    expect(r.trimmedNewer).toBe(true);
+  });
+
+  it('keeps the anchor when it sits near the end', () => {
+    const r = run(963, 960, 500);
+    expect(r.events.map((e: any) => e.id)).toContain(960);
+    expect(r.events).toHaveLength(500);
+    expect(r.trimmedOlder).toBe(true);
+    expect(r.trimmedNewer).toBe(false);
+  });
+
+  it('never drops the anchor, wherever it falls', () => {
+    // The failure mode behind the "couldn't load that message" toast: when more
+    // than max rows follow the anchor, tail-trimming discarded it outright.
+    for (const anchor of [1, 250, 481, 700, 963]) {
+      expect(run(963, anchor, 500).events.map((e: any) => e.id)).toContain(anchor);
+    }
+  });
+
+  it('falls back to the newest rows when the anchor is absent', () => {
+    const r = run(963, 99999, 500);
+    expect(r.events).toHaveLength(500);
+    expect(r.events[r.events.length - 1].id).toBe(963);
+    expect(r.trimmedOlder).toBe(true);
+  });
+});
+
+describe('applyAroundSlice — the anchor survives the ring', () => {
+  it('keeps the anchor centred rather than trimming to the newest rows', () => {
+    // Exercised through the store, not just the helper: the bug was in which
+    // window applyAroundSlice asked for, so a helper-only test lets the old
+    // `slice(-MAX)` back in unnoticed.
+    vi.mocked(socketSend).mockReturnValue(true);
+    const store = useBuffersStore();
+    store.ensure(1, '#busy', 47);
+    const token = store.loadAround(1, '#busy', 250528);
+    expect(token).not.toBeNull();
+
+    // A noisy channel: far more rows come back than the ring holds, spread
+    // either side of the anchor.
+    const events = Array.from({ length: 963 }, (_, i) => ({
+      id: 250528 - 481 + i,
+      networkId: 1,
+      target: '#busy',
+      type: 'message',
+      nick: 'someone',
+      text: 'x',
+    }));
+
+    store.applyAroundSlice(1, '#busy', { token, anchorId: 250528, events });
+
+    const buf = store.findByTarget(1, '#busy')!;
+    const ids = buf.messages.map((m) => m.id);
+    expect(ids).toContain(250528);
+    // And with real context above it — landing the anchor at the top of the
+    // pane is the visible half of this bug.
+    expect(ids.indexOf(250528)).toBeGreaterThan(100);
+    expect(buf.hasMoreOlder).toBe(true);
+    expect(buf.hasMoreNewer).toBe(true);
   });
 });
