@@ -2123,6 +2123,55 @@ defineExpose({ scrollByPage });
 // the jump, which is the main reason a *delivered* jump fails to scroll on mobile.
 const SCROLL_RETRY_FRAMES = 60;
 
+// How long to keep the jump target centred after the first scroll.
+//
+// Landing on the row isn't enough. A jump renders a whole slice at once, and
+// this pane deliberately disables browser scroll anchoring (see overflow-anchor
+// below — it picks bad anchors when older history prepends). So as images and
+// wrapped text ABOVE the target finish resolving, everything below shifts down
+// while scrollTop stays put, and the row the user asked for drifts off screen.
+// Re-centre while that settles.
+//
+// Measured on device, not assumed: a jump into a 1870-event slice took 74
+// corrections before it stopped moving. A smaller slice took none — which is
+// why the drift only showed up sometimes, and why it can't be reasoned away.
+const SCROLL_HOLD_MS = 1200;
+// Don't fight sub-pixel noise, do fix a row that has moved meaningfully.
+const SCROLL_DRIFT_PX = 8;
+
+function holdCentred(el: HTMLElement, target: HTMLElement, id: number | string): void {
+  const until = performance.now() + SCROLL_HOLD_MS;
+  let released = false;
+  // The moment the user takes over, stop — being dragged back to a row you're
+  // scrolling away from is worse than the drift.
+  const release = () => {
+    released = true;
+  };
+  el.addEventListener('touchstart', release, { passive: true, once: true });
+  el.addEventListener('wheel', release, { passive: true, once: true });
+
+  const tick = () => {
+    if (released || props.pendingScrollId !== id) return finish();
+    // Re-query: a re-render can replace the node under us.
+    const node = el.querySelector(`[data-msg-id="${id}"]`) as HTMLElement | null;
+    if (node) {
+      const rect = node.getBoundingClientRect();
+      const box = el.getBoundingClientRect();
+      const drift = rect.top + rect.height / 2 - (box.top + box.height / 2);
+      if (Math.abs(drift) > SCROLL_DRIFT_PX) {
+        node.scrollIntoView({ block: 'center', behavior: 'auto' });
+      }
+    }
+    if (performance.now() < until) requestAnimationFrame(tick);
+    else finish();
+  };
+  function finish(): void {
+    el.removeEventListener('touchstart', release);
+    el.removeEventListener('wheel', release);
+  }
+  requestAnimationFrame(tick);
+}
+
 watch(
   () => props.pendingScrollId,
   async (id) => {
@@ -2140,9 +2189,13 @@ watch(
         return;
       }
       stickToBottom.value = false;
-      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      // 'auto', not 'smooth': a jump is a teleport, and an animated scroll over
+      // a slice this size is both meaningless and fragile — it races the layout
+      // settling below and loses.
+      target.scrollIntoView({ block: 'center', behavior: 'auto' });
       target.classList.add('scroll-target');
       setTimeout(() => target.classList.remove('scroll-target'), 1500);
+      holdCentred(el, target as HTMLElement, id);
     };
     tryScroll();
   },
