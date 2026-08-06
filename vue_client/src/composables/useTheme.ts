@@ -61,7 +61,13 @@ function computedColorScheme(fallbackBg: string): 'light' | 'dark' {
   const m = /^rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+%?))?\s*\)$/.exec(
     resolved || '',
   );
-  if (m && m[4] !== '0') return schemeFromLuma(Number(m[1]), Number(m[2]), Number(m[3]));
+  if (m) {
+    // Numeric alpha, not a string compare: browsers canonically serialize a
+    // transparent computed color as `rgba(0, 0, 0, 0)`, but `0.0`/`0%` forms
+    // must fall through to the fallback too — their RGB is meaningless.
+    const alpha = m[4] === undefined ? 1 : parseFloat(m[4]) / (m[4].endsWith('%') ? 100 : 1);
+    if (alpha > 0) return schemeFromLuma(Number(m[1]), Number(m[2]), Number(m[3]));
+  }
   return colorSchemeFor(fallbackBg);
 }
 

@@ -25,16 +25,19 @@ interface RawRow {
 }
 
 function toTheme(row: RawRow): ThemeRow | null {
-  let values: Record<string, SettingValue>;
+  let values: unknown;
   try {
     values = JSON.parse(row.values_json);
   } catch {
     return null; // malformed row — treat as absent, like db/settings.ts does
   }
+  // JSON.parse succeeding isn't enough: `null`, an array, or a bare scalar all
+  // parse fine and none is a {key: value} map. Same treatment as unparseable.
+  if (!values || typeof values !== 'object' || Array.isArray(values)) return null;
   return {
     id: row.id,
     name: row.name,
-    values,
+    values: values as Record<string, SettingValue>,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
