@@ -107,7 +107,8 @@
     -->
     <p v-if="hint" class="dep-hint">{{ hint }}</p>
     <div v-if="modified" class="default-line">
-      default: <code>{{ formatDefault(opt) }}</code>
+      default:
+      <code>{{ formatDefault(opt, baseline !== undefined ? baseline : opt.default) }}</code>
     </div>
   </li>
 </template>
@@ -122,6 +123,13 @@ withDefaults(
     value?: SettingValue;
     modified?: boolean;
     /**
+     * What resetting this row would restore. Defaults to `opt.default`, but a
+     * themed key under a non-default theme resets to the THEME's value — the
+     * annotation must advertise the value reset actually produces, so the
+     * caller passes the resolved baseline (settings.baseline(key)).
+     */
+    baseline?: SettingValue;
+    /**
      * Non-empty when the setting's `dependsOn` clauses don't currently hold:
      * the explanation to show, and the flag that greys the editor out. Empty
      * (the default) for an ordinary live row.
@@ -131,6 +139,7 @@ withDefaults(
   {
     value: undefined,
     modified: false,
+    baseline: undefined,
     hint: '',
   },
 );
@@ -142,8 +151,7 @@ defineEmits<{
 
 const revealed = ref(false);
 
-function formatDefault(opt: SettingOption): string {
-  const v = opt.default;
+function formatDefault(opt: SettingOption, v: SettingValue): string {
   if (Array.isArray(v)) return v.join(', ');
   if (typeof v === 'boolean') return v ? 'on' : 'off';
   // Same lookup the <select> does. This line exists to tell the user what they

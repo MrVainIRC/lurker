@@ -8,6 +8,7 @@ import { useBuffersStore } from '../stores/buffers.js';
 import { useAuthStore } from '../stores/auth.js';
 import { useSettingsStore } from '../stores/settings.js';
 import { useThemesStore } from '../stores/themes.js';
+import { THEME_POINTER_KEYS } from '../../../shared/themePresets.js';
 import { primePreviews } from './useLinkPreview.js';
 import { previewableEventTexts } from '../utils/previewEvents.js';
 import { useConfigStore } from '../stores/config.js';
@@ -584,6 +585,14 @@ function applySnapshot(snapshot: any[], globalIgnores: any[] = []): void {
     .catch(() => {
       /* ignore — server stamp (m.matched) still drives highlighting */
     });
+  // Saved themes: the only live refresh is the themes-changed frame, which a
+  // disconnected device never received. Refetch on every (re)connect so a
+  // theme edited elsewhere while this device slept doesn't render stale.
+  useThemesStore()
+    .fetchAll()
+    .catch(() => {
+      /* ignore — the bootstrap list (or the last successful fetch) keeps rendering */
+    });
   for (const net of snapshot) {
     for (const ch of net.channels) {
       // Snapshot members are already { nick, modes } objects from the server.
@@ -726,6 +735,16 @@ function handleMessage(raw: string): void {
   if (payload.kind === 'settings') {
     const settings = useSettingsStore();
     settings.applyRemote(payload);
+    // A cross-device theme APPLY lands here (pointer write + themed resets) and
+    // races the themes-changed refetch, which is an async GET — a pointer at a
+    // theme this tab hasn't fetched yet resolves as built-in Dark meanwhile.
+    // When a pointer moved to an id we don't know, refetch right away; this
+    // also heals a list left stale by an earlier fetch failing silently.
+    const changed = payload.changes || {};
+    const themes = useThemesStore();
+    if (THEME_POINTER_KEYS.some((k) => k in changed && !themes.byId(String(changed[k])))) {
+      themes.fetchAll().catch(() => {});
+    }
     return;
   }
   if (payload.kind === 'themes-changed') {

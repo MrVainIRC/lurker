@@ -39,6 +39,7 @@
           :opt="opt"
           :value="settings.effective(opt.key)"
           :modified="settings.isModified(opt.key)"
+          :baseline="settings.baseline(opt.key)"
           :hint="dependencyHintFor(opt)"
           @commit="(v) => onCommit(opt.key, v)"
           @reset="onReset(opt.key)"

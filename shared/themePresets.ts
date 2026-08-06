@@ -31,8 +31,28 @@ export const THEME_NAME_MAX = 40;
 export const RESERVED_THEME_NAMES: readonly string[] = Object.freeze(['default', 'dark', 'light']);
 export const MAX_THEMES_PER_USER = 50;
 
+// The three settings whose stored value is a theme id. look.theme.mode is a
+// mode switch, not a pointer, so it never dangles. Shared because three
+// resolvers care: the client resolver, the server's delete-time pointer reset,
+// and the import-time pointer rewrite.
+export const THEME_POINTER_KEYS: readonly string[] = Object.freeze([
+  'look.theme.active',
+  'look.theme.light',
+  'look.theme.dark',
+]);
+
 export function normalizeThemeName(raw: string): string {
   return raw.trim();
+}
+
+/**
+ * Case-fold for theme-name comparisons. ASCII-only ON PURPOSE: the server's
+ * uniqueness domain is SQLite COLLATE NOCASE, which folds only A-Z, so a
+ * Unicode-aware toLowerCase() here would call two names "the same theme" that
+ * the server happily stores side by side (and vice versa would overwrite one).
+ */
+export function foldThemeName(name: string): string {
+  return name.replace(/[A-Z]/g, (c) => c.toLowerCase());
 }
 
 /** '' when valid, else the reason the name is rejected. */
@@ -41,7 +61,7 @@ export function themeNameError(raw: string): string {
   if (!name) return 'theme name is required';
   if (name.length > THEME_NAME_MAX)
     return `theme name must be ${THEME_NAME_MAX} characters or fewer`;
-  if (RESERVED_THEME_NAMES.includes(name.toLowerCase()))
+  if (RESERVED_THEME_NAMES.includes(foldThemeName(name)))
     return `"${name}" is a reserved theme name`;
   return '';
 }
@@ -113,11 +133,30 @@ const LIGHT_OVERRIDES: Record<string, SettingValue> = {
   ],
 };
 
+// Fresh array copies per call. REGISTRY's Object.freeze is shallow and
+// LIGHT_OVERRIDES' arrays are module singletons — without copying, every
+// consumer of a built-in theme would hold write-through references into the
+// registry defaults themselves, and one in-place edit (palette[i] = x,
+// .splice) by a future consumer (the theme editor) would corrupt the defaults
+// and both built-ins for the whole session.
+function copyValues(values: Record<string, SettingValue>): Record<string, SettingValue> {
+  const out: Record<string, SettingValue> = {};
+  for (const [key, value] of Object.entries(values)) {
+    out[key] = Array.isArray(value) ? [...value] : value;
+  }
+  return out;
+}
+
 export function builtinThemes(): ThemePreset[] {
   const dark = themedDefaults();
   return [
-    { id: 'dark', name: 'Dark', builtin: true, values: dark },
-    { id: 'light', name: 'Light', builtin: true, values: { ...dark, ...LIGHT_OVERRIDES } },
+    { id: 'dark', name: 'Dark', builtin: true, values: copyValues(dark) },
+    {
+      id: 'light',
+      name: 'Light',
+      builtin: true,
+      values: { ...copyValues(dark), ...copyValues(LIGHT_OVERRIDES) },
+    },
   ];
 }
 

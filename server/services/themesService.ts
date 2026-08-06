@@ -11,7 +11,7 @@ import { EventEmitter } from 'events';
 import type { SettingValue } from '../../shared/settingsRegistry.js';
 import {
   MAX_THEMES_PER_USER,
-  isBuiltinThemeId,
+  THEME_POINTER_KEYS,
   normalizeThemeName,
   themeNameError,
 } from '../../shared/themePresets.js';
@@ -33,13 +33,7 @@ type Result<T = undefined> =
   | (T extends undefined ? { ok: true } : { ok: true } & T)
   | { ok: false; error: string; status?: number };
 
-// The three settings whose stored value is a theme id. look.theme.mode is a
-// mode switch, not a pointer, so it never dangles.
-export const THEME_POINTER_KEYS: readonly string[] = Object.freeze([
-  'look.theme.active',
-  'look.theme.light',
-  'look.theme.dark',
-]);
+export { THEME_POINTER_KEYS };
 
 // A theme's values must be a non-empty object of themed registry keys with
 // type-valid values. A SUBSET of the themed keys is allowed on purpose: a key
@@ -133,10 +127,10 @@ class ThemesService extends EventEmitter {
     // here, server-authoritatively — one settings update, so every device gets
     // the same broadcast and re-themes in step with the deletion.
     const stored = getUserSettings(userId);
-    const dangling = THEME_POINTER_KEYS.filter((key) => {
-      const value = stored[key];
-      return typeof value === 'string' && !isBuiltinThemeId(value) && Number(value) === id;
-    });
+    // Exact-string match, matching how the client resolves pointers (byId over
+    // ids minted as String(rowid)). A numeric compare here would call '012' a
+    // pointer at theme 12 — a value no client ever renders as that theme.
+    const dangling = THEME_POINTER_KEYS.filter((key) => stored[key] === String(id));
     if (dangling.length) settingsService.update(userId, {}, dangling);
     this.emit('change', { userId });
     return { ok: true };

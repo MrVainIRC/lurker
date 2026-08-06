@@ -99,6 +99,16 @@ export const useSettingsStore = defineStore('settings', {
       }
     },
     async setValue(key: string, value: SettingValue) {
+      // A themed key written at exactly its current baseline is "no override" —
+      // persist it as a reset, not a row. The row would be invisible everywhere
+      // (isModified is baseline-relative) yet spring back as a wrong-theme
+      // override the next time the active theme changes under it (mode switch,
+      // OS light/dark flip — neither clears overrides; only applying does).
+      const opt = getOption(key);
+      if (opt?.themed && valuesEqual(value, this.baseline(key))) {
+        await this.patchMany({}, [key]);
+        return;
+      }
       await this.patchMany({ [key]: value });
     },
     /**

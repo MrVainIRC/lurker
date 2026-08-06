@@ -145,7 +145,7 @@ import { parseRelayCommand } from '../lib/commands/relay.js';
 import { parseDccCommand } from '../lib/commands/dcc.js';
 import { parseThemeCommand } from '../lib/commands/theme.js';
 import { useThemesStore } from '../stores/themes.js';
-import { themeNameError } from '../../../shared/themePresets.js';
+import { foldThemeName, themeNameError } from '../../../shared/themePresets.js';
 import type { ThemePreset } from '../../../shared/themePresets.js';
 import { formatColumns } from '../lib/commands/output.js';
 import { REGISTRY, getOption, optionVisible, CATEGORIES } from '../utils/settingsRegistry.js';
@@ -2491,8 +2491,11 @@ async function runTheme(argLine: string, networkId: number | null, target: strin
   const reply = (msg: string) => localInfo(networkId, target, msg);
   if (cmd.kind === 'error') return reply(`/theme: ${cmd.message}`);
   const themes = useThemesStore();
+  // foldThemeName, not toLowerCase(): the server's uniqueness domain is SQLite
+  // NOCASE (ASCII-only), and a wider Unicode fold here would silently take the
+  // destructive overwrite branch in `save` for a name the server considers new.
   const findByName = (name: string): ThemePreset | null =>
-    themes.all.find((t) => t.name.toLowerCase() === name.toLowerCase()) || null;
+    themes.all.find((t) => foldThemeName(t.name) === foldThemeName(name)) || null;
 
   if (cmd.kind === 'list') {
     const drift = settings.themeDriftKeys.length;
@@ -2530,17 +2533,12 @@ async function runTheme(argLine: string, networkId: number | null, target: strin
     if (cmd.kind === 'save') {
       const err = themeNameError(cmd.name);
       if (err) return reply(`/theme save: ${err}`);
-      // Snapshot BEFORE re-pointing: applyTheme clears the overrides that make
-      // up the drift being saved.
-      const values = themes.snapshotCurrent();
       const existing = findByName(cmd.name);
       if (existing) {
-        await themes.update(Number(existing.id), { values });
-        await themes.applyTheme(existing.id);
+        await themes.saveCurrentInto(Number(existing.id));
         return reply(`updated theme ${existing.name} with the current look.`);
       }
-      const created = await themes.create(cmd.name, values);
-      await themes.applyTheme(String(created.id));
+      const created = await themes.saveCurrentAs(cmd.name);
       return reply(`saved current look as theme ${created.name}.`);
     }
     if (cmd.kind === 'delete') {
@@ -2548,8 +2546,11 @@ async function runTheme(argLine: string, networkId: number | null, target: strin
       if (!t) return reply(`/theme: no theme named "${cmd.name}" — /theme lists them`);
       if (t.builtin) return reply(`/theme: ${t.name} is built-in and can't be deleted`);
       const wasActive = t.id === themes.activeThemeId;
+      // The dangling pointer resets to ITS default — per-slot, so a system-mode
+      // device in light scheme reverts to Light, not Dark.
+      const revertsTo = themes.activePointerKey === 'look.theme.light' ? 'Light' : 'Dark';
       await themes.remove(Number(t.id));
-      return reply(`deleted theme ${t.name}.${wasActive ? ' Reverted to Dark.' : ''}`);
+      return reply(`deleted theme ${t.name}.${wasActive ? ` Reverted to ${revertsTo}.` : ''}`);
     }
     if (cmd.kind === 'mode') {
       if (cmd.mode === null) {
@@ -2929,7 +2930,9 @@ function runGet(argLine: string, networkId: number | null, target: string): void
   if (!opt) return reply(`/get: unknown setting "${parts[0]}" — /set lists available keys`);
   reply(`${opt.key} = ${formatSettingValue(opt, settings.effective(opt.key))}`);
   if (settings.isModified(opt.key)) {
-    reply(`  default: ${formatSettingValue(opt, opt.default)}`);
+    // Baseline, not opt.default: a themed key under a non-default theme resets
+    // to the THEME's value, and this line advertises what reset restores.
+    reply(`  default: ${formatSettingValue(opt, settings.baseline(opt.key))}`);
   }
 }
 

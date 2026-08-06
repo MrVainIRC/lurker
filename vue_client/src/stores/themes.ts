@@ -102,6 +102,26 @@ export const useThemesStore = defineStore('themes', {
       const settings = useSettingsStore();
       await settings.patchMany({ [this.activePointerKey]: id }, [...THEMED_KEYS]);
     },
+    /**
+     * Snapshot the current look (active theme + drift) into a NEW theme and
+     * make it active. The ordering is load-bearing — snapshot BEFORE
+     * applyTheme, which clears the very overrides being saved — so it lives
+     * here once; every surface (GUI, /theme, the future editor) calls this
+     * rather than re-deriving the sequence.
+     */
+    async saveCurrentAs(name: string): Promise<SavedTheme> {
+      const values = this.snapshotCurrent();
+      const created = await this.create(name, values);
+      await this.applyTheme(String(created.id));
+      return created;
+    },
+    /** Same sequence, into an EXISTING theme (overwrite its values, re-point at it). */
+    async saveCurrentInto(id: number): Promise<SavedTheme> {
+      const values = this.snapshotCurrent();
+      const updated = await this.update(id, { values });
+      await this.applyTheme(String(id));
+      return updated;
+    },
     async create(name: string, values: Record<string, SettingValue>): Promise<SavedTheme> {
       const { theme } = await api('/api/themes', { method: 'POST', body: { name, values } });
       await this.fetchAll();

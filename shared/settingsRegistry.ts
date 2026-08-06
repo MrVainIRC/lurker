@@ -1752,10 +1752,16 @@ export const THEMED_KEYS: readonly string[] = Object.freeze(
   REGISTRY.filter((opt) => opt.themed).map((opt) => opt.key),
 );
 
-/** Registry defaults for just the themed keys — the built-in Dark theme's values. */
+/**
+ * Registry defaults for just the themed keys — the built-in Dark theme's
+ * values. Arrays are copied: REGISTRY's freeze is shallow, so handing out the
+ * live default arrays would let any consumer mutate the registry in place.
+ */
 export function themedDefaults(): Record<string, SettingValue> {
   const out: Record<string, SettingValue> = {};
-  for (const opt of REGISTRY) if (opt.themed) out[opt.key] = opt.default;
+  for (const opt of REGISTRY) {
+    if (opt.themed) out[opt.key] = Array.isArray(opt.default) ? [...opt.default] : opt.default;
+  }
   return out;
 }
 

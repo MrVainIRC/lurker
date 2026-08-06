@@ -1386,3 +1386,59 @@ describe('uploader_config — export/import', () => {
     expect(getUserSettings(bob.id)['uploads.uploader_id']).toBeUndefined();
   });
 });
+
+describe('user_themes — export/import', () => {
+  it('round-trips saved themes and rewrites the look.theme.* pointers through the id map', async () => {
+    const themesService = (await import('./themesService.js')).default;
+    const settingsService = (await import('./settingsService.js')).default;
+    const { getUserSettings } = await import('../db/settings.js');
+    const { alice } = seedAlice();
+    const created = themesService.create(alice.id, {
+      name: 'Ocean',
+      values: { 'look.color.bg': '#101010', 'look.color.fg': '#f0f0f0' },
+    });
+    if (!created.ok) throw new Error(created.error);
+    settingsService.update(alice.id, {
+      'look.theme.active': String(created.theme.id),
+      // Built-in ids travel as-is; non-default so the row persists.
+      'look.theme.light': 'dark',
+    });
+
+    const buf = await exportToBuffer(alice.id, { includeMessages: false });
+    const bob = createUser(`bob_themes_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    await importFromZipBuffer(bob.id, buf);
+
+    const imported = themesService.list(bob.id).find((t) => t.name === 'Ocean');
+    expect(imported).toBeDefined();
+    expect(imported!.values).toEqual({ 'look.color.bg': '#101010', 'look.color.fg': '#f0f0f0' });
+    // The pointer follows the theme's NEW id on the target; built-ins pass through.
+    expect(getUserSettings(bob.id)['look.theme.active']).toBe(String(imported!.id));
+    expect(getUserSettings(bob.id)['look.theme.light']).toBe('dark');
+  });
+
+  it("replaces a zero-network account's pre-existing themes instead of colliding on the name", async () => {
+    const themesService = (await import('./themesService.js')).default;
+    const { alice } = seedAlice();
+    const created = themesService.create(alice.id, {
+      name: 'Ocean',
+      values: { 'look.color.bg': '#101010' },
+    });
+    if (!created.ok) throw new Error(created.error);
+    const buf = await exportToBuffer(alice.id, { includeMessages: false });
+
+    // accountIsEmpty checks networks only, so a fresh account can still hold a
+    // saved theme — with a case-twin name that would abort the whole import on
+    // the NOCASE UNIQUE constraint if the import merged instead of replacing.
+    const bob = createUser(`bob_twin_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    const twin = themesService.create(bob.id, {
+      name: 'ocean',
+      values: { 'look.color.bg': '#eeeeee' },
+    });
+    if (!twin.ok) throw new Error(twin.error);
+
+    await importFromZipBuffer(bob.id, buf);
+    const names = themesService.list(bob.id).map((t) => t.name);
+    expect(names).toEqual(['Ocean']);
+    expect(themesService.list(bob.id)[0].values['look.color.bg']).toBe('#101010');
+  });
+});

@@ -41,14 +41,15 @@
         >
           Apply
         </button>
-        <button
-          v-else-if="drifted && !t.builtin"
-          class="link"
-          :disabled="busy"
-          @click="updateActive(t)"
-        >
-          Save changes
-        </button>
+        <template v-else-if="drifted">
+          <button v-if="!t.builtin" class="link" :disabled="busy" @click="updateActive(t)">
+            Save changes
+          </button>
+          <!-- Re-applying the active theme IS the discard-drift operation; without
+               this, a drifted built-in row would render zero actions and the only
+               ways back would be /theme apply or resetting keys one by one. -->
+          <button class="link" :disabled="busy" @click="apply(t)">Discard changes</button>
+        </template>
         <button v-if="!t.builtin" class="link danger" :disabled="busy" @click="remove(t)">
           Delete
         </button>
@@ -61,6 +62,7 @@
       v-model="newName"
       type="text"
       :maxlength="THEME_NAME_MAX"
+      :disabled="busy"
       placeholder="Save current look as…"
       @keydown.enter.prevent="saveNew"
     />
@@ -133,6 +135,10 @@ function slotValue(key: string): string {
 }
 
 async function run(fn: () => Promise<void>) {
+  // Reentrancy guard: Enter in the save box (and key auto-repeat) bypasses
+  // button :disabled, so without this two create+apply sequences interleave
+  // and the loser paints a spurious "already exists" error over a good save.
+  if (busy.value) return;
   error.value = '';
   busy.value = true;
   try {
@@ -168,9 +174,7 @@ function apply(t: ThemePreset) {
 
 function updateActive(t: ThemePreset) {
   void run(async () => {
-    const values = themes.snapshotCurrent();
-    await themes.update(Number(t.id), { values });
-    await themes.applyTheme(t.id);
+    await themes.saveCurrentInto(Number(t.id));
   });
 }
 
@@ -183,19 +187,19 @@ function saveNew() {
     return;
   }
   void run(async () => {
-    // Snapshot BEFORE re-pointing: applyTheme clears the overrides being saved.
-    const values = themes.snapshotCurrent();
-    const created = await themes.create(name, values);
-    await themes.applyTheme(String(created.id));
+    await themes.saveCurrentAs(name);
     newName.value = '';
   });
 }
 
 function remove(t: ThemePreset) {
   const active = t.id === themes.activeThemeId;
+  // The dangling pointer resets to ITS default, which is per-slot: in system
+  // mode on a light-scheme device that's the built-in Light, not Dark.
+  const revertsTo = themes.activePointerKey === 'look.theme.light' ? 'Light' : 'Dark';
   if (
     !confirm(
-      `Delete theme ${t.name}? This can't be undone.${active ? ' Your appearance reverts to Dark.' : ''}`,
+      `Delete theme ${t.name}? This can't be undone.${active ? ` Your appearance reverts to ${revertsTo}.` : ''}`,
     )
   ) {
     return;
