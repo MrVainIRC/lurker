@@ -271,19 +271,26 @@ function colorNicksInText(
 // Fallback for the 16 mIRC colour slots, used when no caller-supplied palette
 // covers a given index. The chromatic slots match nick.colors defaults so a
 // renderer without a settings store (tests, MOTD pre-paint) still produces
-// theme-friendly colours; the four mono-ish slots fall back to theme vars.
-// Indices 16-98 (extended) and the \x04 hex variant aren't widely used and
-// clash badly with custom themes, so we don't render those — we just consume
-// the escape so the digits don't leak into the output.
-// The mono-ish slots track the theme so they stay legible when the user changes
-// look.color.bg / look.color.fg — a slot pinned to a literal near-white would
-// vanish the moment someone sets a light background.
+// theme-friendly colours. Indices 16-98 (extended) and the \x04 hex variant
+// aren't widely used and clash badly with custom themes, so we don't render
+// those — we just consume the escape so the digits don't leak into the output.
 //
-// ⚠ With ONE exception, and it is the whole rule: a slot must never resolve to
-// the SURFACE it is drawn on. Slot 1 was var(--bg), which is the background by
-// definition — black text rendered in precisely the colour behind it and
-// disappeared. var(--fg) and things derived from it are safe (they can never
-// equal the background); var(--bg) can never be anything else.
+// ⚠ EVERY slot is a literal, and none may become a theme reference again.
+//
+// The rule used to be narrower — "never var(--bg), because that IS the surface;
+// var(--fg) and its derivatives are safe since they can never equal the
+// background" — and that reasoning only held for the CANVAS. A run carries its
+// own background, which is a second surface it never considered:
+//
+//   \x0300,01  white on black  →  var(--fg) on #000000, unreadable in a light
+//                                 theme
+//   \x0301,00  black on white  →  slot 0 is the BACKGROUND here, so a
+//                                 foreground reference painted the box
+//
+// A slot that can't be named without knowing what it's drawn on isn't a colour.
+// The cost is that white is invisible on a light canvas when used bare, exactly
+// as black already was on a dark one — the sender's call, and what every other
+// client does.
 export const MIRC_PALETTE_FALLBACK: readonly string[] = [
   '#ffffff', // 0  white
   '#000000', // 1  black
