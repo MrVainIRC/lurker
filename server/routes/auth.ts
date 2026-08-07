@@ -46,7 +46,6 @@ import {
   isValidPassword,
   passwordRequirementsMessage,
 } from '../services/password.js';
-import { asyncHandler } from '../utils/asyncHandler.js';
 import {
   guardCredentialAttempt,
   limitRequests,
@@ -111,109 +110,103 @@ router.get('/setup-status', (_req: Request, res: Response) => {
 // Open registration only while there are zero users. The first account
 // created here is promoted to admin and gets exclusive control over invites
 // and user management.
-router.post(
-  '/setup/options',
-  asyncHandler(async (req: Request, res: Response) => {
-    if (countUsers() > 0) {
-      res.status(409).json({ error: 'setup already complete' });
-      return;
-    }
-    const requested = (req.body?.username || '').trim();
-    if (!isValidUsername(requested)) {
-      res.status(400).json({ error: 'invalid username' });
-      return;
-    }
-    if (usernameTaken(requested)) {
-      res.status(409).json({ error: 'username already taken' });
-      return;
-    }
-    const user = createUser(requested, { role: 'admin' });
-    const { rpID, rpName } = rpConfig();
-    const options = await generateRegistrationOptions({
-      rpName,
-      rpID,
-      userName: user.username,
-      userID: new Uint8Array(userIdToHandle(user.id)),
-      userDisplayName: user.username,
-      attestationType: 'none',
-      authenticatorSelection: {
-        residentKey: 'required',
-        userVerification: 'preferred',
-      },
-      excludeCredentials: [],
+router.post('/setup/options', async (req: Request, res: Response) => {
+  if (countUsers() > 0) {
+    res.status(409).json({ error: 'setup already complete' });
+    return;
+  }
+  const requested = (req.body?.username || '').trim();
+  if (!isValidUsername(requested)) {
+    res.status(400).json({ error: 'invalid username' });
+    return;
+  }
+  if (usernameTaken(requested)) {
+    res.status(409).json({ error: 'username already taken' });
+    return;
+  }
+  const user = createUser(requested, { role: 'admin' });
+  const { rpID, rpName } = rpConfig();
+  const options = await generateRegistrationOptions({
+    rpName,
+    rpID,
+    userName: user.username,
+    userID: new Uint8Array(userIdToHandle(user.id)),
+    userDisplayName: user.username,
+    attestationType: 'none',
+    authenticatorSelection: {
+      residentKey: 'required',
+      userVerification: 'preferred',
+    },
+    excludeCredentials: [],
+  });
+
+  const token = saveChallenge({
+    purpose: 'setup',
+    challenge: options.challenge,
+    userId: user.id,
+  });
+  setChallengeCookie(res, token);
+  res.json({ options, mode: 'create-user', username: user.username });
+});
+
+router.post('/setup/verify', async (req: Request, res: Response) => {
+  const token = req.signedCookies?.[CHALLENGE_COOKIE];
+  const entry = consumeChallenge(token);
+  clearChallengeCookie(res);
+  if (!entry || entry.purpose !== 'setup') {
+    res.status(400).json({ error: 'no pending setup' });
+    return;
+  }
+  // Race guard: if another tab finished setup between options and verify,
+  // back out. We can't safely create credentials against the now-existing
+  // admin from an anonymous request.
+  if (countAllCredentials() > 0) {
+    res.status(409).json({ error: 'setup already complete' });
+    return;
+  }
+  const { rpID, expectedOrigin } = rpConfig();
+  let verification: VerifiedRegistrationResponse;
+  try {
+    verification = await verifyRegistrationResponse({
+      response: req.body?.response,
+      expectedChallenge: entry.challenge as string,
+      expectedOrigin,
+      expectedRPID: rpID,
+      requireUserVerification: false,
     });
+  } catch (err) {
+    const e = err as { message?: string };
+    res.status(400).json({ error: e.message || 'verification failed' });
+    return;
+  }
+  if (!verification.verified || !verification.registrationInfo) {
+    res.status(400).json({ error: 'verification failed' });
+    return;
+  }
 
-    const token = saveChallenge({
-      purpose: 'setup',
-      challenge: options.challenge,
-      userId: user.id,
-    });
-    setChallengeCookie(res, token);
-    res.json({ options, mode: 'create-user', username: user.username });
-  }),
-);
+  const user = findUserById(entry.userId as number);
+  if (!user) {
+    res.status(500).json({ error: 'user vanished mid-setup' });
+    return;
+  }
 
-router.post(
-  '/setup/verify',
-  asyncHandler(async (req: Request, res: Response) => {
-    const token = req.signedCookies?.[CHALLENGE_COOKIE];
-    const entry = consumeChallenge(token);
-    clearChallengeCookie(res);
-    if (!entry || entry.purpose !== 'setup') {
-      res.status(400).json({ error: 'no pending setup' });
-      return;
-    }
-    // Race guard: if another tab finished setup between options and verify,
-    // back out. We can't safely create credentials against the now-existing
-    // admin from an anonymous request.
-    if (countAllCredentials() > 0) {
-      res.status(409).json({ error: 'setup already complete' });
-      return;
-    }
-    const { rpID, expectedOrigin } = rpConfig();
-    let verification: VerifiedRegistrationResponse;
-    try {
-      verification = await verifyRegistrationResponse({
-        response: req.body?.response,
-        expectedChallenge: entry.challenge as string,
-        expectedOrigin,
-        expectedRPID: rpID,
-        requireUserVerification: false,
-      });
-    } catch (err) {
-      const e = err as { message?: string };
-      res.status(400).json({ error: e.message || 'verification failed' });
-      return;
-    }
-    if (!verification.verified || !verification.registrationInfo) {
-      res.status(400).json({ error: 'verification failed' });
-      return;
-    }
+  const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
+  const label = (req.body?.label || '').toString().trim().slice(0, 64) || null;
+  insertCredential({
+    userId: user.id,
+    credentialId: credential.id,
+    publicKey: Buffer.from(credential.publicKey),
+    counter: credential.counter,
+    transports: credential.transports || [],
+    deviceType: credentialDeviceType,
+    backedUp: credentialBackedUp,
+    label,
+  });
 
-    const user = findUserById(entry.userId as number);
-    if (!user) {
-      res.status(500).json({ error: 'user vanished mid-setup' });
-      return;
-    }
-
-    const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
-    const label = (req.body?.label || '').toString().trim().slice(0, 64) || null;
-    insertCredential({
-      userId: user.id,
-      credentialId: credential.id,
-      publicKey: Buffer.from(credential.publicKey),
-      counter: credential.counter,
-      transports: credential.transports || [],
-      deviceType: credentialDeviceType,
-      backedUp: credentialBackedUp,
-      label,
-    });
-
-    const { token: sessionToken } = createSession(user.id);
-    res.cookie(SESSION_COOKIE, sessionToken, getCookieOptions());
-    res.json({ user: { id: user.id, username: user.username, role: user.role } });
-  }),
-);
+  const { token: sessionToken } = createSession(user.id);
+  res.cookie(SESSION_COOKIE, sessionToken, getCookieOptions());
+  res.json({ user: { id: user.id, username: user.username, role: user.role } });
+});
 
 // Password-only first-admin setup. Mirrors /setup/options + /setup/verify but
 // skips the WebAuthn dance — operator picks a username and password and is
@@ -261,125 +254,119 @@ router.get('/invite/:token', (req: Request<{ token: string }>, res: Response) =>
   res.json({ valid: false });
 });
 
-router.post(
-  '/invite/:token/options',
-  asyncHandler(async (req: Request<{ token: string }>, res: Response) => {
-    const result = inviteStatus(req.params.token);
-    if (result.status !== 'valid') {
-      res.status(404).json({ error: 'invalid or used invite' });
-      return;
-    }
-    const requested = (req.body?.username || '').trim();
-    if (!isValidUsername(requested)) {
-      res.status(400).json({ error: 'invalid username' });
-      return;
-    }
-    if (usernameTaken(requested)) {
-      res.status(409).json({ error: 'username already taken' });
-      return;
-    }
-    // Create the user up-front so we have a stable webauthn user handle for the
-    // registration options. If the user abandons the flow we end up with a
-    // username-squatter the admin can remove, mirroring the existing setup
-    // flow's tradeoff.
-    const user = createUser(requested, { role: 'user' });
-    const { rpID, rpName } = rpConfig();
-    const options = await generateRegistrationOptions({
-      rpName,
-      rpID,
-      userName: user.username,
-      userID: new Uint8Array(userIdToHandle(user.id)),
-      userDisplayName: user.username,
-      attestationType: 'none',
-      authenticatorSelection: {
-        residentKey: 'required',
-        userVerification: 'preferred',
-      },
-      excludeCredentials: [],
+router.post('/invite/:token/options', async (req: Request<{ token: string }>, res: Response) => {
+  const result = inviteStatus(req.params.token);
+  if (result.status !== 'valid') {
+    res.status(404).json({ error: 'invalid or used invite' });
+    return;
+  }
+  const requested = (req.body?.username || '').trim();
+  if (!isValidUsername(requested)) {
+    res.status(400).json({ error: 'invalid username' });
+    return;
+  }
+  if (usernameTaken(requested)) {
+    res.status(409).json({ error: 'username already taken' });
+    return;
+  }
+  // Create the user up-front so we have a stable webauthn user handle for the
+  // registration options. If the user abandons the flow we end up with a
+  // username-squatter the admin can remove, mirroring the existing setup
+  // flow's tradeoff.
+  const user = createUser(requested, { role: 'user' });
+  const { rpID, rpName } = rpConfig();
+  const options = await generateRegistrationOptions({
+    rpName,
+    rpID,
+    userName: user.username,
+    userID: new Uint8Array(userIdToHandle(user.id)),
+    userDisplayName: user.username,
+    attestationType: 'none',
+    authenticatorSelection: {
+      residentKey: 'required',
+      userVerification: 'preferred',
+    },
+    excludeCredentials: [],
+  });
+  const token = saveChallenge({
+    purpose: 'invite',
+    challenge: options.challenge,
+    userId: user.id,
+    inviteToken: req.params.token,
+  });
+  setChallengeCookie(res, token);
+  res.json({ options, username: user.username });
+});
+
+router.post('/invite/:token/verify', async (req: Request<{ token: string }>, res: Response) => {
+  const challengeToken = req.signedCookies?.[CHALLENGE_COOKIE];
+  const entry = consumeChallenge(challengeToken);
+  clearChallengeCookie(res);
+  if (!entry || entry.purpose !== 'invite' || entry.inviteToken !== req.params.token) {
+    res.status(400).json({ error: 'no pending invite' });
+    return;
+  }
+  const entryUserId = entry.userId as number;
+  // Re-check the invite right before committing. Status may have changed
+  // between options and verify (admin revoke, parallel redemption).
+  if (inviteStatus(req.params.token).status !== 'valid') {
+    deleteUser(entryUserId);
+    res.status(409).json({ error: 'invite is no longer valid' });
+    return;
+  }
+  const { rpID, expectedOrigin } = rpConfig();
+  let verification: VerifiedRegistrationResponse;
+  try {
+    verification = await verifyRegistrationResponse({
+      response: req.body?.response,
+      expectedChallenge: entry.challenge as string,
+      expectedOrigin,
+      expectedRPID: rpID,
+      requireUserVerification: false,
     });
-    const token = saveChallenge({
-      purpose: 'invite',
-      challenge: options.challenge,
-      userId: user.id,
-      inviteToken: req.params.token,
-    });
-    setChallengeCookie(res, token);
-    res.json({ options, username: user.username });
-  }),
-);
+  } catch (err) {
+    deleteUser(entryUserId);
+    const e = err as { message?: string };
+    res.status(400).json({ error: e.message || 'verification failed' });
+    return;
+  }
+  if (!verification.verified || !verification.registrationInfo) {
+    deleteUser(entryUserId);
+    res.status(400).json({ error: 'verification failed' });
+    return;
+  }
 
-router.post(
-  '/invite/:token/verify',
-  asyncHandler(async (req: Request<{ token: string }>, res: Response) => {
-    const challengeToken = req.signedCookies?.[CHALLENGE_COOKIE];
-    const entry = consumeChallenge(challengeToken);
-    clearChallengeCookie(res);
-    if (!entry || entry.purpose !== 'invite' || entry.inviteToken !== req.params.token) {
-      res.status(400).json({ error: 'no pending invite' });
-      return;
-    }
-    const entryUserId = entry.userId as number;
-    // Re-check the invite right before committing. Status may have changed
-    // between options and verify (admin revoke, parallel redemption).
-    if (inviteStatus(req.params.token).status !== 'valid') {
-      deleteUser(entryUserId);
-      res.status(409).json({ error: 'invite is no longer valid' });
-      return;
-    }
-    const { rpID, expectedOrigin } = rpConfig();
-    let verification: VerifiedRegistrationResponse;
-    try {
-      verification = await verifyRegistrationResponse({
-        response: req.body?.response,
-        expectedChallenge: entry.challenge as string,
-        expectedOrigin,
-        expectedRPID: rpID,
-        requireUserVerification: false,
-      });
-    } catch (err) {
-      deleteUser(entryUserId);
-      const e = err as { message?: string };
-      res.status(400).json({ error: e.message || 'verification failed' });
-      return;
-    }
-    if (!verification.verified || !verification.registrationInfo) {
-      deleteUser(entryUserId);
-      res.status(400).json({ error: 'verification failed' });
-      return;
-    }
+  const user = findUserById(entryUserId);
+  if (!user) {
+    res.status(500).json({ error: 'user vanished mid-setup' });
+    return;
+  }
 
-    const user = findUserById(entryUserId);
-    if (!user) {
-      res.status(500).json({ error: 'user vanished mid-setup' });
-      return;
-    }
+  // Atomic consume — only one parallel redemption can win. If we lose,
+  // tear down the user we created and surface the conflict.
+  if (!consumeInvite(req.params.token, user.id)) {
+    deleteUser(user.id);
+    res.status(409).json({ error: 'invite is no longer valid' });
+    return;
+  }
 
-    // Atomic consume — only one parallel redemption can win. If we lose,
-    // tear down the user we created and surface the conflict.
-    if (!consumeInvite(req.params.token, user.id)) {
-      deleteUser(user.id);
-      res.status(409).json({ error: 'invite is no longer valid' });
-      return;
-    }
+  const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
+  const label = (req.body?.label || '').toString().trim().slice(0, 64) || null;
+  insertCredential({
+    userId: user.id,
+    credentialId: credential.id,
+    publicKey: Buffer.from(credential.publicKey),
+    counter: credential.counter,
+    transports: credential.transports || [],
+    deviceType: credentialDeviceType,
+    backedUp: credentialBackedUp,
+    label,
+  });
 
-    const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
-    const label = (req.body?.label || '').toString().trim().slice(0, 64) || null;
-    insertCredential({
-      userId: user.id,
-      credentialId: credential.id,
-      publicKey: Buffer.from(credential.publicKey),
-      counter: credential.counter,
-      transports: credential.transports || [],
-      deviceType: credentialDeviceType,
-      backedUp: credentialBackedUp,
-      label,
-    });
-
-    const { token: sessionToken } = createSession(user.id);
-    res.cookie(SESSION_COOKIE, sessionToken, getCookieOptions());
-    res.json({ user: { id: user.id, username: user.username, role: user.role } });
-  }),
-);
+  const { token: sessionToken } = createSession(user.id);
+  res.cookie(SESSION_COOKIE, sessionToken, getCookieOptions());
+  res.json({ user: { id: user.id, username: user.username, role: user.role } });
+});
 
 // Password redemption of an invite. Mirrors /invite/:token/options +
 // /invite/:token/verify but with no WebAuthn dance.
@@ -419,37 +406,34 @@ router.post('/invite/:token/password', (req: Request<{ token: string }>, res: Re
 
 // ---------- login ----------
 
-router.post(
-  '/login/options',
-  asyncHandler(async (_req: Request, res: Response) => {
-    // Returns options only when at least one passkey exists. The client also
-    // probes /auth-methods to know whether to even surface the passkey button,
-    // so this 409 mostly guards against stale clients calling out of order.
-    if (countAllCredentials() === 0) {
-      res.status(409).json({ error: 'no passkeys registered' });
-      return;
-    }
-    const { rpID } = rpConfig();
-    const options = await generateAuthenticationOptions({
-      rpID,
-      userVerification: 'preferred',
-      // Empty allowCredentials lets the browser surface any discoverable
-      // (resident-key) passkey for this RP — no username field needed.
-      allowCredentials: [],
-    });
-    const token = saveChallenge({
-      purpose: 'login',
-      challenge: options.challenge,
-    });
-    setChallengeCookie(res, token);
-    res.json({ options });
-  }),
-);
+router.post('/login/options', async (_req: Request, res: Response) => {
+  // Returns options only when at least one passkey exists. The client also
+  // probes /auth-methods to know whether to even surface the passkey button,
+  // so this 409 mostly guards against stale clients calling out of order.
+  if (countAllCredentials() === 0) {
+    res.status(409).json({ error: 'no passkeys registered' });
+    return;
+  }
+  const { rpID } = rpConfig();
+  const options = await generateAuthenticationOptions({
+    rpID,
+    userVerification: 'preferred',
+    // Empty allowCredentials lets the browser surface any discoverable
+    // (resident-key) passkey for this RP — no username field needed.
+    allowCredentials: [],
+  });
+  const token = saveChallenge({
+    purpose: 'login',
+    challenge: options.challenge,
+  });
+  setChallengeCookie(res, token);
+  res.json({ options });
+});
 
 router.post(
   '/login/verify',
   guardCredentialAttempt(loginFailureThrottle),
-  asyncHandler(async (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const token = req.signedCookies?.[CHALLENGE_COOKIE];
     const entry = consumeChallenge(token);
     clearChallengeCookie(res);
@@ -509,7 +493,7 @@ router.post(
     const { token: sessionToken } = createSession(user.id);
     res.cookie(SESSION_COOKIE, sessionToken, getCookieOptions());
     res.json({ user: { id: user.id, username: user.username, role: user.role } });
-  }),
+  },
 );
 
 // Dummy hash with valid format and the real algorithm parameters. Verifying
@@ -618,85 +602,77 @@ router.get('/passkeys', requireAuth, (req: Request, res: Response) => {
   res.json({ passkeys: listCredentialsForUser(req.user!.id).map(publicCredential) });
 });
 
-router.post(
-  '/passkeys/options',
-  requireAuth,
-  asyncHandler(async (req: Request, res: Response) => {
-    const { rpID, rpName } = rpConfig();
-    // listCredentialsForUser is untyped — credentials are any[]
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const existing = listCredentialsForUser(req.user!.id) as any[];
-    const options = await generateRegistrationOptions({
-      rpName,
-      rpID,
-      userName: req.user!.username,
-      userID: new Uint8Array(userIdToHandle(req.user!.id)),
-      userDisplayName: req.user!.username,
-      attestationType: 'none',
-      authenticatorSelection: {
-        residentKey: 'required',
-        userVerification: 'preferred',
-      },
-      excludeCredentials: existing.map((c) => ({
-        id: c.credentialId,
-        transports: c.transports,
-      })),
-    });
-    const token = saveChallenge({
-      purpose: 'add-passkey',
-      challenge: options.challenge,
-      userId: req.user!.id,
-    });
-    setChallengeCookie(res, token);
-    res.json({ options });
-  }),
-);
+router.post('/passkeys/options', requireAuth, async (req: Request, res: Response) => {
+  const { rpID, rpName } = rpConfig();
+  // listCredentialsForUser is untyped — credentials are any[]
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const existing = listCredentialsForUser(req.user!.id) as any[];
+  const options = await generateRegistrationOptions({
+    rpName,
+    rpID,
+    userName: req.user!.username,
+    userID: new Uint8Array(userIdToHandle(req.user!.id)),
+    userDisplayName: req.user!.username,
+    attestationType: 'none',
+    authenticatorSelection: {
+      residentKey: 'required',
+      userVerification: 'preferred',
+    },
+    excludeCredentials: existing.map((c) => ({
+      id: c.credentialId,
+      transports: c.transports,
+    })),
+  });
+  const token = saveChallenge({
+    purpose: 'add-passkey',
+    challenge: options.challenge,
+    userId: req.user!.id,
+  });
+  setChallengeCookie(res, token);
+  res.json({ options });
+});
 
-router.post(
-  '/passkeys/verify',
-  requireAuth,
-  asyncHandler(async (req: Request, res: Response) => {
-    const token = req.signedCookies?.[CHALLENGE_COOKIE];
-    const entry = consumeChallenge(token);
-    clearChallengeCookie(res);
-    if (!entry || entry.purpose !== 'add-passkey' || (entry.userId as number) !== req.user!.id) {
-      res.status(400).json({ error: 'no pending registration' });
-      return;
-    }
-    const { rpID, expectedOrigin } = rpConfig();
-    let verification: VerifiedRegistrationResponse;
-    try {
-      verification = await verifyRegistrationResponse({
-        response: req.body?.response,
-        expectedChallenge: entry.challenge as string,
-        expectedOrigin,
-        expectedRPID: rpID,
-        requireUserVerification: false,
-      });
-    } catch (err) {
-      const e = err as { message?: string };
-      res.status(400).json({ error: e.message || 'verification failed' });
-      return;
-    }
-    if (!verification.verified || !verification.registrationInfo) {
-      res.status(400).json({ error: 'verification failed' });
-      return;
-    }
-    const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
-    const label = (req.body?.label || '').toString().trim().slice(0, 64) || null;
-    const stored = insertCredential({
-      userId: req.user!.id,
-      credentialId: credential.id,
-      publicKey: Buffer.from(credential.publicKey),
-      counter: credential.counter,
-      transports: credential.transports || [],
-      deviceType: credentialDeviceType,
-      backedUp: credentialBackedUp,
-      label,
+router.post('/passkeys/verify', requireAuth, async (req: Request, res: Response) => {
+  const token = req.signedCookies?.[CHALLENGE_COOKIE];
+  const entry = consumeChallenge(token);
+  clearChallengeCookie(res);
+  if (!entry || entry.purpose !== 'add-passkey' || (entry.userId as number) !== req.user!.id) {
+    res.status(400).json({ error: 'no pending registration' });
+    return;
+  }
+  const { rpID, expectedOrigin } = rpConfig();
+  let verification: VerifiedRegistrationResponse;
+  try {
+    verification = await verifyRegistrationResponse({
+      response: req.body?.response,
+      expectedChallenge: entry.challenge as string,
+      expectedOrigin,
+      expectedRPID: rpID,
+      requireUserVerification: false,
     });
-    res.json({ passkey: publicCredential(stored) });
-  }),
-);
+  } catch (err) {
+    const e = err as { message?: string };
+    res.status(400).json({ error: e.message || 'verification failed' });
+    return;
+  }
+  if (!verification.verified || !verification.registrationInfo) {
+    res.status(400).json({ error: 'verification failed' });
+    return;
+  }
+  const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
+  const label = (req.body?.label || '').toString().trim().slice(0, 64) || null;
+  const stored = insertCredential({
+    userId: req.user!.id,
+    credentialId: credential.id,
+    publicKey: Buffer.from(credential.publicKey),
+    counter: credential.counter,
+    transports: credential.transports || [],
+    deviceType: credentialDeviceType,
+    backedUp: credentialBackedUp,
+    label,
+  });
+  res.json({ passkey: publicCredential(stored) });
+});
 
 router.patch('/passkeys/:id', requireAuth, (req: Request, res: Response) => {
   const id = Number(req.params.id);
