@@ -3,9 +3,12 @@
 
 import { describe, it, expect } from 'vitest';
 import { applySpoilerMarkup } from './spoilerMarkup.js';
+import { splitTextByTokens } from './nickColor.js';
 
-// A spoiler on the wire is colour code 01 (black) on background 01.
-const OPEN = '\x0301,01';
+// A spoiler on the wire is any run whose foreground and background match. We
+// emit grey on grey (14,14) rather than black on black — see the note in
+// spoilerMarkup.ts for why the colour is the sender's problem now.
+const OPEN = '\x0314,14';
 const CLOSE = '\x03';
 
 describe('applySpoilerMarkup', () => {
@@ -55,5 +58,34 @@ describe('applySpoilerMarkup', () => {
   it('leaves a lone backslash literal', () => {
     expect(applySpoilerMarkup('a \\ b')).toBe('a \\ b');
     expect(applySpoilerMarkup('path\\to\\file')).toBe('path\\to\\file');
+  });
+});
+
+// Everything above pins the bytes we emit. This pins the thing that actually
+// matters: that our own renderer reads them back as a spoiler. The two halves
+// live in different files and were free to drift — a pair the parser didn't
+// recognise would ship as visible plaintext, which for a spoiler is the whole
+// failure.
+describe('applySpoilerMarkup → splitTextByTokens round trip', () => {
+  const parse = (text: string) => splitTextByTokens(text, null, null, null);
+
+  it('emits a run our own parser recognises as a spoiler', () => {
+    expect(parse(applySpoilerMarkup('||secret||'))).toEqual([
+      { text: 'secret', spoiler: true, fg: 14 },
+    ]);
+  });
+
+  // The delimiter is two digits and so is the colour code, so a spoiler opening
+  // on a digit is where a greedy parse would go wrong: `\x0314,14` + `42` must
+  // read as grey-on-grey plus the text "42", not as colour 14,1442.
+  it('does not swallow leading digits of the hidden text', () => {
+    expect(parse(applySpoilerMarkup('the answer is ||42||'))).toEqual([
+      { text: 'the answer is ' },
+      { text: '42', spoiler: true, fg: 14 },
+    ]);
+  });
+
+  it('still recognises an incoming 01,01 spoiler from another client', () => {
+    expect(parse('\x0301,01secret\x03')).toEqual([{ text: 'secret', spoiler: true, fg: 1 }]);
   });
 });

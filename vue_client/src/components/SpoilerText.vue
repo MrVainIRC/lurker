@@ -67,11 +67,15 @@ function reveal(e: Event): void {
 // recolours part of a picture.
 //
 // So we honour whatever the sender named, and let the REVEAL carry the safety
-// (see bodyStyle). The cost is that a black box on the dark canvas is 1.3:1 and
-// a white one on the light canvas is 1.1:1 — a real spoiler in the matching
-// scheme is nearly invisible as an affordance. That's the trade: art renders
-// correctly, and a spoiler you can't see is still revealed by clicking where
-// the text would be.
+// (see bodyStyle).
+//
+// What makes that affordable is that the affordance is now the SENDER's problem
+// rather than the renderer's: applySpoilerMarkup emits grey on grey (14,14),
+// the one mono slot that reads as a box on both canvases (4.1:1 dark, 3.7:1
+// light), so every spoiler Lurker sends looks right without anyone here
+// second-guessing a colour. A spoiler that arrives as 01,01 from another client
+// is drawn honestly and is a poor affordance in dark mode — 1.3:1 — but it
+// still reveals on click, and that beats repainting somebody's ASCII art.
 const color = computed(() => {
   const fg = props.seg.fg;
   if (fg == null) return null;
