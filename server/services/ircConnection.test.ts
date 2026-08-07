@@ -1357,6 +1357,18 @@ describe('auto-reconnect controller', () => {
     return { conn, events };
   }
 
+  // Emit 'registered' the way these stubbed connections must: connect() is
+  // mocked, so the library's own 'registered' listener has no live
+  // connection.options — pin harmless ping settings first so its
+  // startPeriodicPing early-returns instead of dereferencing null.
+  function emitRegistered(conn: IrcConnection): void {
+    (conn.client as unknown as { options: unknown }).options = {
+      ping_interval: 0,
+      ping_timeout: 0,
+    };
+    conn.client.emit('registered', { nick: 'nick' });
+  }
+
   // The connectScheduler is a process-wide singleton; clear its per-host gate
   // state before each test so a prior run's timestamps can't delay this launch.
   beforeEach(() => connectScheduler.reset());
@@ -1549,6 +1561,70 @@ describe('auto-reconnect controller', () => {
     ).toBe(true);
   });
 
+  // #651: a ban-shaped ERROR that did NOT close its own socket must not lie in
+  // wait — before the pending/promote treatment it set the terminal flag on
+  // sight, and the next unrelated drop (netsplit, ping timeout, laptop lid)
+  // inherited it and stopped auto-reconnect for good, telling the user they
+  // were banned when they weren't. The survival proof is ORDERING, not time: a
+  // real ban ERROR is the link's last line, so any later server line discards
+  // the flag.
+  it('a ban-shaped error followed by more server traffic does not poison a later drop', () => {
+    vi.useFakeTimers();
+    const { conn, events } = makeConn('rc-ban-stale');
+    conn.client.emit('irc error', { error: 'irc', reason: 'you are banned from this server' });
+    // The link keeps talking — proof the "ban" didn't kill it.
+    conn.client.emit('raw', {
+      from_server: true,
+      line: ':irc.example.test PONG irc.example.test :keepalive',
+    });
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    conn.client.emit('close', true);
+    vi.advanceTimersByTime(60 * 1000);
+    expect(conn.connect).toHaveBeenCalled();
+    expect(
+      events.some(
+        (e) => e.type === 'error' && /Not reconnecting automatically/i.test(String(e.text)),
+      ),
+    ).toBe(false);
+  });
+
+  // The counterpart that a wall-clock window would get wrong: an IP-level ban
+  // whose FIN is blackholed closes only via the ping timeout, minutes after
+  // the ERROR — but with NO lines in between, the ERROR was the link's last
+  // word and must still be believed, or auto-reconnect hammers a server that
+  // banned us forever.
+  it('still stops when the close arrives long after the ban with no traffic in between', () => {
+    vi.useFakeTimers();
+    const { conn, events } = makeConn('rc-ban-blackhole');
+    conn.client.emit('irc error', { error: 'irc', reason: 'Closing Link: nick[u@h] (Z-Lined)' });
+    vi.advanceTimersByTime(120 * 1000); // irc-framework's ping timeout scale
+    conn.client.emit('close', true);
+    vi.runAllTimers();
+    expect(conn.connect).not.toHaveBeenCalled();
+    expect(
+      events.some(
+        (e) => e.type === 'error' && /Not reconnecting automatically/i.test(String(e.text)),
+      ),
+    ).toBe(true);
+  });
+
+  // Registration is proof positive too: whatever that line was, the server
+  // kept us, so a close right after must retry.
+  it('registering after a ban-shaped error clears it before any close can promote it', () => {
+    vi.useFakeTimers();
+    const { conn, events } = makeConn('rc-ban-registered');
+    conn.client.emit('irc error', { error: 'irc', reason: 'you are banned from this server' });
+    emitRegistered(conn);
+    conn.client.emit('close', true);
+    vi.advanceTimersByTime(60 * 1000);
+    expect(conn.connect).toHaveBeenCalled();
+    expect(
+      events.some(
+        (e) => e.type === 'error' && /Not reconnecting automatically/i.test(String(e.text)),
+      ),
+    ).toBe(false);
+  });
+
   // Was "stops on a hard SASL authentication failure" — stopping on the FIRST
   // one is the behavior #617 changed, because a rejection the server didn't drop
   // us for would kill an unrelated later drop's reconnect. The intent it was
@@ -1588,16 +1664,12 @@ describe('auto-reconnect controller', () => {
   it('resets the streak when registration succeeds despite repeated SASL failures', () => {
     vi.useFakeTimers();
     const { conn } = makeConn('rc-sasl-reset');
-    (conn.client as unknown as { options: unknown }).options = {
-      ping_interval: 0,
-      ping_timeout: 0,
-    };
     for (let i = 0; i < 2; i += 1) {
       conn.client.emit('sasl failed', { reason: 'fail' });
       conn.client.emit('close', true);
       vi.runAllTimers();
     }
-    conn.client.emit('registered', { nick: 'nick' });
+    emitRegistered(conn);
 
     // A third failure now starts a fresh streak rather than tipping the old one.
     conn.client.emit('sasl failed', { reason: 'fail' });
@@ -1642,11 +1714,7 @@ describe('auto-reconnect controller', () => {
     vi.useFakeTimers();
     const { conn } = makeConn('rc-sasl-recovered');
     conn.client.emit('sasl failed', { reason: 'fail' });
-    (conn.client as unknown as { options: unknown }).options = {
-      ping_interval: 0,
-      ping_timeout: 0,
-    };
-    conn.client.emit('registered', { nick: 'nick' }); // server let us in anyway
+    emitRegistered(conn); // server let us in anyway
     conn.client.emit('close', false); // a later, unrelated drop
     vi.runAllTimers();
     expect(conn.connect).toHaveBeenCalledTimes(1);
@@ -1667,14 +1735,7 @@ describe('auto-reconnect controller', () => {
     expect(attemptOf()).toBe(1);
     vi.runAllTimers();
     // A full registration proves the network is reachable again → ladder resets.
-    // (connect() is stubbed here, so the library's own 'registered' listener has
-    // no live connection.options; pin harmless ping settings so its
-    // startPeriodicPing early-returns instead of dereferencing null.)
-    (conn.client as unknown as { options: unknown }).options = {
-      ping_interval: 0,
-      ping_timeout: 0,
-    };
-    conn.client.emit('registered', { nick: 'nick' });
+    emitRegistered(conn);
     // Next drop starts back at attempt 1, not 2.
     conn.client.emit('close', false);
     expect(attemptOf()).toBe(1);
