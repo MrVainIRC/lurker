@@ -1,6 +1,13 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
+// FIRST import on purpose: it installs the dead-pty stdout/stderr guards as an
+// import side effect (#442), and module evaluation follows import-declaration
+// order — dotenv's injection banner and the db module's boot-migration logs
+// write to stdout during the import phase, before any statement in this file
+// runs. Moving this down (or installing from this file's body, as a previous
+// revision did) re-opens the boot-time crash window this exists to close.
+import { onStdioSuppressed, installFatalExceptionExit } from './utils/processGuards.js';
 import 'dotenv/config';
 import http from 'http';
 
@@ -46,30 +53,36 @@ import {
 import { startIgnoreSweeper, stopIgnoreSweeper } from './services/ignoreSweeper.js';
 import { sweepTempUploads } from './routes/uploads.js';
 import { startEventLoopMonitor, stopEventLoopMonitor } from './services/eventLoopMonitor.js';
-import { swallowDeadTtyErrors } from './utils/processGuards.js';
+import * as systemMessages from './db/systemMessages.js';
 
-// Before ANY console output: a vanished controlling terminal (dropped SSH
-// session + `disown`) leaves fds 1/2 pointing at a dead pty, and the next
-// console write would otherwise crash the whole server with EIO (#442).
-swallowDeadTtyErrors(process.stdout);
-swallowDeadTtyErrors(process.stderr);
-
-// An uncaught exception still exits — a process in an unknown state must not
-// limp on — but the reason is recorded in the DB-backed system log first,
-// because the terminal that would have shown the stack may be long gone.
-process.on('uncaughtException', (err) => {
-  try {
-    systemLog.log({
-      scope: 'server',
-      level: 'error',
-      text: `fatal uncaught exception: ${err?.stack || err}`,
-    });
-  } catch {
-    /* the log write failing must not mask the exit path */
-  }
-  console.error('[lurker] fatal uncaught exception:', err);
-  process.exit(1);
+// Wired here rather than inside processGuards (which must stay import-free —
+// see its header): both records target the DB-backed system log, which only
+// exists once the import phase is over. The breadcrumb makes "console logging
+// stopped" (dead pty, or the consumer of `npm start | tee` exiting)
+// discoverable instead of a silent weeks-long gap in the log file.
+onStdioSuppressed((detail) => {
+  systemLog.log({
+    scope: 'server',
+    level: 'warn',
+    text: `Console stream write failed (${detail}) — stdout/stderr logging is suspended; the system log is unaffected`,
+  });
 });
+
+// Fatal exceptions (and, under Node's default mode, unhandled rejections)
+// still exit — see installFatalExceptionExit for the ordering contract. The
+// record writes via systemMessages.insert directly, NOT systemLog.log: log()
+// synchronously runs the full wsHub fan-out (per-user reads, frame queuing)
+// for frames the exit(1) is about to discard mid-crash.
+installFatalExceptionExit((text) =>
+  systemMessages.insert({
+    userId: null,
+    ts: new Date().toISOString(),
+    level: 'error',
+    scope: 'server',
+    source: 'server',
+    text,
+  }),
+);
 
 const PORT = Number(process.env.PORT || 8010);
 // Optional bind address for the web/API server (HOST). Unset keeps upstream

@@ -418,4 +418,4 @@ npm run client:build
 npm start
 ```
 
-The server listens on port 8010 by default. Configure with the same envvars described above (set them in a `.env` file next to `package.json`, or export them in your shell). Use a process supervisor (`systemd`, `pm2`, etc.) or a persistent session (`tmux`, `nohup`) to keep it running — note that backgrounding + `disown` alone is not enough to fully detach from an SSH session, since the process keeps its stdout/stderr attached to the disappearing terminal. (Lurker survives that since #442, but a supervisor restarts it after a genuine crash too.)
+The server listens on port 8010 by default. Configure with the same envvars described above (set them in a `.env` file next to `package.json`, or export them in your shell). Use a process supervisor (`systemd`, `pm2`, etc.) to keep it running: it restarts the server after a crash, which nothing else on this page does. Backgrounding with `disown` and logging out also works — the server survives its terminal going away — but console output is gone for good at that point (the in-app system log keeps recording), and a crash stays down until you notice.
