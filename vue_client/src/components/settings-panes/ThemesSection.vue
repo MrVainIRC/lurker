@@ -212,19 +212,6 @@ function remove(t: ThemePreset) {
 
 <style src="./panes.css"></style>
 <style scoped>
-.device-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-.device .ua {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 8px;
-}
-.device .name {
-  color: var(--fg);
-}
 .tag {
   font-size: 0.85em;
   color: var(--fg-muted);
