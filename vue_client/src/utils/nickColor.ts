@@ -271,36 +271,43 @@ function colorNicksInText(
 // Fallback for the 16 mIRC colour slots, used when no caller-supplied palette
 // covers a given index. The chromatic slots match nick.colors defaults so a
 // renderer without a settings store (tests, MOTD pre-paint) still produces
-// theme-friendly colours; the four mono-ish slots fall back to theme vars.
-// Indices 16-98 (extended) and the \x04 hex variant aren't widely used and
-// clash badly with custom themes, so we don't render those — we just consume
-// the escape so the digits don't leak into the output.
-// The mono-ish slots track the theme so they stay legible when the user changes
-// look.color.bg / look.color.fg — a slot pinned to a literal near-white would
-// vanish the moment someone sets a light background.
+// theme-friendly colours. Indices 16-98 (extended) and the \x04 hex variant
+// aren't widely used and clash badly with custom themes, so we don't render
+// those — we just consume the escape so the digits don't leak into the output.
 //
-// ⚠ With ONE exception, and it is the whole rule: a slot must never resolve to
-// the SURFACE it is drawn on. Slot 1 was var(--bg), which is the background by
-// definition — black text rendered in precisely the colour behind it and
-// disappeared. var(--fg) and things derived from it are safe (they can never
-// equal the background); var(--bg) can never be anything else.
+// ⚠ EVERY slot is a literal, and none may become a theme reference again.
+//
+// The rule used to be narrower — "never var(--bg), because that IS the surface;
+// var(--fg) and its derivatives are safe since they can never equal the
+// background" — and that reasoning only held for the CANVAS. A run carries its
+// own background, which is a second surface it never considered:
+//
+//   \x0300,01  white on black  →  var(--fg) on #000000, unreadable in a light
+//                                 theme
+//   \x0301,00  black on white  →  slot 0 is the BACKGROUND here, so a
+//                                 foreground reference painted the box
+//
+// A slot that can't be named without knowing what it's drawn on isn't a colour.
+// The cost is that white is invisible on a light canvas when used bare, exactly
+// as black already was on a dark one — the sender's call, and what every other
+// client does.
 export const MIRC_PALETTE_FALLBACK: readonly string[] = [
-  'var(--fg)', //                                       0  white
-  '#000000', //                                         1  black — NOT var(--bg)
-  '#6799f3', //                                         2  navy
-  '#a9dc76', //                                         3  green
-  '#ff6188', //                                         4  red
-  '#ed6c89', //                                         5  maroon
-  '#ab9df2', //                                         6  purple
-  '#fc9867', //                                         7  orange
-  '#ffd866', //                                         8  yellow
-  '#b3db82', //                                         9  lime
-  '#78dce8', //                                         10 teal
-  '#a0f1ff', //                                         11 cyan
-  '#7ba4ff', //                                         12 blue
-  '#ff7494', //                                         13 magenta
-  'var(--fg-muted)', //                                 14 gray
-  'color-mix(in srgb, var(--fg) 70%, transparent)', //  15 light gray
+  '#ffffff', // 0  white
+  '#000000', // 1  black
+  '#6799f3', // 2  navy
+  '#a9dc76', // 3  green
+  '#ff6188', // 4  red
+  '#ed6c89', // 5  maroon
+  '#ab9df2', // 6  purple
+  '#fc9867', // 7  orange
+  '#ffd866', // 8  yellow
+  '#b3db82', // 9  lime
+  '#78dce8', // 10 teal
+  '#a0f1ff', // 11 cyan
+  '#7ba4ff', // 12 blue
+  '#ff7494', // 13 magenta
+  '#7f7f7f', // 14 gray       — mIRC's own grey
+  '#d2d2d2', // 15 light gray — mIRC's own light grey
 ];
 
 // Look up a mIRC colour slot in a caller-supplied palette, falling back to
@@ -440,6 +447,8 @@ export function parseIrcFormatting(text: string): IrcRun[] {
 export interface TextSegmentStyle {
   color?: string;
   backgroundColor?: string;
+  /** Vertical only — see `--mirc-bg-bleed`. Never a horizontal value. */
+  padding?: string;
   fontWeight?: string;
   fontStyle?: string;
   textDecoration?: string;
@@ -489,7 +498,14 @@ export function segmentInlineStyle(
   }
   if (seg.bg != null) {
     const bg = mircColor(seg.bg, mircPalette);
-    if (bg) style.backgroundColor = bg;
+    if (bg) {
+      style.backgroundColor = bg;
+      // Bleed the fill into the line's leading so stacked coloured rows form a
+      // solid field rather than a striped one — see --mirc-bg-bleed. Only when
+      // there IS a background: on a foreground-only run this would paint
+      // nothing and merely widen the hit area.
+      style.padding = 'var(--mirc-bg-bleed) 0';
+    }
   }
   if (seg.bold) style.fontWeight = 'bold';
   if (seg.italic) style.fontStyle = 'italic';

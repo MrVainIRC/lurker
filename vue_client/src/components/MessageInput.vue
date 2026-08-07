@@ -536,7 +536,7 @@ function bodyForSplit(raw: string): { body: string; isAction: boolean } {
   if (!m) return { body: '', isAction: false };
   const cmd = m[1].toLowerCase();
   // ⚠ Every branch below counts the POST-rewrite bytes, for the same reason the plain path above
-  // does: the spoiler rewrite ADDS bytes (`\x0301,01` … `\x03`), so a message that fits before it
+  // does: the spoiler rewrite ADDS bytes (`\x0314,14` … `\x03`), so a message that fits before it
   // may not after, and counting the typed form drifts the estimate LOW.
   //
   // ⚠ …and each branch reproduces its command's own whitespace handling, because `computeChunks`

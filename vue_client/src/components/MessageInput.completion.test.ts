@@ -661,7 +661,7 @@ describe('MessageInput command dispatch', () => {
   // click-to-reveal box when typed and literal pipes when sent through a command. Silent and
   // non-recoverable — the spoiler is on the wire before the user can see it didn't work.
   describe('||spoiler|| markup in commands (#652)', () => {
-    const OPEN = '\x0301,01';
+    const OPEN = '\x0314,14';
     const CLOSE = '\x03';
 
     it('/me rewrites the spoiler in the ACTION body', async () => {
