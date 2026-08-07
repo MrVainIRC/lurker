@@ -2370,7 +2370,10 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
   // Wrapper around the (synchronous) snapshot builder. Two jobs: (1) time it,
   // so a stall serving one connect is visible; (2) contain any throw so a bad
   // snapshot for ONE client can't take down the process and drop every user's
-  // IRC. There is no global unhandledRejection guard, so this is the backstop.
+  // IRC. Still load-bearing after #442's global fatal handler: that handler
+  // records the failure and EXITS (a process in unknown state must not limp
+  // on) — it does not make uncontained throws survivable, so removing this
+  // catch would turn one bad snapshot into every user's IRC dropping.
   function sendSnapshot(
     ws: LurkerWebSocket,
     userId: number,

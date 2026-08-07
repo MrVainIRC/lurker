@@ -1,6 +1,13 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
+// FIRST import on purpose: it installs the dead-pty stdout/stderr guards as an
+// import side effect (#442), and module evaluation follows import-declaration
+// order — dotenv's injection banner and the db module's boot-migration logs
+// write to stdout during the import phase, before any statement in this file
+// runs. Moving this down (or installing from this file's body, as a previous
+// revision did) re-opens the boot-time crash window this exists to close.
+import { onStdioSuppressed, installFatalExceptionExit } from './utils/processGuards.js';
 import 'dotenv/config';
 import http from 'http';
 
@@ -46,6 +53,36 @@ import {
 import { startIgnoreSweeper, stopIgnoreSweeper } from './services/ignoreSweeper.js';
 import { sweepTempUploads } from './routes/uploads.js';
 import { startEventLoopMonitor, stopEventLoopMonitor } from './services/eventLoopMonitor.js';
+import * as systemMessages from './db/systemMessages.js';
+
+// Wired here rather than inside processGuards (which must stay import-free —
+// see its header): both records target the DB-backed system log, which only
+// exists once the import phase is over. The breadcrumb makes "console logging
+// stopped" (dead pty, or the consumer of `npm start | tee` exiting)
+// discoverable instead of a silent weeks-long gap in the log file.
+onStdioSuppressed((detail) => {
+  systemLog.log({
+    scope: 'server',
+    level: 'warn',
+    text: `Console stream write failed (${detail}) — stdout/stderr logging is suspended; the system log is unaffected`,
+  });
+});
+
+// Fatal exceptions (and, under Node's default mode, unhandled rejections)
+// still exit — see installFatalExceptionExit for the ordering contract. The
+// record writes via systemMessages.insert directly, NOT systemLog.log: log()
+// synchronously runs the full wsHub fan-out (per-user reads, frame queuing)
+// for frames the exit(1) is about to discard mid-crash.
+installFatalExceptionExit((text) =>
+  systemMessages.insert({
+    userId: null,
+    ts: new Date().toISOString(),
+    level: 'error',
+    scope: 'server',
+    source: 'server',
+    text,
+  }),
+);
 
 const PORT = Number(process.env.PORT || 8010);
 // Optional bind address for the web/API server (HOST). Unset keeps upstream
