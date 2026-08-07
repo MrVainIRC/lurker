@@ -1549,6 +1549,48 @@ describe('auto-reconnect controller', () => {
     ).toBe(true);
   });
 
+  // #651: a ban-shaped ERROR that did NOT close its own socket must not lie in
+  // wait — before the pending/promote treatment it set the terminal flag on
+  // sight, and the next unrelated drop (netsplit, ping timeout, laptop lid)
+  // inherited it and stopped auto-reconnect for good, telling the user they
+  // were banned when they weren't.
+  it('a ban-shaped error on a surviving socket does not poison a later unrelated drop', () => {
+    vi.useFakeTimers();
+    const { conn, events } = makeConn('rc-ban-stale');
+    conn.client.emit('irc error', { error: 'irc', reason: 'you are banned from this server' });
+    // The socket lives on well past the promote window — the ban didn't close it.
+    vi.advanceTimersByTime(60 * 1000);
+    conn.client.emit('close', true);
+    vi.advanceTimersByTime(60 * 1000);
+    expect(conn.connect).toHaveBeenCalled();
+    expect(
+      events.some(
+        (e) => e.type === 'error' && /Not reconnecting automatically/i.test(String(e.text)),
+      ),
+    ).toBe(false);
+  });
+
+  // Registration is even stronger proof than time: whatever that line was, the
+  // server kept us, so even a close INSIDE the promote window must retry.
+  it('registering after a ban-shaped error clears it before any close can promote it', () => {
+    vi.useFakeTimers();
+    const { conn, events } = makeConn('rc-ban-registered');
+    conn.client.emit('irc error', { error: 'irc', reason: 'you are banned from this server' });
+    (conn.client as unknown as { options: unknown }).options = {
+      ping_interval: 0,
+      ping_timeout: 0,
+    };
+    conn.client.emit('registered', { nick: 'nick' });
+    conn.client.emit('close', true);
+    vi.advanceTimersByTime(60 * 1000);
+    expect(conn.connect).toHaveBeenCalled();
+    expect(
+      events.some(
+        (e) => e.type === 'error' && /Not reconnecting automatically/i.test(String(e.text)),
+      ),
+    ).toBe(false);
+  });
+
   // Was "stops on a hard SASL authentication failure" — stopping on the FIRST
   // one is the behavior #617 changed, because a rejection the server didn't drop
   // us for would kill an unrelated later drop's reconnect. The intent it was

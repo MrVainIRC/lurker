@@ -250,6 +250,15 @@ function classifyServerBan(reason: string | undefined): string | null {
   return null;
 }
 
+// How recently a ban-shaped ERROR must have arrived for a 'close' to be
+// blamed on it (#651). A real "Closing Link (G-Lined)" ERROR is the server
+// narrating the disconnect it is about to perform, so the close follows
+// within moments; a ban-shaped line that did NOT close the socket is noise
+// (or channel-adjacent text the classifier over-matched), and a much later
+// unrelated drop must not inherit it. Generous on purpose — the failure mode
+// this guards against is HOURS of staleness, not seconds.
+const SERVER_BAN_CLOSE_WINDOW_MS = 10_000;
+
 // SASL failure reasons that mean the credentials themselves are wrong or the
 // account is locked — a retry with the same stored password is pointless. Other
 // SASL reasons (unsupported_mechanism, capability_missing) are server/config
@@ -613,6 +622,11 @@ export class IrcConnection {
   //   string is the human-readable cause shown in the "not reconnecting" notice.
   // pendingSaslFailure: a SASL rejection that has NOT yet been proven fatal (#617).
   //   See the 'sasl failed' handler for why it can't be terminal on sight.
+  // pendingServerBan: a ban-classified ERROR that has NOT yet been proven fatal
+  //   (#651) — promoted to terminal only by a 'close' arriving within
+  //   SERVER_BAN_CLOSE_WINDOW_MS of it. Unlike SASL there's no retry streak: the
+  //   server's own message is proof enough once it's shown to have closed the
+  //   link; the window only settles WHICH close it belongs to.
   // reconnectGate: the manager's policy check, consulted before each retry opens a
   //   socket (#616). Absent = no gate (tests, and any caller that builds a
   //   connection directly).
@@ -621,6 +635,7 @@ export class IrcConnection {
   private intentionalDisconnect: boolean;
   private terminalDisconnect: string | null;
   private pendingSaslFailure: string | null;
+  private pendingServerBan: { reason: string; at: number } | null;
   // Consecutive SASL rejections with no successful registration between them.
   // Deliberately NOT reset by connect(): it has to survive the retry ladder, or
   // it could never run out. Only 'registered' clears it.
@@ -724,6 +739,7 @@ export class IrcConnection {
     this.intentionalDisconnect = false;
     this.terminalDisconnect = null;
     this.pendingSaslFailure = null;
+    this.pendingServerBan = null;
     this.saslFailureStreak = 0;
     this.bind();
   }
@@ -1078,6 +1094,7 @@ export class IrcConnection {
       // auto-reconnect rather than inherit a stale give-up flag.
       this.terminalDisconnect = null;
       this.pendingSaslFailure = null;
+      this.pendingServerBan = null;
       // Registering is the proof the credentials aren't fatal here (the network's
       // SASL is optional, or they started working) — so the streak starts over.
       this.saslFailureStreak = 0;
@@ -1232,8 +1249,10 @@ export class IrcConnection {
       this.markAllPeersOffline();
       this.setState('disconnected');
       // Decide, now that we know WHEN the socket died, whether a SASL rejection
-      // earlier in this connection is what killed it (#617).
+      // (#617) or a ban-classified ERROR (#651) earlier in this connection is
+      // what killed it.
       this.maybePromoteSaslFailure();
+      this.maybePromoteServerBan();
       // 'close' is now the single terminal socket-death event (irc-framework's
       // auto_reconnect is disabled, so it no longer retries internally): decide
       // here whether to schedule our own backoff retry. Runs after the state/
@@ -2649,18 +2668,18 @@ export class IrcConnection {
       // us. Only server-scoped bans qualify: a channel-scoped ban (474) carries a
       // channel param and is routed inline below, so gate on its absence.
       //
-      // ⚠ Unlike the SASL flag (which is pending until 'close' proves it fatal,
-      // #617), this one is terminal the moment it's set and is cleared ONLY by
-      // 'registered' or a fresh connect(). So a ban-shaped error on a live,
-      // already-registered connection lingers, and the next unrelated transient
-      // drop inherits it and stops auto-reconnect for good — the same staleness
-      // #617 fixed for SASL. In practice a "Closing Link" ERROR does close the
-      // link, so the window is narrow; giving this the same pending/promote
-      // treatment is tracked separately rather than widened into #616/#617.
+      // PENDING, not terminal on sight — the same treatment SASL got in #617
+      // (#651). A real ban ERROR is the server narrating the close it is about
+      // to perform, so 'close' promotes this within moments; a ban-shaped line
+      // on a live connection that does NOT close it must not lie in wait to be
+      // blamed for an unrelated transient drop hours later. See
+      // maybePromoteServerBan for the freshness window.
       const banChannel = event?.channel as string | undefined;
       if (!banChannel) {
         const banned = classifyServerBan(reason);
-        if (banned) this.terminalDisconnect = `banned by the server (${banned})`;
+        if (banned) {
+          this.pendingServerBan = { reason: `banned by the server (${banned})`, at: Date.now() };
+        }
       }
       const isDmMiss = tag === 'no_such_nick' && eventNick && isDmTargetName(eventNick);
       // For ERR_NOSUCHNICK against a nick the user has any DM history with,
@@ -3500,6 +3519,7 @@ export class IrcConnection {
     this.intentionalDisconnect = false;
     this.terminalDisconnect = null;
     this.pendingSaslFailure = null;
+    this.pendingServerBan = null;
     const { sasl_password, sasl_account, nick } = this.network;
     const account = sasl_password
       ? { account: sasl_account || nick, password: sasl_password }
@@ -5042,6 +5062,24 @@ export class IrcConnection {
     this.pendingSaslFailure = null;
     if (this.saslFailureStreak >= MAX_CONSECUTIVE_SASL_FAILURES) {
       this.terminalDisconnect = pending;
+    }
+  }
+
+  /**
+   * Promote a ban-classified ERROR to terminal only if THIS close is the one
+   * it announced (#651). No retry streak, unlike SASL: the server's own
+   * message is proof once it's shown to have closed the link — the freshness
+   * window only settles which close it belongs to. A ban-shaped error on a
+   * connection that survived it is consumed here either way, so it can never
+   * be blamed for a later unrelated drop (the staleness #617 removed from the
+   * SASL half).
+   */
+  private maybePromoteServerBan(): void {
+    const pending = this.pendingServerBan;
+    if (!pending) return;
+    this.pendingServerBan = null;
+    if (Date.now() - pending.at <= SERVER_BAN_CLOSE_WINDOW_MS) {
+      this.terminalDisconnect = pending.reason;
     }
   }
 
