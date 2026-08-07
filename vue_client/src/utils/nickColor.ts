@@ -285,22 +285,22 @@ function colorNicksInText(
 // disappeared. var(--fg) and things derived from it are safe (they can never
 // equal the background); var(--bg) can never be anything else.
 export const MIRC_PALETTE_FALLBACK: readonly string[] = [
-  'var(--fg)', //                                       0  white
-  '#000000', //                                         1  black — NOT var(--bg)
-  '#6799f3', //                                         2  navy
-  '#a9dc76', //                                         3  green
-  '#ff6188', //                                         4  red
-  '#ed6c89', //                                         5  maroon
-  '#ab9df2', //                                         6  purple
-  '#fc9867', //                                         7  orange
-  '#ffd866', //                                         8  yellow
-  '#b3db82', //                                         9  lime
-  '#78dce8', //                                         10 teal
-  '#a0f1ff', //                                         11 cyan
-  '#7ba4ff', //                                         12 blue
-  '#ff7494', //                                         13 magenta
-  'var(--fg-muted)', //                                 14 gray
-  'color-mix(in srgb, var(--fg) 70%, transparent)', //  15 light gray
+  '#ffffff', // 0  white
+  '#000000', // 1  black
+  '#6799f3', // 2  navy
+  '#a9dc76', // 3  green
+  '#ff6188', // 4  red
+  '#ed6c89', // 5  maroon
+  '#ab9df2', // 6  purple
+  '#fc9867', // 7  orange
+  '#ffd866', // 8  yellow
+  '#b3db82', // 9  lime
+  '#78dce8', // 10 teal
+  '#a0f1ff', // 11 cyan
+  '#7ba4ff', // 12 blue
+  '#ff7494', // 13 magenta
+  '#7f7f7f', // 14 gray       — mIRC's own grey
+  '#d2d2d2', // 15 light gray — mIRC's own light grey
 ];
 
 // Look up a mIRC colour slot in a caller-supplied palette, falling back to

@@ -346,40 +346,53 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     type: 'string-list',
     // 16 entries, one per mIRC color code 0..15. The chromatic slots default
     // to the closest hue from look.nick.colors so coloured chat text harmonises
-    // with the rest of the theme; the mono-ish slots track the theme so they
-    // stay legible when the user changes look.color.bg / look.color.fg.
+    // with the rest of the theme.
     //
-    // ⚠ A slot must never resolve to the SURFACE it's drawn on. Slot 1 was
-    // var(--bg) — the background by definition — so black text rendered in
-    // exactly the colour behind it and disappeared. Anything derived from
-    // var(--fg) is safe; var(--bg) never is. Keep in sync with
+    // ⚠ EVERY slot is a literal colour, and must stay one. A mIRC code names a
+    // colour — `\x0300` means white, not "whatever this theme calls text" — and
+    // a sender who writes `\x0300,01` has specified both halves of a
+    // self-sufficient pair that we have no business overriding.
+    //
+    // Slots 0/14/15 were theme references (var(--fg), var(--fg-muted), 70% of
+    // var(--fg)) on the theory that they'd stay legible on any background. They
+    // don't: a run carries its OWN background, which is a second surface the
+    // theory never considered. In a light theme `\x0300,01` drew near-black on
+    // black, and `\x0301,00` — where slot 0 is the *background* — drew a dark
+    // box with black text in it. Both unreadable, both entirely the palette's
+    // doing. A slot that can't be named without knowing what it's painted on
+    // isn't a colour.
+    //
+    // The cost is accepted and is the sender's: white on a light canvas is
+    // invisible, exactly as black on a dark one already was. Keep in sync with
     // MIRC_PALETTE_FALLBACK in vue_client/src/utils/nickColor.ts.
     default: [
-      'var(--fg)', //                                       0  white
-      '#000000', //                                         1  black — NOT var(--bg)
-      '#6799f3', //                                         2  navy
-      '#a9dc76', //                                         3  green
-      '#ff6188', //                                         4  red
-      '#ed6c89', //                                         5  maroon
-      '#ab9df2', //                                         6  purple
-      '#fc9867', //                                         7  orange
-      '#ffd866', //                                         8  yellow
-      '#b3db82', //                                         9  lime
-      '#78dce8', //                                         10 teal
-      '#a0f1ff', //                                         11 cyan
-      '#7ba4ff', //                                         12 blue
-      '#ff7494', //                                         13 magenta
-      'var(--fg-muted)', //                                 14 gray
-      'color-mix(in srgb, var(--fg) 70%, transparent)', //  15 light gray
+      '#ffffff', // 0  white
+      '#000000', // 1  black
+      '#6799f3', // 2  navy
+      '#a9dc76', // 3  green
+      '#ff6188', // 4  red
+      '#ed6c89', // 5  maroon
+      '#ab9df2', // 6  purple
+      '#fc9867', // 7  orange
+      '#ffd866', // 8  yellow
+      '#b3db82', // 9  lime
+      '#78dce8', // 10 teal
+      '#a0f1ff', // 11 cyan
+      '#7ba4ff', // 12 blue
+      '#ff7494', // 13 magenta
+      '#7f7f7f', // 14 gray       — mIRC's own grey
+      '#d2d2d2', // 15 light gray — mIRC's own light grey
     ],
     description:
       'How the 16 mIRC color codes (0-15) render in chat. One CSS color per line, ' +
       'in order: white, black, navy, green, red, maroon, purple, orange, yellow, ' +
       'lime, teal, cyan, blue, magenta, gray, light gray. Defaults pick the ' +
       'closest hue from your nick palette so coloured text matches the rest of ' +
-      'the theme. Any CSS color value works (hex, rgb(), var(--name), color-mix()) — ' +
-      'except var(--bg), which is the chat background itself, so text set to it is ' +
-      'invisible.',
+      'the theme. Any CSS color value works (hex, rgb(), var(--name), color-mix()), ' +
+      'but prefer a literal: a code names a colour, and a slot that follows the ' +
+      'theme instead is wrong the moment a sender pairs it with a background of ' +
+      'their own. var(--bg) is the worst case — it IS the chat background, so text ' +
+      'set to it is invisible.',
   },
 
   // ─── Alternating message rows ─────────────────────────────────────────

@@ -21,18 +21,23 @@ function parse(text: string) {
 }
 
 describe('MIRC_PALETTE_FALLBACK', () => {
-  // The bug that prompted this: slot 1 ("black") was var(--bg), which IS the
-  // surface the text is drawn on — so black text rendered in precisely the
-  // colour behind it and vanished.
+  // Every slot is a literal, and this is the test that keeps it that way.
   //
-  // The rule is narrow on purpose. Theme variables are RIGHT for the mono-ish
-  // slots: look.color.bg and look.color.fg are user-settable, so a slot pinned
-  // to a literal near-white would vanish the moment someone sets a light
-  // background — the same bug mirrored. What can never appear is the background
-  // itself, which is the one value guaranteed to match its own surface.
-  it('never paints a slot in the background colour', () => {
+  // It has been narrowed once already, to "no var(--bg)", on the theory that
+  // theme references were right for the mono-ish slots and only the background
+  // could ever match its own surface. That theory is wrong, and this is the
+  // second time round: a run carries its OWN background, so var(--fg) collides
+  // just as thoroughly the moment a sender writes `\x0300,01`. Worse, slot 0
+  // can BE the background (`\x0301,00`), and then a foreground reference paints
+  // the box.
+  //
+  // So: no var(), no color-mix(), nothing that has to be resolved against a
+  // surface to know what it is. A colour code names a colour. If the named
+  // colour is invisible on the reader's canvas, that is the sender's doing and
+  // it is allowed to look that way.
+  it('is entirely literal colours', () => {
     for (const [i, entry] of MIRC_PALETTE_FALLBACK.entries()) {
-      expect(entry, `slot ${i}`).not.toMatch(/var\(\s*--bg\b/);
+      expect(entry, `slot ${i}`).toMatch(/^#[0-9a-f]{6}$/);
     }
   });
 
