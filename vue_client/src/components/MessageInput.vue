@@ -28,23 +28,9 @@
         >&gt;</span
       ><template v-else>&gt;</template></span
     >
-    <!-- `:value` + `@input` rather than `v-model`: see the IME composition note
-         in the script block. v-model carries a hidden `composing` flag that
-         stops it both reading and writing for the duration of an IME
-         composition — which on an Android keyboard is every word.
-         `@compositionend` runs the same handler as a backstop: dropping v-model
-         also dropped the synthetic `input` it re-dispatched on commit, and a
-         browser that commits (or cancels) a composition without a trailing
-         `input` would otherwise leave the model parked on the preedit with no
-         path back — a divergence nothing else resyncs, so the next Send would
-         ship the stale text. `@change` is the third copy of the same backstop,
-         and it too is one v-model registered and we'd otherwise have dropped:
-         some engines (iOS Chrome on autocomplete/autofill) fire `change`
-         *instead of* `input`, which would leave the model behind the textarea
-         until the next keystroke — and `change` beats `blur`, whose flushBuffer
-         would push that stale body to the server as the buffer's draft.
-         onTextInput no-ops when the two already agree, so the duplicates are
-         free. -->
+    <!-- `:value` + `@input` rather than `v-model`, with compositionend/change
+         as backstop copies of the same handler — the full rationale lives in
+         the "IME composition" note in the script block. -->
     <textarea
       ref="inputEl"
       rows="1"
@@ -55,9 +41,10 @@
       :autocorrect="systemFeatures.autocorrect"
       :autocapitalize="systemFeatures.autocapitalize"
       @keydown="onKeydown"
-      @input="onTextInput"
-      @compositionend="onTextInput"
-      @change="onTextInput"
+      @input="syncModelFromDom"
+      @compositionstart="onCompositionStart"
+      @compositionend="onCompositionEnd"
+      @change="syncModelFromDom"
       @paste="onPaste"
       @blur="onBlur"
     ></textarea>
@@ -346,7 +333,7 @@ const systemText = ref('');
 
 // Input contents are server-side per-buffer drafts — switching channels swaps
 // the input bar's body to that buffer's draft (or empty). Keystrokes reach the
-// setter via onTextInput, which records the optimistic local update and schedules
+// setter via syncModelFromDom, which records the optimistic local update and schedules
 // a debounced WS flush; the typing-state side effects in onInput run here
 // (not in a watch(text)) so remote `draft-updated` echoes from other tabs
 // don't fire fake "active" typing notifications. The system buffer routes to
@@ -696,13 +683,26 @@ let cycling = false; // true while we're programmatically rewriting `text`
 // A plain `:value` binding has no such flag. patchDOMProp writes el.value
 // whenever the model differs and skips when it doesn't, so normal typing
 // leaves the caret alone while a genuine divergence (send-clear, buffer
-// switch, a completion splice) still repaints. Paired with onTextInput below,
+// switch, a completion splice) still repaints. Paired with syncModelFromDom below,
 // which assigns unconditionally, the model and the DOM track each other in
 // both directions no matter what the IME is doing.
 //
-// Known tradeoff: a CJK IME's preedit now reaches the draft store and the
-// typing indicator, where before only the committed text did. That is wrong
-// in the abstract — romaji is throwaway phonetic input — but it self-corrects
+// The WRITE half of v-model's guard is re-established where the dangerous
+// writes originate, not at the binding: while a composition is live the
+// drafts store (composingKey, stores/drafts.ts) drops remote draft
+// updates/seeds for that buffer and defers the debounce flush, so another
+// device can't repaint the textarea under a live preedit and a mid-word
+// pause can't persist raw preedit as the durable cross-device draft.
+//
+// Known tradeoff: a CJK IME's preedit now reaches the typing indicator, and
+// clicking Send mid-composition ships the visible text, preedit included
+// (the button's mousedown.prevent keeps focus, so no blur-commit runs
+// first). Gating Send on the composition flag was considered and rejected:
+// on an Android keyboard a composition is open for every word, so a
+// refusing Send button would go dead for any message not ending in a space
+// — the exact shape of #623, on the branch's own target platform. Desktop
+// CJK users confirm with Enter (which IS gated) before reaching for the
+// mouse; what-you-see-is-what-sends matches Discord/Slack. It self-corrects
 // on commit and is much the lesser evil next to a Send button that stays
 // disabled and a submit() that ships pre-composition text.
 
@@ -905,6 +905,9 @@ function onBlur() {
   // races a selection.
   closeEmojiStrip();
   closeEmojiPicker();
+  // Losing focus ends any IME composition (the engine commits or cancels) —
+  // release the drafts store's composition write-guard before flushing.
+  drafts.endComposition();
   // Force the active buffer's draft to the server now rather than waiting on
   // the debounce timer — covers refocus into a different tab or mobile
   // app-switch without losing the in-progress text.
@@ -1001,6 +1004,24 @@ const isMac =
   /mac|iphone|ipad|ipod/i.test(navigator.platform || navigator.userAgent || '');
 
 function onKeydown(e: KeyboardEvent): void {
+  // ONE composition gate for the whole handler, where ten scattered per-branch
+  // `!e.isComposing` checks used to live (and two branches — Cmd+B/I/U and
+  // Escape-closes-color-picker — had predictably been missed). While an IME
+  // composition is live, every key belongs to the IME: arrows/Tab/Enter drive
+  // its candidate window, Escape cancels its preedit — nothing here should
+  // act. keyCode 229 is gated too: Safari fires the Enter that confirms a CJK
+  // composition AFTER compositionend, with isComposing already false but
+  // keyCode still 229 — without this, committing a word would send the message
+  // (the standard ProseMirror/Slate guard).
+  //
+  // Tab still preventDefaults on the way out: the IME has already consumed the
+  // key, and letting the default through would walk focus out of the composer
+  // onto Send — which on Firefox/Gboard Android, where a composition is open
+  // for every word, would be the *only* thing Tab ever did.
+  if (e.isComposing || e.keyCode === 229) {
+    if (e.key === 'Tab') e.preventDefault();
+    return;
+  }
   // Formatting shortcuts (Cmd/Ctrl + B/I/U). preventDefault stops the browser
   // from owning Cmd+B for "bookmarks bar"; stopPropagation keeps the global
   // shortcut handler in useKeyboardShortcuts.js from seeing keys that map to
@@ -1034,7 +1055,7 @@ function onKeydown(e: KeyboardEvent): void {
   // to send / word completion. Skipped entirely during an IME composition so
   // the same arrows/Tab/Enter stay free to drive the IME's candidate window.
   // The picker is desktop-only — the mobile suggestion strip never opens it.
-  if (pickerOpen.value && !e.isComposing && nickPickerEl.value?.hasCandidates()) {
+  if (pickerOpen.value && nickPickerEl.value?.hasCandidates()) {
     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       if (!e.altKey && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
@@ -1054,7 +1075,7 @@ function onKeydown(e: KeyboardEvent): void {
   // Gated on hasCandidates() so a no-match `#zzz` lets Enter/Tab fall through to
   // send / in-place completion below. refreshPicker keeps this and the nick
   // picker from being open at once, so the two blocks can't both fire.
-  if (channelPickerOpen.value && !e.isComposing && channelPickerEl.value?.hasCandidates()) {
+  if (channelPickerOpen.value && channelPickerEl.value?.hasCandidates()) {
     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       if (!e.altKey && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
@@ -1080,7 +1101,7 @@ function onKeydown(e: KeyboardEvent): void {
   // This strip is prefix-less: it pops up on any plain word that matches a
   // nick while you type an ordinary message, so a key that means "send" must
   // not quietly mean "complete" (issue #221).
-  if (overlay.nickOpen && !e.isComposing && hasNickCandidates()) {
+  if (overlay.nickOpen && hasNickCandidates()) {
     if (e.key === 'Escape') {
       e.preventDefault();
       closeStrip();
@@ -1118,7 +1139,7 @@ function onKeydown(e: KeyboardEvent): void {
   // during an IME composition. The emoji strip and the nick picker are never
   // open at once (refreshPicker closes one before opening the other), so the
   // two blocks can't both fire.
-  if (overlay.emojiOpen && !e.isComposing && hasEmojiCandidates()) {
+  if (overlay.emojiOpen && hasEmojiCandidates()) {
     if (e.key === 'Escape') {
       e.preventDefault();
       closeEmojiStrip();
@@ -1146,7 +1167,7 @@ function onKeydown(e: KeyboardEvent): void {
   // nav keys — arrows move the highlight, Tab/Enter confirm; Escape is left to
   // the popover's own document listener. Mobile uses the emoji-strip block
   // above instead (the two are never open at once). Shift+Enter still newlines.
-  if (emojiPickerOpen.value && !e.isComposing && emojiPickerEl.value?.hasCandidates()) {
+  if (emojiPickerOpen.value && emojiPickerEl.value?.hasCandidates()) {
     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       if (!e.altKey && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
@@ -1166,7 +1187,7 @@ function onKeydown(e: KeyboardEvent): void {
   // submit below, so an open menu takes precedence over walking history in
   // place. Gated on hasCandidates() like the nick/channel pickers; skipped
   // mid-IME. Shift+Enter still newlines.
-  if (historyPickerOpen.value && !e.isComposing && historyPickerEl.value?.hasCandidates()) {
+  if (historyPickerOpen.value && historyPickerEl.value?.hasCandidates()) {
     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       if (!e.altKey && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
@@ -1181,11 +1202,10 @@ function onKeydown(e: KeyboardEvent): void {
   }
   if (e.key === 'Enter') {
     // Textareas don't submit forms on Enter, so we trigger submission here.
-    // Shift+Enter falls through to the default newline insert. e.isComposing
-    // guards against IME users — pressing Enter to confirm a composition
-    // shouldn't fire a send. The fire-and-forget on submit() is intentional;
-    // it owns its own error handling and the sync handler shouldn't await.
-    if (e.isComposing) return;
+    // Shift+Enter falls through to the default newline insert; the top-of-
+    // handler composition gate keeps an IME-confirming Enter from sending.
+    // The fire-and-forget on submit() is intentional; it owns its own error
+    // handling and the sync handler shouldn't await.
     if (e.shiftKey) return;
     e.preventDefault();
     submit();
@@ -1195,8 +1215,6 @@ function onKeydown(e: KeyboardEvent): void {
     // Bare arrows only — Alt+Arrow is buffer navigation (useKeyboardShortcuts),
     // and Shift+Arrow extends the selection; neither should hijack history.
     if (e.altKey || e.metaKey || e.ctrlKey || e.shiftKey) return;
-    // Leave the arrows to an active IME — they navigate its candidate window.
-    if (e.isComposing) return;
     const el = inputEl.value;
     // Only consider history with a collapsed caret (no selection). Don't
     // preventDefault — let the browser move the caret natively first. That
@@ -1233,7 +1251,7 @@ function onKeydown(e: KeyboardEvent): void {
     !e.altKey &&
     !e.ctrlKey &&
     (e.key === 'ArrowLeft' || e.key === 'ArrowRight');
-  if (!e.isComposing && (bareHomeEnd || macCmdArrow)) {
+  if (bareHomeEnd || macCmdArrow) {
     const el = inputEl.value;
     if (el) {
       e.preventDefault();
@@ -1267,19 +1285,6 @@ function onKeydown(e: KeyboardEvent): void {
   }
   if (e.key !== 'Tab') {
     if (completion) resetCompletion();
-    return;
-  }
-  // Tab belongs to the IME while a composition is live — several of them walk
-  // the candidate list with it. Completing here would splice underneath an
-  // active composition, and the model rewrite would repaint the textarea out
-  // from under the preedit. Matches the `!e.isComposing` gate every picker
-  // branch above already carries; this one was missed. preventDefault anyway:
-  // the IME has already consumed the key by the time we see it, and letting
-  // Tab's default through would walk focus out of the composer onto Send —
-  // which on Firefox/Gboard Android, where a composition is open for every
-  // word, would be the *only* thing Tab ever did.
-  if (e.isComposing) {
-    e.preventDefault();
     return;
   }
   if (!sendable.value) return;
@@ -1714,30 +1719,31 @@ function onHistorySelect(entry: string): void {
   queueMicrotask(() => inputEl.value?.focus());
 }
 
-// The composer's only `input` listener — what v-model would have installed,
-// minus the composing guard that made it drop a word at a time (see the IME
-// composition note further up). Everything a keystroke should do hangs off the
-// `text` setter, so assigning here routes composed and uncomposed input down
-// the identical path rather than giving composition its own side channel that
-// has to remember to replicate each of onInput's jobs.
-//
-// Also wired to `compositionend` and `change`, both of which v-model used to
-// cover by re-dispatching a synthetic `input`. Modern engines fire a real one
-// on commit, but a commit or cancel that doesn't would strand the model on the
-// preedit with nothing to resync it; and `change`-without-`input` is a real
-// autocomplete/autofill path (v-model's own source cites iOS Chrome) that would
-// otherwise leave the model behind until the next keystroke — with `blur`'s
-// flushBuffer shipping the stale body to the server in between. Cheap to close
-// off given the skip below makes the duplicate calls free.
-//
-// The equality check is a redundancy skip, not a correctness gate: an input
-// event that reports the value the model already holds has nothing to update,
+// The DOM→model half of the binding (see the IME composition note further up
+// for why this replaces v-model, and why compositionend/change re-run it as
+// backstops). The equality check is a redundancy skip, not a correctness gate:
+// an event reporting the value the model already holds has nothing to update,
 // and running the pipeline for it would fire a typing notification and a draft
 // flush for a no-op edit.
-function onTextInput() {
+function syncModelFromDom() {
   const el = inputEl.value;
   if (!el || el.value === text.value) return;
   text.value = el.value;
+}
+
+// Composition lifecycle → the drafts store's write-guard (see the IME note):
+// while a composition is live in a real buffer, the store drops remote draft
+// updates/seeds for it and defers the debounce flush. endComposition clears
+// whichever buffer was marked, so blur and buffer-switch calling it too means
+// a missed compositionend can never suppress remote updates indefinitely.
+function onCompositionStart() {
+  const a = active.value;
+  if (a && !isSystemBuffer.value) drafts.beginComposition(a.networkId, a.target);
+}
+
+function onCompositionEnd() {
+  drafts.endComposition();
+  syncModelFromDom();
 }
 
 function onInput() {
@@ -1818,6 +1824,10 @@ watch(active, (newActive, oldActive) => {
   // but any unused split-confirm token doesn't transfer — a fresh buffer is
   // a fresh consent decision.
   pendingSplitConfirm = false;
+  // A composition can't meaningfully survive the draft swap — release the
+  // store's write-guard for the buffer we're leaving so its remote updates
+  // aren't suppressed by a stale composing mark.
+  drafts.endComposition();
   // Drain any pending debounced flush for the buffer we're leaving so the
   // server's row reflects the latest body before the next tab sees us
   // switching away. flushBuffer is a no-op if nothing is pending.

@@ -486,6 +486,101 @@ describe('MessageInput Tab-completion', () => {
 
       expect(drafts.forBuffer(1, '#zebra')).toBe('hey bob !');
     });
+
+    it('drops a remote draft update aimed at the buffer being composed into', async () => {
+      // Dropping v-model also dropped its beforeUpdate write-guard, so a
+      // draft-updated fan-out from another device could repaint the focused
+      // textarea under a live preedit — the store's composing mark is the
+      // replacement guard, and it must hold even though `pending` would have
+      // been disarmed by the debounce flush by then.
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+      const drafts = useDraftStore();
+      drafts.resetTimers(); // clear any composing mark leaked by earlier tests
+
+      composeStart(el);
+      await type(el, 'hei');
+      drafts.applyRemoteUpdate(1, '#zebra', 'clobber from another device');
+      expect(drafts.forBuffer(1, '#zebra')).toBe('hei');
+
+      // Commit + flush, and remote updates land again — the guard is scoped to
+      // the composition, not sticky.
+      await commitComposition(el);
+      drafts.flushBuffer(1, '#zebra');
+      drafts.applyRemoteUpdate(1, '#zebra', 'now it lands');
+      expect(drafts.forBuffer(1, '#zebra')).toBe('now it lands');
+    });
+
+    it('defers the debounced draft flush until the composition ends', async () => {
+      // A >500ms mid-word pause used to ship raw phonetic preedit as the
+      // durable cross-device draft (and disarm `pending` with it). The flush
+      // must wait for compositionend; the committed text then flushes normally.
+      //
+      // Mount and helpers run under REAL timers — flush() awaits a setTimeout,
+      // which would hang forever under fake ones (and a timed-out test never
+      // reaches its finally, leaking frozen timers into every later test). The
+      // fake-timer window below contains only synchronous dispatches.
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+      const drafts = useDraftStore();
+      drafts.resetTimers();
+      vi.mocked(socketSend).mockClear();
+      vi.useFakeTimers();
+      try {
+        el.dispatchEvent(new Event('compositionstart', { bubbles: true }));
+        el.value = 'nihongo';
+        el.setSelectionRange(7, 7);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        vi.advanceTimersByTime(5000);
+        const draftSets = () =>
+          vi.mocked(socketSend).mock.calls.filter(([m]) => (m as any)?.type === 'draft-set');
+        expect(draftSets()).toHaveLength(0);
+
+        el.dispatchEvent(new Event('compositionend', { bubbles: true }));
+        vi.advanceTimersByTime(5000);
+        expect(draftSets()).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('ignores the Enter that confirms a composition on Safari (keyCode 229)', async () => {
+      // Safari fires compositionend first, THEN the confirming Enter's keydown
+      // with isComposing already false but keyCode still 229 — the keydown
+      // gate has to catch it or committing a word sends the message.
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+      useDraftStore().resetTimers();
+      vi.mocked(socketSendWithAck).mockClear();
+      await type(el, 'sent by mistake');
+
+      const enter229 = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true });
+      Object.defineProperty(enter229, 'keyCode', { value: 229 });
+      el.dispatchEvent(enter229);
+      await flush();
+
+      expect(socketSendWithAck).not.toHaveBeenCalled();
+      expect(useDraftStore().forBuffer(1, '#zebra')).toBe('sent by mistake');
+    });
+
+    it('keeps Cmd+B from splicing formatting codes under a live preedit', async () => {
+      // One of the two branches the scattered per-branch gates had missed —
+      // now covered by the single composition gate at the top of onKeydown.
+      seedStores('#zebra');
+      const { el } = await mountComposer();
+      useDraftStore().resetTimers();
+
+      composeStart(el);
+      await type(el, 'bo');
+      const cmdB = new KeyboardEvent('keydown', { key: 'b', metaKey: true, bubbles: true });
+      Object.defineProperty(cmdB, 'isComposing', { value: true });
+      el.dispatchEvent(cmdB);
+      await flush();
+
+      expect(el.value.includes('\u0002')).toBe(false); // \u0002 = mIRC bold
+      expect(useDraftStore().forBuffer(1, '#zebra')).toBe('bo');
+      await commitComposition(el);
+    });
   });
 });
 
