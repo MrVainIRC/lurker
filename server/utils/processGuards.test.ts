@@ -78,7 +78,7 @@ describe('installFatalExceptionExit', () => {
 
   it('still exits when the record itself throws', () => {
     const target = new EventEmitter();
-    const exit = vi.fn();
+    const exit = vi.fn<(code: number) => void>();
     installFatalExceptionExit(
       () => {
         throw new Error('db is gone too');
