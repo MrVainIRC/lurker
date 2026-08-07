@@ -11,6 +11,8 @@ import {
   defaultsAsObject,
   CATEGORIES,
   GROUPS,
+  THEMED_KEYS,
+  themedDefaults,
 } from '../../../shared/settingsRegistry.js';
 import type {
   SettingValue,
@@ -19,7 +21,7 @@ import type {
   SettingDependency,
 } from '../../../shared/settingsRegistry.js';
 
-export { REGISTRY, getOption, defaultsAsObject, CATEGORIES, GROUPS };
+export { REGISTRY, getOption, defaultsAsObject, CATEGORIES, GROUPS, THEMED_KEYS, themedDefaults };
 
 export function getDefault(key: string): SettingValue | undefined {
   const opt = getOption(key);

@@ -72,6 +72,17 @@ interface BaseOption {
   // screen was already carrying one of these by hand for consolidate_max_names,
   // and the tier adds eight more.
   dependsOn?: readonly SettingDependency[];
+
+  // Part of a theme preset's snapshot (#TBD): the fonts group plus every
+  // color-typed appearance setting. A theme stores a value for each themed key;
+  // the client resolves a themed key as override → active theme → registry
+  // default (stores/settings.ts). Two server behaviors hang off this flag:
+  // settingsService KEEPS a themed row whose value equals the registry default
+  // (on a non-default theme, "set it to the default color" is a statement, not
+  // an absence), and /api/themes validates snapshot keys against it. The
+  // look.theme.* pointer keys themselves must NEVER be themed — the resolver
+  // reads them to pick the active theme, so a themed pointer would recurse.
+  themed?: boolean;
 }
 
 /** Free-text settings: plain strings, CSS colors, and write-only secrets. */
@@ -157,6 +168,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Font family',
     category: 'appearance',
     group: 'fonts',
+    themed: true,
     type: 'string',
     default: "'Input Mono', 'Input', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
     description:
@@ -168,6 +180,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Font size',
     category: 'appearance',
     group: 'fonts',
+    themed: true,
     type: 'int',
     min: 9,
     max: 32,
@@ -181,6 +194,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Font size (mobile)',
     category: 'appearance',
     group: 'fonts',
+    themed: true,
     type: 'int',
     min: 9,
     max: 32,
@@ -195,6 +209,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Font weight',
     category: 'appearance',
     group: 'fonts',
+    themed: true,
     type: 'int',
     min: 100,
     max: 900,
@@ -210,6 +225,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Terminal-style font smoothing (macOS)',
     category: 'appearance',
     group: 'fonts',
+    themed: true,
     type: 'bool',
     default: false,
     description:
@@ -224,6 +240,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Background',
     category: 'appearance',
     group: 'palette',
+    themed: true,
     type: 'color',
     default: '#212022',
     description: 'Window background (every region uses this, like a CLI app).',
@@ -233,6 +250,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Soft background (hover / active)',
     category: 'appearance',
     group: 'palette',
+    themed: true,
     type: 'color',
     default: '#2c2a2e',
     description: 'Slightly raised background used for hover and active-buffer highlight.',
@@ -242,6 +260,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Foreground (text)',
     category: 'appearance',
     group: 'palette',
+    themed: true,
     type: 'color',
     default: '#fcfcfa',
     description: 'Default foreground / text color.',
@@ -251,6 +270,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Muted text',
     category: 'appearance',
     group: 'palette',
+    themed: true,
     type: 'color',
     default: '#939293',
     description: 'Muted text (timestamps, system events, secondary labels).',
@@ -260,6 +280,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Accent',
     category: 'appearance',
     group: 'palette',
+    themed: true,
     type: 'color',
     default: '#a99dec',
     description: 'Primary accent (logo, active-buffer indicator, focused borders).',
@@ -269,6 +290,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Link color',
     category: 'appearance',
     group: 'palette',
+    themed: true,
     type: 'color',
     default: 'var(--fg)',
     description:
@@ -280,6 +302,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Good / connected',
     category: 'appearance',
     group: 'palette',
+    themed: true,
     type: 'color',
     default: '#b3db82',
     description: 'Positive / connected state.',
@@ -289,6 +312,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Warning',
     category: 'appearance',
     group: 'palette',
+    themed: true,
     type: 'color',
     default: '#f9d978',
     description: 'Warning / in-progress state (connecting, modified setting marker).',
@@ -298,6 +322,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Error / disconnected',
     category: 'appearance',
     group: 'palette',
+    themed: true,
     type: 'color',
     default: '#ed6c89',
     description: 'Error / disconnected / destructive state.',
@@ -307,6 +332,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Borders',
     category: 'appearance',
     group: 'palette',
+    themed: true,
     type: 'color',
     default: '#38353b',
     description: 'Subtle horizontal/vertical separators between regions.',
@@ -316,6 +342,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'mIRC color palette',
     category: 'appearance',
     group: 'palette',
+    themed: true,
     type: 'string-list',
     // 16 entries, one per mIRC color code 0..15. The chromatic slots default
     // to the closest hue from look.nick.colors so coloured chat text harmonises
@@ -361,6 +388,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Alternating row background',
     category: 'appearance',
     group: 'messages',
+    themed: true,
     type: 'color',
     default: 'var(--bg)',
     description:
@@ -372,6 +400,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Alternating row text',
     category: 'appearance',
     group: 'messages',
+    themed: true,
     type: 'color',
     default: '#c4c4c4',
     description:
@@ -447,6 +476,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Owner prefix (~)',
     category: 'appearance',
     group: 'members',
+    themed: true,
     type: 'color',
     default: '#ed6c89',
     description: 'Color for the ~ prefix (channel owner mode +q).',
@@ -456,6 +486,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Admin prefix (&)',
     category: 'appearance',
     group: 'members',
+    themed: true,
     type: 'color',
     default: '#fc9867',
     description: 'Color for the & prefix (channel admin mode +a).',
@@ -465,6 +496,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Op prefix (@)',
     category: 'appearance',
     group: 'members',
+    themed: true,
     type: 'color',
     default: '#a99dec',
     description: 'Color for the @ prefix (channel operator mode +o).',
@@ -474,6 +506,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Half-op prefix (%)',
     category: 'appearance',
     group: 'members',
+    themed: true,
     type: 'color',
     default: '#78dce8',
     description: 'Color for the % prefix (half-op mode +h).',
@@ -483,6 +516,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Voiced prefix (+)',
     category: 'appearance',
     group: 'members',
+    themed: true,
     type: 'color',
     default: '#b3db82',
     description: 'Color for the + prefix (voiced mode +v).',
@@ -498,6 +532,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Unread row color',
     category: 'appearance',
     group: 'buffer-list',
+    themed: true,
     type: 'color',
     default: 'var(--accent)',
     description:
@@ -511,6 +546,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Highlighted row color',
     category: 'appearance',
     group: 'buffer-list',
+    themed: true,
     type: 'color',
     default: 'var(--warn)',
     description:
@@ -551,6 +587,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Nick color palette',
     category: 'appearance',
     group: 'nicks',
+    themed: true,
     type: 'string-list',
     default: [
       '#ff6188',
@@ -582,6 +619,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     label: 'Your own nick color',
     category: 'appearance',
     group: 'nicks',
+    themed: true,
     type: 'color',
     default: 'var(--fg)',
     description:
@@ -1599,6 +1637,74 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
       'work either way.',
   },
 
+  // ─── Theme presets (pointer keys) ─────────────────────────────────────
+  // Which theme preset drives the `themed` appearance keys. Category `theme`
+  // is deliberately absent from CATEGORIES (like `system`): these render in
+  // the bespoke Themes section of the Appearance pane, not as raw rows. The
+  // stored value of the three pointer keys is a theme id — 'dark' / 'light'
+  // for the built-ins, or the decimal row id of a saved /api/themes theme. A
+  // pointer at a theme that no longer exists resolves as the built-in Dark
+  // theme (the client resolver falls back; the themes DELETE route also
+  // resets any pointer it dangles). None of these are `themed` — see the
+  // BaseOption note; a themed pointer would make resolution recursive.
+  {
+    key: 'look.theme.mode',
+    label: 'Theme selection mode',
+    category: 'theme',
+    group: 'presets',
+    type: 'enum',
+    choices: ['single', 'system'],
+    // Ascribed because TS unions every literal in REGISTRY: a second distinct
+    // choiceLabels key-set makes each other's keys optional-undefined, which the
+    // Record<string, string> index signature rejects.
+    choiceLabels: {
+      single: 'One theme everywhere',
+      system: 'Follow system light/dark',
+    } as Readonly<Record<string, string>>,
+    default: 'single',
+    description:
+      'How the active theme preset is chosen. "single" uses the one theme set ' +
+      'in look.theme.active everywhere. "system" follows this device\'s ' +
+      'light/dark preference: look.theme.light applies when the OS is in ' +
+      'light mode, look.theme.dark when it is in dark mode. The preference is ' +
+      'read per device, so a phone in light mode and a desktop in dark mode ' +
+      'each get their assigned theme from the same synced settings.',
+  },
+  {
+    key: 'look.theme.active',
+    label: 'Active theme',
+    category: 'theme',
+    group: 'presets',
+    type: 'string',
+    default: 'dark',
+    description:
+      'The theme preset in effect when look.theme.mode is "single": "dark", ' +
+      '"light", or the id of a saved theme. Applying a theme sets this and ' +
+      'clears any per-setting overrides so the theme shows unmodified.',
+  },
+  {
+    key: 'look.theme.light',
+    label: 'Light-mode theme',
+    category: 'theme',
+    group: 'presets',
+    type: 'string',
+    default: 'light',
+    description:
+      'The theme preset used while this device reports a light color scheme, ' +
+      'when look.theme.mode is "system". "dark", "light", or a saved theme id.',
+  },
+  {
+    key: 'look.theme.dark',
+    label: 'Dark-mode theme',
+    category: 'theme',
+    group: 'presets',
+    type: 'string',
+    default: 'dark',
+    description:
+      'The theme preset used while this device reports a dark color scheme, ' +
+      'when look.theme.mode is "system". "dark", "light", or a saved theme id.',
+  },
+
   // ─── System / locale ──────────────────────────────────────────────────
   {
     key: 'system.timezone',
@@ -1641,6 +1747,24 @@ export function defaultsAsObject(): Record<string, SettingValue> {
   return out;
 }
 
+/** The keys a theme preset snapshots, in registry order. */
+export const THEMED_KEYS: readonly string[] = Object.freeze(
+  REGISTRY.filter((opt) => opt.themed).map((opt) => opt.key),
+);
+
+/**
+ * Registry defaults for just the themed keys — the built-in Dark theme's
+ * values. Arrays are copied: REGISTRY's freeze is shallow, so handing out the
+ * live default arrays would let any consumer mutate the registry in place.
+ */
+export function themedDefaults(): Record<string, SettingValue> {
+  const out: Record<string, SettingValue> = {};
+  for (const opt of REGISTRY) {
+    if (opt.themed) out[opt.key] = Array.isArray(opt.default) ? [...opt.default] : opt.default;
+  }
+  return out;
+}
+
 // ─── Sidebar taxonomy ─────────────────────────────────────────────────────
 //
 // Ordered list of categories shown in the Settings sidebar. `kind: 'registry'`
@@ -1656,7 +1780,9 @@ export function defaultsAsObject(): Record<string, SettingValue> {
 // personal → meta. Sidebar renders top-to-bottom; the first category is also
 // the redirect target when navigating to bare /settings.
 export const CATEGORIES: readonly SettingCategory[] = Object.freeze([
-  { id: 'appearance', label: 'Appearance', kind: 'registry' },
+  // Bespoke only for the leading Themes section (AppearancePane.vue); the
+  // registry rows still render beneath it via the embedded RegistryPane.
+  { id: 'appearance', label: 'Appearance', kind: 'bespoke' },
   { id: 'chat', label: 'Chat', kind: 'registry' },
   // Everything about join/part/quit/nick/host-change/mode lines: whether you see
   // them at all, how they're folded, and how much detail each carries. Split out

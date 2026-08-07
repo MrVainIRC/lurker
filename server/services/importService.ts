@@ -30,6 +30,8 @@ import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import type { Statement, RunResult } from 'better-sqlite3';
 import db from '../db/index.js';
 import { EXPORT_TABLES, EXPORT_FORMAT_VERSION, IMPORT_ORDER } from '../db/exportSchema.js';
+import { isBuiltinThemeId, THEME_POINTER_KEYS } from '../../shared/themePresets.js';
+import themesService from './themesService.js';
 import { encryptSecret } from '../utils/secretCrypto.js';
 import {
   importRow as importBufferRow,
@@ -324,6 +326,56 @@ function insertTable(
       row.value = JSON.stringify(mapped);
     }
 
+    // Same in-VALUE rewrite for the theme pointers: their value is a user_themes
+    // row id as a decimal STRING (or a built-in id, which travels as-is). A
+    // pointer whose theme didn't survive the trip drops and falls back to its
+    // registry default — the resolver treats that as the built-in Dark theme.
+    if (
+      table === 'user_settings' &&
+      typeof row.key === 'string' &&
+      THEME_POINTER_KEYS.includes(row.key)
+    ) {
+      let oldId: unknown;
+      try {
+        oldId = JSON.parse(String(row.value));
+      } catch {
+        continue;
+      }
+      if (typeof oldId !== 'string') continue;
+      if (!isBuiltinThemeId(oldId)) {
+        // Only a canonical decimal string is a pointer. '012' or '2e0' never
+        // resolved on any client (exact-string byId), so rewriting them through
+        // Number() would turn a dead value into a live pointer.
+        const n = Number(oldId);
+        if (!Number.isInteger(n) || String(n) !== oldId) continue;
+        const mapped = idMaps.user_themes?.get(n);
+        if (mapped === undefined) continue;
+        row.value = JSON.stringify(String(mapped));
+      }
+    }
+
+    // Saved themes route through the service (same reasoning as ignored_masks
+    // below): a crafted/edited archive must not plant what POST /api/themes
+    // would 400 — non-themed keys, type-invalid values, reserved/over-long
+    // names, rows past the cap, or case-twin names that would abort the whole
+    // import on the NOCASE UNIQUE constraint. An invalid theme drops alone;
+    // its pointer rewrite above then misses and the pointer falls back to the
+    // built-in Dark theme.
+    if (table === 'user_themes') {
+      let values: unknown;
+      try {
+        values = JSON.parse(String(row.values_json));
+      } catch {
+        continue;
+      }
+      const result = themesService.create(row.user_id as number, { name: row.name, values });
+      if (!result.ok) continue;
+      idMaps.user_themes ??= new Map();
+      idMaps.user_themes.set(original.id, result.theme.id);
+      inserted += 1;
+      continue;
+    }
+
     // Route ignore rules through the service rather than a raw INSERT, so a
     // crafted/legacy archive can't plant an unvalidated regex (ReDoS surface), a
     // non-ISO expires_at that never lapses and never sweeps, or a duplicate —
@@ -521,6 +573,7 @@ function resetImportedData(userId: number): void {
     db.prepare('DELETE FROM networks WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM highlight_rules WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM user_settings WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM user_themes WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM upload_history WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM user_away_state WHERE user_id = ?').run(userId);
     // Network-scoped buffers cascade with networks above, but an app-scoped row
@@ -619,8 +672,12 @@ export async function importFromZipFile(
       // ---- Phase A: data.json tables that don't depend on messages (one tx). ----
       db.transaction(() => {
         // Fresh accounts usually have an auto-synced system.timezone row; wipe
-        // before insert — import replaces, doesn't merge.
+        // before insert — import replaces, doesn't merge. Same for saved
+        // themes: accountIsEmpty only checks networks, so a zero-network
+        // account can still hold themes whose names would collide with the
+        // archive's on the NOCASE UNIQUE constraint (or silently merge).
         db.prepare('DELETE FROM user_settings WHERE user_id = ?').run(targetUserId);
+        db.prepare('DELETE FROM user_themes WHERE user_id = ?').run(targetUserId);
         for (const table of IMPORT_ORDER) {
           const def = EXPORT_TABLES[table as keyof typeof EXPORT_TABLES] as
             | ExportTableDefFull

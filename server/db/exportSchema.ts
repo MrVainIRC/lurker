@@ -419,6 +419,22 @@ export const EXPORT_TABLES = Object.freeze({
     columns: ['user_id', 'message_id', 'created_at'],
   },
 
+  // Saved theme presets. The look.theme.* user_settings values reference these
+  // row ids (as decimal strings), so the id exports and rekeyOnImport builds the
+  // map the importer uses to rewrite those pointers — same hand-rewrite as
+  // uploads.uploader_id. A pointer at a built-in ('dark'/'light') needs no
+  // rewrite; one at a theme that didn't survive the trip drops and falls back
+  // to the registry default (Dark).
+  user_themes: {
+    mode: 'export',
+    scope: 'user_id',
+    section: 'data',
+    pk: 'id',
+    rekeyOnImport: true,
+    fkRekey: { user_id: 'users' },
+    columns: ['id', 'user_id', 'name', 'values_json', 'created_at', 'updated_at'],
+  },
+
   // A user's OWN configured uploaders (#514). This became exportable the moment
   // the legacy uploads.* user_settings keys were deleted: those keys used to be
   // what carried a user's provider config across an export, and with them gone
@@ -662,6 +678,9 @@ export const IMPORT_ORDER = Object.freeze([
   // Before user_settings (whose `uploads.uploader_id` value is rewritten through
   // this table's id map) and before upload_history (which FK-rekeys against it).
   'uploader_config',
+  // Before user_settings too: the look.theme.* pointer values rewrite through
+  // this table's id map.
+  'user_themes',
   'user_settings',
   'ignored_masks',
   'user_nick_notes',

@@ -20,6 +20,7 @@ import settingsRouter from './routes/settings.js';
 import highlightRulesRouter from './routes/highlightRules.js';
 import highlightsRouter from './routes/highlights.js';
 import bookmarksRouter from './routes/bookmarks.js';
+import themesRouter from './routes/themes.js';
 import pushRouter from './routes/push.js';
 import adminRouter from './routes/admin.js';
 import uploadsRouter from './routes/uploads.js';
@@ -76,6 +77,7 @@ export function buildApp(sessionSecret: string): Express {
   app.use('/api/highlight-rules', highlightRulesRouter);
   app.use('/api/highlights', highlightsRouter);
   app.use('/api/bookmarks', bookmarksRouter);
+  app.use('/api/themes', themesRouter);
   app.use('/api/push', pushRouter);
   app.use('/api/admin', adminRouter);
   app.use('/api/uploads', uploadsRouter);
