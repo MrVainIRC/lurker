@@ -123,13 +123,14 @@ const bodyStyle = computed<CSSProperties>(() => {
 
 <style scoped>
 .spoiler {
-  border-radius: var(--radius-sm);
-  /* ⚠ NO horizontal padding, and don't add any back. An fg==bg run is not
-     always a spoiler — ASCII art uses the same encoding to fill a solid block
-     of colour — and any padding here widens that run past its own characters,
-     which shifts every glyph after it and shears the art off its grid. The box
-     has to measure exactly as many columns as it contains. Colour and radius
-     are free; anything that changes advance width is not. */
+  /* ⚠ NO padding and NO border-radius, and don't add either back. An fg==bg run
+     is not always a spoiler — ASCII art uses the same encoding to fill a solid
+     block of colour — so this box has to be able to BE a block. Padding widened
+     the run past its own characters and sheared everything after it off the
+     monospace grid; the radius notched its corners, which shows wherever two
+     filled runs meet and on any square area an artist drew. Colour is the only
+     decoration left, and that's the point: the run occupies exactly the cells
+     it contains, painted exactly as it was sent. */
   /* Wrapper-style overrides this for coloured spoilers; the var(--fg-muted)
      fallback covers older snapshots whose segments lack fg. */
   background: var(--fg-muted);
