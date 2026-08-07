@@ -447,6 +447,8 @@ export function parseIrcFormatting(text: string): IrcRun[] {
 export interface TextSegmentStyle {
   color?: string;
   backgroundColor?: string;
+  /** Vertical only — see `--mirc-bg-bleed`. Never a horizontal value. */
+  padding?: string;
   fontWeight?: string;
   fontStyle?: string;
   textDecoration?: string;
@@ -496,7 +498,14 @@ export function segmentInlineStyle(
   }
   if (seg.bg != null) {
     const bg = mircColor(seg.bg, mircPalette);
-    if (bg) style.backgroundColor = bg;
+    if (bg) {
+      style.backgroundColor = bg;
+      // Bleed the fill into the line's leading so stacked coloured rows form a
+      // solid field rather than a striped one — see --mirc-bg-bleed. Only when
+      // there IS a background: on a foreground-only run this would paint
+      // nothing and merely widen the hit area.
+      style.padding = 'var(--mirc-bg-bleed) 0';
+    }
   }
   if (seg.bold) style.fontWeight = 'bold';
   if (seg.italic) style.fontStyle = 'italic';

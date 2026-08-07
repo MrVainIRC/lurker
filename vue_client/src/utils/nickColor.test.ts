@@ -192,7 +192,24 @@ describe('segmentInlineStyle / segmentHasStyle — background colour', () => {
     expect(segmentInlineStyle({ text: 'x', fg: 4, bg: 8 }, null)).toEqual({
       color: '#ff6188',
       backgroundColor: '#ffd866',
+      padding: 'var(--mirc-bg-bleed) 0',
     });
+  });
+
+  // The bleed rides with the background and nothing else. Stacked coloured rows
+  // need it to form a solid field rather than a striped one; a run with only a
+  // foreground has no fill to extend, and padding there would widen the hit
+  // area for no paint.
+  //
+  // ⚠ The vertical-only shorthand is the whole trick. A horizontal value would
+  // push the run past its own characters and shear ASCII art off the monospace
+  // grid — the exact bug removed from the spoiler box.
+  it('bleeds the background vertically, and only when there is one', () => {
+    expect(segmentInlineStyle({ text: 'x', fg: 4, bg: 8 }, null).padding).toBe(
+      'var(--mirc-bg-bleed) 0',
+    );
+    expect(segmentInlineStyle({ text: 'x', fg: 4 }, null).padding).toBeUndefined();
+    expect(segmentInlineStyle({ text: 'x' }, null).padding).toBeUndefined();
   });
 
   it('renders a background even when the foreground is the default (99)', () => {

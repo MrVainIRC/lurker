@@ -100,6 +100,23 @@
      same direction. */
   --embed-bg: color-mix(in srgb, var(--fg) 6%, var(--bg-soft));
 
+  /* How far a coloured mIRC background bleeds above and below its own text.
+
+     An inline span paints its background over the font's content area, not the
+     full line box — so at line-height 1.55 roughly a third of every line goes
+     unpainted, and multi-line ASCII art built from \x03FG,BG runs comes out
+     striped instead of solid. This is half that shortfall, applied as VERTICAL
+     padding, which on a non-replaced inline element paints without affecting
+     line-box height. The grid survives; the stripes close.
+
+     ⚠ Deliberately a touch under half the leading. Overshooting makes each
+     line's background overlap the one above — and since a later line paints
+     after the earlier line's text, that clips the descenders above it
+     (commas, slashes: exactly what art is made of). A hairline seam is a far
+     cheaper failure than shaved glyphs, so err small. Tune here only; both the
+     spoiler box and ordinary coloured runs read this. */
+  --mirc-bg-bleed: 0.22em;
+
   /* Corner radii. The app is intentionally flat (most things are square);
      these are the few deliberate exceptions. */
   --radius-sm: 2px;

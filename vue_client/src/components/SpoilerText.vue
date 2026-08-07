@@ -123,14 +123,19 @@ const bodyStyle = computed<CSSProperties>(() => {
 
 <style scoped>
 .spoiler {
-  /* ⚠ NO padding and NO border-radius, and don't add either back. An fg==bg run
-     is not always a spoiler — ASCII art uses the same encoding to fill a solid
-     block of colour — so this box has to be able to BE a block. Padding widened
-     the run past its own characters and sheared everything after it off the
-     monospace grid; the radius notched its corners, which shows wherever two
-     filled runs meet and on any square area an artist drew. Colour is the only
-     decoration left, and that's the point: the run occupies exactly the cells
-     it contains, painted exactly as it was sent. */
+  /* ⚠ NO HORIZONTAL padding and NO border-radius, and don't add either back. An
+     fg==bg run is not always a spoiler — ASCII art uses the same encoding to
+     fill a solid block of colour — so this box has to be able to BE a block.
+     Horizontal padding widened the run past its own characters and sheared
+     everything after it off the monospace grid; the radius notched its corners,
+     which shows wherever two filled runs meet and on any square area an artist
+     drew.
+
+     The VERTICAL padding below is the opposite case and is load-bearing: on a
+     non-replaced inline element it paints without affecting line-box height, so
+     it closes the gap between stacked rows and the grid is untouched. The two
+     axes genuinely behave differently here — see --mirc-bg-bleed. */
+  padding: var(--mirc-bg-bleed) 0;
   /* Wrapper-style overrides this for coloured spoilers; the var(--fg-muted)
      fallback covers older snapshots whose segments lack fg. */
   background: var(--fg-muted);
