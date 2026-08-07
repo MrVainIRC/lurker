@@ -12,6 +12,9 @@ import { getNodeSecret } from './middleware/nodeAuth.js';
 import { nodeUploadConfigured } from './services/uploadProviders/nodeUpload.js';
 import * as systemLog from './services/systemLog.js';
 import { purgeExpiredSessions } from './db/sessions.js';
+import { sweepExpiredPreviews } from './db/linkPreviews.js';
+import { sweepPreviewCache } from './services/previewCache/index.js';
+import { listGrandfatheredUsernames } from './db/users.js';
 import { backfillEncryptColumns } from './db/secretBackfill.js';
 import { assertPushCredentials } from './services/push/credentials.js';
 import { resolveSessionSecret } from './utils/sessionSecret.js';
@@ -78,6 +81,20 @@ attachWsHub(server, SESSION_SECRET);
 purgeExpiredSessions();
 setInterval(purgeExpiredSessions, 60 * 60 * 1000).unref();
 
+// link_previews is a cache with a TTL, so lapsed rows have to actually go — without this it
+// only ever grows. Deliberately NOT gated on previewsEnabled(): an operator who turns the
+// feature off still has whatever it cached while it was on, and that should still expire.
+sweepExpiredPreviews();
+setInterval(sweepExpiredPreviews, 60 * 60 * 1000).unref();
+
+// The BYTE cache's index needs the same treatment, and for `s3` it is not merely
+// hygiene: nothing else bounds that table, and a row that outlives its object has
+// `toDescriptor` minting a public URL that 404s for everyone. `void` because the
+// sweep touches a bucket-backed backend and answers with a count nobody waits on;
+// it swallows its own failures, like every other path in that module.
+void sweepPreviewCache();
+setInterval(() => void sweepPreviewCache(), 60 * 60 * 1000).unref();
+
 systemLog.log({ scope: 'server', text: `Lurker server starting up (edition: ${EDITION})` });
 
 // Watch for synchronous event-loop stalls (a heavy client-connect snapshot on
@@ -122,6 +139,20 @@ const wrapped = backfillEncryptColumns();
 if (wrapped.encrypted > 0) {
   console.log(`[lurker] encrypted ${wrapped.encrypted} secret column value(s) at rest`);
   systemLog.log({ scope: 'server', text: `Encrypted ${wrapped.encrypted} secret column value(s)` });
+}
+
+// Name any account whose username couldn't be created under today's rules — a
+// space, or a case-twin of another account. They keep working (grandfathered),
+// but the operator should learn about them here rather than from a user who
+// can't tell which of two lookalike accounts is theirs. Silent on the
+// overwhelmingly common instance where every name already conforms.
+const legacyNames = listGrandfatheredUsernames();
+if (legacyNames.length > 0) {
+  console.warn(
+    `[lurker] ${legacyNames.length} account name(s) predate the username rules and are ` +
+      'grandfathered (they keep logging in with them): ' +
+      legacyNames.map((u) => `#${u.id} "${u.username}" — ${u.why}`).join('; '),
+  );
 }
 
 ircManager.initAll();

@@ -104,6 +104,45 @@ export const useDraftStore = defineStore('drafts', {
       this.clearTimer(k);
       pending.delete(k);
     },
+    // Lifecycle hooks (lib/bufferLifecycle.ts). rekey moves the body AND the
+    // module-level debounce bookkeeping — a pending flush keyed by the dead
+    // name would otherwise fire a draft-set for a buffer the server just
+    // renamed away.
+    dropBuffer(networkId: number | string | null, target: string) {
+      if (networkId == null) return;
+      this.drop(networkId, target);
+    },
+    rekeyBuffer(networkId: number | string | null, from: string, to: string) {
+      if (networkId == null) return;
+      const fromKey = key(networkId, from);
+      const toKey = key(networkId, to);
+      // Destination wins on a merge collision: if the destination buffer has
+      // ANY local draft state (body, pending flush, armed timer), the
+      // source's is dropped rather than clobbering what the user typed there
+      // — mirroring the server's merge (survivor's non-empty draft wins).
+      const destHasState =
+        this.drafts[toKey] != null || pending.has(toKey) || flushTimers.has(toKey);
+      const fromTimer = flushTimers.get(fromKey);
+      if (fromTimer) {
+        // Never move the old timeout: its closure captured the OLD name.
+        clearTimeout(fromTimer);
+        flushTimers.delete(fromKey);
+      }
+      if (destHasState) {
+        delete this.drafts[fromKey];
+        pending.delete(fromKey);
+        return;
+      }
+      if (this.drafts[fromKey] != null) {
+        this.drafts[toKey] = this.drafts[fromKey];
+        delete this.drafts[fromKey];
+      }
+      if (pending.has(fromKey)) {
+        pending.delete(fromKey);
+        pending.set(toKey, { networkId, target: to });
+      }
+      if (fromTimer) this.scheduleFlush(networkId, to);
+    },
     // Beacon path used on tab close: ship every un-flushed buffer in one POST
     // since a WS send may already be in teardown. Returns whether anything
     // was actually queued — the sendBeacon return is best-effort either way.

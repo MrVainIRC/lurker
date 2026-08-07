@@ -1,9 +1,10 @@
 # Lurker Client Protocol & API — a guide for client authors
 
 > **Audience:** third-party client authors (native apps, TUIs, alternative web
-> clients). Last verified against server code 2026-07-21 (`main` @ `fefbeee`,
-> protocol version **1**). The server source is authoritative; `file:line`
-> references point into this repository.
+> clients). Last verified against server code 2026-08-06 (`theme-presets-foundation`,
+> protocol version **1**; settings/themes sections updated for that branch — the
+> rest last swept 2026-07-21, `main` @ `fefbeee`). The server source is
+> authoritative; `file:line` references point into this repository.
 >
 > Reference implementations:
 > [`vue_client/`](https://github.com/amiantos/lurker/tree/main/vue_client)
@@ -46,8 +47,17 @@ and the protocol version — before doing anything else:
 GET /api/config            (no auth)
 → { "edition": "standalone" | "node",
     "protocolVersion": 1,
-    "minProtocolVersion": 1 }
+    "minProtocolVersion": 1,
+    "features": { "linkPreviews": false } }
 ```
+
+`features` carries instance-level flags an operator turned on. Treat a missing
+flag as **off** — an older server that doesn't advertise one doesn't have it.
+Settings whose registry entry names a feature (`requiresFeature`) must be
+**hidden**, not merely disabled, when that flag is false: there is no server
+behind them, and the endpoints aren't mounted, so a toggle would do nothing.
+`linkPreviews` gates `chat.inline_media.enabled`, `chat.link_previews.enabled`,
+and the `/api/link-preview/*` endpoints.
 
 Node edition disables `/api/api-tokens`, `/mcp`, and `/uploads/*` static serving;
 standalone has no `/api/node/*`. The WS protocol itself is identical in both.
@@ -193,30 +203,126 @@ Authorization: Bearer <token>        (native; browsers ride the cookie)
 ### 4.3 Connect: the snapshot burst
 
 On every successful connect the server immediately sends a **burst of separate
-frames**, synchronously, in this order (`wsHub.ts:1828`):
+frames**, synchronously, in this order (`wsHub.ts` `sendSnapshotInner`, 2293):
 
-1. `{kind:'snapshot', protocolVersion, networks:[…], globalIgnores:[…], cursor?}`
+1. `{kind:'snapshot', protocolVersion, maxUploadBytes, networks, globalIgnores, cursor?}`
    — full live state for every network (see §5.1). `cursor` (present only on a
    fresh connect) is the current global max message id: **seed your resume
    cursor from it**, because the shell backlogs that follow carry no rows and
-   would otherwise leave your cursor at 0.
+   would otherwise leave your cursor at 0. `maxUploadBytes` is the largest
+   upload this account may send right now — see §Uploads.
 2. `{kind:'draft-snapshot', drafts}` — saved per-buffer input drafts.
-3. `{kind:'bookmark-ids-snapshot', ids:[…]}` — bookmarked message ids.
-4. A `backlog` frame for the app-scoped **system buffer** (`networkId:null`,
+3. A `backlog` frame for the app-scoped **system buffer** (`networkId:null`,
    `target:':system:'`).
-5. `{kind:'contacts-snapshot', contacts:[…]}` — the friends/contacts list.
-6. One `backlog` frame per open buffer on each connected network.
-7. Per **offline** network: a real backlog for its `:server:` log, shells for
+4. `{kind:'favorites-changed', favorites:[{networkId, target, bufferId}]}` —
+   the user's favorite buffers in global order. Deliberately the SAME frame
+   every later favorite/unfavorite/reorder correction uses (replace
+   wholesale), so one handler covers seed and updates. Additive like frame 7:
+   an older server never sends it — no frame ⇒ treat favorites as empty,
+   don't wait on it.
+5. One `backlog` frame per open buffer on each connected network.
+6. Per **offline** network: a real backlog for its `:server:` log, shells for
    its channels/DMs.
+7. `{kind:'backlog-complete'}` — terminal marker, nothing else in it.
 
-There is no "end of burst" marker; after frame 1 you can render progressively.
+Render progressively from frame 1; don't wait for the end.
+
+**What frame 7 is for.** Until it arrives, "I have no row for this buffer _yet_"
+and "there is no such buffer" are the same observation, and no amount of waiting
+separates them. After it arrives, **absence is proof**: a buffer key with no
+`backlog` frame is **not open** — for channels, DMs and `:server:` logs alike,
+on connected and disconnected networks alike. That matters if you
+navigate by **key** rather than by tapping a row that already exists (restoring
+the last-read buffer at launch, opening one from a notification tap): without it
+those screens sit on a spinner forever, because nothing ever says the row isn't
+coming (#635).
+
+**"Not open" is not "never existed", and the burst can't tell you which.** A
+buffer the user closed from another client ships no frame either (it's dropped
+from the enumeration — `wsHub.ts:609`), yet it keeps its full persisted history
+and one `open-buffer` reopens it with that history intact. Both cases mean the
+same thing for what you _render_ — it isn't in the buffer list — which is why
+§9.1 models closed as absent. They differ for what you **destroy**: don't purge
+local history, drafts, or a saved read position on the strength of a missing
+frame, because the server hasn't forgotten any of it.
+
+Two things that look like they'd answer the same question and don't:
+
+- **`snapshot`'s per-network `channels` is not authoritative for buffer
+  existence.** It's empty outright for any network with no live connection
+  (paused account, manually disconnected, never autoconnected) even though
+  those networks still own persisted buffers, and even on a live connection
+  it's read at the `'connected'` instant — before auto-rejoin JOINs land. Judge
+  membership from it and you'll decide a user left channels they're still in.
+- **Don't probe with `open-buffer`.** For a `#channel` with no row the server
+  reads that as "join it" (§9.1), so a probe silently re-JOINs a channel the
+  user deliberately left from another client. `{type:'history', mode:'latest'}`
+  (§4.3) is the read — it answers for any target without creating, reopening, or
+  joining anything.
+
+An older server never sends frame 7 (it's additive, and `protocolVersion` does
+not move for it) — if you don't see one, keep whatever you do today rather than
+concluding anything. A truncated burst withholds it too: the server only sends
+it once the whole burst went out, so a snapshot that failed part-way through
+never claims a buffer is missing.
 
 **Shells vs. hydrated backlogs.** On a fresh connect (`since=0`) channel/DM
-buffers arrive as _shells_: `{kind:'backlog', …, events:[], hasMoreOlder:true}` —
-"this buffer exists; fetch content when the user opens it." Hydrate a shell with
-either `{type:'open-buffer'}` (server replies with a populated `backlog` — the
-iOS approach) or `{type:'history', mode:'latest'}` (the web-client approach).
-Both are valid; pick one.
+buffers arrive as _shells_: `{kind:'backlog', …, events:[], mode:'shell',
+hasMoreOlder:true}` — "this buffer exists; fetch content when the user opens it."
+
+Hydrate a shell with **`{type:'history', mode:'latest'}`**, and only with that.
+It **changes nothing**: no reopen, no row minted, no JOIN, and nothing announced
+to the user's other devices. Send it for any buffer you hold, as often as you
+like. If you consolidate presence noise, send `countBy:'renderable'` with it —
+or `countBy:'chat'` if you hide events entirely (§8). This is the fetch that
+fills the first screenful, so it's where sizing a page in stored rows shows up
+as a blank-looking channel.
+
+It **always answers**, including for a target with no row and no history (an
+empty `events` array). A client that spends one request per buffer can't tell
+"no reply yet" from "never coming", so a silent branch would be a permanent
+loading spinner.
+
+It is also **not gated for paused accounts** — reading your own history is not a
+write. That matters more than it sounds: see the warning below.
+
+> ⚠ **`{type:'open-buffer'}` is a WRITE — don't hydrate with it.** It returns a
+> populated `backlog` too, which is exactly why it was easy to reach for. But for
+> a closed buffer with history it _reopens_ it (a persisted state flip), for a
+> bare nick it mints a DM row, and for an unjoined `#channel` it JOINs. Hydrating
+> with it means a user merely _opening a screen_ mutates state on every device
+> they own — and since an open is now announced (below), visibly. Reserve it for
+> explicit user intent ("open this DM", "join this channel"). Same hazard as the
+> "don't probe with `open-buffer`" warning above, reached from a different
+> direction.
+>
+> It is also gated for paused accounts, correctly, being a write. So a client
+> that hydrates through it **cannot show a paused user anything at all**:
+> `{kind:'error', text:'account paused'}`, then a loading spinner forever. That
+> pairing is what makes this seam load-bearing rather than tidy — the paused gate
+> has encoded it all along, and a client hydrating through the write verb was
+> simply on the wrong side of it.
+
+**A successful `open-buffer` is announced to the user's other devices**, which
+receive a `backlog` **shell** for the buffer followed by `buffer-opened`. The
+requesting socket gets its full backlog and the `buffer-opened` ack, and is
+excluded from the announcement.
+
+> ⚠ **`buffer-opened` is not a "focus this" instruction.** To the socket that
+> asked, it's the reply resolving canonical casing, and focusing is reasonable.
+> To every other device it means only _this buffer is now open_ — activating on
+> it would drag the user to a buffer they opened on a different device. The two
+> are the same frame, so the only thing that distinguishes them is whether you
+> asked: track your own outstanding `open-buffer` targets and focus only on a
+> match (`vue_client/src/stores/buffers.ts`, `pendingOpens`). Clear that record
+> when the socket drops, or a reply that never arrived will claim someone else's
+> open later.
+>
+> You don't need a `buffer-opened` handler to _materialize_ the buffer — the
+> shell that travels with it already does, the same way every other
+> buffer-creating frame works (§9.1). `buffer-reopened` (`wsHub.ts:1815`) is
+> still emitted separately, when an incoming _event_ outranks a closed flag
+> rather than a verb doing it.
 
 ### 4.4 Reconnect and resume (`?since`)
 
@@ -281,38 +387,63 @@ A buffer is one conversation: `kind ∈ channel | dm | server | system`. **The
 server owns buffer existence and open/closed state** (a real `buffers` table
 row per user/network/target). Clients never decide that a buffer exists — they
 _materialize_ their local model in response to specific frames, and only those
-(§9.1). Identity is `(networkId, case-folded target)`; two pseudo-buffers use
-sentinel targets:
+(§9.1).
 
-- `:server:` — per-network server log (`networkId` set, target literally
-  `":server:"`). Uncloseable. Catch-all for server-voice text (§7.3).
+**Identity is `bufferId`** — the server-assigned integer that is stable for
+the buffer's whole life (it will not change even when the buffer's NAME does;
+renames are a coming feature). `(networkId, case-folded target)` remains a
+valid, always-present _address_ for the same buffer, and is how the two ends
+talked before `bufferId` existed. The connect burst doubles as the directory:
+every `backlog` frame carries `bufferId` alongside `networkId`/`target`, so by
+`backlog-complete` a client holds the full id⇄name mapping. New clients should
+key their per-buffer state by `bufferId` and treat the name as a resolvable
+attribute; old clients that ignore the field keep working unchanged.
+`bufferId` is `null` in exactly one degenerate case (a live-joined channel
+whose registry row was lost mid-session — the same defensive carve-out §9.1
+describes) and absent on the one `buffer-opened` ack for a channel still being
+JOINed (no row exists until the echo).
+
+Two sentinel buffers use `:`-prefixed targets. They are REAL rows with real
+`bufferId`s (minted at account/network creation), just uncloseable and never
+user-managed:
+
+- `:server:<networkId>` — per-network server log (`networkId` set). Catch-all
+  for server-voice text (§7.3).
 - `:system:` — app-scoped Lurker log (`networkId: null`). Read-mostly; carries
-  `type:'system'` events. Separate id space (§4.4).
+  `type:'system'` events. Separate message-id space (§4.4).
 
-Sentinel targets are exact-match, never case-folded. (The web client's
-`:friends:` is a purely client-side virtual view — not a wire concept; ignore
-it.)
+Sentinel targets are exact-match, never case-folded.
 
 **Case folding:** IRC targets are case-insensitive and servers echo
-inconsistently-cased names. Fold with **ASCII `toLowerCase`** for identity;
-keep the first/canonical casing for display. RFC 1459 casemapping (treating
-`{}|^` as the lowercase of `[]\~`) is deliberately **not** implemented anywhere
-in Lurker — match that, don't "fix" it unilaterally.
+inconsistently-cased names. Clients fold with plain `toLowerCase` for identity
+(the first-party clients use their platform's Unicode lowercase; ASCII-only is
+also fine) and keep the first/canonical casing for display. The _server_ folds
+per the network's declared ISUPPORT `CASEMAPPING` (#707) — including the
+RFC 1459 rule treating `{|}~` as the lowercase of `[\]^` — so two names a
+client held apart may be one buffer server-side, and (rarely: non-ASCII
+case-twins on an ascii-family network) two server buffers may collide under a
+client's fold; prefer `bufferId` wherever a frame carries it. Don't implement
+the server's fold client-side: when the server learns a mapping that collapses
+names, it merges the rows and announces each merge with the ordinary
+`buffer-renamed` frame (§9.7), which is all a client needs to converge.
 
 ### 5.3 Messages (`MessageEvent`)
 
-Common fields on every **persisted** event (`db/messages.ts:31` +
-`decorateMessage`, `wsHub.ts:430`):
+Common fields on every **persisted** event (`db/messages.ts` `rowToEvent` +
+`decorateMessage`, `wsHub.ts`):
 
 ```
 { id, networkId, target, time,        // ISO 8601 — see the note below
+  bufferId,                           // buffers(id) — absent only on synthetic
+                                      // never-persisted events (§5.2)
   type,                               // see §7.2
   nick, text, kind,                   // kind = raw IRC command; see the ⚠ below
   self,                               // you sent it (any of your clients)
   userhost, alt, mirrored, dm,
   matched, matchedRuleId,             // highlight decoration
   fromIgnored, notifyAlways, notify,
-  msgid? }                            // IRCv3 server message id, when supplied
+  msgid?,                             // IRCv3 server message id, when supplied
+  bookmarked? }                       // true when you've saved this line
 ```
 
 plus type-specific extras (`newNick`, `kicked`, `modes`, `members`, …).
@@ -328,6 +459,14 @@ with respect to `id` — order and dedupe by `id`, always (§9.3).
 own sends learn theirs via `echo-message`). Absent — not null — on rows from
 untagged networks and on optimistic self echoes. It is the future anchor for
 react/reply; today it is informational only.
+
+**`bookmarked`** is `true` when the account reading the row has saved it, and
+**absent — not `false`** otherwise, so unsaved rows (nearly all of them) cost
+nothing on the wire. There is no bookmark snapshot in the connect burst: keep a
+`Set` of the ids you've seen carrying this flag, add/remove on `bookmark-updated`,
+and treat "not in the Set" as unsaved. That bounds the state you hold by what
+you've loaded rather than by everything the account has ever saved. Full rows for
+the saved-messages list come from `GET /api/bookmarks`, which is paginated.
 
 **`notify` is the server's delivery decision — the one flag to gate a live
 alert (toast, sound, native buzz) on.** It is the union of the content signals
@@ -358,7 +497,7 @@ the _notify_ verdict into this flag; you apply the _hide_ verdict yourself.
 ### 5.4 Read state
 
 Server-authoritative, per buffer:
-`{networkId, target, lastReadId, unread, highlights, highlightsCapped}` —
+`{networkId, target, bufferId, lastReadId, unread, highlights, highlightsCapped}` —
 broadcast to **all** the user's sockets after every countable event and every
 mark-read. Never count unread locally (§9.4).
 
@@ -366,10 +505,46 @@ mark-read. Never count unread locally (§9.4).
 
 ## 6. Client → server verbs
 
+**Addressing a buffer by id:** every verb below that operates on an existing
+buffer also accepts an optional `bufferId` (number). When present and valid it
+WINS over `networkId`/`target`, which may then be omitted; an id that doesn't
+resolve to one of your buffers drops the verb — the same outcome as an unknown
+name. `reorder-pins` takes `bufferIds:[…]` as the id-form alternative to
+`targets`; `reorder-favorites` is id-form ONLY (favorites span networks, so
+bare names can't address them — and every client holds the ids from
+`favorites-changed`). Verbs that address IRC _entities_ rather than buffers (`send`,
+`action`, `notice`, `join`, `part`, `typing`, `e2e`, `ctcp`) stay name-only —
+the name is what goes on the IRC wire. `open-buffer`'s id form addresses an
+existing row only; minting a new DM or JOINing a channel is inherently
+name-first.
+
 All messages are `{type:'<verb>', …}`. Any message carrying a `networkId` for a
 network you don't own gets `{kind:'error', text:'unknown network'}`. Unknown
 verbs are non-fatal (§2). Verbs marked ⏸ are rejected when the account is
 paused. Dispatch: `handleClientMessage`, `wsHub.ts:2031`.
+
+**Request/reply correlation.** There is no envelope-level request id. The verbs
+that answer you carry a per-verb correlation field instead, which you generate
+and the server echoes back (verbatim, with one length caveat noted below):
+
+| Verb(s)                      | Field           | Echoed on                   | Discipline                                                           |
+| ---------------------------- | --------------- | --------------------------- | -------------------------------------------------------------------- |
+| `send` / `action` / `notice` | `clientId`      | `send-result`               | Optional. Omit it and you get no ack (the `irc` echo still arrives)  |
+| `history` / `search`         | `token`         | `history` / `search-result` | Keep it monotonic and **drop replies whose token you've superseded** |
+| `POST /api/uploads` (REST)   | `progressToken` | `upload-progress`           | **Must be ≤64 chars** — see below; the only cross-transport one      |
+
+> ⚠ `progressToken` is **truncated, not rejected**, at 64 characters
+> (`routes/uploads.ts:250`). Send a longer one and the upload succeeds while
+> every `upload-progress` frame carries the truncated token, matching nothing
+> you're waiting on — so progress silently never appears and no error is raised
+> anywhere. Keep yours short (a UUID is 36).
+
+Three names for one concept is a historical accident, not a pattern to extend.
+Nothing else is correlated: every other verb either replies with a frame whose
+`(networkId, target)` identifies it unambiguously, or doesn't reply at all.
+Match on those keys rather than inventing your own correlation. Frames
+that describe one buffer also carry `bufferId`; matching on it is equivalent
+and rename-proof.
 
 ### Sending ⏸
 
@@ -392,31 +567,38 @@ is emitted immediately from the server's optimistic local copy.
 
 ### Channels & buffers ⏸
 
-| `type`         | Fields                        | Notes                                                                                                                   |
-| -------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `join`         | `networkId, channel, key?`    | Request only — the buffer appears on `channel-joined` (§9.1)                                                            |
-| `part`         | `networkId, channel, reason?` | Buffer survives, parted                                                                                                 |
-| `open-buffer`  | `networkId, target`           | Reopen/create: replies `backlog` + `buffer-opened`; JOINs if an unjoined channel; mints an empty DM row for a bare nick |
-| `close-buffer` | `networkId, target, reason?`  | Closes (PARTs a joined channel, untracks a DM peer). `:server:` refuses                                                 |
+| `type`         | Fields                        | Notes                                                                                                                                                                                               |
+| -------------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `join`         | `networkId, channel, key?`    | Request only — the buffer appears on `channel-joined` (§9.1)                                                                                                                                        |
+| `part`         | `networkId, channel, reason?` | Buffer survives, parted                                                                                                                                                                             |
+| `open-buffer`  | `networkId, target, countBy?` | **Write.** Reopen/create: replies `backlog` + `buffer-opened`, announces a shell + `buffer-opened` to the user's other devices; JOINs if an unjoined channel; mints an empty DM row for a bare nick |
+| `close-buffer` | `networkId, target, reason?`  | Closes (PARTs a joined channel, untracks a DM peer). `:server:` refuses                                                                                                                             |
+
+Every verb in this section is rejected while an account is paused — they are all
+writes. **Hydration is not in this section for that reason:** it's
+`{type:'history', mode:'latest'}` (§4.3, §8), which is a read and stays
+available. A client that hydrates through `open-buffer` can't show a paused user
+anything at all.
 
 ### View state (persisted server-side, fanned out to your other devices)
 
-| `type`                            | Fields                                                                                                                                                                                                                                                                                                                                            |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mark-read`                       | `networkId, target, messageId` — MAX-clamped server-side, idempotent. System buffer: `networkId: null, target: ':system:'` (send an explicit null, don't omit)                                                                                                                                                                                    |
-| `mark-all-read`                   | —                                                                                                                                                                                                                                                                                                                                                 |
-| `clear-buffer` / `unclear-buffer` | `networkId, target`                                                                                                                                                                                                                                                                                                                               |
-| `pin-buffer` / `unpin-buffer`     | `networkId, target`                                                                                                                                                                                                                                                                                                                               |
-| `reorder-pins`                    | `networkId, targets:[…]`                                                                                                                                                                                                                                                                                                                          |
-| `set-nicklist-collapsed`          | `networkId, target, collapsed`                                                                                                                                                                                                                                                                                                                    |
-| `set-channel-notify-always`       | `networkId, target, notifyAlways`                                                                                                                                                                                                                                                                                                                 |
-| `draft-set` / `draft-clear`       | `networkId, target, body?`                                                                                                                                                                                                                                                                                                                        |
-| `input-history-add`               | `networkId, target, text`                                                                                                                                                                                                                                                                                                                         |
-| `set-bookmark` / `unset-bookmark` | `messageId`                                                                                                                                                                                                                                                                                                                                       |
-| `set-nick-note`                   | `networkId, nick, note`                                                                                                                                                                                                                                                                                                                           |
-| `set-relay-bot`                   | `networkId, nick, marked, pattern`                                                                                                                                                                                                                                                                                                                |
-| `set-contact` / `delete-contact`  | `contactId, displayName, notifyOnline, targets` / `contactId`                                                                                                                                                                                                                                                                                     |
-| `add-ignore` / `remove-ignore`    | `networkId` (null = global), `rule`/`mask` / `id`/`mask`. `rule` = `{mask (null or '*' = anyone), channels?, pattern?, patternKind: substr\|full\|regex, levels? (default ALL), isExcept?, expiresAt?}` (`ignoreRuleInput.ts`). Channel/network **muting** is expressed here — a rule with no mask scoped to a channel — not via a dedicated verb |
+| `type`                                  | Fields                                                                                                                                                                                                                                                                                                                                            |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mark-read`                             | `networkId, target, messageId` (or `bufferId, messageId`) — MAX-clamped server-side, idempotent. System buffer: `networkId: null, target: ':system:'` (send an explicit null, don't omit)                                                                                                                                                         |
+| `mark-all-read`                         | —                                                                                                                                                                                                                                                                                                                                                 |
+| `clear-buffer` / `unclear-buffer`       | `networkId, target` (or `bufferId`)                                                                                                                                                                                                                                                                                                               |
+| `pin-buffer` / `unpin-buffer`           | `networkId, target` (or `bufferId`)                                                                                                                                                                                                                                                                                                               |
+| `reorder-pins`                          | `networkId, targets:[…]` (or `networkId, bufferIds:[…]`). Same subset semantics as `reorder-favorites`: unmentioned pins keep their relative order after the supplied ones                                                                                                                                                                        |
+| `favorite-buffer` / `unfavorite-buffer` | `networkId, target` (or `bufferId`). One flag for both UX labels: channels surface as "Favorites", DMs as "Friends". Server/system pseudo-buffers and CLOSED buffers are refused. Closing a buffer implies unfavorite; favoriting implies unpin (one placement per buffer — a `pins-changed` follows when a pin was dropped)                      |
+| `reorder-favorites`                     | `bufferIds:[…]` (id-form only, global order). May be a subset — unmentioned favorites keep their relative order after the supplied ones, so a kind-filtered section reorders independently. A stale/foreign id ⇒ no write; either way the server echoes the authoritative `favorites-changed`                                                     |
+| `set-nicklist-collapsed`                | `networkId, target, collapsed` (or `bufferId, collapsed`)                                                                                                                                                                                                                                                                                         |
+| `set-channel-notify-always`             | `networkId, target, notifyAlways` (or `bufferId, notifyAlways`)                                                                                                                                                                                                                                                                                   |
+| `draft-set` / `draft-clear`             | `networkId, target, body?` (or `bufferId, body?`)                                                                                                                                                                                                                                                                                                 |
+| `input-history-add`                     | `networkId, target, text` (or `bufferId, text`)                                                                                                                                                                                                                                                                                                   |
+| `set-bookmark` / `unset-bookmark`       | `messageId`. Saving is a silent no-op for a message you don't own, and for system-buffer lines (`networkId:null`) which have no owning network — no `bookmark-updated` follows, so don't render a toggle optimistically                                                                                                                           |
+| `set-nick-note`                         | `networkId, nick, note`                                                                                                                                                                                                                                                                                                                           |
+| `set-relay-bot`                         | `networkId, nick, marked, pattern`                                                                                                                                                                                                                                                                                                                |
+| `add-ignore` / `remove-ignore`          | `networkId` (null = global), `rule`/`mask` / `id`/`mask`. `rule` = `{mask (null or '*' = anyone), channels?, pattern?, patternKind: substr\|full\|regex, levels? (default ALL), isExcept?, expiresAt?}` (`ignoreRuleInput.ts`). Channel/network **muting** is expressed here — a rule with no mask scoped to a channel — not via a dedicated verb |
 
 ### Presence & status
 
@@ -429,13 +611,13 @@ is emitted immediately from the server's optimistic local copy.
 
 ### Sync & fetch
 
-| `type`            | Fields                                                                                                      | Reply                                            |
-| ----------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `snapshot`        | —                                                                                                           | Re-runs the snapshot burst as a gap-fill (§4.4)  |
-| `history`         | `networkId, target, mode: before\|after\|around\|latest, limit (1–500), token?, before?/afterId?/anchorId?` | `{kind:'history'}` (§8)                          |
-| `search`          | `query, networkId?, target?, nick?, nicks?, before?, limit?, token?`                                        | `{kind:'search-result'}`                         |
-| `list-channels` ⏸ | `networkId`                                                                                                 | Kicks off `/LIST`; progress via `chanlist-state` |
-| `chanlist-search` | `networkId, query, sortBy, sortDir, offset, limit`                                                          | `{kind:'chanlist-result'}`                       |
+| `type`            | Fields                                                                                                                | Reply                                            |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `snapshot`        | —                                                                                                                     | Re-runs the snapshot burst as a gap-fill (§4.4)  |
+| `history`         | `networkId, target, mode: before\|after\|around\|latest, limit (1–500), token?, countBy?, before?/afterId?/anchorId?` | `{kind:'history'}` (§8)                          |
+| `search`          | `query, networkId?, target?, nick?, nicks?, before?, limit?, token?`                                                  | `{kind:'search-result'}`                         |
+| `list-channels` ⏸ | `networkId`                                                                                                           | Kicks off `/LIST`; progress via `chanlist-state` |
+| `chanlist-search` | `networkId, query, sortBy, sortDir, offset, limit`                                                                    | `{kind:'chanlist-result'}`                       |
 
 ### E2E (RPE2E, per-channel opt-in)
 
@@ -450,29 +632,33 @@ a v1 client.
 
 ### 7.1 Frame kinds
 
-| `kind`                                                                                                                                                                   | Payload                                                                                                                                                             | When                                               |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `snapshot`                                                                                                                                                               | `protocolVersion, networks[], globalIgnores[], cursor?`                                                                                                             | Connect burst / gap-fill                           |
-| `draft-snapshot` / `bookmark-ids-snapshot` / `contacts-snapshot`                                                                                                         | `drafts` / `ids[]` / `contacts[]`                                                                                                                                   | Connect burst                                      |
-| `backlog`                                                                                                                                                                | `networkId, target, events[], reset?, hasMoreOlder, joined, lastReadId, unread, highlights, highlightsCapped, clearedBeforeId, clearedAt, speakers?, inputHistory?` | Burst, `open-buffer` reply, resume gap             |
-| `irc`                                                                                                                                                                    | A decorated `MessageEvent` (§5.3) with `kind` clobbered to `'irc'`                                                                                                  | Every live IRC-side event                          |
-| `history`                                                                                                                                                                | `networkId, target, mode, token, events[], speakers, hasMoreOlder, hasMoreNewer, hasMore, before/afterId/anchorId/anchorMissing` (per mode)                         | Reply to `history`                                 |
-| `read-state`                                                                                                                                                             | see §5.4                                                                                                                                                            | After every countable event / mark-read            |
-| `send-result`                                                                                                                                                            | `clientId, ok, error?`                                                                                                                                              | Ack for `send`/`action`/`notice`                   |
-| `buffer-opened` / `buffer-closed` / `buffer-reopened`                                                                                                                    | `networkId, target`                                                                                                                                                 | Buffer lifecycle (§9.1)                            |
-| `buffer-cleared`                                                                                                                                                         | `networkId, target, clearedBeforeId, clearedAt`                                                                                                                     | `/clear` marker                                    |
-| `pins-changed`                                                                                                                                                           | `networkId, pinned[]`                                                                                                                                               | Authoritative pin order                            |
-| `nicklist-collapsed-changed` / `channel-notify-changed`                                                                                                                  | `networkId, target, …`                                                                                                                                              | View-state sync                                    |
-| `draft-updated` / `input-history-added` / `bookmark-updated` / `nick-note-updated` / `relay-bot-updated` / `contact-updated` / `contact-deleted` / `ignore-list-updated` | various                                                                                                                                                             | Multi-device view-state fan-out                    |
-| `settings`                                                                                                                                                               | `changes`                                                                                                                                                           | Server-side settings changed                       |
-| `highlight-rules-changed`                                                                                                                                                | —                                                                                                                                                                   | Re-fetch highlight rules                           |
-| `account-state`                                                                                                                                                          | `paused: bool`                                                                                                                                                      | Hosted pause/resume                                |
-| `chanlist-state` / `chanlist-result`                                                                                                                                     | `/LIST` cache meta / result page                                                                                                                                    | Channel browser                                    |
-| `e2eExport` / `e2eImport`                                                                                                                                                | E2E key material / import result                                                                                                                                    | Replies, this socket only                          |
-| `dcc-transfer`                                                                                                                                                           | full transfer row (snake_case)                                                                                                                                      | DCC state changes                                  |
-| `upload-progress`                                                                                                                                                        | `token, phase, destination, percent`                                                                                                                                | During REST upload (correlate via `progressToken`) |
-| `export`                                                                                                                                                                 | `job`                                                                                                                                                               | Export job progress                                |
-| `error`                                                                                                                                                                  | `text`                                                                                                                                                              | Non-fatal; also the reply to unknown verbs         |
+| `kind`                                                                                                                           | Payload                                                                                                                                                                                                                                                                                                                                                                                                     | When                                                                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `snapshot`                                                                                                                       | `protocolVersion, maxUploadBytes, networks[], globalIgnores[], cursor?`                                                                                                                                                                                                                                                                                                                                     | Connect burst / gap-fill                                                                                                                                  |
+| `draft-snapshot`                                                                                                                 | `drafts`                                                                                                                                                                                                                                                                                                                                                                                                    | Connect burst                                                                                                                                             |
+| `backlog-complete`                                                                                                               | —                                                                                                                                                                                                                                                                                                                                                                                                           | Last frame of the burst; absence is proof (§4.3)                                                                                                          |
+| `backlog`                                                                                                                        | `networkId, target, bufferId, events[], mode, reset?, hasMoreOlder, joined, lastReadId, unread, highlights, highlightsCapped, clearedBeforeId, clearedAt, speakers?, inputHistory?` — **`mode ∈ replace\|append\|shell` is how you merge it (§8); `reset` is legacy**                                                                                                                                       | Burst, `open-buffer` reply, resume gap                                                                                                                    |
+| `irc`                                                                                                                            | A decorated `MessageEvent` (§5.3) with `kind` clobbered to `'irc'`; persisted events carry `bufferId`                                                                                                                                                                                                                                                                                                       | Every live IRC-side event                                                                                                                                 |
+| `history`                                                                                                                        | `networkId, target, bufferId, mode, token, events[], speakers, hasMoreOlder, hasMoreNewer, hasMore, before/afterId/anchorId/anchorMissing` (per mode)                                                                                                                                                                                                                                                       | Reply to `history`                                                                                                                                        |
+| `read-state`                                                                                                                     | see §5.4                                                                                                                                                                                                                                                                                                                                                                                                    | After every countable event / mark-read                                                                                                                   |
+| `send-result`                                                                                                                    | `clientId, ok, error?`                                                                                                                                                                                                                                                                                                                                                                                      | Ack for `send`/`action`/`notice`                                                                                                                          |
+| `buffer-opened` / `buffer-closed` / `buffer-reopened`                                                                            | `networkId, target, bufferId?` (absent only on the ack for a channel still being JOINed — no row yet)                                                                                                                                                                                                                                                                                                       | Buffer lifecycle (§9.1). `buffer-opened` is an ack to the socket that asked **and** a fan-out to the user's other devices — only focus on your own (§4.3) |
+| `buffer-cleared`                                                                                                                 | `networkId, target, bufferId, clearedBeforeId, clearedAt`                                                                                                                                                                                                                                                                                                                                                   | `/clear` marker                                                                                                                                           |
+| `buffer-renamed`                                                                                                                 | `networkId, from, to, bufferId, merged, mergedFromBufferId?` — see §9.7                                                                                                                                                                                                                                                                                                                                     | A buffer kept its id across a name event: DM follows a peer's NICK, or a CASEMAPPING refold merged case-twins (any kind)                                  |
+| `pins-changed`                                                                                                                   | `networkId, pinned[], pinnedIds[]` (parallel-indexed: `pinnedIds[i]` is `pinned[i]`'s buffer)                                                                                                                                                                                                                                                                                                               | Authoritative pin order                                                                                                                                   |
+| `favorites-changed`                                                                                                              | `favorites:[{networkId, target, bufferId}]` — the FULL global order; replace wholesale                                                                                                                                                                                                                                                                                                                      | Connect burst + authoritative favorites order                                                                                                             |
+| `nicklist-collapsed-changed` / `channel-notify-changed`                                                                          | `networkId, target, bufferId, …`                                                                                                                                                                                                                                                                                                                                                                            | View-state sync                                                                                                                                           |
+| `draft-updated` / `input-history-added` / `bookmark-updated` / `nick-note-updated` / `relay-bot-updated` / `ignore-list-updated` | various                                                                                                                                                                                                                                                                                                                                                                                                     | Multi-device view-state fan-out                                                                                                                           |
+| `settings`                                                                                                                       | `changes`, `resets?`, `maxUploadBytes?` (only when the upload cap was touched). `resets` names keys whose stored override was DELETED; each also appears in `changes` as `{key: registryDefault}` for older clients. Apply `changes` first, then delete `resets` keys — for a `themed` registry key the two differ: a default-valued entry in `changes` alone is a real override of the active theme preset | Server-side settings changed                                                                                                                              |
+| `themes-changed`                                                                                                                 | —                                                                                                                                                                                                                                                                                                                                                                                                           | Saved theme presets changed (any device) — re-fetch `GET /api/themes`                                                                                     |
+| `highlight-rules-changed`                                                                                                        | —                                                                                                                                                                                                                                                                                                                                                                                                           | Re-fetch highlight rules                                                                                                                                  |
+| `account-state`                                                                                                                  | `paused: bool`                                                                                                                                                                                                                                                                                                                                                                                              | Hosted pause/resume                                                                                                                                       |
+| `chanlist-state` / `chanlist-result`                                                                                             | `/LIST` cache meta / result page                                                                                                                                                                                                                                                                                                                                                                            | Channel browser                                                                                                                                           |
+| `e2eExport` / `e2eImport`                                                                                                        | E2E key material / import result                                                                                                                                                                                                                                                                                                                                                                            | Replies, this socket only                                                                                                                                 |
+| `dcc-transfer`                                                                                                                   | full transfer row (snake_case)                                                                                                                                                                                                                                                                                                                                                                              | DCC state changes                                                                                                                                         |
+| `upload-progress`                                                                                                                | `token, phase, destination, percent`                                                                                                                                                                                                                                                                                                                                                                        | During REST upload (correlate via `progressToken`)                                                                                                        |
+| `export`                                                                                                                         | `job`                                                                                                                                                                                                                                                                                                                                                                                                       | Export job progress                                                                                                                                       |
+| `error`                                                                                                                          | `text`                                                                                                                                                                                                                                                                                                                                                                                                      | Non-fatal; also the reply to unknown verbs                                                                                                                |
 
 ### 7.2 `irc` event types (the inner `type` field)
 
@@ -543,25 +729,126 @@ connection-independent — offline networks still serve it.
 pipeline requests: keep a monotonically increasing token and drop any reply
 whose token you've superseded.
 
+### `countBy` — what `limit` counts
+
+`limit` counts **stored rows**. If you consolidate presence noise — both
+first-party clients fold runs of `join`/`part`/`quit`/`nick`/`chghost` into one
+summary line, per `shared/consolidate.ts`, which is the canonical set — that is
+not the unit you render in, and on a busy channel the
+gap is enormous: a 100-row page out of a netsplit can render as three visible
+lines. You fetch, fold it to nothing, notice the page was short, fetch again —
+and the user watches the buffer assemble itself.
+
+Send **`countBy:'renderable'`** (every `history` mode, and `open-buffer`) and the
+server sizes the page in rows that render as their own line. The consolidatable
+rows still come back — consolidation needs the whole run to summarize it — they
+just don't spend the budget. Default is `'event'`, i.e. today's behavior; an
+older server ignores the field and answers exactly as before.
+
+Send **`countBy:'chat'`** instead if you hide event noise **entirely** — the
+`none` rung of the web client's event tier (`chat.events`). That unit also makes
+`mode` free, because a client drawing nothing for a mode change would otherwise
+spend budget on invisible rows. The canonical set is `NOISE_TYPES` in
+`shared/eventFilter.ts`: the fold set plus `mode`.
+
+There is deliberately **no unit for partial (smart) filtering**. Which events it
+hides depends on who spoke recently in your client, which the server can't know;
+ask for the unit your tier would otherwise use and accept the occasional short
+page.
+
+- **What counts is the complement of the set you hide**, not "messages". Under
+  `'renderable'` a `kick`, `mode`, `topic`, `error`, or `invite` each renders
+  standalone, so each is worth one slot; under `'chat'` the same holds minus
+  `mode`. Kicks, topics and invites are never free under either — they are
+  things that happened, not churn.
+- **The slice is still a contiguous id range**, exactly like an event-counted
+  one. `hasMoreOlder`, prepend-and-dedupe, and the `before: <oldest returned
+id>` cursor are unchanged. This cannot open a hole.
+- **The scan is capped** (2000 rows). Past the cap you get fewer renderable rows
+  than you asked for and `hasMoreOlder` stays true — a buffer holding tens of
+  thousands of joins between two sentences degrades to today's behavior instead
+  of shipping a huge frame.
+- **Ask for the unit you actually render in** — and only once you _know_ what
+  that is. If your client renders every event as its own line (the web client
+  makes this a user setting), `'event'` is already the right unit, and
+  `'renderable'` would hand you up to a full scan window of rows you then
+  display in full. If the preference hasn't loaded yet, send `'event'`: of the
+  wrong guesses, that one just costs a short first page.
+- **On `around` it sizes each side**, so the window is up to `2×limit+1`
+  _renderable_ rows. Worth sending: for a client that enters a buffer with a
+  pending jump (a push tap, a highlight, jump-to-first-unread), the `around`
+  slice **is** the hydrate — no `latest` or `open-buffer` precedes it.
+- **A page can now be much bigger than your in-memory cap, if you keep one.**
+  Two consequences, both silent when missed:
+  - `hasMoreOlder` describes the slice the server _sent_. If your ring drops
+    rows off the old edge, there is more older history than you hold regardless
+    of what the flag said — re-arm the pager yourself.
+  - Don't merge a page larger than your ring into an existing slice. It evicts
+    the very rows the reader is looking at, and their scroll position ends up
+    pointing at content that no longer exists. Take the end **adjacent** to what
+    you hold (newest rows of an older page, oldest rows of a newer one), keep
+    the merge contiguous, and treat the remainder as still fetchable. The web
+    client caps an incremental merge at 250 rows for exactly this
+    (`vue_client/src/stores/buffers.ts:28`).
+
 **Jump-to-message detaches the buffer** (Discord/Slack convention): after
 `around`, live events for that buffer should _not_ be spliced into the visible
 slice (track them separately or refetch); `latest` reattaches.
 
 **Merge rules that protect you from data loss:**
 
-1. `backlog` with `reset:true` → replace the buffer's contents wholesale
-   (resume gap overflowed; splicing leaves a hole).
-2. `backlog` without a `reset` field, or the system buffer's backlog (which
-   hardcodes `reset:false` but means "replace") → replace. Only
-   `networkId != null` **and** `reset === false` means gap-append. (iOS
-   `FrameParser.swift:104-111`; web detects the non-overlap case instead.)
-3. **Never un-hydrate:** a later shell (`events:[]`) for a buffer you already
-   populated must not wipe it.
-4. On any replace, **keep held live events newer than the slice tail** — a
+1. **Read `mode` on every `backlog` frame and do what it says.** It is the
+   server stating how it built the slice — the only field you need to decide
+   _how to merge_ (but not the only one you must record; see rule 4):
+
+   | `mode`    | Meaning                                                | Action                                                      |
+   | --------- | ------------------------------------------------------ | ----------------------------------------------------------- |
+   | `replace` | Authoritative slice, **not** contiguous with your tail | Take `events`; **may** keep overlapping older rows — rule 5 |
+   | `append`  | A contiguous gap-fill                                  | Splice onto your existing tail                              |
+   | `shell`   | Buffer exists, nothing shipped (`events:[]`)           | Leave existing contents alone; fetch on open                |
+
+   > Taking `events` wholesale is always **safe** on `replace`, and is the right
+   > first implementation. Rule 5 is the refinement that stops it costing the
+   > user their scrollback — read it before you ship.
+
+2. **Ignore `reset`.** It predates `mode` and is not decodable on its own:
+   `reset:false` means _append_ on a resume gap but _replace_ on a fresh
+   connect and on the system buffer — three meanings, two values. Old clients
+   derived it by also reading `networkId` and by knowing out-of-band whether
+   they'd sent `?since` (iOS `FrameParser.swift:104-111`; web inferred from id
+   non-overlap). It is still sent wherever it was sent before, unchanged — note
+   that's only two of the four backlog shapes: shells and `open-buffer` replies
+   have never carried it at all. Don't build on it.
+
+   > A server predating `mode` omits the field entirely. If you must support
+   > one: treat `events:[] && hasMoreOlder` as a shell **first** (absent `reset`
+   > would otherwise fall into replace and un-hydrate it — rule 3), then append
+   > only when `networkId != null && reset === false`, else replace.
+
+3. **Never un-hydrate:** a `shell` for a buffer you already populated must not
+   wipe it. This is why shells are their own `mode` rather than
+   `replace`-with-empty.
+4. **`mode` tells you how to merge; `hasMoreOlder` tells you whether the pager
+   is still armed — record it on every frame, including `append` and `shell`.**
+   It's the flag your open-time lazy fetch and scroll-up pager gate on, so
+   dropping it on a gap-fill strands the buffer at whatever it happens to hold
+   (`wsHub.ts:870-876`).
+5. **`replace` permits preserving contiguous older history you already hold.**
+   The rule it must never break is _don't create a hole_. So: if the incoming
+   slice **overlaps** what you hold (its oldest id ≤ your newest id), you may
+   dedupe-merge and keep older rows the user paged in — this is what the web
+   client does (`vue_client/src/stores/buffers.ts:504-525`), and it matters
+   because `:system:` and offline `:server:` buffers get a full `replace` frame
+   on **every** snapshot, including the in-band `{type:'snapshot'}` resync a
+   client may fire on visibility return. Dropping everything there would throw
+   away the user's scrollback each time they tab back. If the slice is
+   **disjoint** (its oldest id > your newest id), rows went missing in between —
+   you must replace wholesale and let `hasMoreOlder` page the rest.
+6. On any replace, **keep held live events newer than the slice tail** — a
    message can land mid-hydrate.
-5. Dedupe everything by id against what you hold; drop legacy `away`/`back`
+7. Dedupe everything by id against what you hold; drop legacy `away`/`back`
    rows if you encounter them in old history.
-6. The web client caps its in-memory ring at 500 events/buffer and pages the
+8. The web client caps its in-memory ring at 500 events/buffer and pages the
    rest — policy, not protocol, but a sane default.
 
 ---
@@ -594,14 +881,42 @@ these signals:
   `read-state` for unknown buffers must resolve-or-drop. (`mark-all-read` fans
   out `read-state` for _closed_ buffers too — resurrecting them in the sidebar
   was bug #319; typing-tag DM creation was #292.)
-- NOTICEs never create or reopen a DM — a notice to a closed/absent DM arrives
-  on `:server:` with `mirrored:true`. Already handled server-side; just don't
-  special-case it.
+- **NOTICEs may create a DM buffer, but never reopen a closed one.** Both
+  outcomes are decided server-side and arrive as ordinary frames — don't
+  special-case either. What the server actually does with an incoming
+  DM-targeted event (`server/db/buffers.ts:21-29`):
+
+  | Trigger              | Buffer has no row | Buffer row is closed                      |
+  | -------------------- | ----------------- | ----------------------------------------- |
+  | `message` / `action` | creates it, open  | **reopens** it                            |
+  | `notice`             | creates it, open  | **stays closed** → mirrored to `:server:` |
+
+  So a NOTICE from a nick you've never talked to does open a buffer for that
+  nick — that's how services (NickServ, ChanServ, oper notices) get their own
+  buffer instead of dumping into `:server:`. Only the **closed-row** case
+  routes elsewhere: the real copy is persisted in the closed DM buffer (waiting
+  for a reopen) and a second, durable copy lands in `:server:` carrying
+  `mirrored:true`. Render the mirror like any other `:server:` line; it's
+  excluded from search so it can't double up results.
+
+  A notice-only buffer is deliberately **not** a "conversation": the server
+  won't start presence-tracking its nick (no MONITOR slot, no presence dot)
+  until a real PRIVMSG/ACTION arrives (`db/messages.ts:440`).
+
+- **Navigating to a buffer by key** (launch restore, notification tap) is the
+  one case where you need to ask "does this exist?" rather than mirror a
+  signal. Wait for `backlog-complete`; if the key still has no `backlog` frame
+  after it, that buffer isn't open — say so instead of spinning. It may be
+  closed rather than gone, so render it as absent but don't destroy anything
+  local over it. Don't guess from `snapshot` and don't probe with `open-buffer`
+  — see §4.3 for why both are traps.
 
 ### 9.2 Identity & case
 
-Fold targets with ASCII lowercase for identity; sentinels (`:server:`,
-`:system:`) exact-match; first-seen casing is display-canonical (§5.2).
+Prefer `bufferId` wherever a frame carries it — it is fold-proof and (soon)
+rename-proof (§5.2). When matching by name: fold targets with ASCII lowercase;
+sentinels (`:server:<networkId>`, `:system:`) exact-match; first-seen casing
+is display-canonical (§5.2).
 
 ### 9.3 Sending: no optimistic rendering
 
@@ -651,6 +966,62 @@ nicklist patch arrives separately as `member-update`).
 
 ---
 
+### 9.7 Renames keep a buffer's identity
+
+**Two producers emit this frame today**, for buffers of any kind: a DM
+following its peer's `/nick` (weechat/irssi parity), and the CASEMAPPING
+refold (#707) merging rows — channels included — that fold together under a
+newly-declared mapping. Channel renames (`draft/channel-rename`) will reuse it
+too. ⚠ The producers orient `from`/`to` differently on a merge: the DM path
+absorbs the row that already held `to`, the refold path absorbs the `from` row
+(the survivor keeps its own name, so `from ≠ to` with no actual rename).
+Never derive which buffer died from orientation — `mergedFromBufferId` is the
+absorbed row, `bufferId` the survivor, and `to` is always the survivor's final
+name.
+
+```jsonc
+{
+  "kind": "buffer-renamed",
+  "networkId": 4,
+  "from": "alice", // canonical pre-rename name (registry casing)
+  "to": "alice_away", // authoritative new name — key off THIS
+  "bufferId": 42, // the SURVIVING buffer; its id did not change
+  "merged": false,
+  "mergedFromBufferId": 17, // present iff merged: the absorbed, now-deleted id
+}
+```
+
+The contract, in the order a client should apply it:
+
+- **The id never changes.** `bufferId` is the same id this buffer has always
+  had; only the name moved. A client keying state by id has almost nothing to
+  do; a client keying by name rekeys `from → to` in every store holding
+  per-buffer state (the web client does this with one registry sweep —
+  `lib/bufferLifecycle.ts`).
+- **`merged: true` means another buffer was absorbed**, and
+  `mergedFromBufferId` names it — drop THAT buffer everywhere first (by id,
+  per the orientation warning above), then apply the rename; done in that
+  order there is no key collision. The surviving conversation keeps its id.
+  The merged history interleaves server-side, so wipe the local slice and
+  re-hydrate rather than guessing at the interleave.
+- **Corrections ride behind a merge.** `read-state`, `pins-changed`,
+  `favorites-changed`, and (when the surviving draft changed) `draft-updated`
+  frames follow immediately — the merge changed those server-side and an idle
+  buffer would never otherwise learn. Favorites entries' `target` strings are
+  display hints subject to `buffer-renamed`; `bufferId` is the identity.
+- **Key off `to`, never a name you predicted**, and follow the active buffer:
+  a rename of the buffer the user is reading is the same buffer, not a
+  navigation.
+- The frame reaches **every** socket including whichever device's action
+  caused it — it describes a fact, not an instruction.
+- The DM also receives an ordinary persisted `type:'nick'` row ("x is now
+  known as y"), AFTER the rename, so it renders under the new name with the
+  same code path channel nick rows use.
+- What deliberately does NOT follow a rename: highlight/ignore rules scoped
+  to the old name (glob patterns, possibly cross-network), and e2e crypto
+  contexts (wire-keyed; a DM context keys on the peer's host and is already
+  rename-proof).
+
 ## 10. HTTP API reference
 
 Everything `requireAuth` unless noted. Errors are `{"error": "<message>"}` (some
@@ -672,22 +1043,23 @@ form.
 
 ### Settings & personalization
 
-| Endpoint                      | Notes                                                                                                                                                  |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `GET /api/settings/bootstrap` | → `{registry, values}` — the registry is self-describing (types, defaults, enums); build your settings UI from it rather than hardcoding keys          |
-| `PATCH /api/settings`         | `{changes:{key:value,…}}` → `{values}`; other devices get the `settings` frame                                                                         |
-| `DELETE /api/settings/:key`   | Reset to default                                                                                                                                       |
-| `/api/highlight-rules`        | CRUD: `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id`                                                                                                   |
-| `GET /api/highlights`         | Paginated highlight feed: `?limit (≤200), before, networkId, q, nick (repeatable), target` → `{items, nextBefore}`                                     |
-| `GET /api/bookmarks`          | `?limit, before` → `{items, nextBefore}`                                                                                                               |
-| `POST /api/drafts/flush`      | Beacon-style: raw text body containing JSON `{drafts:[{networkId,target,body}]}` → `204`. For page-unload flush; live clients use the `draft-set` verb |
+| Endpoint                      | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/settings/bootstrap` | → `{registry, values, themes}` — the registry is self-describing (types, defaults, enums); build your settings UI from it rather than hardcoding keys. `themes` is the saved-theme list (same rows as `GET /api/themes`), bundled so theme-pointer resolution never races the list                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `PATCH /api/settings`         | `{changes?:{key:value,…}, resets?:[key,…]}` → `{values}`; at least one required. `resets` deletes stored overrides outright — applying a theme is one call: its pointer in `changes` + every `themed` key in `resets`. Other devices get the `settings` frame                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `DELETE /api/settings/:key`   | Reset one key to its baseline (registry default, or the active theme's value for `themed` keys)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `/api/themes`                 | Saved theme presets — CRUD: `GET /` → `{items}`, `POST /` `{name, values}`, `PUT /:id` `{name?, values?}`, `DELETE /:id`. `values` = a subset of the `themed` registry keys, type-validated; names ≤40 chars, per-user unique (ASCII case-insensitive), reserved: `default`, `dark`, `light`, `Monokai Plus`, `Monokai Plus Light`; 50 per user. The built-ins (ids `dark`/`light`, named "Monokai Plus" / "Monokai Plus Light") never appear here (`shared/themePresets.ts`). The `look.theme.*` settings store which theme is active: `'dark'`/`'light'` or a saved id as a decimal string; unknown ids resolve as the dark built-in. Deleting a theme resets any pointer aimed at it (broadcast as a `settings` frame) |
+| `/api/highlight-rules`        | CRUD: `GET /`, `POST /`, `PATCH /:id`, `DELETE /:id`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `GET /api/highlights`         | Paginated highlight feed: `?limit (≤200), before, networkId, q, nick (repeatable), target` → `{items, nextBefore}`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `GET /api/bookmarks`          | `?limit, before` → `{items, nextBefore}`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `POST /api/drafts/flush`      | Beacon-style: raw text body containing JSON `{drafts:[{networkId,target,body}]}` → `204`. For page-unload flush; live clients use the `draft-set` verb                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 ### Uploads — `/api/uploads`
 
 | Endpoint         | Notes                                                                                                                                                                                                                                                                       |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `POST /`         | `multipart/form-data`, file field **`image`**; optional `uploaderId`, `progressToken` (≤64 chars — progress arrives as `upload-progress` WS frames). → `{id, url, mime, can_delete, thumbnail_url?}`. `413` over cap, `415` rejected type, `502` provider error (never 401) |
-| `GET /`          | `?before, limit, q, kind` → `{items, providers}`                                                                                                                                                                                                                            |
+| `GET /`          | `?before, limit, q, kind` → `{items, providers, maxUploadBytes}`                                                                                                                                                                                                            |
 | `GET /:id/thumb` | Binary thumbnail                                                                                                                                                                                                                                                            |
 | `DELETE /:id`    | `409` if not deletable                                                                                                                                                                                                                                                      |
 
@@ -695,6 +1067,35 @@ form.
 secrets write-only). Standalone serves local files publicly at
 `GET /uploads/:key` (no auth, sandboxed CSP). Paste the returned `url` into a
 message — the server does the rest.
+
+**Size cap.** `maxUploadBytes` — on the `snapshot` frame and on `GET /api/uploads`
+— is the largest **file** this account may send, and the number to compress media
+against. **Do not hardcode a cap.** It is the smallest of three ceilings: the
+200 MB hard limit, the instance's declared transport limit (`LURKER_MAX_UPLOAD_MB`
+— what a CDN or reverse proxy in front of Lurker will pass), and the per-user or
+operator-baked uploader cap. Only the first is universal, so a self-hosted
+instance and a CDN-fronted one legitimately differ by a lot.
+
+It already has the multipart envelope subtracted, so a file at exactly
+`maxUploadBytes` still fits inside the request body once the boundaries, part
+headers, and `uploaderId` / `progressToken` fields are added. Size the **file**
+to it; don't budget for the envelope yourself.
+
+Treat it as advisory, not a contract: it is resolved for the account's **default**
+uploader, so a per-upload `uploaderId` override with a tighter policy cap, or an
+operator changing the limit mid-session, is still settled by a `413` carrying the
+real number. It is refreshed on reconnect, and re-sent on the `settings` frame
+whenever the user changes their own cap — so a client that reads it from both
+frames never compresses against a stale number.
+
+**Imports are capped separately.** `POST /api/imports` has its own, much larger
+limit (500 MB) and is **not** bound by the 200 MB upload ceiling — so
+`maxUploadBytes` is the wrong number to check an archive against. Read
+`maxImportBytes` from `GET /api/exports/preview` instead. Only the instance's
+transport limit is shared between the two, which does mean lowering
+`LURKER_MAX_UPLOAD_MB` lowers both. Over-limit archives get a `413` with
+`code: "archive_too_large"`; there is no way to compress an archive to fit, so
+check before uploading.
 
 ### DCC — `/api/dcc` (403 unless enabled for the account)
 
@@ -781,8 +1182,12 @@ What the iOS app actually ships with (`FrameParser.parseWs`,
 - **`irc` types rendered:** `message`, `action`, `notice`, `error`, `system`,
   `join`, `part`, `quit`, `nick`, `kick`, `mode`, `topic`, `motd`, `invite`
   (plus `channel-topic` for state). Unknown → drop.
-- **Send verbs (8):** `presence`, `send`, `history` (`before`/`latest`),
-  `mark-read`, `mark-all-read`, `join`, `open-buffer`, `close-buffer`.
+- **Send verbs (8):** `presence`, `send`, `history` (`before`/`latest`; add
+  `countBy:'renderable'` if you consolidate, `'chat'` if you hide events — §8),
+  `mark-read`, `mark-all-read`,
+  `join`, `open-buffer`, `close-buffer`. Hydrate with `{mode:'latest'}`, never
+  with `open-buffer` — §4.3 for why that's the difference between reading a
+  buffer and reopening it on every device the user owns.
 - **REST (4):** `POST /api/auth/login/token` (or the CP login), `GET
 /api/networks`, `POST /api/auth/logout`, and optionally `GET
 /api/push/config`.

@@ -90,3 +90,56 @@ describe('admin store — refetch race guard (#613)', () => {
     expect(store.usersLoaded).toBe(true);
   });
 });
+
+// The ident write reports on the WRITE, not on the bookkeeping refetch that
+// follows it (#643). Getting this backwards tells an admin their save failed
+// when it landed, and invites them to retry a write that already applied.
+describe('admin store — setUserIdent', () => {
+  it('resolves when the write succeeds even if the follow-up refetch fails', async () => {
+    const store = useAdminStore();
+    store.users = [user(1, 'alice')];
+    h.api.mockImplementation((_url: string, opts?: { method?: string }) =>
+      opts?.method === 'PUT'
+        ? Promise.resolve({ ok: true, ident: 'ali', effectiveIdent: 'ali' })
+        : Promise.reject(new Error('network down')),
+    );
+
+    await expect(store.setUserIdent(1, 'ali')).resolves.toMatchObject({ effectiveIdent: 'ali' });
+    // The row still shows the value the write returned...
+    expect(store.users[0]).toMatchObject({ ident: 'ali', effectiveIdent: 'ali' });
+    // ...and no error is left on the SHARED store field for the next pane to
+    // render as its own failure.
+    expect(store.error).toBe('');
+  });
+
+  it('still rejects when the write itself fails', async () => {
+    const store = useAdminStore();
+    store.users = [user(1, 'alice')];
+    h.api.mockRejectedValue(new Error('that ident is already in use by bob'));
+    await expect(store.setUserIdent(1, 'bob')).rejects.toThrow(/already in use/);
+    expect(store.users[0].ident).toBeUndefined();
+  });
+
+  it('refreshes conflict flags from the server after a successful write', async () => {
+    // Assigning an override can clear the duplicate badge on the OTHER side of a
+    // clash, which only a refetch can know.
+    const store = useAdminStore();
+    store.users = [
+      { ...user(1, 'bob smith'), effectiveIdent: 'bobsmith', identConflict: true },
+      { ...user(2, 'bobsmith'), effectiveIdent: 'bobsmith', identConflict: true },
+    ];
+    h.api.mockImplementation((_url: string, opts?: { method?: string }) =>
+      opts?.method === 'PUT'
+        ? Promise.resolve({ ok: true, ident: 'bobs', effectiveIdent: 'bobs' })
+        : Promise.resolve({
+            users: [
+              { ...user(1, 'bob smith'), effectiveIdent: 'bobs', identConflict: false },
+              { ...user(2, 'bobsmith'), effectiveIdent: 'bobsmith', identConflict: false },
+            ],
+          }),
+    );
+
+    await store.setUserIdent(1, 'bobs');
+    expect(store.users.map((u) => u.identConflict)).toEqual([false, false]);
+  });
+});

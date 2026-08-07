@@ -211,7 +211,16 @@ describe('CHATHISTORY msgid rejected', () => {
     expect(isupport).not.toContain('msgid');
     c.send('CHATHISTORY BEFORE #r msgid=5 100');
     const fail = await c.waitForCommand('FAIL');
-    expect(fail).toContain('Invalid first bound');
+    // A well-formed selector of a type we don't implement gets the spec's
+    // dedicated code, NOT INVALID_PARAMS — the client's syntax was fine, the
+    // reftype isn't offered, and only INVALID_MSGREFTYPE says so.
+    //
+    // Asserted as a full param sequence, not substrings: the spec layout is
+    // `<command> <target> [context]`, and a substring check would happily pass
+    // while the target was missing and the client mistook `msgid=5` for a
+    // buffer name.
+    expect(fail).toContain('FAIL CHATHISTORY INVALID_MSGREFTYPE BEFORE #r msgid=5 :');
+    expect(fail).toContain('Unsupported message reference type');
     c.close();
   });
 });
@@ -253,7 +262,10 @@ describe('CHATHISTORY errors', () => {
     const acct = harnessMod.seedAccount({ nick: 'ch8' });
     const c = await harness.connect();
     await attachBound(c, acct);
-    c.send('CHATHISTORY BEFORE #r msgid=notanumber 100');
+    // A SUPPORTED reftype carrying an unparseable value — that's a syntax error
+    // the client can fix, so it stays INVALID_PARAMS. (Deliberately not a
+    // `msgid=` selector: that's an unsupported reftype, covered above.)
+    c.send('CHATHISTORY BEFORE #r timestamp=notatimestamp 100');
     const fail = await c.waitForCommand('FAIL');
     expect(fail).toContain('INVALID_PARAMS');
     expect(fail).toContain('Invalid first bound');

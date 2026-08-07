@@ -31,14 +31,14 @@ import { createIdentdServer, unregisterIdent } from './identd.js';
 import connectScheduler from './connectScheduler.js';
 import { getRecent } from './systemLog.js';
 import { createUser } from '../db/users.js';
-import { createNetwork } from '../db/networks.js';
+import { createNetwork, getNetwork } from '../db/networks.js';
 import {
   getBuffer,
   ensureOpen as ensureBufferOpen,
   seedAutojoinChannel,
   listForNetwork as listBufferRowsForNetwork,
 } from '../db/buffers.js';
-import { getPeerPresence } from '../db/peerPresence.js';
+import { getPeerPresence, writePeerState } from '../db/peerPresence.js';
 import { setUserSetting, deleteUserSetting } from '../db/settings.js';
 
 // The bare IrcConnections built below carry user_id: 1, and their join/part
@@ -351,17 +351,27 @@ describe('resolveChannelContext (#439)', () => {
     expect(resolveChannelContext(undefined, '[info] something', channels)).toBe(null);
   });
 
-  it('only resolves `#` channels, not `&`/`!`/`+` (matches Lurker routing)', () => {
-    // Even when "joined" to a non-# channel, channel-context must not redirect to
-    // it — Lurker routes `&`/`!`/`+` targets as non-channels.
+  it('resolves every channel prefix once joined, not just `#` (#724)', () => {
+    // This test used to assert the opposite, on the rationale that "Lurker routes `&`/`!`/`+`
+    // targets as non-channels" — which was the bug, not a decision. Now that both tiers classify
+    // all four prefixes, a channel-context tag naming a joined `&local` must resolve to it;
+    // refusing would strand the notice in the server buffer instead of its channel.
     const withLocal = new Map([
       ['#christian', { name: '#Christian' }],
       ['&local', { name: '&local' }],
     ]);
     expect(resolveChannelContext({ '+draft/channel-context': '&local' }, 'x', withLocal)).toBe(
-      null,
+      '&local',
     );
-    expect(resolveChannelContext(undefined, '[&local] hi', withLocal)).toBe(null);
+    expect(resolveChannelContext(undefined, '[&local] hi', withLocal)).toBe('&local');
+  });
+
+  it('still refuses a channel prefix we are NOT joined to', () => {
+    // The membership check is what keeps this safe — widening the prefix set must not turn any
+    // bracketed `[+foo]` in a notice body into a redirect target.
+    const channels = new Map([['#christian', { name: '#Christian' }]]);
+    expect(resolveChannelContext({ '+draft/channel-context': '&nope' }, 'x', channels)).toBe(null);
+    expect(resolveChannelContext(undefined, '[+nope] hi', channels)).toBe(null);
   });
 });
 
@@ -385,6 +395,7 @@ describe('tls certificate trust setting', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -444,17 +455,18 @@ describe('addPeerWatch live presence seed (#302)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
     });
   }
 
-  // A friend added while connected must get a MONITOR S follow-up: the server
+  // A peer tracked while connected must get a MONITOR S follow-up: the server
   // only SHOULD (not MUST) volunteer current state in reply to MONITOR +, so
-  // without the explicit status query a freshly-added offline friend lands with
+  // without the explicit status query a freshly-added offline peer lands with
   // no state and renders as if online until a reconnect re-seeds.
-  it('follows MONITOR + with MONITOR S when a friend is tracked on a live connection', () => {
+  it('follows MONITOR + with MONITOR S when a peer is tracked on a live connection', () => {
     const conn = makeConn();
     conn.useMonitor = true;
     conn.monitorLimit = 100;
@@ -462,7 +474,7 @@ describe('addPeerWatch live presence seed (#302)', () => {
     const raw = vi.fn<(...args: string[]) => void>();
     conn.client.raw = raw;
 
-    conn.trackFriend('offlinepal', 42);
+    conn.trackDmPeer('offlinepal');
 
     // Order matters: the nick must be added before MONITOR S, or the status
     // dump won't include it.
@@ -476,7 +488,7 @@ describe('addPeerWatch live presence seed (#302)', () => {
     const raw = vi.fn<(...args: string[]) => void>();
     conn.client.raw = raw;
 
-    conn.trackFriend('offlinepal', 42);
+    conn.trackDmPeer('offlinepal');
 
     expect(raw).not.toHaveBeenCalled();
   });
@@ -502,6 +514,7 @@ describe('nick-regain MONITOR teardown gating (#384)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -651,6 +664,7 @@ describe('refused-message handler routing (#283)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -868,6 +882,7 @@ describe('built-in identd registration', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -967,6 +982,7 @@ describe('disconnect quit message (#324)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -1024,6 +1040,7 @@ describe('self nick updates the input bar (#362)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -1123,6 +1140,7 @@ describe('capability negotiation (#310)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -1170,7 +1188,7 @@ describe('away/back presence logging (#310)', () => {
   // online/offline 'Presence:' lines.
   it('logs Presence: away (with reason) and back for a tracked peer', () => {
     const conn = makeConn('awaylog');
-    conn.trackFriend('awaypal', 7);
+    conn.trackDmPeer('awaypal');
     conn.markPeerEvent('awaypal', 'online'); // online itself isn't logged here
     conn.markPeerEvent('awaypal', 'away', 'brb');
     conn.markPeerEvent('awaypal', 'back');
@@ -1213,9 +1231,9 @@ describe('disconnect-offline sweep + WHO re-light (no-MONITOR presence)', () => 
     return new IrcConnection({ network, onEvent: () => {} });
   }
 
-  it('markAllPeersOffline forces every tracked peer (DM + friend) offline', () => {
+  it('markAllPeersOffline forces every tracked peer offline', () => {
     const conn = makeConn('disco');
-    conn.trackFriend('pal', 1);
+    conn.trackDmPeer('pal');
     conn.trackDmPeer('dmpal');
     conn.markPeerEvent('pal', 'online');
     conn.markPeerEvent('dmpal', 'away', 'brb');
@@ -1231,13 +1249,32 @@ describe('disconnect-offline sweep + WHO re-light (no-MONITOR presence)', () => 
     expect(getPeerPresence(conn.network.id, 'stranger')).toBeNull();
   });
 
+  // Rows left behind by anything that no longer tracks the nick (the removed
+  // friends system being the motivating case) can never be refreshed — but
+  // they WOULD be served as live state if the nick is ever re-tracked, and on
+  // a no-MONITOR network nothing ever corrects them. The hydrate-time orphan
+  // sweep deletes them; rows for still-tracked peers survive.
+  it('sweepUntrackedPresenceRows deletes rows for untracked nicks and keeps tracked ones', () => {
+    const conn = makeConn('orphan-sweep');
+    conn.trackDmPeer('keptpal');
+    // Simulate leftovers: rows written under a prior regime for nicks nothing
+    // tracks anymore (writePeerState bypasses the eligiblePeer gate on purpose).
+    writePeerState(conn.network.id, 'exfriend', 'online', new Date().toISOString(), null);
+    writePeerState(conn.network.id, 'keptpal', 'away', new Date().toISOString(), 'brb');
+
+    conn.sweepUntrackedPresenceRows();
+
+    expect(getPeerPresence(conn.network.id, 'exfriend')).toBeNull();
+    expect(getPeerPresence(conn.network.id, 'keptpal')?.state).toBe('away');
+  });
+
   // dispose() sets disposed=true before the socket tears down; on a deletion
   // dispose the network row (+ its peer_presence_state rows) may already be gone
   // when the async socket-close fires, so a write here would hit a FK violation.
   // The guard makes the sweep a no-op in that window.
   it('is a no-op when the connection is disposed (avoids a post-delete FK write)', () => {
     const conn = makeConn('disco-disposed');
-    conn.trackFriend('pal', 1);
+    conn.trackDmPeer('pal');
     conn.markPeerEvent('pal', 'online');
     conn.disposed = true;
     conn.markAllPeersOffline();
@@ -1250,7 +1287,7 @@ describe('disconnect-offline sweep + WHO re-light (no-MONITOR presence)', () => 
   it("fires the sweep from the 'socket close' event (the auto-reconnect path)", () => {
     const conn = makeConn('sockclose');
     conn.publish = vi.fn<typeof conn.publish>(); // skip the disconnected-state + error publishes
-    conn.trackFriend('pal', 1);
+    conn.trackDmPeer('pal');
     conn.markPeerEvent('pal', 'online');
     conn.client.emit('socket close', {});
     expect(getPeerPresence(conn.network.id, 'pal')?.state).toBe('offline');
@@ -1260,7 +1297,7 @@ describe('disconnect-offline sweep + WHO re-light (no-MONITOR presence)', () => 
     const conn = makeConn('relight');
     conn.publish = vi.fn<typeof conn.publish>(); // assert on presence, not history
     conn.client.user.nick = 'me';
-    conn.trackFriend('chanpal', 9);
+    conn.trackDmPeer('chanpal');
     // Peer shares a channel with us…
     conn.client.emit('join', { channel: '#room', nick: 'chanpal', ident: 'u', hostname: 'h' });
     // …then our socket drops (peer quit unseen or not — doesn't matter):
@@ -1278,7 +1315,7 @@ describe('disconnect-offline sweep + WHO re-light (no-MONITOR presence)', () => 
     const conn = makeConn('relight-away');
     conn.publish = vi.fn<typeof conn.publish>();
     conn.client.user.nick = 'me';
-    conn.trackFriend('awaychan', 10);
+    conn.trackDmPeer('awaychan');
     conn.client.emit('join', { channel: '#room', nick: 'awaychan' });
     conn.client.emit('wholist', { target: '#room', users: [{ nick: 'awaychan', away: true }] });
     expect(getPeerPresence(conn.network.id, 'awaychan')?.state).toBe('away');
@@ -1375,6 +1412,128 @@ describe('auto-reconnect controller', () => {
     expect(conn.state).toBe('disconnected');
   });
 
+  // #616: auto-reconnect used to call connect() directly, walking past the
+  // paused-account and network-lockdown gates every other connect path clears.
+  describe('policy gate', () => {
+    function makeGatedConn(
+      name: string,
+      gate: () => { ok: true } | { ok: false; reason: string },
+    ): { conn: IrcConnection; events: Record<string, unknown>[] } {
+      const network = createNetwork(1, {
+        name,
+        host: 'irc.example.test',
+        port: 6697,
+        tls: 1,
+        trusted_certificates: 1,
+        nick: 'nick',
+        username: null,
+        realname: null,
+        server_password: null,
+        autoconnect: 0,
+        sasl_account: null,
+        sasl_password: null,
+        connect_commands: null,
+      })!;
+      const events: Record<string, unknown>[] = [];
+      const conn = new IrcConnection({
+        network,
+        onEvent: (e) => events.push(e as Record<string, unknown>),
+        reconnectGate: gate,
+      });
+      vi.spyOn(conn, 'connect').mockImplementation(() => {});
+      return { conn, events };
+    }
+
+    it('opens the socket when the gate allows it', () => {
+      vi.useFakeTimers();
+      const { conn } = makeGatedConn('rc-gate-ok', () => ({ ok: true }));
+      conn.client.emit('close', true);
+      vi.runAllTimers();
+      expect(conn.connect).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses to reconnect a paused account', () => {
+      vi.useFakeTimers();
+      const { conn, events } = makeGatedConn('rc-gate-paused', () => ({
+        ok: false,
+        reason: 'this account is paused',
+      }));
+      conn.client.emit('close', true);
+      vi.runAllTimers();
+      expect(conn.connect).not.toHaveBeenCalled();
+      expect(
+        events.some((e) => e.type === 'error' && /account is paused/i.test(String(e.text))),
+      ).toBe(true);
+    });
+
+    // The part review insisted on: scheduleReconnectIfWarranted has ALREADY
+    // announced 'reconnecting' by the time the gate is asked, so a silent refusal
+    // would pin the network on "Reconnecting…" forever — the exact stuck state
+    // the auto-reconnect overhaul removed.
+    it('settles to disconnected rather than hanging on "reconnecting"', () => {
+      vi.useFakeTimers();
+      const { conn } = makeGatedConn('rc-gate-state', () => ({
+        ok: false,
+        reason: 'this account is paused',
+      }));
+      conn.client.emit('close', true);
+      expect(conn.state).toBe('reconnecting');
+      vi.runAllTimers();
+      expect(conn.state).toBe('disconnected');
+    });
+
+    // Read live, not captured at construction: a user paused DURING the backoff
+    // wait must not get a socket out of a decision made before they were paused.
+    it('asks the gate at launch time, not when the retry was scheduled', () => {
+      vi.useFakeTimers();
+      let allowed = true;
+      const { conn } = makeGatedConn('rc-gate-live', () =>
+        allowed ? { ok: true } : { ok: false, reason: 'this account is paused' },
+      );
+      conn.client.emit('close', true);
+      expect(conn.state).toBe('reconnecting');
+      allowed = false; // paused mid-backoff
+      vi.runAllTimers();
+      expect(conn.connect).not.toHaveBeenCalled();
+    });
+
+    // A gate that THROWS is not a gate that refuses. It reads the DB, so
+    // SQLITE_BUSY or a closed handle can take it out — and connectScheduler only
+    // console.errors a throwing task, with the backoff timer already spent. If
+    // this escaped, the network would sit on "Reconnecting…" with nothing left
+    // to fire it.
+    it('re-arms rather than stranding the network when the gate throws', () => {
+      vi.useFakeTimers();
+      let throws = true;
+      const { conn } = makeGatedConn('rc-gate-throws', () => {
+        if (throws) throw new Error('SQLITE_BUSY: database is locked');
+        return { ok: true };
+      });
+      conn.client.emit('close', true);
+      // Bounded advance, not runAllTimers: a re-arming ladder never drains.
+      vi.advanceTimersByTime(5 * 60 * 1000);
+      // The failed reads cost attempts, not the ladder itself.
+      expect(conn.connect).not.toHaveBeenCalled();
+      expect(conn.state).toBe('reconnecting');
+
+      throws = false;
+      vi.advanceTimersByTime(5 * 60 * 1000);
+      expect(conn.connect).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops the ladder — a refusal does not schedule another attempt', () => {
+      vi.useFakeTimers();
+      const { conn } = makeGatedConn('rc-gate-stops', () => ({
+        ok: false,
+        reason: `irc.example.test is not permitted by this instance`,
+      }));
+      conn.client.emit('close', true);
+      vi.runAllTimers();
+      vi.advanceTimersByTime(10 * 60 * 1000);
+      expect(conn.connect).not.toHaveBeenCalled();
+    });
+  });
+
   it('stops (no reconnect) and surfaces a notice on a detected server ban', () => {
     vi.useFakeTimers();
     const { conn, events } = makeConn('rc-ban');
@@ -1390,16 +1549,80 @@ describe('auto-reconnect controller', () => {
     ).toBe(true);
   });
 
-  it('stops (no reconnect) on a hard SASL authentication failure', () => {
+  // Was "stops on a hard SASL authentication failure" — stopping on the FIRST
+  // one is the behavior #617 changed, because a rejection the server didn't drop
+  // us for would kill an unrelated later drop's reconnect. The intent it was
+  // written for (bad credentials must not retry forever) is unchanged and still
+  // asserted here; only the count moved.
+  it('stops after a hard SASL authentication failure repeats', () => {
     vi.useFakeTimers();
     const { conn, events } = makeConn('rc-sasl');
-    conn.client.emit('sasl failed', { reason: 'fail' });
-    conn.client.emit('close', true);
-    vi.runAllTimers();
-    expect(conn.connect).not.toHaveBeenCalled();
+    for (let i = 0; i < 3; i += 1) {
+      conn.client.emit('sasl failed', { reason: 'fail' });
+      conn.client.emit('close', true);
+      vi.runAllTimers();
+    }
+    // Two retries, then the ladder ends — bounded, not a failed-login hammer.
+    expect(conn.connect).toHaveBeenCalledTimes(2);
     expect(
       events.some((e) => e.type === 'error' && /SASL authentication failed/i.test(String(e.text))),
     ).toBe(true);
+  });
+
+  // #617: a single rejection is not proof the credentials killed THIS socket. On
+  // a network where SASL is optional the server keeps us, so a later drop (a
+  // stalled registration timing out, a blip) is unrelated and must still retry —
+  // before this, that drop inherited the flag and killed reconnect forever.
+  it('does not give up on the first SASL failure', () => {
+    vi.useFakeTimers();
+    const { conn } = makeConn('rc-sasl-first');
+    conn.client.emit('sasl failed', { reason: 'fail' });
+    conn.client.emit('close', true);
+    vi.runAllTimers();
+    expect(conn.connect).toHaveBeenCalledTimes(1);
+  });
+
+  // The optional-SASL recovery path the streak exists to protect: registering
+  // unauthenticated proves the credentials aren't fatal here, so the count starts
+  // over and a much later drop is still just a drop.
+  it('resets the streak when registration succeeds despite repeated SASL failures', () => {
+    vi.useFakeTimers();
+    const { conn } = makeConn('rc-sasl-reset');
+    (conn.client as unknown as { options: unknown }).options = {
+      ping_interval: 0,
+      ping_timeout: 0,
+    };
+    for (let i = 0; i < 2; i += 1) {
+      conn.client.emit('sasl failed', { reason: 'fail' });
+      conn.client.emit('close', true);
+      vi.runAllTimers();
+    }
+    conn.client.emit('registered', { nick: 'nick' });
+
+    // A third failure now starts a fresh streak rather than tipping the old one.
+    conn.client.emit('sasl failed', { reason: 'fail' });
+    conn.client.emit('close', true);
+    vi.runAllTimers();
+    expect(conn.connect).toHaveBeenCalledTimes(3);
+  });
+
+  // A rejection that didn't kill its own socket must not linger to be blamed for
+  // a later one.
+  it('consumes the pending SASL failure at the close it survived', () => {
+    vi.useFakeTimers();
+    const { conn } = makeConn('rc-sasl-consumed');
+    conn.client.emit('sasl failed', { reason: 'fail' });
+    conn.client.emit('close', true);
+    vi.runAllTimers();
+    expect(conn.connect).toHaveBeenCalledTimes(1);
+
+    // Two further drops with no new SASL failure: nothing pending to promote, so
+    // both are ordinary transients even though the streak sits at 1.
+    conn.client.emit('close', true);
+    vi.runAllTimers();
+    conn.client.emit('close', true);
+    vi.runAllTimers();
+    expect(conn.connect).toHaveBeenCalledTimes(3);
   });
 
   // A clean SASL abort is transient (server hiccup), not a credential problem —
@@ -1478,6 +1701,7 @@ describe('IRCv3 draft/multiline (#381)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -1740,6 +1964,7 @@ describe('inbound INVITE handler (#261)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -1837,6 +2062,7 @@ describe('invite channel lines + dedup (#261)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -1924,6 +2150,7 @@ describe('channel mode display (status bar)', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -2026,6 +2253,134 @@ describe('channel mode display (status bar)', () => {
     expect(modes).not.toContain('secret');
   });
 
+  // #486: prefix/membership modes come from ISUPPORT PREFIX, not a hardcode.
+  // solanum/Libera declare `q` as a quiet LIST mode and leave it out of PREFIX;
+  // the old q/a/o/h/v hardcode routed `+q` into the member branch, dropping it
+  // before listModes() was consulted.
+  function solanumIsupport(conn: IrcConnection): void {
+    const options = conn.client.network.options as { CHANMODES?: unknown; PREFIX?: unknown };
+    // `q` in group A (list), and absent from PREFIX — solanum's actual shape.
+    options.CHANMODES = ['eIbq', 'k', 'flj', 'CFLMPQScgimnprstz'];
+    options.PREFIX = [
+      { symbol: '@', mode: 'o' },
+      { symbol: '+', mode: 'v' },
+    ];
+  }
+
+  it('routes solanum +q to the list-mode path, not the member-prefix path (#486)', () => {
+    const conn = makeConn();
+    solanumIsupport(conn);
+    const ch = conn.upsertChannel('#chan');
+    // A joined member whose nick is exactly the quiet's parameter. This is the
+    // case the hardcode got wrong: a bare-nick quiet matched a real member, so
+    // `troll` was handed a phantom owner-style `q` badge.
+    ch.members.set('troll', {
+      nick: 'troll',
+      modes: [],
+      away: false,
+      user: null,
+      host: null,
+      account: null,
+    });
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.client.emit('mode', {
+      target: '#chan',
+      modes: [{ mode: '+n' }, { mode: '+q', param: 'troll' }],
+      raw_modes: '+nq',
+      raw_params: ['troll'],
+    });
+
+    // No phantom badge: +q never reached the member branch.
+    expect(ch.members.get('troll')?.modes).toEqual([]);
+    // And it was excluded from the status bar as the list mode it is.
+    const modes = latestModes(publish);
+    expect(modes).toContain('n');
+    expect(modes).not.toContain('q');
+  });
+
+  it('still treats +q as a member prefix when the server declares it in PREFIX', () => {
+    const conn = makeConn();
+    // UnrealIRCd-shaped: q IS an owner prefix here, and not a list mode.
+    const options = conn.client.network.options as { CHANMODES?: unknown; PREFIX?: unknown };
+    options.CHANMODES = ['beI', 'k', 'l', 'imnpst'];
+    options.PREFIX = [
+      { symbol: '~', mode: 'q' },
+      { symbol: '@', mode: 'o' },
+      { symbol: '+', mode: 'v' },
+    ];
+    const ch = conn.upsertChannel('#chan');
+    ch.members.set('owner', {
+      nick: 'owner',
+      modes: [],
+      away: false,
+      user: null,
+      host: null,
+      account: null,
+    });
+    conn.publish = vi.fn<(event: unknown) => void>();
+
+    conn.client.emit('mode', {
+      target: '#chan',
+      modes: [{ mode: '+q', param: 'owner' }],
+      raw_modes: '+q',
+      raw_params: ['owner'],
+    });
+
+    expect(ch.members.get('owner')?.modes).toEqual(['q']);
+  });
+
+  it('falls back to the common prefix set before ISUPPORT PREFIX arrives', () => {
+    const conn = makeConn();
+    // No PREFIX declared yet (pre-005). +o must still land on the member.
+    const ch = conn.upsertChannel('#chan');
+    ch.members.set('bob', {
+      nick: 'bob',
+      modes: [],
+      away: false,
+      user: null,
+      host: null,
+      account: null,
+    });
+    conn.publish = vi.fn<(event: unknown) => void>();
+
+    conn.client.emit('mode', {
+      target: '#chan',
+      modes: [{ mode: '+o', param: 'bob' }],
+      raw_modes: '+o',
+      raw_params: ['bob'],
+    });
+
+    expect(ch.members.get('bob')?.modes).toEqual(['o']);
+  });
+
+  it('falls back rather than trusting a malformed PREFIX token', () => {
+    const conn = makeConn();
+    // irc-framework leaves the raw string in place when `(modes)symbols` fails
+    // to parse — Array.isArray, not truthiness, is what keeps this safe.
+    (conn.client.network.options as { PREFIX?: unknown }).PREFIX = 'garbage';
+    const ch = conn.upsertChannel('#chan');
+    ch.members.set('bob', {
+      nick: 'bob',
+      modes: [],
+      away: false,
+      user: null,
+      host: null,
+      account: null,
+    });
+    conn.publish = vi.fn<(event: unknown) => void>();
+
+    conn.client.emit('mode', {
+      target: '#chan',
+      modes: [{ mode: '+o', param: 'bob' }],
+      raw_modes: '+o',
+      raw_params: ['bob'],
+    });
+
+    expect(ch.members.get('bob')?.modes).toEqual(['o']);
+  });
+
   it('drops a channel mode when it is removed (-k)', () => {
     const conn = makeConn();
     conn.upsertChannel('#chan');
@@ -2113,6 +2468,7 @@ describe('join key forwarding', () => {
         sasl_password: null,
         connect_commands: null,
         position: 0,
+        casemapping: null,
         created_at: new Date().toISOString(),
       },
       onEvent: () => {},
@@ -2189,14 +2545,21 @@ describe('join echo, forwarded joins (470), and un-partable channels (442)', () 
     expect(row?.key).toBe('hunter2');
   });
 
-  it("someone else's join mints nothing", () => {
+  it("someone else's join grants no autojoin and no key", () => {
     const conn = makeConn('echo-other');
     conn.client.user.nick = 'me';
     conn.upsertChannel('#chan');
 
     conn.client.emit('join', { channel: '#chan', nick: 'stranger' });
 
-    expect(getBuffer(conn.network.user_id, conn.network.id, '#chan')).toBeUndefined();
+    // Persisting the join event materializes the row (schema 17: the mint the
+    // wsHub live filter used to perform moved to the insert itself), but the
+    // property this test guards is unchanged: only the SELF echo is a join
+    // confirmation, so a stranger's join must not turn the channel into a
+    // rejoin carrier.
+    const row = getBuffer(conn.network.user_id, conn.network.id, '#chan');
+    expect(row?.autojoin).toBe(false);
+    expect(row?.key).toBe(null);
   });
 
   it('470 deletes a history-less pre-existing row even when the server relays a different case', () => {
@@ -2215,6 +2578,33 @@ describe('join echo, forwarded joins (470), and un-partable channels (442)', () 
     // Gone entirely — no history means nothing to show, and a surviving row
     // would replay the forwarded JOIN on every reconnect.
     expect(getBuffer(conn.network.user_id, netId, '#apple')).toBeUndefined();
+  });
+
+  it('470-forget drops a favorite on the deleted row and flags the part event', async () => {
+    // The hard delete would otherwise cascade the favorite away silently —
+    // no renumber, no favorites-changed republish — leaving clients with a
+    // ghost entry for the dead buffer id.
+    const { favoriteBuffer, listFavoritesForUser } = await import('../db/favoriteBuffers.js');
+    const conn = makeConn('fwd-fav');
+    const netId = conn.network.id;
+    // An OPEN history-less row (a quiet just-joined channel) — the config-row
+    // variant seedAutojoinChannel mints is born closed, which favoriteBuffer
+    // now refuses by design (the stale-tab orphan guard).
+    ensureBufferOpen(conn.network.user_id, netId, '#apple', { kind: 'channel' });
+    expect(favoriteBuffer(conn.network.user_id, netId, '#apple')).toBe(true);
+    const published: Array<Record<string, unknown>> = [];
+    conn.publish = ((ev: Record<string, unknown>) => {
+      published.push(ev);
+    }) as typeof conn.publish;
+
+    conn.client.emit('channel_redirect', { from: '#apple', to: '##apple' });
+
+    expect(getBuffer(conn.network.user_id, netId, '#apple')).toBeUndefined();
+    expect(listFavoritesForUser(conn.network.user_id).some((f) => f.target === '#apple')).toBe(
+      false,
+    );
+    const parted = published.find((e) => e.type === 'channel-parted');
+    expect(parted).toMatchObject({ target: '#apple', favoritesChanged: true });
   });
 
   it('470 discards a stashed join key for the forwarded-from channel', () => {
@@ -2305,14 +2695,18 @@ describe('join echo, forwarded joins (470), and un-partable channels (442)', () 
   it('442 for a channel with no row does not conjure one', () => {
     // Correcting state must not CREATE it: a typo'd /part answered with 442
     // used to leave a phantom channels row behind. setAutojoin is update-only,
-    // so the registry stays empty.
+    // so no channel row appears. (The error line itself persists into the
+    // server buffer, which as of schema 17 mints the `:server:` sentinel row —
+    // a real, deliberately-kinded fixture, not the phantom this test guards.)
     const conn = makeConn('notonchan-phantom');
     conn.client.emit('irc error', {
       error: 'not_on_channel',
       channel: '#never-joined',
       reason: "You're not on that channel",
     });
-    expect(listBufferRowsForNetwork(conn.network.id)).toHaveLength(0);
+    expect(
+      listBufferRowsForNetwork(conn.network.id).filter((b) => b.kind !== 'server'),
+    ).toHaveLength(0);
   });
 
   it('442 corrects a stale autojoin row even when the channel is not in the joined set', () => {
@@ -2334,5 +2728,339 @@ describe('join echo, forwarded joins (470), and un-partable channels (442)', () 
     });
 
     expect(getBuffer(conn.network.user_id, conn.network.id, '#apple')?.autojoin).toBe(false);
+  });
+});
+
+// #695: a DM buffer follows its peer through /nick (weechat/irssi parity).
+describe('DM rename on peer NICK', () => {
+  function connFor(name: string) {
+    const network = createNetwork(1, {
+      name,
+      host: 'irc.example.test',
+      port: 6697,
+      tls: 1,
+      trusted_certificates: 1,
+      nick: 'me',
+      username: null,
+      realname: null,
+      server_password: null,
+      autoconnect: 0,
+      sasl_account: null,
+      sasl_password: null,
+      connect_commands: null,
+    })!;
+    const conn = new IrcConnection({ network, onEvent: () => {} });
+    conn.client.user.nick = 'me';
+    const published: Array<Record<string, unknown>> = [];
+    conn.publish = vi.fn<(event: unknown) => void>((e) => {
+      published.push(e as Record<string, unknown>);
+    }) as typeof conn.publish;
+    conn.publishEphemeral = vi.fn<(event: unknown) => void>((e) => {
+      published.push(e as Record<string, unknown>);
+    }) as typeof conn.publishEphemeral;
+    return { conn, network, published };
+  }
+
+  it('renames the DM row, announces it, and persists the "known as" line under the NEW name', async () => {
+    const { conn, network, published } = connFor('dmrename');
+    const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
+    ensureOpen(network.user_id, network.id, 'bob', { kind: 'dm' });
+    const id = get(network.user_id, network.id, 'bob')!.id;
+
+    conn.client.emit('nick', { nick: 'bob', new_nick: 'bob_away' });
+
+    // The registry row kept its id and adopted the new name.
+    expect(get(network.user_id, network.id, 'bob')).toBeUndefined();
+    expect(get(network.user_id, network.id, 'bob_away')?.id).toBe(id);
+    // The announcement, then the DM's own nick row — in that order, so the
+    // row lands under the buffer's new name.
+    const renamed = published.find((e) => e.type === 'buffer-renamed');
+    expect(renamed).toMatchObject({ from: 'bob', to: 'bob_away', bufferId: id, merged: false });
+    const nickRow = published.find((e) => e.type === 'nick' && e.target === 'bob_away');
+    expect(nickRow).toMatchObject({ nick: 'bob', newNick: 'bob_away' });
+    expect(published.indexOf(renamed!)).toBeLessThan(published.indexOf(nickRow!));
+  });
+
+  it('a collision merges source-survives and announces the absorbed id', async () => {
+    const { conn, network, published } = connFor('dmrename-merge');
+    const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
+    ensureOpen(network.user_id, network.id, 'stale_carol', { kind: 'dm' });
+    const absorbedId = get(network.user_id, network.id, 'stale_carol')!.id;
+    ensureOpen(network.user_id, network.id, 'carol', { kind: 'dm' });
+    const liveId = get(network.user_id, network.id, 'carol')!.id;
+
+    conn.client.emit('nick', { nick: 'carol', new_nick: 'stale_carol' });
+
+    expect(get(network.user_id, network.id, 'stale_carol')?.id).toBe(liveId);
+    expect(published.find((e) => e.type === 'buffer-renamed')).toMatchObject({
+      bufferId: liveId,
+      merged: true,
+      mergedFromBufferId: absorbedId,
+    });
+  });
+
+  it('a closed DM renames too, without reopening', async () => {
+    const { conn, network } = connFor('dmrename-closed');
+    const { ensureOpen, close, getBuffer: get } = await import('../db/buffers.js');
+    ensureOpen(network.user_id, network.id, 'ghost', { kind: 'dm' });
+    close(network.user_id, network.id, 'ghost');
+
+    conn.client.emit('nick', { nick: 'ghost', new_nick: 'phantom' });
+
+    expect(get(network.user_id, network.id, 'phantom')?.state).toBe('closed');
+  });
+
+  it('no DM row means no rename and no announcement', async () => {
+    const { conn, network, published } = connFor('dmrename-none');
+    conn.client.emit('nick', { nick: 'stranger', new_nick: 'stranger2' });
+    const { getBuffer: get } = await import('../db/buffers.js');
+    expect(get(network.user_id, network.id, 'stranger2')).toBeUndefined();
+    expect(published.find((e) => e.type === 'buffer-renamed')).toBeUndefined();
+  });
+
+  it('our own /nick never renames a buffer', async () => {
+    const { conn, network, published } = connFor('dmrename-self');
+    const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
+    // Pathological but possible: a DM buffer named like our own nick.
+    ensureOpen(network.user_id, network.id, 'me', { kind: 'dm' });
+
+    conn.client.emit('nick', { nick: 'me', new_nick: 'me2' });
+
+    expect(get(network.user_id, network.id, 'me')).toBeDefined();
+    expect(published.find((e) => e.type === 'buffer-renamed')).toBeUndefined();
+  });
+});
+
+describe('CASEMAPPING capture + refold (#707)', () => {
+  function connFor(name: string) {
+    const network = createNetwork(1, {
+      name,
+      host: 'irc.example.test',
+      port: 6697,
+      tls: 1,
+      trusted_certificates: 1,
+      nick: 'me',
+      username: null,
+      realname: null,
+      server_password: null,
+      autoconnect: 0,
+      sasl_account: null,
+      sasl_password: null,
+      connect_commands: null,
+    })!;
+    const conn = new IrcConnection({ network, onEvent: () => {} });
+    const published: Array<Record<string, unknown>> = [];
+    conn.publish = vi.fn<(event: unknown) => void>((e) => {
+      published.push(e as Record<string, unknown>);
+    }) as typeof conn.publish;
+    conn.publishEphemeral = vi.fn<(event: unknown) => void>((e) => {
+      published.push(e as Record<string, unknown>);
+    }) as typeof conn.publishEphemeral;
+    return { conn, network, published };
+  }
+
+  function raw005(conn: IrcConnection, tokens: string) {
+    // Capture reads the RAW 005 tokens, deliberately NOT network.options —
+    // irc-framework pre-seeds options.CASEMAPPING to 'rfc1459' in its
+    // NetworkInfo constructor, so through the options bag "declared rfc1459"
+    // and "declared nothing" are the same value. Drive the real 'raw' handler
+    // with a wire line, exactly as the socket would.
+    conn.client.emit('raw', {
+      from_server: true,
+      line: `:irc.example.test 005 me ${tokens} :are supported by this server`,
+    });
+  }
+
+  it('stores a declared mapping and merges rows that now fold together', async () => {
+    const { conn, network, published } = connFor('casemap');
+    const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
+    // Two rows under the legacy fold; ONE channel under rfc1459.
+    ensureOpen(network.user_id, network.id, '#foo[bar]');
+    ensureOpen(network.user_id, network.id, '#foo{bar}');
+
+    raw005(conn, 'CHANTYPES=# CASEMAPPING=rfc1459 MONITOR=100');
+
+    expect(getNetwork(network.id, network.user_id)?.casemapping).toBe('rfc1459');
+    const merged = get(network.user_id, network.id, '#foo[bar]');
+    expect(merged?.id).toBe(get(network.user_id, network.id, '#foo{bar}')?.id);
+    expect(published.find((e) => e.type === 'buffer-renamed')).toMatchObject({
+      merged: true,
+      bufferId: merged!.id,
+    });
+  });
+
+  it("NEVER captures irc-framework's defaulted rfc1459 — no token, no store", () => {
+    const { conn, network } = connFor('casemap-absent');
+    // The framework default is sitting right there in the options bag; a 005
+    // line without the token must not launder it into a declaration.
+    expect(conn.client.network.options.CASEMAPPING).toBe('rfc1459');
+    raw005(conn, 'CHANTYPES=# MONITOR=100');
+    expect(getNetwork(network.id, network.user_id)?.casemapping).toBeNull();
+  });
+
+  it('a declaration on a LATER 005 line still captures', async () => {
+    const { conn, network } = connFor('casemap-late');
+    raw005(conn, 'CHANTYPES=# PREFIX=(ov)@+');
+    raw005(conn, 'MONITOR=100 CASEMAPPING=ascii TARGMAX=NAMES:1');
+    expect(getNetwork(network.id, network.user_id)?.casemapping).toBe('ascii');
+  });
+
+  it('an unknown value is not stored and changes nothing', async () => {
+    const { conn, network, published } = connFor('casemap-unknown');
+    const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
+    ensureOpen(network.user_id, network.id, '#a[1]');
+    ensureOpen(network.user_id, network.id, '#a{1}');
+
+    raw005(conn, 'CASEMAPPING=rfc8265');
+
+    expect(getNetwork(network.id, network.user_id)?.casemapping).toBeNull();
+    expect(get(network.user_id, network.id, '#a[1]')?.id).not.toBe(
+      get(network.user_id, network.id, '#a{1}')?.id,
+    );
+    // No lifecycle frames — the raw 005 line itself still renders as server
+    // text via the ordinary numeric path, which is not this test's concern.
+    expect(published.filter((e) => e.type === 'buffer-renamed')).toEqual([]);
+  });
+
+  it('re-declaring the stored mapping is a no-op — reconnects do no work', () => {
+    const { conn, published } = connFor('casemap-again');
+    raw005(conn, 'CASEMAPPING=rfc1459');
+    raw005(conn, 'CASEMAPPING=rfc1459');
+    expect(published.filter((e) => e.type === 'buffer-renamed')).toEqual([]);
+  });
+
+  it('a merge of two CLOSED twins is silent — clients hold nothing to correct', async () => {
+    const { conn, network, published } = connFor('casemap-closed');
+    const { ensureOpen, close, getBuffer: get } = await import('../db/buffers.js');
+    ensureOpen(network.user_id, network.id, 'ghost^', { kind: 'dm' });
+    ensureOpen(network.user_id, network.id, 'ghost~', { kind: 'dm' });
+    close(network.user_id, network.id, 'ghost^');
+    close(network.user_id, network.id, 'ghost~');
+
+    raw005(conn, 'CASEMAPPING=rfc1459');
+
+    // Merged server-side, closed, and NOT announced — an announced merge
+    // would make clients materialize a sidebar row for it.
+    expect(get(network.user_id, network.id, 'ghost~')?.state).toBe('closed');
+    expect(published.filter((e) => e.type === 'buffer-renamed')).toEqual([]);
+  });
+
+  it('adopts the wire spelling on a join echo when the folds diverge', async () => {
+    // The state a refold merge can leave behind: the surviving twin isn't the
+    // spelling the ircd echoes. The join echo respells it (casing-only
+    // rename, announced) so the id-less control frames that follow can't
+    // fork a ghost buffer client-side. Plain ASCII case differences keep
+    // first-writer-wins display casing.
+    const { conn, network, published } = connFor('casemap-respell');
+    const { ensureOpen, getBuffer: get } = await import('../db/buffers.js');
+    raw005(conn, 'CASEMAPPING=rfc1459');
+    ensureOpen(network.user_id, network.id, '#chat{dev}');
+    const id = get(network.user_id, network.id, '#chat{dev}')!.id;
+    conn.client.user.nick = 'me';
+
+    conn.client.emit('join', { nick: 'me', channel: '#chat[dev]' });
+
+    // Same row (the spellings fold together); display adopts the wire spelling.
+    const row = get(network.user_id, network.id, '#chat[dev]');
+    expect(row?.id).toBe(id);
+    expect(row?.target).toBe('#chat[dev]');
+    expect(published.find((e) => e.type === 'buffer-renamed')).toMatchObject({
+      from: '#chat{dev}',
+      to: '#chat[dev]',
+      bufferId: id,
+      merged: false,
+    });
+  });
+
+  it('isChannelJoined folds both sides per the declared mapping', () => {
+    // The one membership probe every consumer must use instead of the raw
+    // channels-map key (legacy-lowercased wire names): a fold-variant
+    // spelling of a joined channel reads joined, and a Unicode case-twin on
+    // an ascii-family network does NOT (toLowerCase over-folds).
+    const { conn } = connFor('casemap-joined');
+    conn.upsertChannel('#foo[bar]');
+    conn.upsertChannel('#ärger');
+    raw005(conn, 'CASEMAPPING=rfc1459');
+
+    expect(conn.isChannelJoined('#foo{bar}')).toBe(true);
+    expect(conn.isChannelJoined('#FOO[BAR]')).toBe(true);
+    expect(conn.isChannelJoined('#ärger')).toBe(true);
+    // Distinct channels under rfc1459: Ä is not in the fold range.
+    expect(conn.isChannelJoined('#Ärger')).toBe(false);
+    expect(conn.isChannelJoined('#elsewhere')).toBe(false);
+  });
+});
+
+// #716 QA follow-up: a DM opened fresh from the nicklist showed its peer
+// offline until the first message, because the presence probe refused to
+// track anything without a conversation. The gate exists for notice-only
+// service buffers (NickServ, #439) — an EMPTY buffer is deliberate user
+// intent and must probe.
+describe('probePresence intent gate', () => {
+  function connFor(name: string) {
+    const network = createNetwork(1, {
+      name,
+      host: 'irc.example.test',
+      port: 6697,
+      tls: 1,
+      trusted_certificates: 1,
+      nick: 'me',
+      username: null,
+      realname: null,
+      server_password: null,
+      autoconnect: 0,
+      sasl_account: null,
+      sasl_password: null,
+      connect_commands: null,
+    })!;
+    const conn = new IrcConnection({ network, onEvent: () => {} });
+    const tracked: string[] = [];
+    conn.trackDmPeer = vi.fn<(nick: string) => boolean>((n) => {
+      tracked.push(n);
+      return true;
+    }) as typeof conn.trackDmPeer;
+    return { conn, network, tracked };
+  }
+
+  it('probes a brand-new empty DM (the just-opened query)', async () => {
+    const { conn, network, tracked } = connFor('probe-fresh');
+    const { ensureOpen } = await import('../db/buffers.js');
+    ensureOpen(network.user_id, network.id, 'newperson', { kind: 'dm' });
+    conn.probePresence('newperson');
+    expect(tracked).toEqual(['newperson']);
+  });
+
+  it('probes a real conversation', async () => {
+    const { conn, network, tracked } = connFor('probe-convo');
+    const { ensureOpen } = await import('../db/buffers.js');
+    const { insertMessage } = await import('../db/messages.js');
+    ensureOpen(network.user_id, network.id, 'talker', { kind: 'dm' });
+    insertMessage({
+      networkId: network.id,
+      target: 'talker',
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'talker',
+      text: 'hi',
+    });
+    conn.probePresence('talker');
+    expect(tracked).toEqual(['talker']);
+  });
+
+  it('still refuses a notice-only service buffer', async () => {
+    const { conn, network, tracked } = connFor('probe-service');
+    const { ensureOpen } = await import('../db/buffers.js');
+    const { insertMessage } = await import('../db/messages.js');
+    ensureOpen(network.user_id, network.id, 'NickServ', { kind: 'dm' });
+    insertMessage({
+      networkId: network.id,
+      target: 'NickServ',
+      time: new Date().toISOString(),
+      type: 'notice',
+      nick: 'NickServ',
+      text: 'This nickname is registered.',
+    });
+    conn.probePresence('NickServ');
+    expect(tracked).toEqual([]);
   });
 });

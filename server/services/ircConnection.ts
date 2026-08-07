@@ -4,6 +4,9 @@
 import IRC, { ircLineParser } from 'irc-framework';
 import type { Client as IrcClient } from 'irc-framework';
 import { insertMessage, hasMessageForTarget, hasConversationForTarget } from '../db/messages.js';
+import { renameBuffer as renameDmBuffer } from '../db/renameBuffer.js';
+import { refoldNetworkBuffers } from '../db/refoldBuffers.js';
+import { normalizeCasemapping } from '../db/casemapping.js';
 import type { Network } from '../db/networks.js';
 import {
   isClosed as isBufferClosed,
@@ -13,8 +16,12 @@ import {
   setChannelKey as setBufferChannelKey,
   deleteBuffer,
   listOpenDms,
+  networkCasemapping,
+  foldTarget,
+  foldTargetFor,
+  kindForTarget,
 } from '../db/buffers.js';
-import { listTargetsForNetwork as listFriendTargetsForNetwork } from '../db/contacts.js';
+import { unfavoriteBuffer } from '../db/favoriteBuffers.js';
 import * as chanlistDb from '../db/chanlist.js';
 import type { PeerPresence, PeerState } from '../db/peerPresence.js';
 import {
@@ -32,7 +39,7 @@ import { effectiveSetting, effectiveSettings } from './settingsService.js';
 import { APP_NAME, APP_VERSION } from '../utils/userAgent.js';
 import { findUserById } from '../db/users.js';
 import { isNodeMode } from '../utils/edition.js';
-import { deriveIdent } from '../utils/ident.js';
+import { deriveIdent } from '../../shared/ident.js';
 import { registerIdent, unregisterIdent, isIdentdEnabled, isOidentdFileEnabled } from './identd.js';
 import { MESSAGE_MAX_BYTES, partitionMultiline, reassembleMultiline } from './messageSplit.js';
 import type { MultilineLimits } from './messageSplit.js';
@@ -82,6 +89,7 @@ import {
 import { getChannelConfig as getE2eChannelConfig } from '../db/e2e.js';
 import type { ChannelMode } from '../db/e2e.js';
 import { randomBytes } from 'node:crypto';
+import { isChannelTarget, CHANNEL_PREFIX_CLASS } from '../../shared/channels.js';
 
 // Optional source address for outbound IRC connections (LURKER_OUTGOING_ADDR),
 // passed to irc-framework as `outgoing_addr` → the socket's localAddress. Lets a
@@ -99,6 +107,43 @@ export function outgoingAddr(): string | undefined {
 // being used. Per-disconnect overrides (network removal, no-nick failure,
 // etc.) pass their own reason and bypass this default.
 const DEFAULT_QUIT_MESSAGE = `Lurker ${APP_VERSION} (the truth is out there) https://lurker.chat`;
+
+/**
+ * The manager's policy check, asked before an auto-reconnect opens a socket (#616).
+ *
+ * Auto-reconnect used to call connect() directly, which walked straight past the
+ * two gates every OTHER connect path clears in ircManager.startNetwork: the
+ * paused-account check (the linchpin billing hooks into) and the instance network
+ * lockdown (#298). It wasn't actively exploitable — suspendUser happens to
+ * disconnect() first, which cancels the pending backoff — but that is a
+ * coincidence of ordering, not a guarantee, and any future pause path that
+ * forgot to disconnect a live connection would have let a transient drop
+ * resurrect a connection policy forbids.
+ *
+ * A callback rather than a manager back-reference: the connection needs to ASK
+ * the policy question, not gain the ability to start networks.
+ */
+export type ReconnectGate = () => { ok: true } | { ok: false; reason: string };
+
+// How many SASL rejections in a row, with no successful registration in
+// between, before auto-reconnect gives up (#617).
+//
+// A COUNT rather than a timer. The obvious discriminator — "did the socket die
+// right after the rejection?" — can't actually separate the two cases it needs
+// to: #617's scenario (optional SASL, registration stalls, socket times out
+// minutes later) and a required-SASL server that holds the socket open and lets
+// it time out are the same shape on the wire, so any wall-clock window
+// misclassifies one of them. Worse, a window that decides "transient" reproduces
+// its own timing on the next attempt, so it re-decides "transient" forever —
+// an unbounded failed-login ladder, which is precisely what the give-up flag
+// exists to prevent.
+//
+// A streak has no such failure mode. On an optional-SASL network the retry
+// registers unauthenticated and 'registered' resets the count, so #617's
+// transient drop recovers; on a network that genuinely refuses the credentials
+// nothing ever registers and the count runs out. Worst case is a bounded 3
+// attempts spread over the backoff ladder, which is not a hammer.
+const MAX_CONSECUTIVE_SASL_FAILURES = 3;
 
 const NON_PERSISTED_TYPES = new Set([
   'state',
@@ -273,6 +318,8 @@ interface EnrichedEvent extends IrcEvent {
   networkId: number;
   time: string;
   id?: number | bigint;
+  /** buffers(id) the persisted row landed in — the wire's stable buffer key. */
+  bufferId?: number;
   alt?: boolean;
   matched?: boolean;
   matchedRuleId?: number | null;
@@ -288,7 +335,7 @@ interface EnrichedEvent extends IrcEvent {
 
 function isDmTargetName(target: string | undefined | null): boolean {
   if (!target) return false;
-  return !target.startsWith('#') && !target.startsWith(':server:');
+  return !isChannelTarget(target) && !target.startsWith(':server:');
 }
 
 // Persisted timestamps prefer IRCv3 server-time (#450): irc-framework parses
@@ -419,16 +466,13 @@ function normalizeAccount(raw: unknown): string | null | undefined {
   return s;
 }
 
-// Why a nick is on the presence watch list: an active DM peer, a friend/contact
-// target, or both. The MONITOR watch + peer_presence_state row are shared, so
-// these are reference-counted (see IrcConnection.trackedPeers).
-type TrackReason = 'dm' | 'friend';
+// Why a nick is on the presence watch list. Only 'dm' today; the reason set is
+// reference-counted (see IrcConnection.trackedPeers) so a future second reason
+// (e.g. favorites) shares the MONITOR watch + peer_presence_state row.
+type TrackReason = 'dm';
 
 interface PeerWatch {
   reasons: Set<TrackReason>;
-  // The contact id when this nick is watched as a friend (informational —
-  // the came-online toast is gated client-side); null for a DM-only peer.
-  contactId: number | null;
 }
 
 export class IrcConnection {
@@ -437,6 +481,10 @@ export class IrcConnection {
   client: IrcClient;
   state: string;
   channels: Map<string, ChannelState>;
+  /** Lazily-built per-network-folded index over `channels` for
+   *  isChannelJoined. null = rebuild on next probe. MUST be nulled by every
+   *  channels-map mutation and by a CASEMAPPING change (the folds move). */
+  joinedFoldedCache: Set<string> | null;
   // Join keys awaiting their echo, keyed by lowercased channel. Nothing is
   // persisted on a join REQUEST (the buffers row is echo-written), so the key
   // rides here until the join lands; a forward (470) discards it. Lost on a
@@ -445,12 +493,10 @@ export class IrcConnection {
   userModes: Set<string>;
   awayState: AwayState;
   // One presence watch list keyed by lowercased nick. Each entry records WHY
-  // we're watching it (DM peer, friend, or both). The MONITOR watch and the
-  // shared peer_presence_state row are reference-counted against those reasons —
-  // added when the first reason appears, torn down only when the last one is
-  // released — so a nick that is both a DM peer and a friend is watched once and
-  // survives losing either role. Hydrated on 'registered' and kept live via
-  // trackDmPeer/trackFriend + untrackDmPeer/untrackFriend.
+  // we're watching it. The MONITOR watch and the shared peer_presence_state row
+  // are reference-counted against those reasons — added when the first reason
+  // appears, torn down only when the last one is released. Hydrated on
+  // 'registered' and kept live via trackDmPeer + untrackDmPeer.
   trackedPeers: Map<string, PeerWatch>;
   // Last time we surfaced an undecryptable-E2E hint per (channel,peer,kind), to
   // collapse a multi-chunk message's per-chunk hints into one (#382). epoch ms.
@@ -565,14 +611,34 @@ export class IrcConnection {
   // terminalDisconnect: a classified give-up reason (detected ban / hard SASL
   //   auth failure). Non-null = stop retrying and require a manual reconnect; the
   //   string is the human-readable cause shown in the "not reconnecting" notice.
+  // pendingSaslFailure: a SASL rejection that has NOT yet been proven fatal (#617).
+  //   See the 'sasl failed' handler for why it can't be terminal on sight.
+  // reconnectGate: the manager's policy check, consulted before each retry opens a
+  //   socket (#616). Absent = no gate (tests, and any caller that builds a
+  //   connection directly).
   private reconnectTimer: ReturnType<typeof setTimeout> | null;
   private reconnectAttempt: number;
   private intentionalDisconnect: boolean;
   private terminalDisconnect: string | null;
+  private pendingSaslFailure: string | null;
+  // Consecutive SASL rejections with no successful registration between them.
+  // Deliberately NOT reset by connect(): it has to survive the retry ladder, or
+  // it could never run out. Only 'registered' clears it.
+  private saslFailureStreak: number;
+  private readonly reconnectGate: ReconnectGate | undefined;
 
-  constructor({ network, onEvent }: { network: Network; onEvent: (event: EnrichedEvent) => void }) {
+  constructor({
+    network,
+    onEvent,
+    reconnectGate,
+  }: {
+    network: Network;
+    onEvent: (event: EnrichedEvent) => void;
+    reconnectGate?: ReconnectGate;
+  }) {
     this.network = network;
     this.onEvent = onEvent;
+    this.reconnectGate = reconnectGate;
     // ALL CTCP handling lives in our 'ctcp request' handler (VERSION/PING/TIME/
     // SOURCE/CLIENTINFO, rate-limited + surfaced), so irc-framework's built-in
     // VERSION auto-reply is disabled with `version: false`. That MUST go in the
@@ -585,7 +651,7 @@ export class IrcConnection {
     // extended-monitor (IRCv3): asks the server to relay away-notify (and the
     // other notify caps irc-framework already negotiates) for nicks on our
     // MONITOR list even when we share no channel with them. That gives our DM
-    // peers and friends away/back tracking, not just online/offline — the
+    // peers away/back tracking, not just online/offline — the
     // 'away'/'back' handlers below already feed markPeerEvent regardless of how
     // the AWAY arrived. requestCap is a no-op on networks that don't advertise
     // the cap — irc-framework only emits a CAP REQ for caps the server lists in
@@ -600,13 +666,14 @@ export class IrcConnection {
     this.client.requestCap('draft/multiline');
     this.state = 'disconnected';
     this.channels = new Map();
+    this.joinedFoldedCache = null;
     this.userModes = new Set();
     this.awayState = { active: false, message: null, since: null, autoSet: false, backAt: null };
-    // Lowercase nicks we watch for presence, each tagged with why (DM peer
-    // and/or friend). Gates the per-peer presence writes so we don't churn the
-    // DB (and the WS broadcast stream) on every JOIN/QUIT for an unrelated user
-    // on a busy network. Hydrated on 'registered' from message history + the
-    // friend watch list, and grown as new DM activity arrives.
+    // Lowercase nicks we watch for presence, each tagged with why. Gates the
+    // per-peer presence writes so we don't churn the DB (and the WS broadcast
+    // stream) on every JOIN/QUIT for an unrelated user on a busy network.
+    // Hydrated on 'registered' from open DM buffers, and grown as new DM
+    // activity arrives.
     this.trackedPeers = new Map();
     // MONITOR (IRCv3) is the presence transport. `useMonitor` is set once
     // ISUPPORT confirms the server speaks it; `monitorLimit` is the per-
@@ -656,6 +723,8 @@ export class IrcConnection {
     this.reconnectAttempt = 0;
     this.intentionalDisconnect = false;
     this.terminalDisconnect = null;
+    this.pendingSaslFailure = null;
+    this.saslFailureStreak = 0;
     this.bind();
   }
 
@@ -757,7 +826,7 @@ export class IrcConnection {
       } catch (e) {
         console.warn('[ignore/highlight] match-on-insert failed:', (e as Error)?.message || e);
       }
-      const { id, alt } = insertMessage({
+      const { id, alt, bufferId } = insertMessage({
         networkId: this.network.id,
         target: event.target as string,
         time,
@@ -776,6 +845,9 @@ export class IrcConnection {
       });
       enriched.id = id;
       enriched.alt = alt;
+      // The buffer the row landed in — the wire's stable identity for the
+      // buffer (schema 17); rides every persisted `irc` frame.
+      enriched.bufferId = bufferId;
       enriched.matched = matchedRuleId != null;
       enriched.matchedRuleId = matchedRuleId;
       enriched.fromIgnored = fromIgnored;
@@ -890,6 +962,21 @@ export class IrcConnection {
       // so a stray mid-session numeric can't graft onto a stale burst. The
       // raw line keeps its trailing CR; strip it so replay consumers get a
       // clean single-line payload.
+      // CASEMAPPING capture (#707) reads the RAW 005 tokens, NOT
+      // client.network.options: irc-framework pre-seeds options.CASEMAPPING
+      // to 'rfc1459' in its NetworkInfo constructor, so through the options
+      // bag "the server declared rfc1459" and "the server declared nothing"
+      // are indistinguishable — and storing the framework default would
+      // trigger a destructive registry merge on servers that declared
+      // something else on a later 005 line, or nothing at all. A token seen
+      // here is a declaration by construction.
+      if (rawCommand === '005') {
+        for (const param of msg?.params ?? []) {
+          if (typeof param === 'string' && param.startsWith('CASEMAPPING=')) {
+            this.adoptDeclaredCasemapping(param.slice('CASEMAPPING='.length));
+          }
+        }
+      }
       const burstLine = event.line.replace(/[\r\n]+$/, '');
       if (rawCommand === '001') this.registrationLines = [burstLine];
       else if (
@@ -924,10 +1011,7 @@ export class IrcConnection {
       // rejection, not a join failure — surface it inline in that channel so
       // the user sees why their message didn't land, instead of a misleading
       // "Couldn't join" toast (#283). publish() canonicalizes the channel case.
-      if (
-        channel &&
-        isOverloadedSpeakRejection(command, this.channels.has(channel.toLowerCase()))
-      ) {
+      if (channel && isOverloadedSpeakRejection(command, this.isChannelJoined(channel))) {
         this.handleSendRejection(channel, reason, { command, params });
         return;
       }
@@ -967,7 +1051,15 @@ export class IrcConnection {
     c.on('sasl failed', (event: Record<string, unknown>) => {
       const reason = (event?.reason as string | undefined) || undefined;
       if (isTerminalSaslFailure(reason)) {
-        this.terminalDisconnect = `SASL authentication failed${
+        // PENDING, not terminal on sight (#617). On a network where SASL is
+        // optional the server does not drop us for a failed auth, so the flag
+        // used to sit there until 'registered' cleared it — and if registration
+        // then stalled and the socket timed out FIRST, that unrelated transient
+        // drop inherited the flag and killed auto-reconnect permanently.
+        // Promoted to terminal at 'close' once the streak runs out; see
+        // maybePromoteSaslFailure.
+        this.saslFailureStreak += 1;
+        this.pendingSaslFailure = `SASL authentication failed${
           reason && reason !== 'fail' ? ` (${reason})` : ''
         } — check the network's account credentials`;
       }
@@ -985,6 +1077,10 @@ export class IrcConnection {
       // us for it), it clearly wasn't fatal — a later transient drop must still
       // auto-reconnect rather than inherit a stale give-up flag.
       this.terminalDisconnect = null;
+      this.pendingSaslFailure = null;
+      // Registering is the proof the credentials aren't fatal here (the network's
+      // SASL is optional, or they started working) — so the streak starts over.
+      this.saslFailureStreak = 0;
       // Fresh registration means a new socket — forget per-connection send
       // state so speak permission is re-probed and stale attribution can't leak
       // across the reconnect (#283).
@@ -1012,24 +1108,21 @@ export class IrcConnection {
       try {
         for (const buf of listOpenDms(this.network.id)) {
           // A notice-only buffer (NickServ/ChanServ, #439) is not a real DM —
-          // don't seed it into MONITOR or it consumes presence slots and shows a
-          // bogus presence dot for a service. Track only actual conversations.
-          if (!hasConversationForTarget(this.network.id, buf.target)) continue;
-          this.addPeerReason(buf.target.toLowerCase(), 'dm', null);
+          // don't seed it into MONITOR or it consumes presence slots and shows
+          // a bogus presence dot for a service. Seed actual conversations AND
+          // empty just-opened DMs (same intent test as probePresence), so a
+          // reconnect doesn't strand a fresh query's presence dot.
+          if (
+            !hasConversationForTarget(this.network.id, buf.target) &&
+            hasMessageForTarget(this.network.id, buf.target)
+          ) {
+            continue;
+          }
+          this.addPeerReason(buf.target.toLowerCase(), 'dm');
         }
+        this.sweepUntrackedPresenceRows();
       } catch (e) {
         console.warn('[presence] hydrate failed:', (e as Error)?.message || e);
-      }
-      // Hydrate the friend watch list before the MONITOR seed runs, so
-      // seedMonitorWatch watches friends too and presence rows are populated for
-      // any backlog that arrives. Same map as the DM peers — a nick that is both
-      // just gains the 'friend' reason on top of 'dm'.
-      try {
-        for (const { contactId, nick } of listFriendTargetsForNetwork(this.network.id)) {
-          this.addPeerReason(nick.toLowerCase(), 'friend', contactId);
-        }
-      } catch (e) {
-        console.warn('[friends] hydrate failed:', (e as Error)?.message || e);
       }
       this.setState('connected', { nick: registeredNick });
       // Defer the MONITOR + handshake until ISUPPORT tells us the server
@@ -1138,6 +1231,9 @@ export class IrcConnection {
       // call is a no-op.
       this.markAllPeersOffline();
       this.setState('disconnected');
+      // Decide, now that we know WHEN the socket died, whether a SASL rejection
+      // earlier in this connection is what killed it (#617).
+      this.maybePromoteSaslFailure();
       // 'close' is now the single terminal socket-death event (irc-framework's
       // auto_reconnect is disabled, so it no longer retries internally): decide
       // here whether to schedule our own backoff retry. Runs after the state/
@@ -1217,7 +1313,7 @@ export class IrcConnection {
         const seedCount = this.monitoredNicks().length;
         if (seedCount > 0) {
           this.logNet(
-            `Seeding MONITOR with ${seedCount} nick${seedCount === 1 ? '' : 's'} (DM peers + friends)`,
+            `Seeding MONITOR with ${seedCount} nick${seedCount === 1 ? '' : 's'} (DM peers)`,
           );
           this.seedMonitorWatch();
         }
@@ -1378,6 +1474,10 @@ export class IrcConnection {
         const localPort = socket?.localPort;
         const remotePort = socket?.remotePort;
         if (!localPort || !remotePort) return;
+        // The ident comes from the ACCOUNT, not from this network's username or
+        // nick — those are the user's to retype at will, and an ident a user can
+        // choose can't attribute anything (#643). See shared/ident.ts.
+        const account = findUserById(this.network.user_id);
         this.identdId = registerIdent({
           localAddress: socket.localAddress || '',
           localPort,
@@ -1385,9 +1485,8 @@ export class IrcConnection {
           remotePort,
           ident: deriveIdent({
             nodeMode: isNodeMode(),
-            accountUsername: findUserById(this.network.user_id)?.username || '',
-            networkUsername: this.network.username,
-            nick: this.network.nick,
+            accountUsername: account?.username || '',
+            accountIdent: account?.ident || null,
           }),
         });
       },
@@ -1526,7 +1625,7 @@ export class IrcConnection {
       // IRCv3 server message id (#450) — the future react/reply anchor. Tag
       // keys arrive lowercased; draft/msgid covers pre-ratification servers.
       const msgid = tags?.msgid || tags?.['draft/msgid'] || undefined;
-      const targetIsChannel = eventTarget && eventTarget.startsWith('#');
+      const targetIsChannel = isChannelTarget(eventTarget);
       const type =
         eventType === 'action' ? 'action' : eventType === 'notice' ? 'notice' : 'message';
 
@@ -1580,7 +1679,7 @@ export class IrcConnection {
 
       let target: string;
       if (isServer) target = `:server:${this.network.id}`;
-      else if (targetIsChannel) target = eventTarget;
+      else if (eventTarget && targetIsChannel) target = eventTarget;
       else if (isNotice) {
         // A NOTICE addressed to us persists to the sender's buffer (its natural
         // home), like a PRIVMSG — so the buffer surfaces on first notice and the
@@ -1592,10 +1691,12 @@ export class IrcConnection {
         //   - EXCEPTION 1: a channel-context hint (the IRCv3 +draft/channel-context
         //     tag, or a leading "[#chan]" body prefix) for a channel we're in
         //     routes the notice to that channel.
-        //   - EXCEPTION 2: a notice NOT addressed to our nick (e.g. to an `&`/`!`/`+`
-        //     local channel, which Lurker routes as a non-channel, or a STATUSMSG
-        //     target) has no DM home — surface it in the server buffer rather than
-        //     fabricating a bogus DM with the sender.
+        //   - EXCEPTION 2: a notice NOT addressed to our nick and not placeable in a
+        //     channel — an oper broadcast (`$$*`), a mask target, a STATUSMSG whose
+        //     channel we aren't in — has no DM home, so surface it in the server
+        //     buffer rather than fabricating a bogus DM with the sender.
+        //     (This used to name `&`/`!`/`+` channels as the example; since #724 they
+        //     route as the channels they are and never reach here.)
         const ctx = resolveChannelContext(
           event.tags as Record<string, string> | undefined,
           eventMessage,
@@ -1869,6 +1970,29 @@ export class IrcConnection {
           if (stashedKey !== undefined) {
             setBufferChannelKey(this.network.user_id, this.network.id, eventChannel, stashedKey);
           }
+          // #707: adopt the WIRE spelling when the row's display name
+          // diverges beyond ASCII case — the state a refold merge leaves
+          // behind when the surviving twin wasn't the joined spelling
+          // ('#chat{dev}' survived on recency, the ircd echoes
+          // '#chat[dev]'). Left alone, the id-less control frames
+          // (channel-joined, names) fork a message-less ghost buffer
+          // client-side, since clients fold without the network rule. Both
+          // spellings resolve to this row, so this is renameBuffer's
+          // casing-only path: one UPDATE, one announce, clients rekey — and
+          // it converges permanently. Plain ASCII case differences (legacy
+          // folds equal) keep first-writer-wins display casing, as ever.
+          if (
+            record.target !== eventChannel &&
+            foldTarget(record.target) !== foldTarget(eventChannel)
+          ) {
+            const adopted = renameDmBuffer(
+              this.network.user_id,
+              this.network.id,
+              record.target,
+              eventChannel,
+            );
+            if (adopted?.renamed && adopted.open) this.announceBufferRenamed(adopted);
+          }
         } catch (_) {
           /* ignore */
         }
@@ -1929,6 +2053,7 @@ export class IrcConnection {
       });
       if (eventNick === c.user.nick) {
         this.channels.delete(eventChannel.toLowerCase());
+        this.joinedFoldedCache = null;
         this.publish({ type: 'channel-parted', target: channel });
         // No system-buffer "Parted #x" line — symmetric with the join above; the
         // part already shows in the channel buffer (#355).
@@ -1962,6 +2087,7 @@ export class IrcConnection {
       // channel that just kicked you reads as ban evasion to ops.
       if (eventKicked && c.user.nick && eventKicked.toLowerCase() === c.user.nick.toLowerCase()) {
         this.channels.delete(eventChannel.toLowerCase());
+        this.joinedFoldedCache = null;
         try {
           setBufferAutojoin(this.network.user_id, this.network.id, channel, false);
         } catch (_) {
@@ -2132,6 +2258,7 @@ export class IrcConnection {
       if (!isSelfNick) {
         this.markPeerEvent(eventNick, 'offline');
         this.markPeerEvent(eventNewNick, 'online');
+        this.renameDmForNickChange(eventNick, eventNewNick, userhost, event.time);
       }
     });
 
@@ -2194,20 +2321,21 @@ export class IrcConnection {
         return;
       }
 
-      if (!target || !target.startsWith('#')) return;
+      if (!target || !isChannelTarget(target)) return;
       const ch = this.channels.get(target.toLowerCase());
       // Apply per-user prefix modes (+o/-o, +v/-v, etc.) to the member map so
       // the snapshot keeps current modes after page reload.
       let memberModesChanged = false;
       let chanModesChanged = false;
       const listModes = this.listModes();
+      const prefixModes = this.prefixModes();
       if (ch) {
         for (const m of eventModes) {
           if (!m || !m.mode) continue;
           const sign = m.mode[0];
           const letter = m.mode.slice(1);
           // Per-user prefix mode: lands on the member, not on the channel.
-          if (m.param && isPrefixMode(letter)) {
+          if (m.param && prefixModes.has(letter)) {
             const member = ch.members.get(m.param.toLowerCase());
             if (!member) continue;
             const set = new Set(member.modes);
@@ -2380,11 +2508,11 @@ export class IrcConnection {
         const m = ch.members.get((u.nick as string).toLowerCase());
         if (!m) continue;
         const next = !!u.away;
-        // Bridge the WHO snapshot to the DM/friend presence rail for tracked
-        // peers. away-notify doesn't fire on join, so this is where a peer we
+        // Bridge the WHO snapshot to the DM presence rail for tracked peers.
+        // away-notify doesn't fire on join, so this is where a peer we
         // share a channel with gets (re-)established — critically on reconnect,
         // where markAllPeersOffline has just forced every tracked peer offline
-        // and a friend still sitting in a channel we rejoin must be promoted
+        // and a DM peer still sitting in a channel we rejoin must be promoted
         // back to online here (the server sends existing occupants via NAMES,
         // not JOIN, so the 'join' handler never fires for them). 'away' sets
         // away; for a present, non-away member 'online' promotes an
@@ -2519,8 +2647,16 @@ export class IrcConnection {
       // Classify an oper/server ban (K/G/Z/D-line) so the auto-reconnect
       // controller stops instead of hammering a server that's actively refusing
       // us. Only server-scoped bans qualify: a channel-scoped ban (474) carries a
-      // channel param and is routed inline below, so gate on its absence. The flag
-      // is consumed at 'close'; setting it here is harmless if the socket lives.
+      // channel param and is routed inline below, so gate on its absence.
+      //
+      // ⚠ Unlike the SASL flag (which is pending until 'close' proves it fatal,
+      // #617), this one is terminal the moment it's set and is cleared ONLY by
+      // 'registered' or a fresh connect(). So a ban-shaped error on a live,
+      // already-registered connection lingers, and the next unrelated transient
+      // drop inherits it and stops auto-reconnect for good — the same staleness
+      // #617 fixed for SASL. In practice a "Closing Link" ERROR does close the
+      // link, so the window is narrow; giving this the same pending/promote
+      // treatment is tracked separately rather than widened into #616/#617.
       const banChannel = event?.channel as string | undefined;
       if (!banChannel) {
         const banned = classifyServerBan(reason);
@@ -2624,7 +2760,7 @@ export class IrcConnection {
       const typing = tags && tags['+typing'];
       if (!typing) return;
       const eventTarget = event.target as string | undefined;
-      const targetIsChannel = eventTarget && eventTarget.startsWith('#');
+      const targetIsChannel = isChannelTarget(eventTarget);
       const target = targetIsChannel ? eventTarget : eventNick;
       this.publishEphemeral({
         type: 'typing',
@@ -2648,7 +2784,6 @@ export class IrcConnection {
     const me = this.client.user?.nick;
     if (me && nick.toLowerCase() === me.toLowerCase()) return null;
     const lower = nick.toLowerCase();
-    // Presence fires for DM peers AND friends — both live in trackedPeers.
     if (!this.trackedPeers.has(lower)) return null;
     return nick;
   }
@@ -2668,7 +2803,8 @@ export class IrcConnection {
       stateAt: row?.stateAt || null,
       awayMessage: row?.awayMessage || null,
       // True only on a real offline→online transition (see markPeerEvent).
-      // wsHub reads this to fire the came-online push; the client ignores it.
+      // wsHub reads this to fire the favorited-DM came-online push; the
+      // client computes its own transition for the toast and ignores it.
       cameOnline,
     });
   }
@@ -2717,8 +2853,8 @@ export class IrcConnection {
     }
     // A genuine offline→online transition (not first-sight null→online, which
     // covers a freshly-added watch / the MONITOR seed) is the only one that
-    // drives the "friend came online" notification. Flag it so wsHub can fire a
-    // push when no client is visible — mirrors the client-side toast gate.
+    // should drive a "came online" notification. Kept computed so the
+    // favorites-based friend-online push can consume it without re-plumbing.
     const cameOnline = state === 'online' && prevState === 'offline';
     this.publishPeerPresence(canonical, next, cameOnline);
   }
@@ -2751,10 +2887,9 @@ export class IrcConnection {
   // batching in ircManager.startNetwork). Any nicks beyond monitorLimit
   // are kept in the in-memory set but skipped on the wire; we surface a
   // notice so the user knows live presence is degraded for the overflow.
-  // Deduped union of the nicks we want MONITORed: DM peers and friends share
+  // Deduped union of the nicks we want MONITORed — every tracked reason shares
   // the one per-connection MONITOR budget.
   monitoredNicks(): string[] {
-    // The map keys are already the deduped union of DM peers and friends.
     return Array.from(this.trackedPeers.keys());
   }
 
@@ -2810,39 +2945,215 @@ export class IrcConnection {
     }
   }
 
+  // A CASEMAPPING token seen on a raw 005 line (#707) — a declaration by
+  // construction, never irc-framework's default (see the 'raw' handler). The
+  // declared fold is a property of the network ROW, not the socket: stored
+  // once, compared per token, and only a CHANGE does real work — a reconnect
+  // that re-declares the stored value is one cached compare and out. No
+  // latch, deliberately: the stored===declared compare is already idempotent,
+  // and a latch would freeze the first token of a burst against a correction
+  // on a later line. Unknown values store nothing: the network keeps the
+  // legacy fold rather than adopting a rule we can't implement.
+  //
+  // On a change, db/refoldBuffers stores the mapping and rewrites the
+  // registry in ONE transaction (a failed refold leaves the mapping unstored,
+  // so the next 005 retries) — drifted folds rewrite silently, rows that now
+  // fold together (`#foo[bar]`/`#foo{bar}` under rfc1459) merge, each merge
+  // announced like a DM nick-collision. In-memory per-target maps
+  // (unsendableTargets & co.) are keyed by the wire name, which a re-fold
+  // doesn't change, so they're left alone.
+  private adoptDeclaredCasemapping(rawValue: string): void {
+    const declared = normalizeCasemapping(rawValue);
+    if (!declared) return;
+    try {
+      const stored = networkCasemapping(this.network.id);
+      if (stored === declared) return;
+      // Synchronous by design (better-sqlite3), and bounded by the absorbed
+      // rows' history sizes: a merge repoints messages wholesale, so a
+      // case-twin with a very large history blocks the loop for the
+      // duration. Accepted with eyes open — it runs ONCE per network, on the
+      // first connect that declares the mapping — and the duration is logged
+      // so a slow one is visible rather than a mystery stall.
+      const startedAt = Date.now();
+      const merges = refoldNetworkBuffers(this.network.user_id, this.network.id, declared);
+      this.logNet(
+        `CASEMAPPING ${declared}${stored ? ` (was ${stored})` : ''}` +
+          (merges.length
+            ? `; merged ${merges.length} case-colliding buffer${merges.length === 1 ? '' : 's'}`
+            : '') +
+          ` (refold ${Date.now() - startedAt}ms)`,
+      );
+      for (const m of merges) {
+        // A closed survivor (both twins were closed) is never announced:
+        // clients hold no state for closed buffers, so there is nothing to
+        // correct — and a merged frame would make them materialize a sidebar
+        // row for a conversation closed everywhere.
+        if (m.survivorOpen) {
+          this.announceBufferRenamed({
+            from: m.absorbedTarget,
+            to: m.survivorTarget,
+            bufferId: m.survivorId,
+            merged: true,
+            mergedFromBufferId: m.absorbedId,
+            draftChanged: m.draftChanged,
+          });
+        }
+        // A merged DM must hand over its presence watch: the hydration seed
+        // ran at 001 (before this 005) against pre-refold rows, so the
+        // absorbed spelling holds a MONITOR slot for a registry row that no
+        // longer exists — stranded until reconnect, consuming the shared cap.
+        // The surviving spelling may never have been seeded at all (a closed
+        // survivor absorbed an open twin). Tracked-implies-open: a closed
+        // survivor gets no watch — the seed skips closed DMs, and a stray
+        // watch here would strand a capped slot on a hidden conversation.
+        // Both trackers refcount, so this is safe when the survivor was
+        // already watched. Per-target maps (unsendableTargets & co.) are
+        // left alone deliberately: they key by wire name, sends go out under
+        // the surviving buffer's name from here on, and the dead spelling's
+        // entries are inert residue until the socket closes.
+        if (kindForTarget(m.absorbedTarget) === 'dm') {
+          this.untrackDmPeer(m.absorbedTarget);
+          if (m.survivorOpen) this.trackDmPeer(m.survivorTarget);
+        }
+      }
+      // The folds themselves moved; any membership index built on the old
+      // rule is stale.
+      this.joinedFoldedCache = null;
+    } catch (e) {
+      console.warn('[casemapping] capture/refold failed:', (e as Error)?.message || e);
+    }
+  }
+
+  /** The one builder for the buffer-renamed announcement, shared by the DM
+   *  nick-follow and the casemapping refold so the frame shape cannot drift
+   *  between its two producers. `to` is ALWAYS the surviving buffer's final
+   *  name and `mergedFromBufferId` the absorbed row — clients identify the
+   *  absorbed side by that id, never by which of from/to it sat under
+   *  (docs §9.7: the two producers orient from/to differently). */
+  private announceBufferRenamed(r: {
+    from: string;
+    to: string;
+    bufferId: number;
+    merged: boolean;
+    mergedFromBufferId?: number;
+    draftChanged: boolean;
+  }): void {
+    this.publishEphemeral({
+      type: 'buffer-renamed',
+      target: r.to,
+      from: r.from,
+      to: r.to,
+      bufferId: r.bufferId,
+      merged: r.merged,
+      ...(r.mergedFromBufferId != null ? { mergedFromBufferId: r.mergedFromBufferId } : {}),
+      draftChanged: r.draftChanged,
+    });
+  }
+
   // ---- presence watch list (shared MONITOR + peer_presence_state rails) ----
-  // trackDmPeer/trackFriend (and their untrackers) are thin wrappers over the
-  // reference-counted helpers below: the wire watch and the DB row are added on
-  // the first reason and removed on the last, so a nick held by both roles is
-  // watched once and survives losing either.
+  // weechat/irssi parity (#695): the DM buffer follows the person through a
+  // /nick. The rename itself is one registry UPDATE (db/renameBuffer);
+  // in-memory per-target state and the MONITOR watch re-key alongside; the
+  // announcement rides publishEphemeral to wsHub, which fans the
+  // buffer-renamed frame (plus merge follow-ups) to every device. The
+  // "is now known as" row is persisted AFTER the rename so it lands under
+  // the buffer's new name — both clients already render type:'nick' rows,
+  // so the DM shows the same line a shared channel does.
+  //
+  // Closed DMs rename too: their history should follow the person, and a
+  // rename never reopens (state carries over; a merge takes the open state
+  // if EITHER side was open — see renameBuffer).
+  //
+  // Deliberately unconditional (no setting): weechat and irssi both do this
+  // without asking. irssi's user@host re-identification (renaming when the
+  // peer RECONNECTS under a new nick, no NICK seen) is out of scope — see
+  // ROADMAP.
+  private renameDmForNickChange(
+    oldNick: string,
+    newNick: string,
+    userhost: string | null,
+    time: unknown,
+  ): void {
+    let result: ReturnType<typeof renameDmBuffer>;
+    try {
+      const row = getBuffer(this.network.user_id, this.network.id, oldNick);
+      if (!row || row.kind !== 'dm') return;
+      result = renameDmBuffer(this.network.user_id, this.network.id, oldNick, newNick);
+    } catch (e) {
+      console.warn('[nick] DM rename failed:', (e as Error)?.message || e);
+      return;
+    }
+    if (!result?.renamed) return;
+    const oldLower = oldNick.toLowerCase();
+    const newLower = newNick.toLowerCase();
+    if (oldLower !== newLower) {
+      // Per-target in-memory state follows the buffer. Each map is keyed by
+      // the folded target; leaving an entry behind resurrects the exact bug
+      // class renameChannel's comment catalogues (a stale can't-speak-here
+      // flag, a leaked one-shot WHO suppression, a stranded CTCP queue).
+      if (this.unsendableTargets.delete(oldLower)) this.unsendableTargets.add(newLower);
+      const lastSend = this.lastUserSendAt.get(oldLower);
+      if (lastSend !== undefined) {
+        this.lastUserSendAt.delete(oldLower);
+        this.lastUserSendAt.set(newLower, lastSend);
+      }
+      if (this.autoWhoTargets.delete(oldLower)) this.autoWhoTargets.add(newLower);
+      const ctcpQueue = this.ctcpOutstanding.get(oldLower);
+      if (ctcpQueue) {
+        this.ctcpOutstanding.delete(oldLower);
+        this.ctcpOutstanding.set(newLower, ctcpQueue);
+      }
+      const hint = this.e2eHintAt.get(oldLower);
+      if (hint !== undefined) {
+        this.e2eHintAt.delete(oldLower);
+        this.e2eHintAt.set(newLower, hint);
+      }
+      // MONITOR follows the person: untrack first so the shared-watch
+      // refcount can't strand the old nick, then watch the new one — the
+      // renamed DM's presence dot stays live instead of going stale until
+      // the next reconnect.
+      this.untrackDmPeer(oldNick);
+      this.trackDmPeer(newNick);
+    }
+    // A closed DM renames silently: clients hold no state for closed buffers,
+    // so there is nothing to rekey — and a MERGED frame for one would make
+    // them materialize a sidebar row for a conversation closed everywhere.
+    if (result.open) this.announceBufferRenamed(result);
+    // The DM's own "x is now known as y" line — same row shape the channel
+    // loop above persists, no new renderer work anywhere.
+    this.publish({
+      type: 'nick',
+      target: result.to,
+      nick: oldNick,
+      newNick,
+      userhost,
+      time,
+    });
+  }
+
+  // trackDmPeer/untrackDmPeer are thin wrappers over the reference-counted
+  // helpers below: the wire watch and the DB row are added on the first reason
+  // and removed on the last.
 
   // In-memory only: record that `lower` is watched for `reason`, merging with
   // any existing entry. Does NOT touch the wire — hydration uses this and the
   // MONITOR seed sends the batched `MONITOR +` afterward.
-  private addPeerReason(lower: string, reason: TrackReason, contactId: number | null): void {
+  private addPeerReason(lower: string, reason: TrackReason): void {
     const w = this.trackedPeers.get(lower);
     if (w) {
       w.reasons.add(reason);
-      if (reason === 'friend') w.contactId = contactId;
     } else {
-      this.trackedPeers.set(lower, {
-        reasons: new Set([reason]),
-        contactId: reason === 'friend' ? contactId : null,
-      });
+      this.trackedPeers.set(lower, { reasons: new Set([reason]) });
     }
   }
 
   // Add a live watch reason for `nick`. Issues `MONITOR +` (subject to the
   // shared cap) the first time the nick becomes tracked for any reason; if it's
-  // already watched (for this or the other role) only the reason is recorded, so
-  // we never re-send a redundant line. Self/blank nicks are ignored. Returns
-  // true if `reason` was newly added. With `useMonitor` false we still grow the
-  // set so other handlers recognize the nick — they just get no live presence.
-  private addPeerWatch(
-    nick: string | undefined | null,
-    reason: TrackReason,
-    contactId: number | null,
-  ): boolean {
+  // already watched only the reason is recorded, so we never re-send a
+  // redundant line. Self/blank nicks are ignored. Returns true if `reason` was
+  // newly added. With `useMonitor` false we still grow the set so other
+  // handlers recognize the nick — they just get no live presence.
+  private addPeerWatch(nick: string | undefined | null, reason: TrackReason): boolean {
     if (!nick) return false;
     const me = this.client.user?.nick;
     if (me && nick.toLowerCase() === me.toLowerCase()) return false;
@@ -2850,14 +3161,13 @@ export class IrcConnection {
     const existing = this.trackedPeers.get(lower);
     if (existing) {
       if (existing.reasons.has(reason)) {
-        if (reason === 'friend') existing.contactId = contactId;
         return false;
       }
-      // Already on the wire for the other role — just record the new reason.
-      this.addPeerReason(lower, reason, contactId);
+      // Already on the wire for another reason — just record the new one.
+      this.addPeerReason(lower, reason);
       return true;
     }
-    this.addPeerReason(lower, reason, contactId);
+    this.addPeerReason(lower, reason);
     if (!this.useMonitor || this.state !== 'connected') return true;
     if (this.monitoredNicks().length > this.monitorLimit) {
       // Over-limit add: keep the in-memory tracking but skip MONITOR. Surface
@@ -2876,7 +3186,7 @@ export class IrcConnection {
       // Same belt-and-suspenders as seedMonitorWatch: per IRCv3 the server only
       // SHOULD (not MUST) volunteer the nick's current state in reply to
       // MONITOR +, so a freshly-added watch can land with no state. That leaves
-      // the peer at 'unknown' on the client, which the friends list renders
+      // the peer at 'unknown' on the client, which presence dots render
       // undimmed — i.e. indistinguishable from online — until a reconnect
       // re-seeds. MONITOR S asks for every monitored nick's state explicitly;
       // markPeerEvent's idempotency gate eats the duplicate replies for nicks we
@@ -2906,40 +3216,42 @@ export class IrcConnection {
     }
   }
 
+  // Restore the invariant that presence rows ⊆ tracked peers. Run right after
+  // hydration: any row whose nick isn't tracked can never be refreshed (nothing
+  // watches it) but WOULD be served as live state the moment the nick re-enters
+  // trackedPeers — on a no-MONITOR network probePresence has no wire follow-up,
+  // so a frozen 'online' from weeks ago would render as current. The friends
+  // system used to keep such nicks tracked (its hydrate pass re-adopted them,
+  // so every disconnect swept them offline); with that gone, rows it left
+  // behind are permanent orphans unless swept here.
+  sweepUntrackedPresenceRows(): void {
+    for (const row of listPeerPresenceForNetwork(this.network.id)) {
+      if (!row) continue;
+      if (this.trackedPeers.has(row.nick.toLowerCase())) continue;
+      try {
+        deletePeerPresence(this.network.id, row.nick);
+      } catch (e) {
+        console.warn('[presence] orphan sweep failed:', (e as Error)?.message || e);
+      }
+    }
+  }
+
   // An incoming DM (or DM activate) makes this nick a tracked DM peer; presence
   // then rides MONITOR. Returns true on a fresh add.
   trackDmPeer(nick: string | undefined | null): boolean {
-    return this.addPeerWatch(nick, 'dm', null);
+    return this.addPeerWatch(nick, 'dm');
   }
 
-  // User closed the DM buffer: drop the 'dm' reason. If the nick is still a
-  // friend the shared watch + presence row stay; otherwise both are cleared —
-  // even when it wasn't actively tracked, so a stale row from history is swept.
+  // User closed the DM buffer: drop the 'dm' reason. If another reason still
+  // holds the nick the shared watch + presence row stay; otherwise both are
+  // cleared — even when it wasn't actively tracked, so a stale row from
+  // history is swept.
   untrackDmPeer(nick: string | undefined | null): void {
     if (!nick) return;
     const lower = nick.toLowerCase();
     const existing = this.trackedPeers.get(lower);
     existing?.reasons.delete('dm');
-    if (existing && existing.reasons.size > 0) return; // still a friend → keep
-    this.trackedPeers.delete(lower);
-    this.teardownPeerWatch(nick);
-  }
-
-  // A contact target makes this nick a tracked friend, sharing the DM peer's
-  // MONITOR watch + presence row, so the wire only fires when it isn't already
-  // a DM peer.
-  trackFriend(nick: string | undefined | null, contactId: number): void {
-    this.addPeerWatch(nick, 'friend', contactId);
-  }
-
-  // Drop the 'friend' reason. No-op if it wasn't a friend. If the nick is still
-  // a DM peer the shared watch + row stay; otherwise both are cleared.
-  untrackFriend(nick: string | undefined | null): void {
-    if (!nick) return;
-    const lower = nick.toLowerCase();
-    const existing = this.trackedPeers.get(lower);
-    if (!existing || !existing.reasons.delete('friend')) return; // wasn't a friend
-    if (existing.reasons.size > 0) return; // still a DM peer → keep
+    if (existing && existing.reasons.size > 0) return; // still held → keep
     this.trackedPeers.delete(lower);
     this.teardownPeerWatch(nick);
   }
@@ -2949,10 +3261,19 @@ export class IrcConnection {
   // RPL_MONOFFLINE from the server — no separate WHOIS probe needed.
   probePresence(nick: string | undefined | null): void {
     if (!nick || !isDmTargetName(nick)) return;
-    // Opening a notice-only buffer (a service like NickServ, #439) must not start
-    // MONITOR tracking — only probe presence for targets we have a real
-    // conversation with. Friends are tracked separately at hydrate time.
-    if (!hasConversationForTarget(this.network.id, nick)) return;
+    // Opening a notice-only buffer (a service like NickServ, #439) must not
+    // start MONITOR tracking. But an EMPTY buffer is different from a
+    // notice-only one: zero rows means the user just deliberately opened a
+    // DM (nicklist → "open query") and is about to talk — showing the peer
+    // as offline until the first message lands reads as a bug (QA on #716
+    // hit exactly this). Probe for real conversations AND for brand-new
+    // empty DMs; only the notice-only service shape stays blocked.
+    if (
+      !hasConversationForTarget(this.network.id, nick) &&
+      hasMessageForTarget(this.network.id, nick)
+    ) {
+      return;
+    }
     this.trackDmPeer(nick);
   }
 
@@ -2997,8 +3318,16 @@ export class IrcConnection {
   private evictChannel(name: string, { forget = false }: { forget?: boolean } = {}): void {
     const canonical = canonicalChannelTarget(name, this.channels) ?? name;
     this.channels.delete(name.toLowerCase());
+    this.joinedFoldedCache = null;
+    let favoritesChanged = false;
     try {
       if (forget && !hasMessageForTarget(this.network.id, canonical)) {
+        // Unfavorite BEFORE the hard delete: letting the FK cascade take the
+        // favorite row would skip the renumber and leave every connected
+        // client holding a ghost favorites entry for the dead buffer id. The
+        // flag rides the channel-parted event so wsHub re-publishes the
+        // authoritative list.
+        favoritesChanged = unfavoriteBuffer(this.network.user_id, this.network.id, canonical);
         deleteBuffer(this.network.user_id, this.network.id, canonical);
       } else {
         setBufferAutojoin(this.network.user_id, this.network.id, canonical, false);
@@ -3009,7 +3338,36 @@ export class IrcConnection {
     } catch (_) {
       /* ignore */
     }
-    this.publish({ type: 'channel-parted', target: canonical });
+    this.publish({
+      type: 'channel-parted',
+      target: canonical,
+      ...(favoritesChanged ? { favoritesChanged: true } : {}),
+    });
+  }
+
+  /** Fold-aware live membership (#707): is `name` one of this connection's
+   *  joined channels under the network's declared CASEMAPPING? The channels
+   *  map is keyed by the legacy-lowercased WIRE name, so a raw
+   *  `.has(x.toLowerCase())` probe has two failure modes on a declared
+   *  network — it misses a fold-variant spelling (`#foo{bar}` asked, joined
+   *  as `#foo[bar]`), and it over-folds Unicode (on an ascii network
+   *  `#Ärger` must NOT read joined via its distinct case-twin `#ärger`).
+   *  Folding BOTH sides with the network's rule is the one comparison that's
+   *  right everywhere; on an undeclared network it reduces to exactly the
+   *  old map probe. One fold + one Set probe per call — the folded index is
+   *  rebuilt lazily after any channels-map mutation or a mapping change,
+   *  because this backs per-buffer loops (snapshot shells, mark-all-read)
+   *  where a per-call scan would be O(buffers × channels) on the same
+   *  event-loop-sensitive path the snapshot-starvation fixes targeted. It is
+   *  the single definition every consumer must use instead of the
+   *  idiomatic-looking raw probe. */
+  isChannelJoined(name: string): boolean {
+    if (!this.joinedFoldedCache) {
+      const set = new Set<string>();
+      for (const ch of this.channels.values()) set.add(foldTargetFor(this.network.id, ch.name));
+      this.joinedFoldedCache = set;
+    }
+    return this.joinedFoldedCache.has(foldTargetFor(this.network.id, name));
   }
 
   upsertChannel(name: string): ChannelState {
@@ -3018,6 +3376,7 @@ export class IrcConnection {
     if (!ch) {
       ch = { name, topic: null, members: new Map(), modes: new Set() };
       this.channels.set(key, ch);
+      this.joinedFoldedCache = null;
     }
     if (!ch.modes) ch.modes = new Set();
     return ch;
@@ -3053,10 +3412,38 @@ export class IrcConnection {
   // This is the same categorisation weechat/irssi/gamja use. Parameter modes
   // like +k/+l are NOT list modes, so they still land in the (+...) display.
   // Member-prefix modes (o/v/h, plus q/a where an ircd uses them as prefixes)
-  // are filtered earlier by isPrefixMode(), so they never reach this set.
+  // are filtered earlier by prefixModes(), so they never reach this set.
   private listModes(): Set<string> {
     const chanmodes = this.client.network?.options?.CHANMODES as string[] | undefined;
     return new Set((chanmodes?.[0] ?? 'beI').split(''));
+  }
+
+  // Member-prefix (membership) modes, from the server's ISUPPORT PREFIX token —
+  // the same 005 origin listModes() reads CHANMODES from, so the two agree
+  // per-ircd. irc-framework parses `PREFIX=(ov)@+` into {symbol, mode} pairs
+  // (registration.js), and leaves the RAW STRING in place when the token is
+  // malformed — hence the Array.isArray check rather than a truthiness test.
+  //
+  // This used to be a hardcoded q/a/o/h/v set, which disagreed with solanum:
+  // there +q is a quiet LIST mode, not an owner prefix, so a live
+  // `MODE #chan +q <mask>` was routed into the member-prefix branch and dropped
+  // before listModes() was ever consulted — making listModes effectively dead
+  // code for `q`. It only ever LOOKED right because quiet masks (!/@/*) never
+  // match a member nick; a bare-nick quiet on a joined member would have minted
+  // a phantom owner badge.
+  //
+  // A server that declares an empty PREFIX genuinely has no membership modes,
+  // so an empty array is honoured rather than falling back (same intent as
+  // listModes' `??`). The fallback covers pre-005 and malformed tokens only.
+  private prefixModes(): Set<string> {
+    const prefix = this.client.network?.options?.PREFIX as
+      | { symbol: string; mode: string }[]
+      | undefined;
+    // A FRESH Set on the fallback path too, matching listModes(). Handing out the shared
+    // module-level constant would let one connection's accidental mutation reach every other
+    // connection that ever fell back.
+    if (!Array.isArray(prefix)) return new Set(DEFAULT_PREFIX_MODES);
+    return new Set(prefix.map((p) => p.mode).filter(Boolean));
   }
 
   publishLag(): void {
@@ -3112,6 +3499,7 @@ export class IrcConnection {
     this.clearReconnectTimer();
     this.intentionalDisconnect = false;
     this.terminalDisconnect = null;
+    this.pendingSaslFailure = null;
     const { sasl_password, sasl_account, nick } = this.network;
     const account = sasl_password
       ? { account: sasl_account || nick, password: sasl_password }
@@ -3361,6 +3749,7 @@ export class IrcConnection {
     const m = /^\s*xdcc\s+(?:send|get)\s+(#?\d+)/i.exec(text);
     if (!m) return;
     if (!dccEnabledForUser(this.network.user_id)) return;
+    // ⚠ NOT a channel test (#724): `#` here is the XDCC PACK-NUMBER sigil.
     const pack = m[1].startsWith('#') ? m[1] : `#${m[1]}`;
     insertDccTransfer(this.network.user_id, {
       network_id: this.network.id,
@@ -3820,7 +4209,7 @@ export class IrcConnection {
   // the prompt appears where the user is actually typing) when we're in that
   // channel, else the server buffer. Ephemeral: status, not history.
   surfaceE2eNotice(notice: UserNotice, channel?: string): void {
-    const inChannel = !!channel && this.channels.has(channel.toLowerCase());
+    const inChannel = !!channel && this.isChannelJoined(channel);
     this.publishEphemeral({
       type: 'e2e',
       level: notice.level,
@@ -3921,11 +4310,23 @@ export class IrcConnection {
     const sub = (tokens.shift() || 'help').toLowerCase();
     // `#`-prefixed channels only — INCLUDING double-hash names like `##anime`
     // (the `length > 1` guard rejects only a bare lone `#`, which would otherwise
-    // persist a junk config row; #382 review #6). This is intentionally narrower
-    // than isChannelContext's `# & ! +`: Lurker's message routing treats `&`/`!`/
-    // `+` targets as DMs (see `targetIsChannel` in the message handler), so they
-    // can never be E2E channels here — accepting them would only enable a config
-    // whose inbound ciphertext would mis-route to a DM buffer (review #1 on #407).
+    // persist a junk config row; #382 review #6). Narrower than isChannelContext's
+    // `# & ! +`.
+    //
+    // ⚠⚠ The ORIGINAL reason for that gap is gone: it read "Lurker's message routing treats
+    // `&`/`!`/`+` targets as DMs, so they can never be E2E channels here", which #724 falsified —
+    // those targets now route as the channels they are. What keeps this `#`-only today is
+    // narrower and deliberate: these tokens are an `/e2e` ARGUMENT LINE that mixes channels,
+    // nicks and handle masks, and `nonChannel` below is derived by exclusion from this same
+    // test. Widening the prefix set would silently reclassify a mask like `+*!*@host` as a
+    // channel and drop it from the peer argument — a misparse with security consequences in the
+    // one subsystem where that matters most.
+    //
+    // ⚠ Known asymmetry this leaves, and the reason it is a follow-up rather than a shrug:
+    // `isChannelContext` (e2e/context.ts) and the inbound decrypt gate both accept `&local`, so
+    // such a channel can RECEIVE ciphertext it can never be configured to decrypt — `/e2e on`
+    // there answers "run this from a channel". Widening wants the arg grammar disambiguated
+    // first (positional, or an explicit `--channel`), not a wider prefix test.
     const channelToken = tokens.find((t) => t.startsWith('#') && t.length > 1);
     const nonChannel = tokens.filter((t) => !t.startsWith('#'));
     // The channel an op targets: an explicit #arg wins, else the issuing buffer
@@ -4221,6 +4622,12 @@ export class IrcConnection {
           // (db/e2e.ts matchAutotrustStmt), so reject anything else up front
           // rather than storing a rule that can never match (a dead rule the
           // user is told was "added").
+          // ⚠ `#`-only on purpose (#724), but NOT for the reason it might look like:
+          // `matchAutotrustStmt` (db/e2e.ts) is `scope = 'global' OR scope = ?`, a prefix-agnostic
+          // exact match that would happily match `&local`. What makes a non-`#` scope dead is
+          // upstream — `effectiveMode` gates on `getChannelConfig(...).enabled`, and `/e2e on`
+          // above cannot enable a non-`#` channel. So this validator stays aligned with `/e2e on`;
+          // widen the two together, and look at the config gate rather than the SQL.
           if (scope.toLowerCase() !== 'global' && !(scope.startsWith('#') && scope.length > 1)) {
             info(
               `/e2e autotrust add: scope must be 'global' or a #channel (got '${scope}')`,
@@ -4616,6 +5023,48 @@ export class IrcConnection {
   // doesn't flood one host). Retries indefinitely for any transient drop; stops
   // only for a disposed connection, a user/system-requested disconnect, or a
   // classified-terminal reason (detected ban / hard SASL auth failure).
+  /**
+   * Consume a pending SASL rejection at socket-close time (#617).
+   *
+   * Give up only once the streak runs out. A single rejection is not proof the
+   * credentials are the reason THIS socket died — on a network where SASL is
+   * optional the server keeps you, and a later drop is unrelated. Retrying
+   * settles it far better than any guess at the wire could: if the network
+   * really does let us in unauthenticated we register and the streak resets, and
+   * if it doesn't we're back here with a higher count.
+   *
+   * The pending flag is consumed either way — a rejection must not linger to be
+   * blamed for a socket death it had nothing to do with.
+   */
+  private maybePromoteSaslFailure(): void {
+    const pending = this.pendingSaslFailure;
+    if (!pending) return;
+    this.pendingSaslFailure = null;
+    if (this.saslFailureStreak >= MAX_CONSECUTIVE_SASL_FAILURES) {
+      this.terminalDisconnect = pending;
+    }
+  }
+
+  /**
+   * Abandon the retry ladder because policy refuses this connection (#616).
+   *
+   * The state assertion is the load-bearing part. By the time the gate is asked,
+   * scheduleReconnectIfWarranted has already announced 'reconnecting' — so
+   * silently returning would leave the network pinned on "Reconnecting…" forever,
+   * which is exactly the stuck-state edge the auto-reconnect overhaul removed.
+   * Inlining the gate checks without this was rejected in review for that reason.
+   */
+  private stopReconnecting(reason: string): void {
+    this.clearReconnectTimer();
+    this.publish({
+      type: 'error',
+      target: this.serverTarget(),
+      text: `Not reconnecting automatically: ${reason}.`,
+    });
+    this.logNet(`Auto-reconnect blocked: ${reason}`, 'warn');
+    this.setState('disconnected');
+  }
+
   private scheduleReconnectIfWarranted(): void {
     if (this.disposed || this.intentionalDisconnect) return;
     if (this.reconnectTimer != null) return; // a retry is already pending
@@ -4657,6 +5106,32 @@ export class IrcConnection {
       // connections whose backoffs elapse together don't flood one IRC server.
       connectScheduler.schedule(this.network.host, () => {
         if (this.disposed || this.intentionalDisconnect) return;
+        // #616: clear the same policy gates every other connect path clears in
+        // ircManager.startNetwork. Asked HERE rather than before the backoff so
+        // the answer is current at the moment we would open the socket — a user
+        // paused mid-wait must not get a connection out of a decision made
+        // before they were paused.
+        let gate: { ok: true } | { ok: false; reason: string };
+        try {
+          gate = this.reconnectGate?.() ?? { ok: true as const };
+        } catch (err) {
+          // The gate reads the DB, so it can throw where a bare connect() never
+          // could (SQLITE_BUSY, a closed handle during shutdown). connectScheduler
+          // only console.errors a throwing task — and by now the backoff timer is
+          // already spent — so letting this escape would strand the network on
+          // "Reconnecting…" with nothing left to fire. A failed POLICY READ is not
+          // a policy refusal: re-arm and ask again next tick.
+          this.logNet(
+            `Reconnect gate check failed (${err instanceof Error ? err.message : String(err)}); retrying`,
+            'warn',
+          );
+          this.scheduleReconnectIfWarranted();
+          return;
+        }
+        if (!gate.ok) {
+          this.stopReconnecting(gate.reason);
+          return;
+        }
         this.connect();
       });
     }, delay);
@@ -4779,7 +5254,6 @@ export class IrcConnection {
           .filter((row): row is PeerPresence => {
             if (row == null) return false;
             const lower = row.nick.toLowerCase();
-            // DM peers AND friends — both render presence on the client.
             return this.trackedPeers.has(lower);
           })
           .map((row) => [row.nick.toLowerCase(), row]),
@@ -4788,10 +5262,10 @@ export class IrcConnection {
   }
 }
 
-const PREFIX_MODES = new Set(['q', 'a', 'o', 'h', 'v']);
-function isPrefixMode(letter: string): boolean {
-  return PREFIX_MODES.has(letter);
-}
+// Pre-005 / malformed-PREFIX fallback for prefixModes(). The widest common set,
+// so a member mode isn't misread as a channel flag before ISUPPORT lands; once
+// the server declares PREFIX, that wins.
+const DEFAULT_PREFIX_MODES = new Set(['q', 'a', 'o', 'h', 'v']);
 
 // Decide how a channel +k / -k MODE change should update the persisted key.
 // Returns null for "leave the stored key alone" — the two cases that must NOT
@@ -4962,33 +5436,38 @@ export function canonicalChannelTarget(
   target: string | undefined,
   channels: Map<string, { name: string }>,
 ): string | undefined {
-  if (typeof target !== 'string' || !target.startsWith('#')) return target;
+  if (!target || !isChannelTarget(target)) return target;
   const known = channels.get(target.toLowerCase());
   return known ? known.name : target;
 }
 
 // Matches a conventional "[#chan] …" channel-context body prefix, also tolerating
-// (#chan), <#chan>, {#chan}. Restricted to `#` to match Lurker's routing, which
-// treats only `#` as a channel (`&`/`!`/`+` are routed as non-channels); the
-// captured name is validated against the joined set before use, and brackets
-// aren't required to pair since the joined-channel check is the real gate.
-const CHANNEL_CONTEXT_PREFIX = /^\s*[[(<{]\s*(#[^\])>}\s]+)\s*[\])>}]/;
+// (#chan), <#chan>, {#chan}. Accepts every channel prefix (#724) — it used to be
+// restricted to `#` "to match Lurker's routing, which treats only `#` as a
+// channel", which is the misclassification that has since been fixed. Widening
+// is safe here for the reason the old comment already gave: the captured name is
+// validated against the JOINED set before use, so a bracketed `[+nope]` in an
+// ordinary notice still resolves to nothing.
+const CHANNEL_CONTEXT_PREFIX = new RegExp(
+  `^\\s*[[(<{]\\s*([${CHANNEL_PREFIX_CLASS}][^\\])>}\\s]+)\\s*[\\])>}]`,
+);
 
 // A nick-addressed NOTICE sometimes belongs in a channel rather than a DM with
 // the sender: services announce per-channel info to your nick (Atheme ENTRYMSG,
 // ChanServ welcome) either via the IRCv3 +draft/channel-context client tag or a
 // conventional "[#chan] …" body prefix. Mirrors weechat's notice_welcome_redirect
 // and irssi's notice_channel_context: redirect to the referenced channel, but ONLY
-// when it's a `#` channel we're currently joined to (so a stray tag/prefix can't
-// fabricate a buffer), returning its canonical (joined) casing. The tag wins over
-// the body prefix. Returns null when there's no usable, joined `#`-channel context.
+// when it's a channel we're currently JOINED to (so a stray tag/prefix can't
+// fabricate a buffer), returning its canonical (joined) casing. Every channel
+// prefix qualifies since #724 — membership, not the prefix set, is the gate. The tag wins over
+// the body prefix. Returns null when there's no usable, joined-channel context.
 export function resolveChannelContext(
   tags: Record<string, string> | undefined,
   body: string | undefined,
   channels: Map<string, { name: string }>,
 ): string | null {
   const joinedChannel = (name: string | undefined): string | null => {
-    if (!name || !name.startsWith('#')) return null;
+    if (!name || !isChannelTarget(name)) return null;
     const known = channels.get(name.toLowerCase());
     return known ? known.name : null;
   };
