@@ -46,6 +46,30 @@ import {
 import { startIgnoreSweeper, stopIgnoreSweeper } from './services/ignoreSweeper.js';
 import { sweepTempUploads } from './routes/uploads.js';
 import { startEventLoopMonitor, stopEventLoopMonitor } from './services/eventLoopMonitor.js';
+import { swallowDeadTtyErrors } from './utils/processGuards.js';
+
+// Before ANY console output: a vanished controlling terminal (dropped SSH
+// session + `disown`) leaves fds 1/2 pointing at a dead pty, and the next
+// console write would otherwise crash the whole server with EIO (#442).
+swallowDeadTtyErrors(process.stdout);
+swallowDeadTtyErrors(process.stderr);
+
+// An uncaught exception still exits — a process in an unknown state must not
+// limp on — but the reason is recorded in the DB-backed system log first,
+// because the terminal that would have shown the stack may be long gone.
+process.on('uncaughtException', (err) => {
+  try {
+    systemLog.log({
+      scope: 'server',
+      level: 'error',
+      text: `fatal uncaught exception: ${err?.stack || err}`,
+    });
+  } catch {
+    /* the log write failing must not mask the exit path */
+  }
+  console.error('[lurker] fatal uncaught exception:', err);
+  process.exit(1);
+});
 
 const PORT = Number(process.env.PORT || 8010);
 // Optional bind address for the web/API server (HOST). Unset keeps upstream
