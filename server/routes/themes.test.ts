@@ -56,7 +56,16 @@ describe('POST /api/themes', () => {
   });
 
   it('rejects reserved names, empty names, and over-long names', async () => {
-    for (const name of ['Dark', 'light', 'DEFAULT', '', '   ', 'x'.repeat(41)]) {
+    for (const name of [
+      'Dark',
+      'light',
+      'DEFAULT',
+      'Monokai Plus',
+      'monokai plus LIGHT',
+      '',
+      '   ',
+      'x'.repeat(41),
+    ]) {
       const res = await aliceAgent.post('/api/themes').send({ name, values: VALUES });
       expect(res.status, `name ${JSON.stringify(name)}`).toBe(400);
     }

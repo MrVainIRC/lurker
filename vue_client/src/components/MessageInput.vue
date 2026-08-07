@@ -2262,7 +2262,8 @@ const COMMANDS_LINES = [
   '  /set <key> <value…>    — change a setting; /set (or /set ?) lists all keys',
   '  /get <key>             — read a setting back (output in the system buffer)',
   '  /theme [list]          — theme presets: apply/save/delete <name>, mode [single|system]',
-  '      e.g. /theme apply Light   ·   /theme save My Theme   ·   /theme use dark Ocean',
+  '      e.g. /theme apply light   ·   /theme save My Theme   ·   /theme use dark Ocean',
+  '      built-ins: Monokai Plus + Monokai Plus Light (dark/light work as shorthands)',
   '  /raw <line>            — send a raw IRC line (alias: /quote)',
   '  /e2e <sub>             — end-to-end encryption for a channel (experimental; /e2e help)',
   '      on [#chan] [auto|normal|quiet]   ·   off [#chan]   ·   mode <auto|normal|quiet>',
@@ -2494,8 +2495,14 @@ async function runTheme(argLine: string, networkId: number | null, target: strin
   // foldThemeName, not toLowerCase(): the server's uniqueness domain is SQLite
   // NOCASE (ASCII-only), and a wider Unicode fold here would silently take the
   // destructive overwrite branch in `save` for a name the server considers new.
+  // Built-in ids double as aliases (`/theme apply dark`) — 'dark'/'light' are
+  // reserved names, so the shorthand can never collide with a saved theme.
   const findByName = (name: string): ThemePreset | null =>
-    themes.all.find((t) => foldThemeName(t.name) === foldThemeName(name)) || null;
+    themes.all.find(
+      (t) =>
+        foldThemeName(t.name) === foldThemeName(name) ||
+        (t.builtin && t.id === foldThemeName(name)),
+    ) || null;
 
   if (cmd.kind === 'list') {
     const drift = settings.themeDriftKeys.length;
@@ -2513,7 +2520,7 @@ async function runTheme(argLine: string, networkId: number | null, target: strin
     const mode = settings.effective('look.theme.mode');
     if (mode === 'system') {
       const slotName = (key: string) =>
-        themes.byId(String(settings.effective(key) ?? ''))?.name || 'Dark';
+        themes.byId(String(settings.effective(key) ?? ''))?.name || themes.byId('dark')!.name;
       reply(
         `  mode: system (light → ${slotName('look.theme.light')}, dark → ${slotName('look.theme.dark')})`,
       );
@@ -2547,8 +2554,10 @@ async function runTheme(argLine: string, networkId: number | null, target: strin
       if (t.builtin) return reply(`/theme: ${t.name} is built-in and can't be deleted`);
       const wasActive = t.id === themes.activeThemeId;
       // The dangling pointer resets to ITS default — per-slot, so a system-mode
-      // device in light scheme reverts to Light, not Dark.
-      const revertsTo = themes.activePointerKey === 'look.theme.light' ? 'Light' : 'Dark';
+      // device in light scheme reverts to the light built-in, not the dark one.
+      const revertsTo = themes.byId(
+        themes.activePointerKey === 'look.theme.light' ? 'light' : 'dark',
+      )!.name;
       await themes.remove(Number(t.id));
       return reply(`deleted theme ${t.name}.${wasActive ? ` Reverted to ${revertsTo}.` : ''}`);
     }

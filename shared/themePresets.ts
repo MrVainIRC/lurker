@@ -24,11 +24,19 @@ export interface ThemePreset {
 }
 
 // Name rules for saved themes, enforced in the client and re-validated by the
-// server. Reserved names cover the built-ins plus 'default' (what the friend's
-// theme-editor spec called the registry-defaults theme before it grew a Light
-// sibling and became 'Dark').
+// server. Reserved names cover the built-ins' display names ("Monokai Plus" /
+// "Monokai Plus Light" — named for what they are: the Monokai Pro palette,
+// plus Lurker's extended hues), their ids ('dark'/'light', which double as
+// /theme aliases), and 'default' (what the theme-editor spec called the
+// registry-defaults theme before it grew a light sibling).
 export const THEME_NAME_MAX = 40;
-export const RESERVED_THEME_NAMES: readonly string[] = Object.freeze(['default', 'dark', 'light']);
+export const RESERVED_THEME_NAMES: readonly string[] = Object.freeze([
+  'default',
+  'dark',
+  'light',
+  'monokai plus',
+  'monokai plus light',
+]);
 export const MAX_THEMES_PER_USER = 50;
 
 // The three settings whose stored value is a theme id. look.theme.mode is a
@@ -165,10 +173,10 @@ function copyValues(values: Record<string, SettingValue>): Record<string, Settin
 export function builtinThemes(): ThemePreset[] {
   const dark = themedDefaults();
   return [
-    { id: 'dark', name: 'Dark', builtin: true, values: copyValues(dark) },
+    { id: 'dark', name: 'Monokai Plus', builtin: true, values: copyValues(dark) },
     {
       id: 'light',
-      name: 'Light',
+      name: 'Monokai Plus Light',
       builtin: true,
       values: { ...copyValues(dark), ...copyValues(LIGHT_OVERRIDES) },
     },

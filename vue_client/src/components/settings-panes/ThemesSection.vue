@@ -195,8 +195,10 @@ function saveNew() {
 function remove(t: ThemePreset) {
   const active = t.id === themes.activeThemeId;
   // The dangling pointer resets to ITS default, which is per-slot: in system
-  // mode on a light-scheme device that's the built-in Light, not Dark.
-  const revertsTo = themes.activePointerKey === 'look.theme.light' ? 'Light' : 'Dark';
+  // mode on a light-scheme device that's the light built-in, not the dark one.
+  const revertsTo = themes.byId(
+    themes.activePointerKey === 'look.theme.light' ? 'light' : 'dark',
+  )!.name;
   if (
     !confirm(
       `Delete theme ${t.name}? This can't be undone.${active ? ` Your appearance reverts to ${revertsTo}.` : ''}`,
