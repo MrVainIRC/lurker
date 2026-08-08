@@ -3,6 +3,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { previewableUrls, MAX_CARDS_PER_MESSAGE, MAX_MEDIA_PER_MESSAGE } from './previewUrls.js';
+import { applySpoilerMarkup } from './spoilerMarkup.js';
 
 const BOTH = { inlineMedia: true, linkPreviews: true };
 const NEITHER = { inlineMedia: false, linkPreviews: false };
@@ -109,6 +110,22 @@ describe('previewableUrls — what counts as a URL', () => {
     expect(previewableUrls(`ok https://e.test/fine.png ${hidden}`, BOTH)).toEqual([
       'https://e.test/fine.png',
     ]);
+  });
+
+  // The other side of the same test: a run whose matched pair is a slot the palette can't paint
+  // is NOT hidden, so its links are ordinary links.
+  //
+  // ⚠ This is load-bearing rather than academic. `applySpoilerMarkup` closes a spoiler with
+  // `\x0399,99` when a digit follows it, so the tail of those messages is a 99,99 run — and
+  // skipping it here would silently drop the preview for any URL after such a spoiler. A missing
+  // preview traced back to a colour code is not a debugging session anyone should have.
+  it('still resolves a link in an unrenderable matched pair, which is not a spoiler', () => {
+    expect(previewableUrls('\x0399,99https://e.test/fine.png', BOTH)).toEqual([
+      'https://e.test/fine.png',
+    ]);
+    expect(
+      previewableUrls(applySpoilerMarkup('||x||5 then https://e.test/fine.png'), BOTH),
+    ).toEqual(['https://e.test/fine.png']);
   });
 
   it('strips formatting codes out of the URL rather than resolving them', () => {

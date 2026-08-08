@@ -624,7 +624,13 @@ export function splitTextByTokens(
     // inside the run would stay visible and leak the hidden content. Keep the
     // chosen colour on the segment so SpoilerText can paint the box in the
     // sender's colour rather than a generic gray.
-    if (run.fg != null && run.bg != null && run.fg === run.bg) {
+    // ⚠ `<= 15`, not just fg === bg. The palette has sixteen slots, so anything above resolves
+    // to null (see mircColor) and paints no box — `\x0399,99text\x03` satisfied fg === bg while
+    // drawing nothing, so text rendered in the clear became a neutral grey spoiler nobody could
+    // usefully reveal. 99 is mIRC's "default", a common way to write a run, and it is also what
+    // applySpoilerMarkup now emits to close a spoiler before a digit: without this check that
+    // close would turn the whole rest of the line into a spoiler box.
+    if (run.fg != null && run.bg != null && run.fg === run.bg && run.fg <= 15) {
       out.push({ text: run.text, spoiler: true, fg: run.fg, ...fmt });
       continue;
     }

@@ -69,8 +69,14 @@ export function previewableUrls(
 
   for (const run of parseIrcFormatting(text)) {
     // Same test the renderer uses for the IRC spoiler convention: a run whose foreground and
-    // background are the same colour is invisible text.
-    if (run.fg != null && run.bg != null && run.fg === run.bg) continue;
+    // background are the same *renderable* colour is invisible text.
+    //
+    // ⚠ The `<= 15` half has to match splitTextByTokens exactly. Slots above 15 paint nothing,
+    // so such a run isn't hidden and its links are ordinary links — and since applySpoilerMarkup
+    // now closes a spoiler with `\x0399,99` when a digit follows, the tail of those messages is
+    // a 99,99 run. Without this, a URL anywhere after such a spoiler would silently lose its
+    // preview, which is a hard failure to trace back to a colour code.
+    if (run.fg != null && run.bg != null && run.fg === run.bg && run.fg <= 15) continue;
 
     for (const match of run.text.matchAll(createUrlRegex())) {
       const raw = match[0];

@@ -88,4 +88,44 @@ describe('applySpoilerMarkup → splitTextByTokens round trip', () => {
   it('still recognises an incoming 01,01 spoiler from another client', () => {
     expect(parse('\x0301,01secret\x03')).toEqual([{ text: 'secret', spoiler: true, fg: 1 }]);
   });
+
+  // ⚠⚠ The close is the dangerous end, and it ate typed text. A bare \x03 followed by a digit is
+  // a colour CODE, so the digit went with it: `||spoiler||5 stars` reached the channel as
+  // " stars" in colour 5 with the "5" deleted, and `the code is ||1234||5678` lost "56" and
+  // rendered the rest in colour 56.
+  //
+  // Asserted as a round trip rather than on the bytes: what matters is that every character
+  // typed after the spoiler survives, and that the spoiler's background doesn't bleed onto it.
+  it.each([
+    ['||spoiler||5 stars', 'spoiler', '5 stars'],
+    ['the code is ||1234||5678', '1234', '5678'],
+    ['||a||0', 'a', '0'],
+  ])('keeps the text after a spoiler when it starts with a digit (%s)', (input, hidden, after) => {
+    const segs = parse(applySpoilerMarkup(input));
+    const index = segs.findIndex((s) => s.spoiler);
+    expect(segs[index]?.text).toBe(hidden);
+
+    const tail = segs.slice(index + 1);
+    expect(tail.map((s) => s.text).join('')).toBe(after);
+    // …and it must not still be sitting on the spoiler's box, nor be a spoiler itself.
+    for (const seg of tail) {
+      expect(seg.bg).not.toBe(14);
+      expect(seg.spoiler).toBeFalsy();
+    }
+  });
+
+  it('keeps the cheap one-byte close when nothing collides', () => {
+    expect(applySpoilerMarkup('||a|| ok').endsWith('\x03 ok')).toBe(true);
+    expect(applySpoilerMarkup('||a||').endsWith('a\x03')).toBe(true);
+    // A comma is safe: only a digit can start a colour code.
+    expect(applySpoilerMarkup('||a||,b').endsWith('\x03,b')).toBe(true);
+  });
+
+  // The half that makes the close above safe. 99 is mIRC's "default" and paints nothing, so a
+  // 99,99 run is not hidden text — treating it as a spoiler turned readable text into a grey box
+  // nobody could usefully reveal, and would turn the tail of every digit-followed spoiler into
+  // one.
+  it('does not treat an unrenderable matched pair as a spoiler', () => {
+    expect(parse('\x0399,99tail text')).toEqual([{ text: 'tail text', fg: 99, bg: 99 }]);
+  });
 });
