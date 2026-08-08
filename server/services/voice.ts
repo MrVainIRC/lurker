@@ -241,13 +241,16 @@ export async function listActiveCalls(): Promise<
   return out;
 }
 
-// ─── Call presence (fed by LiveKit webhooks) ───────────────────────────────
-// Deliberately STATELESS. An earlier draft kept an in-memory identity registry
-// and derived counts from join/leave deltas — which lies after a restart (the
-// first post-restart join "resets" a 3-person call's badge to 1, and leaves
-// with an empty registry broadcast nothing, freezing badges). The webhook event
-// itself carries the authoritative Room.numParticipants at event time, and the
-// room NAME encodes (host, channel) — so there is nothing worth remembering.
+// ─── Call presence (webhooks trigger, the SFU API answers) ─────────────────
+// Two designs died before this one. A delta registry lies after a restart (the
+// first post-restart join "resets" a 3-person badge to 1). The event's own
+// Room.numParticipants looked authoritative but is not, verified against a live
+// SFU: it is ABSENT (=0) on participant_joined, and on participant_left it
+// still included the leaver AND a participant whose unclean disconnect hadn't
+// registered yet. So a webhook is only a TRIGGER that occupancy changed; the
+// count is fetched from the SFU's participant list — the same source /presence
+// hydration uses, which QA showed is right. One API round-trip per join/leave
+// is nothing at call-event rates.
 
 export interface CallPresenceChange {
   room: string;
@@ -272,34 +275,44 @@ export async function receiveWebhook(
   }
 }
 
-/** Turn a verified webhook event into the presence change to broadcast, or
- *  null when the event carries no occupancy change or the room is not a
- *  channel room (DM presence is never broadcast — that would leak who is
- *  talking to whom). Counts come from the event's own Room.numParticipants —
- *  authoritative at event time and immune to a Lurker restart. */
-export function applyWebhookEvent(ev: WebhookEvent): CallPresenceChange | null {
+/** Pure half: does this verified webhook event mean a CHANNEL room's occupancy
+ *  may have changed, and for which (host, channel)? Null for non-occupancy
+ *  events and for DM rooms (DM presence is never broadcast — that would leak
+ *  who is talking to whom). */
+export function webhookCallRoom(
+  ev: WebhookEvent,
+): { room: string; host: string; channel: string } | null {
   const room = ev.room?.name;
   if (!room) return null;
-  let count: number;
   switch (ev.event) {
     case 'participant_joined':
     case 'participant_left':
     case 'participant_connection_aborted':
-      count = Number(ev.room?.numParticipants ?? 0);
-      break;
     case 'room_finished':
-      count = 0;
       break;
     default:
       return null;
   }
   const mapping = parseRoom(room); // the room name encodes (host, channel)
-  if (!mapping) return null; // DM room / unparseable → nothing to broadcast
-  return {
-    room,
-    host: mapping.host,
-    channel: mapping.channel,
-    active: count > 0,
-    count,
-  };
+  if (!mapping) return null;
+  return { room, host: mapping.host, channel: mapping.channel };
+}
+
+/** The room's live participant count straight from the SFU, or null when it
+ *  can't be determined (unconfigured / API failure) — callers must SKIP the
+ *  broadcast then, because a made-up 0 would wrongly clear every badge on a
+ *  transient error. A room the SFU no longer knows counts as genuinely 0. */
+export async function liveCallCount(room: string): Promise<number | null> {
+  const svc = roomService();
+  if (!svc) return null;
+  try {
+    return (await svc.listParticipants(room)).length;
+  } catch (err) {
+    // listParticipants rejects for a closed/unknown room — that IS zero. Only
+    // treat it as unknown if the SFU itself was unreachable.
+    const msg = String((err as Error)?.message ?? err);
+    if (/not found|does not exist|404/i.test(msg)) return 0;
+    console.error('[voice] live count query failed:', err);
+    return null;
+  }
 }

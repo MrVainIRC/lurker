@@ -71,9 +71,20 @@ vi.mock('../services/ircManager.js', () => ({ default: fakeManager }));
 // frame without dragging the real hub (and its socket state) into the app.
 const h = vi.hoisted(() => ({
   fanOutToUser: vi.fn<(userId: number, payload: Record<string, unknown>) => void>(),
+  liveCallCount: vi.fn<(room: string) => Promise<number | null>>(),
 }));
 vi.mock('../services/wsHub.js', () => ({ fanOutToUser: h.fanOutToUser }));
+// Partial mock: liveCallCount queries the SFU over HTTP, which doesn't exist in
+// tests — everything else in the voice service runs real.
+vi.mock('../services/voice.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/voice.js')>()),
+  liveCallCount: h.liveCallCount,
+}));
 const fanOutToUser = h.fanOutToUser;
+
+/** The webhook route acks the SFU BEFORE querying the count + fanning out —
+ *  let that post-response async work settle before asserting on it. */
+const settle = () => new Promise((r) => setTimeout(r, 20));
 
 let app: Express;
 let agent: LurkerTestAgent;
@@ -119,6 +130,7 @@ afterEach(() => {
   fakeManager.conn = null;
   fakeManager.all = [];
   fanOutToUser.mockClear();
+  h.liveCallCount.mockReset();
 });
 
 afterAll(() => ctx.cleanup());
@@ -370,23 +382,49 @@ describe('POST /api/voice/webhook (public, signature-verified)', () => {
       channels: [{ name: '#other', modes: { carol: [] } }],
     });
     fakeManager.all = [inChannel, elsewhere];
+    h.liveCallCount.mockResolvedValueOnce(3);
 
-    const body = webhookBody('participant_joined', 'net-irc.libera.chat-c-#dev', 3);
+    const body = webhookBody('participant_joined', 'net-irc.libera.chat-c-#dev', 1);
     const res = await testRequest(app)
       .post('/api/voice/webhook')
       .set('Content-Type', 'application/webhook+json')
       .set('Authorization', await signedAuth(body))
       .send(body);
     expect(res.status).toBe(200);
+    await settle();
 
+    // Count is the SFU's answer (3), NOT the event body's numParticipants (1) —
+    // the event field is unreliable (see liveCallCount).
+    expect(h.liveCallCount).toHaveBeenCalledWith('net-irc.libera.chat-c-#dev');
     expect(fanOutToUser).toHaveBeenCalledTimes(1);
     expect(fanOutToUser).toHaveBeenCalledWith(user.id, {
       kind: 'call-presence',
       networkId: network.id,
       target: '#Dev', // the receiving connection's own wire spelling
       active: true,
-      count: 3, // straight from the event's Room.numParticipants
+      count: 3,
     });
+  });
+
+  it('skips the broadcast when the SFU count query fails (stale beats wrongly-cleared)', async () => {
+    enableVoice();
+    fakeManager.all = [
+      makeConn({
+        nick: 'alice',
+        network: { id: network.id, host: 'irc.libera.chat', user_id: user.id },
+        channels: [{ name: '#dev', modes: { alice: [] } }],
+      }),
+    ];
+    h.liveCallCount.mockResolvedValueOnce(null);
+    const body = webhookBody('participant_left', 'net-irc.libera.chat-c-#dev', 1);
+    const res = await testRequest(app)
+      .post('/api/voice/webhook')
+      .set('Content-Type', 'application/webhook+json')
+      .set('Authorization', await signedAuth(body))
+      .send(body);
+    expect(res.status).toBe(200);
+    await settle();
+    expect(fanOutToUser).not.toHaveBeenCalled();
   });
 
   it('broadcasts nothing for DM rooms', async () => {
@@ -405,6 +443,9 @@ describe('POST /api/voice/webhook (public, signature-verified)', () => {
       .set('Authorization', await signedAuth(body))
       .send(body);
     expect(res.status).toBe(200);
+    await settle();
+    // A DM room is filtered before the SFU is even asked.
+    expect(h.liveCallCount).not.toHaveBeenCalled();
     expect(fanOutToUser).not.toHaveBeenCalled();
   });
 });

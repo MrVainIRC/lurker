@@ -13,7 +13,8 @@ import {
   meetsJoinMode,
   canModerateCall,
   canAdminCall,
-  applyWebhookEvent,
+  webhookCallRoom,
+  liveCallCount,
   receiveWebhook,
   listActiveCalls,
 } from './voice.js';
@@ -234,61 +235,48 @@ describe('parseRoom', () => {
   });
 });
 
-describe('applyWebhookEvent', () => {
-  const ev = (event: string, room: string, numParticipants?: number): WebhookEvent =>
+describe('webhookCallRoom', () => {
+  const ev = (event: string, room: string): WebhookEvent =>
     ({
       event,
-      room: { name: room, numParticipants },
+      room: { name: room },
       participant: { identity: 'someone' },
     }) as WebhookEvent;
 
-  it('is stateless: count comes from the event, channel from the room name', () => {
-    // A delta registry lied after a restart (first post-restart join "reset" a
-    // 3-person call to 1; leaves broadcast nothing). Room.numParticipants is
-    // authoritative at event time, so a mid-call restart changes nothing.
-    const room = 'net-irc.libera.chat-c-#restart-proof';
-    const change = applyWebhookEvent(ev('participant_joined', room, 4));
-    expect(change).toEqual({
-      room,
-      host: 'irc.libera.chat',
-      channel: '#restart-proof',
-      active: true,
-      count: 4,
-    });
+  it('flags every occupancy-changing event for a channel room', () => {
+    // The event is only a TRIGGER — counts come from liveCallCount, because
+    // the event's own Room.numParticipants is not reliable (verified against
+    // a live SFU: absent on joins, stale on leaves).
+    const room = 'net-irc.libera.chat-c-#dev';
+    for (const e of [
+      'participant_joined',
+      'participant_left',
+      'participant_connection_aborted',
+      'room_finished',
+    ]) {
+      expect(webhookCallRoom(ev(e, room))).toEqual({
+        room,
+        host: 'irc.libera.chat',
+        channel: '#dev',
+      });
+    }
   });
 
-  it('handles leaves, aborted connections, and room end', () => {
-    const room = 'net-irc.libera.chat-c-#counting';
-    expect(applyWebhookEvent(ev('participant_left', room, 1))).toMatchObject({
-      count: 1,
-      active: true,
-    });
-    expect(applyWebhookEvent(ev('participant_left', room, 0))).toMatchObject({
-      count: 0,
-      active: false,
-    });
-    expect(applyWebhookEvent(ev('participant_connection_aborted', room, 2))).toMatchObject({
-      count: 2,
-    });
-    // room_finished carries no reliable count — it IS the zero.
-    expect(applyWebhookEvent(ev('room_finished', room, 3))).toMatchObject({
-      count: 0,
-      active: false,
-    });
-  });
-
-  it('ignores DM rooms (no channel to badge) and irrelevant events', () => {
-    expect(applyWebhookEvent(ev('participant_joined', 'net-h-d-a:b', 1))).toBeNull();
-    expect(applyWebhookEvent(ev('track_published', 'net-irc.libera.chat-c-#x', 1))).toBeNull();
+  it('ignores DM rooms (no channel to badge) and non-occupancy events', () => {
+    expect(webhookCallRoom(ev('participant_joined', 'net-h-d-a:b'))).toBeNull();
+    expect(webhookCallRoom(ev('track_published', 'net-irc.libera.chat-c-#x'))).toBeNull();
+    expect(webhookCallRoom(ev('room_started', 'net-irc.libera.chat-c-#x'))).toBeNull();
   });
 });
 
-describe('receiveWebhook / listActiveCalls (unconfigured)', () => {
-  it('both fail closed when voice is unconfigured', async () => {
+describe('receiveWebhook / listActiveCalls / liveCallCount (unconfigured)', () => {
+  it('all fail closed when voice is unconfigured', async () => {
     delete process.env.LIVEKIT_WS_URL;
     delete process.env.LIVEKIT_API_KEY;
     delete process.env.LIVEKIT_API_SECRET;
     await expect(receiveWebhook('{}', 'whatever')).resolves.toBeNull();
     await expect(listActiveCalls()).resolves.toEqual([]);
+    // null (unknown), NOT 0 — a fabricated zero would clear real badges.
+    await expect(liveCallCount('net-h-c-#x')).resolves.toBeNull();
   });
 });

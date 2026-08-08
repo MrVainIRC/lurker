@@ -22,7 +22,8 @@ import {
   removeFromCall,
   muteParticipant,
   receiveWebhook,
-  applyWebhookEvent,
+  webhookCallRoom,
+  liveCallCount,
   listActiveCalls,
   type CallPresenceChange,
 } from '../services/voice.js';
@@ -274,9 +275,17 @@ voicePublicRouter.post(
       res.status(401).end();
       return;
     }
-    const change = applyWebhookEvent(ev);
-    if (change) broadcastCallPresence(change);
+    // Ack the SFU immediately — the count query below must not stall LiveKit's
+    // webhook queue (it retries + drops slow deliveries).
     res.status(200).end();
+    const trigger = webhookCallRoom(ev);
+    if (!trigger) return;
+    // The event told us occupancy changed; the SFU's participant list says to
+    // what (the event's own numParticipants field is not reliable — see
+    // liveCallCount). room_finished needs no query: it IS the zero.
+    const count = ev.event === 'room_finished' ? 0 : await liveCallCount(trigger.room);
+    if (count == null) return; // SFU unreachable — better stale than wrongly cleared
+    broadcastCallPresence({ ...trigger, count, active: count > 0 });
   },
 );
 
