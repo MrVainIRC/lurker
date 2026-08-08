@@ -143,8 +143,16 @@ const barStyle = computed(() =>
     ? { left: `${pos.value.x}px`, top: `${pos.value.y}px`, right: 'auto', bottom: 'auto' }
     : {},
 );
+function clampPos(x: number, y: number): { x: number; y: number } {
+  return {
+    x: Math.max(4, Math.min(window.innerWidth - 60, x)),
+    y: Math.max(4, Math.min(window.innerHeight - 40, y)),
+  };
+}
 function onHeaderDown(e: PointerEvent) {
-  // Buttons in the header (dismiss) must stay clickable, not start a drag.
+  // Primary button/touch only, and buttons in the header (dismiss) must stay
+  // clickable, not start a drag.
+  if (e.button !== 0) return;
   if ((e.target as HTMLElement).closest('button')) return;
   const bar = (e.currentTarget as HTMLElement).closest('.call-bar') as HTMLElement | null;
   if (!bar) return;
@@ -152,18 +160,29 @@ function onHeaderDown(e: PointerEvent) {
   grabOffset = { x: e.clientX - rect.left, y: e.clientY - rect.top };
   window.addEventListener('pointermove', onDragMove);
   window.addEventListener('pointerup', onDragEnd);
+  // A touch/pen drag can end in pointercancel (app switch, system overlay,
+  // rotation) — without this the leaked move handler makes the bar chase every
+  // later pointer until some unrelated pointerup.
+  window.addEventListener('pointercancel', onDragEnd);
 }
 function onDragMove(e: PointerEvent) {
-  pos.value = {
-    x: Math.max(4, Math.min(window.innerWidth - 60, e.clientX - grabOffset.x)),
-    y: Math.max(4, Math.min(window.innerHeight - 40, e.clientY - grabOffset.y)),
-  };
+  pos.value = clampPos(e.clientX - grabOffset.x, e.clientY - grabOffset.y);
 }
 function onDragEnd() {
   window.removeEventListener('pointermove', onDragMove);
   window.removeEventListener('pointerup', onDragEnd);
+  window.removeEventListener('pointercancel', onDragEnd);
 }
-onBeforeUnmount(onDragEnd);
+// A dragged position can be stranded offscreen by a resize/rotation — the bar
+// holds the ONLY leave control, so re-clamp it into the new viewport.
+function onViewportResize() {
+  if (pos.value) pos.value = clampPos(pos.value.x, pos.value.y);
+}
+window.addEventListener('resize', onViewportResize);
+onBeforeUnmount(() => {
+  onDragEnd();
+  window.removeEventListener('resize', onViewportResize);
+});
 
 // ─── Op moderation (the same shared gate the server enforces) ───────────────
 // The server enforces; showing the buttons only to ops is UX, not security.
@@ -231,6 +250,15 @@ function onVol(id: string, e: Event) {
 .call-bar.has-video {
   width: 480px;
   min-height: 280px;
+}
+/* Small viewports keep the old guarantee that the bar leaves the chat (and
+   composer) visible — CSS resize corners don't exist on touch, so height must
+   self-limit there instead of relying on the user to shrink it. */
+@media (max-width: 600px) {
+  .call-bar,
+  .call-bar.has-video {
+    max-height: 50vh;
+  }
 }
 .call-head {
   display: flex;

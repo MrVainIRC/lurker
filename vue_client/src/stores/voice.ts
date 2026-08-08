@@ -308,8 +308,14 @@ export const useVoiceStore = defineStore('voice', {
         // allow it (Chrome's "share tab audio"); it silently degrades to
         // video-only otherwise.
         await room.localParticipant.setScreenShareEnabled(!this.screenOn, { audio: true });
-      } catch {
-        /* user cancelled the screen picker — not an error */
+      } catch (e: unknown) {
+        // NotAllowedError is the user cancelling the picker (or an OS-level
+        // deny — indistinguishable, and silence is the right call for the
+        // common cancel). Everything else — no capturable source, device
+        // errors, SFU publish failures — must NOT die silently as if the user
+        // changed their mind.
+        if (e instanceof DOMException && e.name === 'NotAllowedError') return;
+        this.error = e instanceof Error ? e.message : 'could not share screen';
       }
     },
 
