@@ -151,8 +151,11 @@ export const useVoiceStore = defineStore('voice', {
         this.error = null;
         this.syncParticipants();
       } catch (e: unknown) {
-        this.error = e instanceof Error ? e.message : 'could not start call';
+        // Order matters: cleanup() clears `error` (so leaving a call never
+        // strands the bar open on a stale message) — set the failure reason
+        // AFTER it so the failed-call state still says why.
         await this.cleanup();
+        this.error = e instanceof Error ? e.message : 'could not start call';
       } finally {
         this.connecting = false;
       }
@@ -217,6 +220,10 @@ export const useVoiceStore = defineStore('voice', {
       this.volumes = {};
       this.networkId = null;
       this.target = '';
+      // In-call notices (op-mute, mute-toggle failures) die with the call —
+      // otherwise the CallBar stays wedged open showing them after /leave.
+      // startCall's catch re-sets its failure reason after calling this.
+      this.error = null;
     },
   },
 });

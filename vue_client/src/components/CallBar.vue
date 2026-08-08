@@ -88,6 +88,7 @@ import { computed } from 'vue';
 import { useVoiceStore } from '../stores/voice.js';
 import { useBuffersStore, bufferKey } from '../stores/buffers.js';
 import { useNetworksStore } from '../stores/networks.js';
+import { useToastsStore } from '../stores/toasts.js';
 import { canModerateCall } from '../../../shared/voiceModes.js';
 import { api } from '../api.js';
 import IconButton from './IconButton.vue';
@@ -121,7 +122,13 @@ async function moderate(identity: string, action: 'mute' | 'remove') {
       body: { networkId: voice.networkId, target: voice.target, action, identity },
     });
   } catch (e: unknown) {
-    voice.error = e instanceof Error ? e.message : 'moderation failed';
+    // A toast, NOT voice.error — that field means "the CALL failed" and keeps
+    // the bar rendered; a failed moderation click must not wedge it open.
+    useToastsStore().push({
+      title: `Could not ${action} ${identity}`,
+      body: e instanceof Error ? e.message : 'the server rejected the action',
+      kind: 'warn',
+    });
   }
 }
 
