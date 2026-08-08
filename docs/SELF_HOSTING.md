@@ -322,6 +322,38 @@ Playback replays the last 50 lines per joined channel (plus your 20 most recentl
 
 Known limitations (shared-connection bouncer semantics): replies to one attached client's WHOIS/LIST are visible to all attached clients on that network; Lurker-side ignore rules don't filter the live relay; and on end-to-end encrypted channels an attached client sees the wire ciphertext for incoming messages.
 
+### Voice calls (LiveKit)
+
+Lurker can offer native voice calls for channels and DMs, powered by a [LiveKit](https://livekit.io/) SFU you host yourself. Two things to understand before enabling it:
+
+- **Call audio is not peer-to-peer, and it never passes through Lurker.** Every participant streams to the SFU, which forwards to the others. Your host pays the bandwidth for every participant's stream.
+- **WebRTC has real networking requirements.** On a LAN this works out of the box; across the public internet the SFU needs its UDP port reachable, and clients behind restrictive NAT need a TURN server. This is where self-hosted calling most often fails — if calls connect but carry no audio, it is almost always NAT, not Lurker.
+
+Enable it by uncommenting the voice block in `docker-compose.yml` and starting the bundled SFU:
+
+```yaml
+environment:
+  - LURKER_VOICE_ENABLED=true
+  - LIVEKIT_WS_URL=ws://<host-clients-can-reach>:7880
+  - LIVEKIT_API_KEY=devkey
+  - LIVEKIT_API_SECRET=<your own long random secret>
+```
+
+```sh
+docker compose --profile voice up -d
+```
+
+`LIVEKIT_API_KEY`/`SECRET` must match the `LIVEKIT_KEYS` pair on the `livekit` service — that shared secret is how Lurker signs call tokens the SFU trusts. `LIVEKIT_WS_URL` is the address **clients** connect to: `ws://<lan-ip>:7880` on a LAN, or `wss://` behind your TLS proxy for the public internet (put only the signaling port behind the proxy; media flows over UDP 7882 directly). Set the LiveKit `--node-ip` flag to an address clients can actually reach, and see the [LiveKit deployment docs](https://docs.livekit.io/home/self-hosting/deployment/) for TURN setup.
+
+Everyone in a channel can join that channel's call — from the button atop the member list, or with `/call` in the buffer. A DM call is `/call` in the DM: both sides join the same room, but nothing "rings" yet — tell the other person to `/call` you back (in-call presence indicators are planned as a follow-up). Call rooms are derived from the IRC server **hostname**, so users who should share calls must configure the _same_ host: `irc.libera.chat` and `irc.eu.libera.chat` are different rooms even though they're the same network.
+
+Two trust caveats, both in line with IRC's own model — fine among people you already trust:
+
+- Channel membership is checked **when the call token is issued**, and tokens last 2 hours. Someone kicked or banned mid-call can rejoin the room on their existing token until it expires (op-side call moderation is planned as a follow-up).
+- DM call rooms are named by the two nicks, and IRC nicks are transferable: on networks without nick registration, someone who takes an offline person's nick could join a call room under that name.
+
+Disabling voice (removing the env vars) makes every call affordance disappear from clients; browsers only download the WebRTC code the first time someone actually joins a call.
+
 ---
 
 ## Troubleshooting

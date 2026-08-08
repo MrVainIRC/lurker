@@ -166,6 +166,7 @@ import { useDraftStore } from '../stores/drafts.js';
 import { useSettingsStore } from '../stores/settings.js';
 import { useUploadsStore, onInsertUrl } from '../stores/uploads.js';
 import { useDccStore, percentReceived, type DccTransfer } from '../stores/dcc.js';
+import { useVoiceStore } from '../stores/voice.js';
 import { useToastsStore } from '../stores/toasts.js';
 import { useIgnoresStore, type IgnoreEntry } from '../stores/ignores.js';
 import { useRelayBotsStore } from '../stores/relayBots.js';
@@ -2365,6 +2366,8 @@ const COMMANDS_LINES = [
   '      modify <name> [-flags…]   ·   remove <name>   ·   move <name> <position>',
   '      connect <name>   ·   disconnect <name>   (Lurker folds irssi /server into these)',
   '  /dcc [list]            — DCC downloads: list, or accept/reject/cancel <id>',
+  '  /call                  — start/join a voice call in this channel or DM (if enabled)',
+  '  /hangup                — leave the current voice call',
   '      e.g. /dcc   ·   /dcc accept 3   ·   /dcc reject 3   ·   /dcc cancel 3',
   '  /set <key> <value…>    — change a setting; /set (or /set ?) lists all keys',
   '  /get <key>             — read a setting back (output in the system buffer)',
@@ -3103,6 +3106,35 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // the buffer when it settles.
       void runDcc(argLine, networkId, target);
       return true;
+    case 'call': {
+      // Start/join a voice call in the current channel or DM buffer. This is
+      // the only DM entry point (the member-list button is channels-only), per
+      // the slash-command-first ethos: the button is a view of this verb.
+      const voice = useVoiceStore();
+      if (!config.voiceEnabled) {
+        localInfo(networkId, target, 'voice calls are not enabled on this server');
+        return true;
+      }
+      if (networkId == null || target.startsWith(':server:')) {
+        localInfo(networkId, target, 'usage: /call — in a channel or DM buffer');
+        return true;
+      }
+      if (voice.active || voice.connecting) {
+        localInfo(networkId, target, `already in a call (${voice.label}) — /hangup first`);
+        return true;
+      }
+      void voice.startCall(networkId, target, target);
+      return true;
+    }
+    case 'hangup': {
+      const voice = useVoiceStore();
+      if (!voice.active && !voice.connecting) {
+        localInfo(networkId, target, 'not in a call');
+        return true;
+      }
+      void voice.leave();
+      return true;
+    }
     case 'theme':
       // Theme presets. App-scoped like /set; async like /dcc.
       void runTheme(argLine, networkId, target);

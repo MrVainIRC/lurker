@@ -48,7 +48,7 @@ GET /api/config            (no auth)
 → { "edition": "standalone" | "node",
     "protocolVersion": 1,
     "minProtocolVersion": 1,
-    "features": { "linkPreviews": false } }
+    "features": { "linkPreviews": false, "voice": false } }
 ```
 
 `features` carries instance-level flags an operator turned on. Treat a missing
@@ -57,7 +57,8 @@ Settings whose registry entry names a feature (`requiresFeature`) must be
 **hidden**, not merely disabled, when that flag is false: there is no server
 behind them, and the endpoints aren't mounted, so a toggle would do nothing.
 `linkPreviews` gates `chat.inline_media.enabled`, `chat.link_previews.enabled`,
-and the `/api/link-preview/*` endpoints.
+and the `/api/link-preview/*` endpoints. `voice` gates the `/api/voice/*`
+endpoints — when false, render no call UI at all.
 
 Node edition disables `/api/api-tokens`, `/mcp`, and `/uploads/*` static serving;
 standalone has no `/api/node/*`. The WS protocol itself is identical in both.
@@ -1101,6 +1102,31 @@ check before uploading.
 
 `GET /?limit` list · `POST /:id/accept|reject|cancel`. Live updates via
 `dcc-transfer` frames; file bytes move over IRC, not HTTP.
+
+### Voice calls — `/api/voice` (503 unless the instance enables voice)
+
+Lurker never carries call media — it mints room-scoped tokens for the
+operator's LiveKit SFU, and your client connects to the SFU directly (any
+LiveKit client SDK).
+
+```
+POST /token   { networkId, target }
+→ { token, room, url }        url = the SFU's ws(s):// origin
+```
+
+Gates, in order: `503` voice not enabled · `404` network not owned · `409`
+network not connected · `403` target is a channel you haven't joined (DMs skip
+this — opening a DM call **is** the invite). The token is a 2-hour JWT granting
+join/publish/subscribe on exactly one room; `identity` inside it is your
+current IRC nick, which is what other participants render.
+
+Room names are derived server-side from the network **host** (never the
+`networkId`): `net-<host>-c-<channel>` for channels,
+`net-<host>-d-<nickA>:<nickB>` (sorted pair, `:`-joined) for DMs. Channel and
+nick are folded with the network's declared CASEMAPPING, the host ASCII-folded
+— so every member of a channel lands in the same room, even from another
+Lurker instance sharing the SFU. The host string must match **exactly** across
+users: different DNS aliases of one network derive different rooms.
 
 ### Export / import
 
