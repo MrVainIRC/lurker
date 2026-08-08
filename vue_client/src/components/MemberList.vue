@@ -5,6 +5,18 @@
 
 <template>
   <div class="members">
+    <div v-if="canCall" class="members-head">
+      <button
+        type="button"
+        class="call-btn"
+        :disabled="voice.connecting || voice.active"
+        :title="inThisCall ? 'You are in this call' : 'Start or join a voice call in this channel'"
+        @click="startCall"
+      >
+        <i class="fa-solid fa-phone" aria-hidden="true"></i>
+        <span>{{ inThisCall ? 'In call' : 'Call' }}</span>
+      </button>
+    </div>
     <ul ref="listEl">
       <li
         v-for="m in sorted"
@@ -45,6 +57,8 @@ import { useBuffersStore, type BufferMember } from '../stores/buffers.js';
 import { useNickColors } from '../composables/useNickColors.js';
 import { useMemberActions } from '../composables/useMemberActions.js';
 import { useIgnoresStore } from '../stores/ignores.js';
+import { useConfigStore } from '../stores/config.js';
+import { useVoiceStore } from '../stores/voice.js';
 import {
   PREFIX_ORDER,
   prefixOf as modePrefixOf,
@@ -62,6 +76,25 @@ const listEl = ref<HTMLElement | null>(null);
 
 const buffer = computed(() => (networks.activeKey ? buffers.byKey(networks.activeKey) : null));
 const members = computed((): BufferMember[] => buffer.value?.members || []);
+
+// ─── Voice call (channels only, and only when the instance offers it) ────────
+const config = useConfigStore();
+const voice = useVoiceStore();
+const canCall = computed(
+  () => config.voiceEnabled && buffer.value?.kind === 'channel' && buffer.value?.networkId != null,
+);
+const inThisCall = computed(
+  () =>
+    voice.active &&
+    voice.networkId === (buffer.value?.networkId ?? null) &&
+    voice.target === buffer.value?.target,
+);
+function startCall() {
+  const b = buffer.value;
+  if (!b || b.networkId == null) return;
+  // label = the channel target; the store mints its own token + room.
+  voice.startCall(b.networkId, b.target, b.target);
+}
 const selfNick = computed(() => {
   const b = buffer.value;
   if (!b || b.networkId == null) return null;
@@ -190,6 +223,18 @@ const sorted = computed(() => {
   flex-direction: column;
   height: 100%;
   min-height: 0;
+}
+.members-head {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+/* Layout only — color/border/disabled come from the global button language. */
+.call-btn {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
 }
 ul {
   list-style: none;
