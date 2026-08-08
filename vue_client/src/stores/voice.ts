@@ -96,6 +96,19 @@ export const useVoiceStore = defineStore('voice', {
             detached.forEach((el) => el.remove());
             audioEls = audioEls.filter((el) => !detached.includes(el));
           })
+          .on(RoomEvent.TrackMuted, (pub, participant) => {
+            // Keep `muted` honest when the mute didn't come from OUR toggle —
+            // an op's server-mute would otherwise be invisible to the mutee
+            // (icon still live, no feedback at all).
+            if (
+              String(pub.source) === 'microphone' &&
+              participant.identity === r.localParticipant.identity &&
+              !this.muted
+            ) {
+              this.muted = true;
+              this.error = 'a channel operator muted your microphone';
+            }
+          })
           .on(RoomEvent.ParticipantConnected, () => this.syncParticipants())
           .on(RoomEvent.ParticipantDisconnected, () => this.syncParticipants())
           .on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
