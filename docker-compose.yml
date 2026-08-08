@@ -98,8 +98,21 @@ services:
     profiles: ['voice']
     command: --dev --node-ip=127.0.0.1
     environment:
-      # `key: secret` pairs. Keep in lockstep with the lurker service vars.
-      - 'LIVEKIT_KEYS=devkey: replace-me-with-a-long-random-secret'
+      # Inline LiveKit config. The `keys` pair must stay in lockstep with the
+      # LIVEKIT_API_KEY / LIVEKIT_API_SECRET vars on the lurker service. The
+      # `webhook` block is what makes live "Join call (N)" badges work: LiveKit
+      # posts signed room events to Lurker at the URL below (`lurker` is the
+      # compose service name — adjust if you renamed it or run the SFU
+      # elsewhere). Without it, calls still work but presence only refreshes
+      # on reconnect.
+      - |
+        LIVEKIT_CONFIG=
+        keys:
+          devkey: replace-me-with-a-long-random-secret
+        webhook:
+          api_key: devkey
+          urls:
+            - http://lurker:8015/api/voice/webhook
     ports:
       - '7880:7880' # signaling (WebSocket + HTTP)
       - '7881:7881' # WebRTC over TCP (ICE/TCP fallback)

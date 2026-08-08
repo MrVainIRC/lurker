@@ -14,8 +14,17 @@
         @click="startCall"
       >
         <i class="fa-solid fa-phone" aria-hidden="true"></i>
-        <span>{{ inThisCall ? 'In call' : 'Call' }}</span>
+        <span>{{ callBtnLabel }}</span>
       </button>
+      <label v-if="isOp" class="call-policy" title="Who may join this channel's call">
+        <span>Join</span>
+        <select :value="policy" @change="onPolicyChange">
+          <option value="none">anyone</option>
+          <option value="voice">voiced+</option>
+          <option value="halfop">halfop+</option>
+          <option value="op">ops only</option>
+        </select>
+      </label>
     </div>
     <ul ref="listEl">
       <li
@@ -59,6 +68,8 @@ import { useMemberActions } from '../composables/useMemberActions.js';
 import { useIgnoresStore } from '../stores/ignores.js';
 import { useConfigStore } from '../stores/config.js';
 import { useVoiceStore } from '../stores/voice.js';
+import { useCallPresenceStore } from '../stores/callPresence.js';
+import { api } from '../api.js';
 import {
   PREFIX_ORDER,
   prefixOf as modePrefixOf,
@@ -94,6 +105,60 @@ function startCall() {
   if (!b || b.networkId == null) return;
   // label = the channel target; the store mints its own token + room.
   void voice.startCall(b.networkId, b.target, b.target);
+}
+
+// "Join call (N)" badge for a call already in progress (webhook-driven counts,
+// hydrated on connect — see stores/callPresence).
+const callPresence = useCallPresenceStore();
+const callCount = computed(() => {
+  const b = buffer.value;
+  return b?.networkId != null ? callPresence.countFor(b.networkId, b.target) : 0;
+});
+const callBtnLabel = computed(() => {
+  if (inThisCall.value) return 'In call';
+  if (callCount.value > 0) return `Join call (${callCount.value})`;
+  return 'Call';
+});
+
+// ─── Op join policy (q/a/o — mirrors the server's canAdminCall gate) ────────
+const OP_MODES = ['q', 'a', 'o'];
+const isOp = computed(() => selfModes.value.some((m) => OP_MODES.includes(m)));
+
+const policy = ref('none');
+
+// Load the channel's join policy whenever the active channel changes. Any
+// member may read it; only ops see the control (and only the server lets them
+// change it).
+watch(
+  buffer,
+  async (b) => {
+    policy.value = 'none';
+    if (!config.voiceEnabled || !b || b.kind !== 'channel' || b.networkId == null) return;
+    try {
+      const r = await api<{ minJoinMode: string }>(
+        `/api/voice/policy?networkId=${b.networkId}&target=${encodeURIComponent(b.target)}`,
+      );
+      policy.value = r.minJoinMode;
+    } catch {
+      /* leave default */
+    }
+  },
+  { immediate: true },
+);
+
+async function onPolicyChange(e: Event) {
+  const b = buffer.value;
+  if (!b || b.networkId == null) return;
+  const minJoinMode = (e.target as HTMLSelectElement).value;
+  try {
+    const r = await api<{ minJoinMode: string }>('/api/voice/policy', {
+      method: 'PUT',
+      body: { networkId: b.networkId, target: b.target, minJoinMode },
+    });
+    policy.value = r.minJoinMode;
+  } catch {
+    /* keep previous */
+  }
 }
 const selfNick = computed(() => {
   const b = buffer.value;
@@ -235,6 +300,17 @@ const sorted = computed(() => {
   align-items: center;
   justify-content: center;
   gap: var(--space-3);
+}
+.call-policy {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  color: var(--fg-muted);
+}
+.call-policy select {
+  flex: 1;
+  min-width: 0;
 }
 ul {
   list-style: none;

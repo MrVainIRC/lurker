@@ -657,6 +657,7 @@ a v1 client.
 | `chanlist-state` / `chanlist-result`                                                                                             | `/LIST` cache meta / result page                                                                                                                                                                                                                                                                                                                                                                            | Channel browser                                                                                                                                           |
 | `e2eExport` / `e2eImport`                                                                                                        | E2E key material / import result                                                                                                                                                                                                                                                                                                                                                                            | Replies, this socket only                                                                                                                                 |
 | `dcc-transfer`                                                                                                                   | full transfer row (snake_case)                                                                                                                                                                                                                                                                                                                                                                              | DCC state changes                                                                                                                                         |
+| `call-presence`                                                                                                                  | `networkId, target, active, count` — a voice call's participant count in a channel you've joined changed. `target` is in your connection's own spelling. Deltas only: re-snapshot via `GET /api/voice/presence` on every (re)connect, or a call that started while you had no socket never badges. Channels only — DM calls broadcast no presence                                                           | Voice-enabled instances, on SFU join/leave                                                                                                                |
 | `upload-progress`                                                                                                                | `token, phase, destination, percent`                                                                                                                                                                                                                                                                                                                                                                        | During REST upload (correlate via `progressToken`)                                                                                                        |
 | `export`                                                                                                                         | `job`                                                                                                                                                                                                                                                                                                                                                                                                       | Export job progress                                                                                                                                       |
 | `error`                                                                                                                          | `text`                                                                                                                                                                                                                                                                                                                                                                                                      | Non-fatal; also the reply to unknown verbs                                                                                                                |
@@ -1127,6 +1128,23 @@ nick are folded with the network's declared CASEMAPPING, the host ASCII-folded
 — so every member of a channel lands in the same room, even from another
 Lurker instance sharing the SFU. The host string must match **exactly** across
 users: different DNS aliases of one network derive different rooms.
+
+```
+GET  /presence?networkId       → { calls: [{ target, count }] }
+GET  /policy?networkId&target  → { minJoinMode }        none|voice|halfop|op
+PUT  /policy                   { networkId, target, minJoinMode }   ops (q/a/o)
+POST /moderate                 { networkId, target, action: mute|remove,
+                                 identity }             channel q/a/o/h only
+```
+
+`/presence` is the connect-time snapshot behind the `call-presence` frame
+(§7.1) — call it per connected network on every socket (re)connect. A token
+mint is gated by the channel's `minJoinMode` (403 with a human-readable
+`error` when below the bar). `mute` is a server-side mute of every published
+track (the target cannot self-unmute); `remove` kicks them from the room and
+invalidates re-joining on the same token. `POST /webhook` also lives under
+`/api/voice` but is LiveKit↔Lurker internal (signature-authenticated) — never
+call it from a client.
 
 ### Export / import
 

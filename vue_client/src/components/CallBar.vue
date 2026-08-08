@@ -41,6 +41,19 @@
               aria-hidden="true"
             ></i>
             <span class="part-nick" :title="id">{{ id }}</span>
+            <IconButton
+              v-if="amOp"
+              icon="fa-microphone-slash"
+              :label="`Mute ${id} for everyone`"
+              @click="moderate(id, 'mute')"
+            />
+            <IconButton
+              v-if="amOp"
+              icon="fa-user-slash"
+              :label="`Remove ${id} from call`"
+              danger
+              @click="moderate(id, 'remove')"
+            />
           </div>
           <input
             class="vol"
@@ -73,15 +86,44 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useVoiceStore } from '../stores/voice.js';
+import { useBuffersStore, bufferKey } from '../stores/buffers.js';
+import { useNetworksStore } from '../stores/networks.js';
+import { api } from '../api.js';
 import IconButton from './IconButton.vue';
 
 const voice = useVoiceStore();
+const buffers = useBuffersStore();
+const networks = useNetworksStore();
 
 const statusText = computed(() => {
   if (voice.connecting) return 'connecting…';
   if (voice.active) return 'connected';
   return 'call failed';
 });
+
+// ─── Op moderation (q/a/o/h — mirrors the server's canModerateCall gate) ────
+// The server enforces; showing the buttons only to ops is UX, not security.
+const MODERATE_MODES = ['q', 'a', 'o', 'h'];
+const amOp = computed(() => {
+  if (voice.networkId == null || !voice.target) return false;
+  const b = buffers.byKey(bufferKey(voice.networkId, voice.target));
+  const selfNick = networks.states[voice.networkId]?.nick;
+  if (!b || !selfNick) return false;
+  const me = b.members?.find((m) => m.nick.toLowerCase() === selfNick.toLowerCase());
+  return !!me?.modes?.some((mm) => MODERATE_MODES.includes(mm));
+});
+
+async function moderate(identity: string, action: 'mute' | 'remove') {
+  if (voice.networkId == null) return;
+  try {
+    await api('/api/voice/moderate', {
+      method: 'POST',
+      body: { networkId: voice.networkId, target: voice.target, action, identity },
+    });
+  } catch (e: unknown) {
+    voice.error = e instanceof Error ? e.message : 'moderation failed';
+  }
+}
 
 function volPct(id: string): number {
   return Math.round((voice.volumes[id] ?? 1) * 100);

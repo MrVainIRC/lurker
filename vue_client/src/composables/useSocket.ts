@@ -29,6 +29,7 @@ import { useWhoisStore } from '../stores/whois.js';
 import { useBookmarksStore } from '../stores/bookmarks.js';
 import { useDataExportStore } from '../stores/dataExport.js';
 import { useDccStore } from '../stores/dcc.js';
+import { useCallPresenceStore } from '../stores/callPresence.js';
 import { useUploadsStore } from '../stores/uploads.js';
 import { makeClientId } from '../utils/clientId.js';
 import { useToastsStore } from '../stores/toasts.js';
@@ -723,6 +724,18 @@ function handleMessage(raw: string): void {
     // cursor (#355).
     if (payload.networkId != null) trackSeenId(payload.id);
     applyEvent(payload);
+    return;
+  }
+  if (payload.kind === 'call-presence') {
+    // A voice call's participant count changed in a channel; badge users who
+    // aren't in the call. Its own top-level frame (not an 'irc' event) so it
+    // never rides the resume cursor — presence is re-snapshotted on reconnect
+    // by useCallPresenceHydration instead.
+    useCallPresenceStore().set(
+      payload.networkId as number,
+      payload.target as string,
+      payload.count as number,
+    );
     return;
   }
   if (payload.kind === 'account-state') {

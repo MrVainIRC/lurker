@@ -608,6 +608,20 @@ function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
 
+    -- Per-channel voice-call join policy (voice, PR 2 of the #680 stack).
+    -- Keyed by IRC network host + folded channel so it is shared across all
+    -- users of the channel on this instance — the same scoping as the LiveKit
+    -- room name. min_join_mode is the lowest IRC prefix mode allowed to join a
+    -- call: 'none' (anyone), 'voice', 'halfop', or 'op'. Set by a channel op.
+    CREATE TABLE IF NOT EXISTS voice_channel_policy (
+      network_host TEXT NOT NULL,
+      channel_folded TEXT NOT NULL,
+      min_join_mode TEXT NOT NULL DEFAULT 'none',
+      updated_by TEXT,
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY (network_host, channel_folded)
+    );
+
     -- Per-user data-export jobs. A request to export account data spawns a
     -- background worker (separate readonly SQLite connection) that builds the
     -- .lurk archive to disk under data/exports/<token>.lurk; the row tracks
