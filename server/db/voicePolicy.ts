@@ -9,14 +9,11 @@ import db from './index.js';
 // on this instance. min_join_mode is the lowest IRC prefix mode allowed to join
 // a call. Set by a channel op (q/a/o, see canAdminCall).
 
-export type MinJoinMode = 'none' | 'voice' | 'halfop' | 'op';
+import { normalizeMinJoinMode } from '../../shared/voiceModes.js';
+import type { MinJoinMode } from '../../shared/voiceModes.js';
 
-const VALID_MODES: ReadonlySet<string> = new Set(['none', 'voice', 'halfop', 'op']);
-
-/** Normalize an untrusted string to a valid MinJoinMode ('none' fallback). */
-export function normalizeMinJoinMode(raw: unknown): MinJoinMode {
-  return typeof raw === 'string' && VALID_MODES.has(raw) ? (raw as MinJoinMode) : 'none';
-}
+export { normalizeMinJoinMode, isMinJoinMode } from '../../shared/voiceModes.js';
+export type { MinJoinMode } from '../../shared/voiceModes.js';
 
 const getStmt = db.prepare(`
   SELECT min_join_mode AS minJoinMode

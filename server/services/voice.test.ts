@@ -14,7 +14,6 @@ import {
   canModerateCall,
   canAdminCall,
   applyWebhookEvent,
-  rememberRoom,
   receiveWebhook,
   listActiveCalls,
 } from './voice.js';
@@ -236,48 +235,51 @@ describe('parseRoom', () => {
 });
 
 describe('applyWebhookEvent', () => {
-  const ev = (event: string, room: string, identity?: string): WebhookEvent =>
+  const ev = (event: string, room: string, numParticipants?: number): WebhookEvent =>
     ({
       event,
-      room: { name: room },
-      participant: identity ? { identity } : undefined,
+      room: { name: room, numParticipants },
+      participant: { identity: 'someone' },
     }) as WebhookEvent;
 
-  it('resolves the channel by parsing the room even without a prior rememberRoom', () => {
-    // The regression from the field: after a restart the roomChannel map is
-    // empty, but presence must still broadcast (the room name encodes it).
+  it('is stateless: count comes from the event, channel from the room name', () => {
+    // A delta registry lied after a restart (first post-restart join "reset" a
+    // 3-person call to 1; leaves broadcast nothing). Room.numParticipants is
+    // authoritative at event time, so a mid-call restart changes nothing.
     const room = 'net-irc.libera.chat-c-#restart-proof';
-    const change = applyWebhookEvent(ev('participant_joined', room, 'jawsh'));
+    const change = applyWebhookEvent(ev('participant_joined', room, 4));
     expect(change).toEqual({
       room,
       host: 'irc.libera.chat',
       channel: '#restart-proof',
       active: true,
-      count: 1,
+      count: 4,
     });
   });
 
-  it('tracks a running count across joins and leaves', () => {
+  it('handles leaves, aborted connections, and room end', () => {
     const room = 'net-irc.libera.chat-c-#counting';
-    applyWebhookEvent(ev('participant_joined', room, 'a'));
-    const two = applyWebhookEvent(ev('participant_joined', room, 'b'));
-    expect(two?.count).toBe(2);
-    const one = applyWebhookEvent(ev('participant_left', room, 'a'));
-    expect(one).toMatchObject({ count: 1, active: true });
-    const gone = applyWebhookEvent(ev('participant_left', room, 'b'));
-    expect(gone).toMatchObject({ count: 0, active: false });
-  });
-
-  it('prefers the rememberRoom mapping over parsing the room name', () => {
-    const room = 'net-irc.libera.chat-c-#seeded';
-    rememberRoom(room, 'IRC.Libera.Chat', '#Seeded');
-    const change = applyWebhookEvent(ev('participant_joined', room, 'x'));
-    expect(change).toMatchObject({ host: 'irc.libera.chat', channel: '#seeded' });
+    expect(applyWebhookEvent(ev('participant_left', room, 1))).toMatchObject({
+      count: 1,
+      active: true,
+    });
+    expect(applyWebhookEvent(ev('participant_left', room, 0))).toMatchObject({
+      count: 0,
+      active: false,
+    });
+    expect(applyWebhookEvent(ev('participant_connection_aborted', room, 2))).toMatchObject({
+      count: 2,
+    });
+    // room_finished carries no reliable count — it IS the zero.
+    expect(applyWebhookEvent(ev('room_finished', room, 3))).toMatchObject({
+      count: 0,
+      active: false,
+    });
   });
 
   it('ignores DM rooms (no channel to badge) and irrelevant events', () => {
-    expect(applyWebhookEvent(ev('participant_joined', 'net-h-d-a:b', 'a'))).toBeNull();
-    expect(applyWebhookEvent(ev('track_published', 'net-irc.libera.chat-c-#x', 'a'))).toBeNull();
+    expect(applyWebhookEvent(ev('participant_joined', 'net-h-d-a:b', 1))).toBeNull();
+    expect(applyWebhookEvent(ev('track_published', 'net-irc.libera.chat-c-#x', 1))).toBeNull();
   });
 });
 

@@ -1140,11 +1140,13 @@ POST /moderate                 { networkId, target, action: mute|remove,
 `/presence` is the connect-time snapshot behind the `call-presence` frame
 (§7.1) — call it per connected network on every socket (re)connect. A token
 mint is gated by the channel's `minJoinMode` (403 with a human-readable
-`error` when below the bar). `mute` is a server-side mute of every published
-track (the target cannot self-unmute); `remove` kicks them from the room and
-invalidates re-joining on the same token. `POST /webhook` also lives under
-`/api/voice` but is LiveKit↔Lurker internal (signature-authenticated) — never
-call it from a client.
+`error` when below the bar; unknown modes on PUT are a 400, never coerced).
+`mute` is a server-side mute of every published track (the target cannot
+self-unmute); `remove` ejects them from the room — after which your client
+must NOT auto-reconnect that call (on self-hosted LiveKit the token itself
+stays valid until expiry, so honouring the removal is the client's job).
+`POST /webhook` also lives under `/api/voice` but is LiveKit↔Lurker internal
+(signature-authenticated) — never call it from a client.
 
 ### Export / import
 

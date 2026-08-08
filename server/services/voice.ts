@@ -24,7 +24,6 @@ import { AccessToken, RoomServiceClient, WebhookReceiver } from 'livekit-server-
 import type { WebhookEvent } from 'livekit-server-sdk';
 import { isChannelTarget } from '../../shared/channels.js';
 import { parseTruthyEnv } from '../utils/truthyEnv.js';
-import type { MinJoinMode } from '../db/voicePolicy.js';
 
 /** The operator master switch. */
 export function voiceMasterEnabled(): boolean {
@@ -173,37 +172,11 @@ export async function mintVoiceToken(args: {
 }
 
 // ─── Channel-mode authority ────────────────────────────────────────────────
-// IRC prefix modes, ranked. Owner (q), admin (a) and op (o) all count as the
-// top "op" tier; halfop (h) above voice (v). Read from ChannelMember.modes.
+// One definition, shared with the client (the UI mirrors these gates to decide
+// which controls to render) — see shared/voiceModes.ts. Re-exported so server
+// callers keep importing from the voice service.
 
-const MODE_RANK: Record<MinJoinMode, number> = {
-  none: 0,
-  voice: 1,
-  halfop: 2,
-  op: 3,
-};
-const LETTER_RANK: Record<string, number> = { v: 1, h: 2, o: 3, a: 3, q: 3 };
-const MODERATE_LETTERS = new Set(['q', 'a', 'o', 'h']); // may mute/remove in a call
-const OP_LETTERS = new Set(['q', 'a', 'o']); // may set the join policy
-
-/** Does a member holding these prefix modes meet a channel's min join mode? */
-export function meetsJoinMode(modes: readonly string[], min: MinJoinMode): boolean {
-  const need = MODE_RANK[min] ?? 0;
-  if (need === 0) return true;
-  let have = 0;
-  for (const m of modes) have = Math.max(have, LETTER_RANK[m] ?? 0);
-  return have >= need;
-}
-
-/** Ops/halfops — allowed to mute or remove others from a call. */
-export function canModerateCall(modes: readonly string[]): boolean {
-  return modes.some((m) => MODERATE_LETTERS.has(m));
-}
-
-/** Ops (q/a/o) — allowed to set the join policy. */
-export function canAdminCall(modes: readonly string[]): boolean {
-  return modes.some((m) => OP_LETTERS.has(m));
-}
+export { meetsJoinMode, canModerateCall, canAdminCall } from '../../shared/voiceModes.js';
 
 // ─── Server-side room control (moderation) ─────────────────────────────────
 // A fresh RoomServiceClient per call — construction is cheap and a config
@@ -217,9 +190,11 @@ function roomService(): RoomServiceClient | null {
   return new RoomServiceClient(cfg.wsUrl.replace(/^ws/, 'http'), cfg.apiKey, cfg.apiSecret);
 }
 
-/** Force-remove a participant (by identity) from a room. This is also the
- *  revocation path for an already-minted 2h token: LiveKit bans re-joining on
- *  the same token after a removeParticipant. */
+/** Force-remove a participant (by identity) from a room. NOTE: on self-hosted
+ *  (OSS) LiveKit this does NOT invalidate their still-valid join token —
+ *  immediate token revocation on removal is a LiveKit Cloud feature. Well-
+ *  behaved client SDKs won't auto-rejoin after a removal, but a raw client can
+ *  reconnect until the token's 2h TTL runs out. Docs carry the honest caveat. */
 export async function removeFromCall(room: string, identity: string): Promise<void> {
   const svc = roomService();
   if (!svc) throw new Error('voice not configured');
@@ -263,21 +238,13 @@ export async function listActiveCalls(): Promise<
   return out;
 }
 
-// ─── Call presence registry (fed by LiveKit webhooks) ──────────────────────
-// In-memory: which identities are in each room, plus a room → (host, channel)
-// map recorded at token mint so a webhook can resolve a room back to its
-// channel without re-parsing the room string. Lost on restart — parseRoom is
-// the fallback, and /presence re-hydrates clients from the SFU.
-
-const roomParticipants = new Map<string, Set<string>>();
-const roomChannel = new Map<string, { host: string; channel: string }>();
-
-/** Record the (host, channel) a room maps to — called when a CHANNEL token is
- *  minted. DM rooms are deliberately never registered: DM calls broadcast no
- *  presence (that would leak who is talking to whom). */
-export function rememberRoom(room: string, host: string, channel: string): void {
-  roomChannel.set(room, { host: foldAscii(host), channel: foldAscii(channel) });
-}
+// ─── Call presence (fed by LiveKit webhooks) ───────────────────────────────
+// Deliberately STATELESS. An earlier draft kept an in-memory identity registry
+// and derived counts from join/leave deltas — which lies after a restart (the
+// first post-restart join "resets" a 3-person call's badge to 1, and leaves
+// with an empty registry broadcast nothing, freezing badges). The webhook event
+// itself carries the authoritative Room.numParticipants at event time, and the
+// room NAME encodes (host, channel) — so there is nothing worth remembering.
 
 export interface CallPresenceChange {
   room: string;
@@ -302,37 +269,29 @@ export async function receiveWebhook(
   }
 }
 
-/** Apply a parsed webhook event to the registry. Returns the presence change to
- *  broadcast, or null when the event is irrelevant or the room is not a channel
- *  room (DM presence is never broadcast). */
+/** Turn a verified webhook event into the presence change to broadcast, or
+ *  null when the event carries no occupancy change or the room is not a
+ *  channel room (DM presence is never broadcast — that would leak who is
+ *  talking to whom). Counts come from the event's own Room.numParticipants —
+ *  authoritative at event time and immune to a Lurker restart. */
 export function applyWebhookEvent(ev: WebhookEvent): CallPresenceChange | null {
   const room = ev.room?.name;
   if (!room) return null;
-  const ident = ev.participant?.identity;
-  let set = roomParticipants.get(room);
+  let count: number;
   switch (ev.event) {
     case 'participant_joined':
-      if (!ident) return null;
-      if (!set) roomParticipants.set(room, (set = new Set()));
-      set.add(ident);
-      break;
     case 'participant_left':
-      if (!ident || !set) return null;
-      set.delete(ident);
-      if (set.size === 0) roomParticipants.delete(room);
+    case 'participant_connection_aborted':
+      count = Number(ev.room?.numParticipants ?? 0);
       break;
     case 'room_finished':
-      roomParticipants.delete(room);
+      count = 0;
       break;
     default:
       return null;
   }
-  // Prefer the map seeded at token-mint, but fall back to parsing the room
-  // name so presence survives a restart that cleared the map while a call
-  // kept running (the room name encodes both halves).
-  const mapping = roomChannel.get(room) ?? parseRoom(room);
+  const mapping = parseRoom(room); // the room name encodes (host, channel)
   if (!mapping) return null; // DM room / unparseable → nothing to broadcast
-  const count = roomParticipants.get(room)?.size ?? 0;
   return {
     room,
     host: mapping.host,

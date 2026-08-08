@@ -47,9 +47,17 @@ export function startCallPresenceHydration(): void {
 
     watch(
       hydratableKey,
-      (key) => {
+      (key, oldKey) => {
         if (!key) return;
-        for (const id of key.split(',')) void presence.hydrate(Number(id));
+        // Only networks that newly ENTERED the hydratable set — at boot the
+        // networks connect one by one and the key changes N times; re-fetching
+        // every already-hydrated network each time would be O(N²) requests.
+        // (An empty→set transition covers the reconnect edge: the key drops to
+        // '' while the socket is down, so every network re-enters on connect.)
+        const before = new Set((oldKey ?? '').split(',').filter(Boolean));
+        for (const id of key.split(',')) {
+          if (!before.has(id)) void presence.hydrate(Number(id));
+        }
       },
       { immediate: true },
     );

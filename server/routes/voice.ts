@@ -21,13 +21,12 @@ import {
   canAdminCall,
   removeFromCall,
   muteParticipant,
-  rememberRoom,
   receiveWebhook,
   applyWebhookEvent,
   listActiveCalls,
   type CallPresenceChange,
 } from '../services/voice.js';
-import { getPolicy, setPolicy, normalizeMinJoinMode } from '../db/voicePolicy.js';
+import { getPolicy, setPolicy, isMinJoinMode } from '../db/voicePolicy.js';
 
 // Voice control surface. Lurker is the token authority + call moderator (see
 // services/voice.ts); it never carries media. Two routers:
@@ -111,6 +110,15 @@ router.post('/token', async (req: Request, res: Response) => {
     }
     // Per-channel join gating: the caller must meet the channel's min join
     // mode (set by an op via PUT /policy).
+    //
+    // Invariant: the policy key and the room key below derive from the SAME
+    // foldTargetFor call on the SAME network row. A row whose declared
+    // casemapping diverges from its neighbours' (e.g. not yet refolded after
+    // #707) therefore derives a different policy key AND a different room —
+    // the caller can only ever "miss" the policy of a room they also can't
+    // derive, never mint an unrestricted token into the restricted call. The
+    // residual cost of divergence is cosmetic (a presence badge may not match,
+    // see broadcastCallPresence) and heals when the row refolds.
     const min = getPolicy(foldKey(network.host), foldTargetFor(network.id, target));
     if (!meetsJoinMode(memberModes(conn, target, nick), min)) {
       res.status(403).json({
@@ -130,12 +138,6 @@ router.post('/token', async (req: Request, res: Response) => {
     foldTargetFor(network.id, target),
     foldTargetFor(network.id, nick),
   );
-  // Seed the webhook's room → channel map — CHANNEL rooms only. DM rooms are
-  // never registered: DM presence is never broadcast (it would leak who is
-  // talking to whom).
-  if (isChannelTarget(target)) {
-    rememberRoom(room, network.host, foldTargetFor(network.id, target));
-  }
   try {
     const minted = await mintVoiceToken({ identity: nick, room });
     res.json(minted); // { token, room, url }
@@ -231,11 +233,18 @@ router.get('/policy', (req: Request, res: Response) => {
 router.put('/policy', (req: Request, res: Response) => {
   const networkId = Number(req.body?.networkId);
   const target = typeof req.body?.target === 'string' ? req.body.target.trim() : '';
-  const minJoinMode = normalizeMinJoinMode(req.body?.minJoinMode);
+  const minJoinMode = req.body?.minJoinMode;
   const ctx = resolveCall(req, res, networkId);
   if (!ctx) return;
   if (!target || !isChannelTarget(target)) {
     res.status(400).json({ error: 'channel target required' });
+    return;
+  }
+  // STRICT here, unlike reads: this is a write to a security control, and the
+  // normalize fallback is 'none' — coercing a typo'd or version-skewed value
+  // would silently UNRESTRICT the call while answering 200.
+  if (!isMinJoinMode(minJoinMode)) {
+    res.status(400).json({ error: 'minJoinMode must be one of none|voice|halfop|op' });
     return;
   }
   const { network, conn, nick } = ctx;
@@ -273,8 +282,11 @@ voicePublicRouter.post(
 
 /** Notify every local account currently in this channel (any of their tabs)
  *  that a call's participant count changed, so they can show/hide the badge.
- *  The folded channel from the registry is translated to each connection's own
- *  wire spelling before sending — clients match frames to buffers by target. */
+ *  The folded channel from the room name is translated to each connection's
+ *  own wire spelling before sending — clients match frames to buffers by
+ *  target. A connection whose network row folds differently from the minter's
+ *  (transitional casemapping divergence) just misses the badge until its row
+ *  refolds; the /presence snapshot on its next reconnect self-heals it. */
 function broadcastCallPresence(change: CallPresenceChange): void {
   for (const conn of ircManager.listAllConnections()) {
     if (foldKey(conn.network.host) !== change.host) continue;

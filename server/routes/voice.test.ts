@@ -253,7 +253,7 @@ describe('voice join policy — GET/PUT /api/voice/policy', () => {
     expect(res.status).toBe(403);
   });
 
-  it('ops set it; it round-trips through GET and normalizes garbage', async () => {
+  it('ops set it and it round-trips through GET', async () => {
     enableVoice();
     connectedAs(['o']);
     const put = await agent
@@ -264,11 +264,22 @@ describe('voice join policy — GET/PUT /api/voice/policy', () => {
 
     const got = await agent.get(`/api/voice/policy?networkId=${network.id}&target=%23dev`);
     expect(got.body.minJoinMode).toBe('halfop');
+  });
 
-    const garbage = await agent
-      .put('/api/voice/policy')
-      .send({ networkId: network.id, target: '#dev', minJoinMode: 'sudo' });
-    expect(garbage.body.minJoinMode).toBe('none'); // normalized, fails open to anyone
+  it('rejects unknown modes with 400 instead of coercing them open', async () => {
+    // normalizeMinJoinMode falls back to 'none' — coercion here would mean a
+    // typo'd restrict request silently UNRESTRICTS the call with a 200.
+    enableVoice();
+    connectedAs(['o']);
+    for (const bad of ['sudo', 'ops', '', 42, null]) {
+      const res = await agent
+        .put('/api/voice/policy')
+        .send({ networkId: network.id, target: '#dev', minJoinMode: bad });
+      expect(res.status).toBe(400);
+    }
+    // The stored policy is untouched by the rejected writes.
+    const got = await agent.get(`/api/voice/policy?networkId=${network.id}&target=%23dev`);
+    expect(got.body.minJoinMode).toBe('halfop');
   });
 
   it('rejects a DM target (policies are channel-scoped)', async () => {
@@ -320,13 +331,17 @@ describe('POST /api/voice/webhook (public, signature-verified)', () => {
     return at.toJwt();
   }
 
-  function webhookBody(event: string, room: string, identity: string): string {
-    return JSON.stringify({ event, room: { name: room }, participant: { identity } });
+  function webhookBody(event: string, room: string, numParticipants: number): string {
+    return JSON.stringify({
+      event,
+      room: { name: room, numParticipants },
+      participant: { identity: 'bob' },
+    });
   }
 
   it('401 for a missing or forged signature', async () => {
     enableVoice();
-    const body = webhookBody('participant_joined', 'net-irc.libera.chat-c-#dev', 'bob');
+    const body = webhookBody('participant_joined', 'net-irc.libera.chat-c-#dev', 1);
     const noAuth = await testRequest(app)
       .post('/api/voice/webhook')
       .set('Content-Type', 'application/webhook+json')
@@ -356,7 +371,7 @@ describe('POST /api/voice/webhook (public, signature-verified)', () => {
     });
     fakeManager.all = [inChannel, elsewhere];
 
-    const body = webhookBody('participant_joined', 'net-irc.libera.chat-c-#dev', 'bob');
+    const body = webhookBody('participant_joined', 'net-irc.libera.chat-c-#dev', 3);
     const res = await testRequest(app)
       .post('/api/voice/webhook')
       .set('Content-Type', 'application/webhook+json')
@@ -370,7 +385,7 @@ describe('POST /api/voice/webhook (public, signature-verified)', () => {
       networkId: network.id,
       target: '#Dev', // the receiving connection's own wire spelling
       active: true,
-      count: expect.any(Number),
+      count: 3, // straight from the event's Room.numParticipants
     });
   });
 
@@ -383,7 +398,7 @@ describe('POST /api/voice/webhook (public, signature-verified)', () => {
         channels: [{ name: '#dev', modes: { alice: [] } }],
       }),
     ];
-    const body = webhookBody('participant_joined', 'net-irc.libera.chat-d-alice:bob', 'bob');
+    const body = webhookBody('participant_joined', 'net-irc.libera.chat-d-alice:bob', 2);
     const res = await testRequest(app)
       .post('/api/voice/webhook')
       .set('Content-Type', 'application/webhook+json')

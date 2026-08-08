@@ -347,11 +347,11 @@ docker compose --profile voice up -d
 
 Everyone in a channel can join that channel's call — from the button atop the member list, or with `/call` in the buffer. When a channel call is in progress, everyone else in the channel sees a live **"Join call (N)"** count on that button (this needs the `webhook` block in the compose config above — without it, counts only refresh on reconnect). A DM call is `/call` in the DM: both sides join the same room, but DMs don't ring or badge — tell the other person to `/call` you back. Call rooms are derived from the IRC server **hostname**, so users who should share calls must configure the _same_ host: `irc.libera.chat` and `irc.eu.libera.chat` are different rooms even though they're the same network.
 
-Channel operators get call controls that mirror their IRC standing: ops and halfops (`q/a/o/h`) can server-mute or remove anyone from the channel's call (removal also invalidates their token — the answer to "kicked but still in the call"), and full ops (`q/a/o`) can restrict who may join the call at all (anyone / voiced+ / halfop+ / ops) from the picker under the Call button.
+Channel operators get call controls that mirror their IRC standing: ops and halfops (`q/a/o/h`) can server-mute or remove anyone from the channel's call, and full ops (`q/a/o`) can restrict who may join the call at all (anyone / voiced+ / halfop+ / ops) from the picker under the Call button.
 
 Two trust caveats, both in line with IRC's own model — fine among people you already trust:
 
-- Channel membership and the join policy are checked **when the call token is issued**, and tokens last 2 hours. Someone kicked or banned mid-call keeps their token until an op removes them from the call (or it expires).
+- Channel membership and the join policy are checked **when the call token is issued**, and tokens last 2 hours. Removing someone from a call ejects them now, but on self-hosted LiveKit it does **not** invalidate their token: Lurker's own clients won't rejoin after a removal, yet someone determined enough to use a raw LiveKit client can reconnect until the token expires. (Instant revocation on removal is a LiveKit Cloud feature.)
 - DM call rooms are named by the two nicks, and IRC nicks are transferable: on networks without nick registration, someone who takes an offline person's nick could join a call room under that name.
 
 Disabling voice (removing the env vars) makes every call affordance disappear from clients; browsers only download the WebRTC code the first time someone actually joins a call.

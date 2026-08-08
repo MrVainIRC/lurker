@@ -88,6 +88,7 @@ import { computed } from 'vue';
 import { useVoiceStore } from '../stores/voice.js';
 import { useBuffersStore, bufferKey } from '../stores/buffers.js';
 import { useNetworksStore } from '../stores/networks.js';
+import { canModerateCall } from '../../../shared/voiceModes.js';
 import { api } from '../api.js';
 import IconButton from './IconButton.vue';
 
@@ -101,16 +102,15 @@ const statusText = computed(() => {
   return 'call failed';
 });
 
-// ─── Op moderation (q/a/o/h — mirrors the server's canModerateCall gate) ────
+// ─── Op moderation (the same shared gate the server enforces) ───────────────
 // The server enforces; showing the buttons only to ops is UX, not security.
-const MODERATE_MODES = ['q', 'a', 'o', 'h'];
 const amOp = computed(() => {
   if (voice.networkId == null || !voice.target) return false;
   const b = buffers.byKey(bufferKey(voice.networkId, voice.target));
   const selfNick = networks.states[voice.networkId]?.nick;
   if (!b || !selfNick) return false;
   const me = b.members?.find((m) => m.nick.toLowerCase() === selfNick.toLowerCase());
-  return !!me?.modes?.some((mm) => MODERATE_MODES.includes(mm));
+  return canModerateCall(me?.modes ?? []);
 });
 
 async function moderate(identity: string, action: 'mute' | 'remove') {
