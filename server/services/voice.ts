@@ -20,6 +20,7 @@
 // put the two ends in two different rooms. So DM rooms are keyed by the
 // *canonical* (sorted) nick pair instead.
 
+import crypto from 'crypto';
 import { AccessToken, RoomServiceClient, WebhookReceiver } from 'livekit-server-sdk';
 import type { WebhookEvent } from 'livekit-server-sdk';
 import { isChannelTarget } from '../../shared/channels.js';
@@ -144,31 +145,51 @@ export interface MintedToken {
 }
 
 /**
- * Mint a room-scoped LiveKit access token. Grants join + publish + subscribe on
- * exactly one room and nothing else — a token for `#dev` cannot touch `#ops`.
- * Identity is the caller's IRC nick so remote participants render sensible names.
- * Throws if voice is not configured (callers should have gated on voiceEnabled).
+ * Mint a room-scoped LiveKit access token. Grants join + subscribe on exactly
+ * one room and nothing else — a token for `#dev` cannot touch `#ops`.
+ * Identity is the caller's IRC nick (or a namespaced guest identity) so remote
+ * participants render sensible names. `canPublish: false` produces a
+ * listen-only token (guest links below the talk threshold). Throws if voice is
+ * not configured (callers should have gated on voiceEnabled).
  */
 export async function mintVoiceToken(args: {
   identity: string;
   room: string;
+  /** false → listen-only. Default true. */
+  canPublish?: boolean;
+  /** Default 2h — a call comfortably outlives its join token. Guest tokens are
+   *  shorter: a token, once minted, is irrevocable on OSS LiveKit, so its TTL
+   *  is the whole revocation story. */
+  ttlSeconds?: number;
 }): Promise<MintedToken> {
   const cfg = liveKitConfig();
   if (!cfg) throw new Error('voice not configured');
 
   const at = new AccessToken(cfg.apiKey, cfg.apiSecret, {
     identity: args.identity,
-    ttl: 2 * 60 * 60, // 2h — a call comfortably outlives its join token
+    ttl: args.ttlSeconds ?? 2 * 60 * 60,
   });
   at.addGrant({
     roomJoin: true,
     room: args.room,
-    canPublish: true,
+    canPublish: args.canPublish !== false,
     canSubscribe: true,
     canPublishData: true,
   });
   const token = await at.toJwt();
   return { token, room: args.room, url: cfg.wsUrl };
+}
+
+/** A safe, namespaced LiveKit identity for a guest so they can never collide
+ *  with or impersonate a real IRC nick (all real identities are bare nicks —
+ *  and a bare-nick collision would also hand the guest that nick's moderation
+ *  treatment). Folded, stripped to [a-z0-9_-], random suffix for uniqueness. */
+export function guestIdentity(name: string): string {
+  const clean =
+    foldAscii(name)
+      .replace(/[^a-z0-9_-]/g, '')
+      .slice(0, 24) || 'guest';
+  return `guest-${clean}-${crypto.randomBytes(4).toString('hex')}`;
 }
 
 // ─── Channel-mode authority ────────────────────────────────────────────────

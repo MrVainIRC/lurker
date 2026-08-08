@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, beforeEach, vi } from 'vitest';
 import { createHash } from 'crypto';
 import { Router } from 'express';
 import type { LurkerTestAgent } from '../test-utils/testApp.js';
@@ -59,6 +59,9 @@ const fakeManager = {
   all: [] as FakeConn[],
   getConnection(_userId: number, _networkId: number) {
     return this.conn;
+  },
+  listConnections(_userId: number) {
+    return this.conn ? [this.conn] : [];
   },
   listAllConnections() {
     return this.all;
@@ -447,5 +450,138 @@ describe('POST /api/voice/webhook (public, signature-verified)', () => {
     // A DM room is filtered before the SFU is even asked.
     expect(h.liveCallCount).not.toHaveBeenCalled();
     expect(fanOutToUser).not.toHaveBeenCalled();
+  });
+});
+
+describe('guest links — /api/voice/guest-link (op-only CRUD)', () => {
+  it('403 for non-ops (halfop is not enough to mint)', async () => {
+    enableVoice();
+    connectedAs(['h']);
+    const res = await agent
+      .post('/api/voice/guest-link')
+      .send({ networkId: network.id, target: '#dev' });
+    expect(res.status).toBe(403);
+  });
+
+  it('ops mint a link whose URL rides the browser Origin, not the Express host', async () => {
+    enableVoice();
+    connectedAs(['o']);
+    const res = await agent
+      .post('/api/voice/guest-link')
+      .set('Origin', 'https://irc.example.com')
+      .send({ networkId: network.id, target: '#dev' });
+    expect(res.status).toBe(200);
+    expect(res.body.url).toBe(`https://irc.example.com/call/${res.body.token}`);
+    expect(res.body.canPublish).toBe(true);
+  });
+
+  it('mints listen-only links and lists active links for ops', async () => {
+    enableVoice();
+    connectedAs(['q']);
+    const mint = await agent
+      .post('/api/voice/guest-link')
+      .send({ networkId: network.id, target: '#dev', canPublish: false });
+    expect(mint.status).toBe(200);
+    expect(mint.body.canPublish).toBe(false);
+
+    const list = await agent.get(`/api/voice/guest-link?networkId=${network.id}&target=%23dev`);
+    expect(list.status).toBe(200);
+    const tokens = (list.body.links as Array<{ token: string }>).map((l) => l.token);
+    expect(tokens).toContain(mint.body.token);
+
+    connectedAs(['v']);
+    const denied = await agent.get(`/api/voice/guest-link?networkId=${network.id}&target=%23dev`);
+    expect(denied.status).toBe(403);
+  });
+
+  it('ops revoke; the link stops being usable for NEW joins', async () => {
+    enableVoice();
+    connectedAs(['o']);
+    const mint = await agent
+      .post('/api/voice/guest-link')
+      .send({ networkId: network.id, target: '#dev' });
+    const del = await agent.delete(`/api/voice/guest-link/${mint.body.token}`);
+    expect(del.status).toBe(200);
+
+    const res = await testRequest(app)
+      .post('/api/voice/guest-token')
+      .send({ token: mint.body.token, name: 'late guest' });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('POST /api/voice/guest-token (public)', () => {
+  beforeEach(async () => {
+    const { resetGuestRateLimit } = await import('./voice.js');
+    resetGuestRateLimit();
+  });
+
+  async function mintLink(canPublish = true): Promise<string> {
+    connectedAs(['o']);
+    const mint = await agent
+      .post('/api/voice/guest-link')
+      .send({ networkId: network.id, target: '#dev', canPublish });
+    return mint.body.token as string;
+  }
+
+  it('404 for unknown tokens', async () => {
+    enableVoice();
+    const res = await testRequest(app)
+      .post('/api/voice/guest-token')
+      .send({ token: 'no-such-link', name: 'x' });
+    expect(res.status).toBe(404);
+  });
+
+  it('exchanges a live link for a namespaced, room-scoped, SHORT token', async () => {
+    enableVoice();
+    const link = await mintLink();
+    const res = await testRequest(app)
+      .post('/api/voice/guest-token')
+      .send({ token: link, name: 'Cool Guest!' });
+    expect(res.status).toBe(200);
+    expect(res.body.canPublish).toBe(true);
+
+    const claims = JSON.parse(
+      Buffer.from(String(res.body.token).split('.')[1]!, 'base64url').toString(),
+    ) as { sub?: string; exp?: number; nbf?: number; video?: { room?: string } };
+    // Identity is namespaced — a guest can never collide with a bare IRC nick.
+    expect(claims.sub).toMatch(/^guest-coolguest-[0-9a-f]{8}$/);
+    expect(claims.video?.room).toBe('net-irc.libera.chat-c-#dev');
+    // 1h TTL, not the members' 2h: a minted token is irrevocable on OSS
+    // LiveKit, so its lifetime IS the revocation story for a killed link.
+    expect((claims.exp ?? 0) - (claims.nbf ?? 0)).toBeLessThanOrEqual(60 * 60 + 60);
+  });
+
+  it('honours the listen-only flag in the LiveKit grant', async () => {
+    enableVoice();
+    const link = await mintLink(false);
+    const res = await testRequest(app)
+      .post('/api/voice/guest-token')
+      .send({ token: link, name: 'quiet' });
+    expect(res.status).toBe(200);
+    expect(res.body.canPublish).toBe(false);
+    const claims = JSON.parse(
+      Buffer.from(String(res.body.token).split('.')[1]!, 'base64url').toString(),
+    ) as { video?: { canPublish?: boolean; canSubscribe?: boolean } };
+    expect(claims.video?.canPublish).toBe(false);
+    expect(claims.video?.canSubscribe).toBe(true);
+  });
+
+  it('throttles per IP (429 with Retry-After past the window cap)', async () => {
+    // Deterministic: the throttle was reset in beforeEach and allows 10/min —
+    // ten mints succeed, the eleventh trips.
+    enableVoice();
+    const link = await mintLink();
+    for (let i = 0; i < 10; i++) {
+      const res = await testRequest(app)
+        .post('/api/voice/guest-token')
+        .send({ token: link, name: `g${i}` });
+      expect(res.status).toBe(200);
+    }
+    const tripped = await testRequest(app)
+      .post('/api/voice/guest-token')
+      .send({ token: link, name: 'g11' });
+    expect(tripped.status).toBe(429);
+    expect(Number(tripped.headers['retry-after'])).toBeGreaterThan(0);
   });
 });

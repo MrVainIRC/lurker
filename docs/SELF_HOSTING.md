@@ -349,6 +349,8 @@ Everyone in a channel can join that channel's call — from the button atop the 
 
 Channel operators get call controls that mirror their IRC standing: ops and halfops (`q/a/o/h`) can server-mute or remove anyone from the channel's call, and full ops (`q/a/o`) can restrict who may join the call at all (anyone / voiced+ / halfop+ / ops) from the picker under the Call button.
 
+Ops can also mint **guest links** from the same panel — a URL that lets someone without a Lurker account join that channel's call from their browser (optionally listen-only). Links expire after 24 hours and can be revoked; revoking stops _new_ guests from joining, while anyone already in the call keeps their (1-hour) access until an op removes them. Guests appear in the call as `guest-<name>-<id>`, so they can never impersonate a real nick.
+
 Two trust caveats, both in line with IRC's own model — fine among people you already trust:
 
 - Channel membership and the join policy are checked **when the call token is issued**, and tokens last 2 hours. Removing someone from a call ejects them now, but on self-hosted LiveKit it does **not** invalidate their token: Lurker's own clients won't rejoin after a removal, yet someone determined enough to use a raw LiveKit client can reconnect until the token expires. (Instant revocation on removal is a LiveKit Cloud feature.)

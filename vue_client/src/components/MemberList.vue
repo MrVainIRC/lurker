@@ -25,6 +25,42 @@
           <option value="op">ops only</option>
         </select>
       </label>
+      <div v-if="isOp" class="guest-links">
+        <div class="guest-mint">
+          <button
+            type="button"
+            class="guest-btn"
+            :disabled="guestBusy"
+            title="Create a public link a guest can use to join this channel's call without an account (expires in 24h)"
+            @click="mintGuestLink"
+          >
+            <i class="fa-solid fa-link" aria-hidden="true"></i> Guest link
+          </button>
+          <label class="listen-only" title="Guests via this link can hear the call but not speak">
+            <input v-model="listenOnly" type="checkbox" /> listen-only
+          </label>
+        </div>
+        <div v-if="guestUrl" class="guest-url">
+          <input :value="guestUrl" readonly aria-label="Guest call link" @focus="selectAll" />
+          <button type="button" @click="copyGuest">{{ copied ? 'Copied' : 'Copy' }}</button>
+        </div>
+        <ul v-if="activeLinks.length" class="link-list">
+          <li v-for="l in activeLinks" :key="l.token">
+            <span class="link-meta" :title="`created by ${l.createdBy ?? 'unknown'}`">
+              {{ l.canPublish ? 'talk' : 'listen' }} · {{ l.useCount }} use{{
+                l.useCount === 1 ? '' : 's'
+              }}
+            </span>
+            <IconButton icon="fa-copy" label="Copy link" @click="copyLink(l)" />
+            <IconButton
+              icon="fa-ban"
+              danger
+              label="Revoke — stops new guests from joining; anyone already in the call stays until removed"
+              @click="revokeLink(l)"
+            />
+          </li>
+        </ul>
+      </div>
     </div>
     <ul ref="listEl">
       <li
@@ -78,6 +114,7 @@ import {
   prefixClass as modePrefixClass,
 } from '../utils/memberPrefix.js';
 import IgnoreModal from './IgnoreModal.vue';
+import IconButton from './IconButton.vue';
 
 const networks = useNetworksStore();
 const buffers = useBuffersStore();
@@ -150,6 +187,97 @@ watch(
   },
   { immediate: true },
 );
+
+// ─── Op guest links (mint / copy / revoke a public capability URL) ──────────
+interface GuestLinkRow {
+  token: string;
+  url: string;
+  canPublish: boolean;
+  createdBy: string | null;
+  useCount: number;
+}
+
+const guestUrl = ref('');
+const copied = ref(false);
+const guestBusy = ref(false);
+const listenOnly = ref(false);
+const activeLinks = ref<GuestLinkRow[]>([]);
+
+async function refreshLinks(b = buffer.value) {
+  if (!config.voiceEnabled || !isOp.value || !b || b.kind !== 'channel' || b.networkId == null) {
+    activeLinks.value = [];
+    return;
+  }
+  try {
+    const r = await api<{ links: GuestLinkRow[] }>(
+      `/api/voice/guest-link?networkId=${b.networkId}&target=${encodeURIComponent(b.target)}`,
+    );
+    if (buffer.value !== b) return; // stale response for a previous channel
+    activeLinks.value = r.links ?? [];
+  } catch {
+    /* leave as-is */
+  }
+}
+
+watch(
+  [buffer, isOp, () => config.voiceEnabled],
+  ([b]) => {
+    guestUrl.value = '';
+    copied.value = false;
+    activeLinks.value = [];
+    void refreshLinks(b);
+  },
+  { immediate: true },
+);
+
+async function mintGuestLink() {
+  const b = buffer.value;
+  if (!b || b.networkId == null) return;
+  guestBusy.value = true;
+  copied.value = false;
+  try {
+    const r = await api<{ url: string }>('/api/voice/guest-link', {
+      method: 'POST',
+      body: { networkId: b.networkId, target: b.target, canPublish: !listenOnly.value },
+    });
+    guestUrl.value = r.url;
+    void refreshLinks();
+  } catch (err: unknown) {
+    useToastsStore().push({
+      title: 'Could not create guest link',
+      body: err instanceof Error ? err.message : 'the server rejected the request',
+      kind: 'warn',
+    });
+  } finally {
+    guestBusy.value = false;
+  }
+}
+
+function copyGuest() {
+  if (!guestUrl.value) return;
+  void navigator.clipboard?.writeText(guestUrl.value);
+  copied.value = true;
+}
+function copyLink(l: GuestLinkRow) {
+  void navigator.clipboard?.writeText(l.url);
+}
+function selectAll(e: FocusEvent) {
+  (e.target as HTMLInputElement).select();
+}
+
+async function revokeLink(l: GuestLinkRow) {
+  try {
+    await api(`/api/voice/guest-link/${encodeURIComponent(l.token)}`, { method: 'DELETE' });
+    if (guestUrl.value === l.url) guestUrl.value = '';
+    void refreshLinks();
+  } catch (err: unknown) {
+    useToastsStore().push({
+      title: 'Could not revoke guest link',
+      body: err instanceof Error ? err.message : 'the server rejected the request',
+      kind: 'warn',
+    });
+  }
+}
 
 async function onPolicyChange(e: Event) {
   const b = buffer.value;
@@ -326,6 +454,59 @@ const sorted = computed(() => {
 .call-policy select {
   flex: 1;
   min-width: 0;
+}
+.guest-links {
+  margin-top: var(--space-3);
+}
+.guest-mint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.guest-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.listen-only {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.guest-url {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+.guest-url input {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+}
+.link-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+}
+.link-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+}
+.link-meta {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 ul {
   list-style: none;
