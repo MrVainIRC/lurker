@@ -14,6 +14,7 @@ import {
   canModerateCall,
   canAdminCall,
   webhookCallRoom,
+  guestIdentity,
   liveCallCount,
   receiveWebhook,
   listActiveCalls,
@@ -278,5 +279,14 @@ describe('receiveWebhook / listActiveCalls / liveCallCount (unconfigured)', () =
     await expect(listActiveCalls()).resolves.toEqual([]);
     // null (unknown), NOT 0 — a fabricated zero would clear real badges.
     await expect(liveCallCount('net-h-c-#x')).resolves.toBeNull();
+  });
+});
+
+describe('guestIdentity', () => {
+  it('namespaces + sanitizes so a guest can never be a bare IRC nick', () => {
+    expect(guestIdentity('Alice')).toMatch(/^guest-alice-[0-9a-f]{8}$/);
+    expect(guestIdentity('bad nick!@#')).toMatch(/^guest-badnick-[0-9a-f]{8}$/);
+    expect(guestIdentity('')).toMatch(/^guest-guest-[0-9a-f]{8}$/);
+    expect(guestIdentity('x')).not.toBe(guestIdentity('x')); // random suffix
   });
 });

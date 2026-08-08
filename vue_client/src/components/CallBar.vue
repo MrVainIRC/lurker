@@ -40,17 +40,19 @@
               :class="voice.speaking.includes(id) ? 'fa-volume-high' : 'fa-user'"
               aria-hidden="true"
             ></i>
-            <span class="part-nick" :title="id">{{ id }}</span>
+            <span class="part-nick" :title="partName(id)">
+              {{ partName(id) }}<span v-if="isGuestIdentity(id)" class="guest-tag">guest</span>
+            </span>
             <IconButton
               v-if="amOp"
               icon="fa-microphone-slash"
-              :label="`Mute ${id} for everyone`"
+              :label="`Mute ${partName(id)} for everyone`"
               @click="moderate(id, 'mute')"
             />
             <IconButton
               v-if="amOp"
               icon="fa-user-slash"
-              :label="`Remove ${id} from call`"
+              :label="`Remove ${partName(id)} from call`"
               danger
               @click="moderate(id, 'remove')"
             />
@@ -61,7 +63,7 @@
             min="0"
             max="100"
             :value="volPct(id)"
-            :aria-label="`Volume for ${id}`"
+            :aria-label="`Volume for ${partName(id)}`"
             @input="onVol(id, $event)"
           />
         </li>
@@ -70,7 +72,10 @@
     </div>
 
     <div v-if="voice.active || voice.connecting" class="call-actions">
+      <!-- Listen-only guests get no mute toggle: an unmute would prompt for
+           mic permission and then be refused by the SFU. -->
       <IconButton
+        v-if="voice.canPublish"
         :icon="voice.muted ? 'fa-microphone-slash' : 'fa-microphone'"
         :label="voice.muted ? 'Unmute' : 'Mute'"
         :danger="voice.muted"
@@ -89,7 +94,7 @@ import { useVoiceStore } from '../stores/voice.js';
 import { useBuffersStore, bufferKey } from '../stores/buffers.js';
 import { useNetworksStore } from '../stores/networks.js';
 import { useToastsStore } from '../stores/toasts.js';
-import { canModerateCall } from '../../../shared/voiceModes.js';
+import { canModerateCall, isGuestIdentity, guestDisplayName } from '../../../shared/voiceModes.js';
 import { api } from '../api.js';
 import IconButton from './IconButton.vue';
 
@@ -130,6 +135,12 @@ async function moderate(identity: string, action: 'mute' | 'remove') {
       kind: 'warn',
     });
   }
+}
+
+/** Human name for a participant row — guests show their picked name, not the
+ *  raw machine identity (the guest-tag badge carries the "guest" fact). */
+function partName(id: string): string {
+  return guestDisplayName(id);
 }
 
 function volPct(id: string): number {
@@ -224,6 +235,13 @@ function onVol(id: string, e: Event) {
 }
 .call-empty {
   margin: 0;
+  color: var(--fg-muted);
+}
+.guest-tag {
+  margin-left: var(--space-2);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
   color: var(--fg-muted);
 }
 .call-actions {

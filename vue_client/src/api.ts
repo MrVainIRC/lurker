@@ -31,7 +31,10 @@ const AUTH_RECOVERY_FLAG = 'lurker:authRecoveryAttempted';
 // NOT a stale session — bouncing would eject an invite/sign-in visitor to
 // `/login?next=/` before their page can even mount.
 function isPublicPath(pathname: string): boolean {
-  return pathname === '/login' || pathname.startsWith('/invite/');
+  // Mirrors the no-requiresAuth routes in router.ts. /call/ is the guest
+  // voice-call page: a logged-in user whose session dies mid-call must NOT be
+  // bounced to /, which would eject them from the call they're in.
+  return pathname === '/login' || pathname.startsWith('/invite/') || pathname.startsWith('/call/');
 }
 
 // Pure decision (exported for tests): a 401 from a normal authed call means the

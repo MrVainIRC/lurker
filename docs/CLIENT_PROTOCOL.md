@@ -1150,6 +1150,31 @@ client's job).
 `POST /webhook` also lives under `/api/voice` but is LiveKit↔Lurker internal
 (signature-authenticated) — never call it from a client.
 
+**Guest links** (ops, `q/a/o`): capability URLs that let someone without an
+account join one channel's call.
+
+```
+POST   /guest-link          { networkId, target, canPublish? }  → { url, token,
+                              canPublish, expiresAt }           24h link TTL
+GET    /guest-link?networkId&target → { links: [...] }          active links
+DELETE /guest-link/:token   → { ok }                            revoke
+POST   /guest-token         { token, name }                     PUBLIC, throttled
+       → { token, url, canPublish }
+```
+
+`/guest-token` exchanges the link for a **1-hour** room token (`canPublish:
+false` = listen-only — don't try to publish, the SFU refuses). Guest
+identities are always `guest-<name>-<hex>` — render them differently from
+members; a bare-nick identity is never a guest. Revoking a link stops NEW
+exchanges only: already-minted guest tokens live out their hour (OSS LiveKit
+cannot revoke tokens) — ops `remove` lingering guests. The web client serves
+the joining UI at `/call/:token`.
+
+Build shareable URLs as `<your own origin>/call/<token>` — the `url` field in
+mint/list responses is best-effort (derived from the request's `Origin`
+header, which browsers omit on same-origin GETs) and may carry the server's
+internal host.
+
 ### Export / import
 
 `GET /api/exports/preview` · `POST /api/exports` (`{include_messages}`, allowed

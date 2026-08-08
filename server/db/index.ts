@@ -622,6 +622,30 @@ function migrate() {
       PRIMARY KEY (network_host, channel_folded)
     );
 
+    -- Public guest call links (voice, PR 3 of the #680 stack). A capability
+    -- token that lets someone without an account join exactly one LiveKit
+    -- room. Opaque token, 24h expiry, soft-revocable via revoked_at —
+    -- revocation stops NEW joins only; already-minted room tokens live until
+    -- their own TTL (OSS LiveKit has no revocation). can_publish gates talk vs
+    -- listen-only. Not tied to a user row — it outlives the op who minted it.
+    -- ⚠ every timestamp here uses ONE format (strftime %Y-%m-%dT%H:%M:%fZ),
+    -- because expiry is compared IN SQL: a JS toISOString 'T' against a SQL
+    -- datetime(' ') would corrupt the comparison for a whole day.
+    CREATE TABLE IF NOT EXISTS voice_guest_link (
+      token TEXT PRIMARY KEY,
+      network_host TEXT NOT NULL,
+      channel_folded TEXT NOT NULL,
+      room TEXT NOT NULL,
+      can_publish INTEGER NOT NULL DEFAULT 1,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      expires_at TEXT NOT NULL,
+      revoked_at TEXT,
+      use_count INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_voice_guest_link_scope
+      ON voice_guest_link(network_host, channel_folded);
+
     -- Per-user data-export jobs. A request to export account data spawns a
     -- background worker (separate readonly SQLite connection) that builds the
     -- .lurk archive to disk under data/exports/<token>.lurk; the row tracks

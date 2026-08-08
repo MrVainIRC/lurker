@@ -99,9 +99,9 @@ export function buildApp(sessionSecret: string): Express {
     app.use('/uploads', localUploadsRouter);
   }
   app.use('/api/dcc', dccRouter);
-  // Public voice sub-route (the LiveKit webhook) FIRST — it authenticates by
-  // webhook signature, not the session cookie, so it must match before the
-  // requireAuth'd voice router 401s it.
+  // Public voice sub-routes (LiveKit webhook + guest join) FIRST — they
+  // authenticate by capability (webhook signature / guest-link token), not the
+  // session cookie, so they must match before the requireAuth'd router 401s them.
   app.use('/api/voice', voicePublicRouter);
   app.use('/api/voice', voiceRouter);
   app.use('/api/drafts', draftsRouter);

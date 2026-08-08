@@ -28,6 +28,17 @@ import {
   type CallPresenceChange,
 } from '../services/voice.js';
 import { getPolicy, setPolicy, isMinJoinMode } from '../db/voicePolicy.js';
+import { guestIdentity } from '../services/voice.js';
+import {
+  createGuestLink,
+  listActiveGuestLinks,
+  revokeGuestLink,
+  getGuestLink,
+  getUsableGuestLink,
+  bumpGuestLinkUse,
+} from '../db/voiceLinks.js';
+import { RequestThrottle, limitRequests } from '../middleware/rateLimit.js';
+import { originFromRequest } from '../utils/requestOrigin.js';
 
 // Voice control surface. Lurker is the token authority + call moderator (see
 // services/voice.ts); it never carries media. Two routers:
@@ -257,7 +268,116 @@ router.put('/policy', (req: Request, res: Response) => {
   res.json({ minJoinMode });
 });
 
-// ─── Public router (no cookie auth) — the LiveKit webhook ───────────────────
+// ─── Guest links: op mints / lists / revokes a public capability URL ───────
+// Revocation stops NEW joins only: a guest who already exchanged the link
+// holds a LiveKit room token that cannot be revoked on self-hosted LiveKit —
+// ops remove lingering guests from the call instead. The client UI says the
+// same thing next to its revoke button.
+
+router.post('/guest-link', (req: Request, res: Response) => {
+  const networkId = Number(req.body?.networkId);
+  const target = typeof req.body?.target === 'string' ? req.body.target.trim() : '';
+  const canPublish = req.body?.canPublish !== false; // default talk
+  const ctx = resolveCall(req, res, networkId);
+  if (!ctx) return;
+  if (!target || !isChannelTarget(target)) {
+    res.status(400).json({ error: 'channel target required' });
+    return;
+  }
+  const { network, conn, nick } = ctx;
+  if (!canAdminCall(memberModes(conn, target, nick))) {
+    res.status(403).json({ error: 'you must be a channel operator to create a guest link' });
+    return;
+  }
+  const room = roomFor(
+    network.host,
+    foldTargetFor(network.id, target),
+    foldTargetFor(network.id, nick),
+  );
+  const link = createGuestLink({
+    networkHost: foldKey(network.host),
+    channelFolded: foldTargetFor(network.id, target),
+    room,
+    canPublish,
+    createdBy: nick,
+  });
+  res.json({
+    url: `${originFromRequest(req)}/call/${link.token}`,
+    token: link.token,
+    canPublish: link.canPublish,
+    expiresAt: link.expiresAt,
+  });
+});
+
+router.get('/guest-link', (req: Request, res: Response) => {
+  const networkId = Number(req.query?.networkId);
+  const target = typeof req.query?.target === 'string' ? req.query.target.trim() : '';
+  const ctx = resolveCall(req, res, networkId);
+  if (!ctx) return;
+  if (!target || !isChannelTarget(target)) {
+    res.status(400).json({ error: 'channel target required' });
+    return;
+  }
+  const { network, conn, nick } = ctx;
+  if (!canAdminCall(memberModes(conn, target, nick))) {
+    res.status(403).json({ error: 'operators only' });
+    return;
+  }
+  const origin = originFromRequest(req);
+  const links = listActiveGuestLinks(foldKey(network.host), foldTargetFor(network.id, target)).map(
+    (l) => ({
+      token: l.token,
+      url: `${origin}/call/${l.token}`,
+      canPublish: l.canPublish,
+      createdBy: l.createdBy,
+      createdAt: l.createdAt,
+      expiresAt: l.expiresAt,
+      useCount: l.useCount,
+    }),
+  );
+  res.json({ links });
+});
+
+router.delete('/guest-link/:token', (req: Request, res: Response) => {
+  if (!voiceEnabled()) {
+    res.status(503).json({ error: 'voice not enabled on this server' });
+    return;
+  }
+  const token = typeof req.params.token === 'string' ? req.params.token : '';
+  const link = getGuestLink(token);
+  if (!link) {
+    res.status(404).json({ error: 'link not found' });
+    return;
+  }
+  // Authorize: on ANY of the caller's connections to the matching host — a
+  // user with two network rows on one host (main + alt) must be able to revoke
+  // from whichever holds the op, or the emergency revoke for a leaked link
+  // fails exactly when needed. The link's CREATOR may always revoke their own
+  // link too: the op-mode check compares the stored channel key (folded under
+  // the MINTER's row's casemapping) against a fold under the REVOKER's row,
+  // which can transiently diverge (see the invariant note at /token) — the
+  // creator path keeps revocation working through that window.
+  const authorized = ircManager.listConnections(req.user!.id).some((c) => {
+    if (!c.currentNick || foldKey(c.network.host) !== link.networkHost) return false;
+    if (
+      link.createdBy &&
+      foldTargetFor(c.network.id, c.currentNick) === foldTargetFor(c.network.id, link.createdBy)
+    ) {
+      return true;
+    }
+    return canAdminCall(memberModes(c, link.channelFolded, c.currentNick));
+  });
+  if (!authorized) {
+    res.status(403).json({ error: 'operators only' });
+    return;
+  }
+  revokeGuestLink(token);
+  res.json({ ok: true });
+});
+
+// ─── Public router (no cookie auth) — webhook + guest join ──────────────────
+// Each route authenticates by its own capability: the webhook by LiveKit's
+// signature, the guest join by the opaque link token. Never the session cookie.
 export const voicePublicRouter = Router();
 
 // LiveKit posts room/participant events here (content-type
@@ -296,6 +416,60 @@ voicePublicRouter.post(
  *  target. A connection whose network row folds differently from the minter's
  *  (transitional casemapping divergence) just misses the badge until its row
  *  refolds; the /presence snapshot on its next reconnect self-heals it. */
+// Guest join: exchange a guest-link token + display name for a room-scoped
+// LiveKit token. Public; the capability IS the opaque link token, throttled
+// per-IP by the shared RequestThrottle (self-capping — see rateLimit.ts).
+// The guest token is deliberately SHORT (1h vs members' 2h): on OSS LiveKit a
+// minted token cannot be revoked, so its TTL is the entire revocation story
+// for a link an op just killed. A legit guest whose call outlives the token
+// re-clicks the link — the LINK lasts 24h.
+const GUEST_TOKEN_TTL_SECONDS = 60 * 60;
+// 60/min per IP: generous enough for a whole NAT'd household joining a
+// community call at once (and behind an untrusted proxy the bucket is shared
+// instance-wide — see LURKER_TRUST_PROXY in rateLimit.ts), while still making
+// brute-force probing of 43-char base64url tokens a non-starter.
+const guestTokenThrottle = new RequestThrottle({ windowMs: 60_000, maxRequests: 60 });
+
+/** Test hook, mirroring resetAuthRateLimits — the throttle is module state. */
+export function resetGuestRateLimit(): void {
+  guestTokenThrottle.clear();
+}
+
+voicePublicRouter.post(
+  '/guest-token',
+  limitRequests(guestTokenThrottle),
+  async (req: Request, res: Response) => {
+    if (!voiceEnabled()) {
+      res.status(503).json({ error: 'voice not enabled' });
+      return;
+    }
+    const token = typeof req.body?.token === 'string' ? req.body.token : '';
+    const name = typeof req.body?.name === 'string' ? req.body.name : '';
+    const link = getUsableGuestLink(token);
+    if (!link) {
+      res.status(404).json({ error: 'this guest link is invalid, expired, or revoked' });
+      return;
+    }
+    try {
+      const minted = await mintVoiceToken({
+        identity: guestIdentity(name || 'guest'),
+        room: link.room,
+        canPublish: link.canPublish,
+        ttlSeconds: GUEST_TOKEN_TTL_SECONDS,
+      });
+      bumpGuestLinkUse(token);
+      res.json({
+        token: minted.token,
+        url: minted.url,
+        canPublish: link.canPublish,
+      });
+    } catch (err) {
+      console.error('[voice] guest token mint failed:', err);
+      res.status(500).json({ error: 'failed to mint token' });
+    }
+  },
+);
+
 function broadcastCallPresence(change: CallPresenceChange): void {
   for (const conn of ircManager.listAllConnections()) {
     if (foldKey(conn.network.host) !== change.host) continue;

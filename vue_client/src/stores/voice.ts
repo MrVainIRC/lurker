@@ -48,6 +48,14 @@ export const useVoiceStore = defineStore('voice', {
     // "in a call somewhere else".
     networkId: null as number | null,
     target: '',
+    // True when this tab joined via a public guest link (no account/session) —
+    // gates off member-only affordances like moderation.
+    isGuest: false,
+    // False for a listen-only token (guest links below the talk threshold):
+    // the mic is never requested, and the mute toggle must not render — an
+    // unmute attempt would prompt for mic permission and then be rejected by
+    // the SFU anyway.
+    canPublish: true,
     // Remote participant identities (their IRC nicks).
     participants: [] as string[],
     // Subset of `participants` currently detected as speaking.
@@ -62,6 +70,9 @@ export const useVoiceStore = defineStore('voice', {
       if (this.active || this.connecting) return;
       this.connecting = true;
       this.error = null;
+      // Label BEFORE the token fetch: the CallBar renders it while connecting,
+      // and a mint failure (403 policy) must blame the channel it belongs to,
+      // not whatever call came before.
       this.label = label;
       this.networkId = networkId;
       this.target = target;
@@ -71,7 +82,33 @@ export const useVoiceStore = defineStore('voice', {
           method: 'POST',
           body: { networkId, target },
         });
+        await this.connectWithToken(url, token, label);
+      } catch (e: unknown) {
+        await this.cleanup();
+        this.error = e instanceof Error ? e.message : 'could not start call';
+      } finally {
+        this.connecting = false;
+      }
+    },
 
+    /** Shared connect path — member calls above, and the public guest page
+     *  (which has already exchanged its link token for a room token).
+     *  `canPublish: false` = a listen-only guest: the mic is never requested
+     *  (the SFU would reject the publish outright) and the state pins muted. */
+    async connectWithToken(
+      url: string,
+      token: string,
+      label: string,
+      opts?: { guest?: boolean; canPublish?: boolean },
+    ) {
+      if (this.active) return;
+      this.connecting = true;
+      this.error = null; // a retry must not show the previous attempt's failure
+      this.label = label;
+      if (opts?.guest) this.isGuest = true;
+      const listenOnly = opts?.canPublish === false;
+      this.canPublish = !listenOnly;
+      try {
         // Lazy chunk: livekit-client only lands over the network at first call.
         const { Room, RoomEvent, Track } = await import('livekit-client');
 
@@ -145,9 +182,9 @@ export const useVoiceStore = defineStore('voice', {
         // already-joined room — otherwise they stay in the call as a ghost
         // participant with no UI to leave.
         room = r;
-        await r.localParticipant.setMicrophoneEnabled(true);
+        if (!listenOnly) await r.localParticipant.setMicrophoneEnabled(true);
         this.active = true;
-        this.muted = false;
+        this.muted = listenOnly;
         this.error = null;
         this.syncParticipants();
       } catch (e: unknown) {
@@ -155,7 +192,7 @@ export const useVoiceStore = defineStore('voice', {
         // strands the bar open on a stale message) — set the failure reason
         // AFTER it so the failed-call state still says why.
         await this.cleanup();
-        this.error = e instanceof Error ? e.message : 'could not start call';
+        this.error = e instanceof Error ? e.message : 'could not connect';
       } finally {
         this.connecting = false;
       }
@@ -176,7 +213,7 @@ export const useVoiceStore = defineStore('voice', {
     },
 
     async toggleMute() {
-      if (!room) return;
+      if (!room || !this.canPublish) return; // listen-only: nothing to toggle
       // Flip state only after the SFU confirms. An optimistic flip that then
       // rejects (device error, mid-reconnect) would render the mic-slash icon
       // while the track is still transmitting — the worst kind of wrong.
@@ -220,6 +257,8 @@ export const useVoiceStore = defineStore('voice', {
       this.volumes = {};
       this.networkId = null;
       this.target = '';
+      this.isGuest = false;
+      this.canPublish = true;
       // In-call notices (op-mute, mute-toggle failures) die with the call —
       // otherwise the CallBar stays wedged open showing them after /leave.
       // startCall's catch re-sets its failure reason after calling this.

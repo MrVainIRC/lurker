@@ -160,7 +160,11 @@ export function urlHash(url: string): string {
 /** ⚠ Exported so a test can substitute a fixed instant for `'now'` and assert the ranking
  *  deterministically. A test that spells the expression out itself asserts a fact about SQLite
  *  rather than about this module, and stays green when this line changes. */
-export const NOW_ISO = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
+/** The one SQL timestamp format for tables whose expiry is compared
+ *  lexicographically in SQL — the same shape as JS toISOString, so both tiers
+ *  compare soundly. Also consumed by voiceLinks (guest call links). */
+export const ISO_TS_FMT = '%Y-%m-%dT%H:%M:%fZ';
+export const NOW_ISO = `strftime('${ISO_TS_FMT}','now')`;
 
 /** ⚠ Exported so a test can EXPLAIN the statements that ACTUALLY run. Planning a paraphrase
  *  proves nothing: an index assertion written against a hand-copied string stays green when the

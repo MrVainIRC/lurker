@@ -60,3 +60,24 @@ export function canModerateCall(modes: readonly string[]): boolean {
 export function canAdminCall(modes: readonly string[]): boolean {
   return modes.some((m) => OP_LETTERS.has(m));
 }
+
+// ─── Guest identities ───────────────────────────────────────────────────────
+// Guests joining via a capability link get namespaced LiveKit identities so
+// they can never collide with or impersonate a bare IRC nick. The server mints
+// them (see guestIdentity in server/services/voice.ts — shape pinned by its
+// tests); clients use these to RENDER guests differently instead of showing
+// the raw machine identity ('guest-coolguest-3fa9b2c1').
+
+const GUEST_IDENTITY_RE = /^guest-([a-z0-9_-]*)-[0-9a-f]{8}$/;
+
+/** True for a minted guest identity; a bare-nick identity is never a guest. */
+export function isGuestIdentity(identity: string): boolean {
+  return GUEST_IDENTITY_RE.test(identity);
+}
+
+/** The human name inside a guest identity ('guest-coolguest-3fa9b2c1' →
+ *  'coolguest'), or the identity unchanged when it isn't a guest. */
+export function guestDisplayName(identity: string): string {
+  const m = GUEST_IDENTITY_RE.exec(identity);
+  return m ? m[1] || 'guest' : identity;
+}
