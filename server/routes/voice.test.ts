@@ -141,6 +141,6 @@ describe('POST /api/voice/token', () => {
     const res = await agent.post('/api/voice/token').send({ networkId: network.id, target: 'Bob' });
     expect(res.status).toBe(200);
     // Canonical sorted pair — Bob's end derives the identical room.
-    expect(res.body.room).toBe('net-irc.libera.chat-d-alice-bob');
+    expect(res.body.room).toBe('net-irc.libera.chat-d-alice:bob');
   });
 });

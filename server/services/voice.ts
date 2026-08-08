@@ -22,20 +22,11 @@
 
 import { AccessToken } from 'livekit-server-sdk';
 import { isChannelTarget } from '../../shared/channels.js';
-
-// Conventional truthy env values — trimmed + case-insensitive. Matches dccConfig.
-const TRUTHY = new Set(['1', 'true', 'yes', 'on']);
-
-/** Parse a raw LURKER_VOICE_ENABLED value to a boolean. Pure (no env access) so
- * it can be unit-tested without touching process.env. */
-export function parseVoiceEnabled(raw: string | undefined): boolean {
-  if (raw == null) return false;
-  return TRUTHY.has(raw.trim().toLowerCase());
-}
+import { parseTruthyEnv } from '../utils/truthyEnv.js';
 
 /** The operator master switch. */
 export function voiceMasterEnabled(): boolean {
-  return parseVoiceEnabled(process.env.LURKER_VOICE_ENABLED);
+  return parseTruthyEnv(process.env.LURKER_VOICE_ENABLED);
 }
 
 export interface LiveKitConfig {
@@ -76,17 +67,31 @@ function foldAscii(s: string): string {
 /**
  * Derive the LiveKit room name for a call. Pure and deterministic.
  *
- * Keyed on the IRC network's HOST — NOT a local network row id. A networkId is
- * per-account, so two users of the same instance on the same channel would
- * otherwise derive different rooms and never connect. Hosts are shared across
- * users, and across *instances* pointed at a common SFU — so a host key is also
- * what makes opt-in cross-instance bridging Just Work.
+ * Keyed on the IRC network's HOST — NOT a local network row id, and NOT the
+ * 005 NETWORK token. A networkId is per-account, so two users of the same
+ * instance on the same channel would otherwise derive different rooms and
+ * never connect. The NETWORK token is *self-declared by the IRC server*: keying
+ * on it would let anyone point a Lurker network at a hostile server claiming
+ * `NETWORK=Libera`, "join" #dev there, and mint a token for the real Libera
+ * channel's room. The host is the one key that is both shared across users and
+ * anchored to where the membership check actually ran. The trade-off (accepted,
+ * documented in SELF_HOSTING): users must configure the SAME hostname — DNS
+ * aliases like irc.libera.chat vs irc.eu.libera.chat derive different rooms.
  *
  *  - Channel `#dev` on irc.libera.chat → `net-irc.libera.chat-c-#dev`
- *  - DM `Alice`↔`bob`                  → `net-irc.libera.chat-d-alice-bob` (sorted, either end)
+ *  - DM `Alice`↔`bob`                  → `net-irc.libera.chat-d-alice:bob` (sorted, either end)
+ *
+ * The DM pair is joined with `:` — impossible in an IRC nick (it's the wire
+ * framing delimiter), where `-` is legal and made distinct pairs collide:
+ * ('john-w','ork') and ('john','w-ork') must NOT share a room, or minting a DM
+ * token becomes a way to listen in on someone else's call.
  *
  * `self` is the caller's own nick on the network; it is only consulted for DMs,
  * where it is paired with `target` and sorted so both ends agree on one room.
+ * Callers should pass `target`/`self` already folded with the network's
+ * declared CASEMAPPING (see routes/voice.ts) so rfc1459 spelling variants of
+ * one channel agree on one room; the ASCII fold here is the floor, not the
+ * whole rule.
  */
 export function roomFor(networkKey: string, target: string, self: string): string {
   const net = foldAscii(networkKey);
@@ -96,7 +101,7 @@ export function roomFor(networkKey: string, target: string, self: string): strin
   const a = foldAscii(self);
   const b = foldAscii(target);
   const [lo, hi] = a <= b ? [a, b] : [b, a];
-  return `net-${net}-d-${lo}-${hi}`;
+  return `net-${net}-d-${lo}:${hi}`;
 }
 
 export interface MintedToken {

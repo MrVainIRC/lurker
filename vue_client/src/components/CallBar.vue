@@ -11,8 +11,10 @@
 -->
 
 <template>
+  <!-- Also rendered when only an error remains: a failed call must say WHY
+       (403/503, SFU unreachable, mic denied) instead of silently vanishing. -->
   <div
-    v-if="voice.active || voice.connecting"
+    v-if="voice.active || voice.connecting || voice.error"
     class="call-bar"
     role="dialog"
     aria-label="Voice call"
@@ -20,10 +22,16 @@
     <div class="call-head">
       <span class="dot" :class="{ live: voice.active }" aria-hidden="true"></span>
       <span class="call-title">{{ voice.label || 'Voice call' }}</span>
-      <span class="call-status">{{ voice.connecting ? 'connecting…' : 'connected' }}</span>
+      <span class="call-status">{{ statusText }}</span>
+      <IconButton
+        v-if="!voice.active && !voice.connecting"
+        icon="fa-xmark"
+        label="Dismiss"
+        @click="voice.clearError()"
+      />
     </div>
 
-    <div class="call-body">
+    <div v-if="voice.active || voice.connecting" class="call-body">
       <ul v-if="voice.participants.length" class="call-parts">
         <li v-for="id in voice.participants" :key="id">
           <div class="part-row" :class="{ talking: voice.speaking.includes(id) }">
@@ -48,7 +56,7 @@
       <p v-else class="call-empty">Just you so far…</p>
     </div>
 
-    <div class="call-actions">
+    <div v-if="voice.active || voice.connecting" class="call-actions">
       <IconButton
         :icon="voice.muted ? 'fa-microphone-slash' : 'fa-microphone'"
         :label="voice.muted ? 'Unmute' : 'Mute'"
@@ -63,10 +71,17 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue';
 import { useVoiceStore } from '../stores/voice.js';
 import IconButton from './IconButton.vue';
 
 const voice = useVoiceStore();
+
+const statusText = computed(() => {
+  if (voice.connecting) return 'connecting…';
+  if (voice.active) return 'connected';
+  return 'call failed';
+});
 
 function volPct(id: string): number {
   return Math.round((voice.volumes[id] ?? 1) * 100);

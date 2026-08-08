@@ -345,9 +345,12 @@ docker compose --profile voice up -d
 
 `LIVEKIT_API_KEY`/`SECRET` must match the `LIVEKIT_KEYS` pair on the `livekit` service — that shared secret is how Lurker signs call tokens the SFU trusts. `LIVEKIT_WS_URL` is the address **clients** connect to: `ws://<lan-ip>:7880` on a LAN, or `wss://` behind your TLS proxy for the public internet (put only the signaling port behind the proxy; media flows over UDP 7882 directly). Set the LiveKit `--node-ip` flag to an address clients can actually reach, and see the [LiveKit deployment docs](https://docs.livekit.io/home/self-hosting/deployment/) for TURN setup.
 
-Everyone in a channel can join that channel's call; a DM call simply rings by existing — the other side sees it and joins from the same button. Room membership is checked against your live IRC state, so you can only get a call token for a channel you are actually in.
+Everyone in a channel can join that channel's call — from the button atop the member list, or with `/call` in the buffer. A DM call is `/call` in the DM: both sides join the same room, but nothing "rings" yet — tell the other person to `/call` you back (in-call presence indicators are planned as a follow-up). Call rooms are derived from the IRC server **hostname**, so users who should share calls must configure the _same_ host: `irc.libera.chat` and `irc.eu.libera.chat` are different rooms even though they're the same network.
 
-One caveat to know: DM call rooms are named by the two nicks. IRC nicks are transferable, so on networks without nick registration someone who takes an offline person's nick could join a call room under that name — the same level of trust as IRC itself. Treat calls like you treat the channel: fine among people you already trust.
+Two trust caveats, both in line with IRC's own model — fine among people you already trust:
+
+- Channel membership is checked **when the call token is issued**, and tokens last 2 hours. Someone kicked or banned mid-call can rejoin the room on their existing token until it expires (op-side call moderation is planned as a follow-up).
+- DM call rooms are named by the two nicks, and IRC nicks are transferable: on networks without nick registration, someone who takes an offline person's nick could join a call room under that name.
 
 Disabling voice (removing the env vars) makes every call affordance disappear from clients; browsers only download the WebRTC code the first time someone actually joins a call.
 

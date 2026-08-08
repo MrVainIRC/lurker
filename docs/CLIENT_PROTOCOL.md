@@ -1122,9 +1122,11 @@ current IRC nick, which is what other participants render.
 
 Room names are derived server-side from the network **host** (never the
 `networkId`): `net-<host>-c-<channel>` for channels,
-`net-<host>-d-<nickA>-<nickB>` (sorted pair) for DMs, all ASCII-folded — so
-every member of a channel lands in the same room, even from another Lurker
-instance sharing the SFU.
+`net-<host>-d-<nickA>:<nickB>` (sorted pair, `:`-joined) for DMs. Channel and
+nick are folded with the network's declared CASEMAPPING, the host ASCII-folded
+— so every member of a channel lands in the same room, even from another
+Lurker instance sharing the SFU. The host string must match **exactly** across
+users: different DNS aliases of one network derive different rooms.
 
 ### Export / import
 

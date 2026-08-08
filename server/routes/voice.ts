@@ -9,6 +9,7 @@ import type { Network } from '../db/networks.js';
 import ircManager from '../services/ircManager.js';
 import type { IrcConnection } from '../services/ircConnection.js';
 import { isChannelTarget } from '../../shared/channels.js';
+import { foldTargetFor } from '../db/buffers.js';
 import { mintVoiceToken, roomFor, voiceEnabled } from '../services/voice.js';
 
 // Voice control surface. Lurker is the token authority (see services/voice.ts);
@@ -69,11 +70,23 @@ router.post('/token', async (req: Request, res: Response) => {
     return;
   }
 
-  const room = roomFor(network.host, target, nick);
+  // Fold with the network's declared CASEMAPPING before deriving the room, so
+  // rfc1459 spelling variants of one channel ('#foo[bar]' vs '#foo{bar}') — or
+  // of a nick — agree on one room. isChannelJoined folds the same way, so the
+  // membership gate and the room key can never diverge. Deterministic across
+  // instances too: the mapping is whatever the shared IRC server declared.
+  const room = roomFor(
+    network.host,
+    foldTargetFor(network.id, target),
+    foldTargetFor(network.id, nick),
+  );
   try {
     const minted = await mintVoiceToken({ identity: nick, room });
     res.json(minted); // { token, room, url }
-  } catch {
+  } catch (err) {
+    // Operator-actionable (bad LIVEKIT_API_SECRET, SDK failure) — log it; a
+    // silent 500 here would leave both ends of the failure invisible.
+    console.error('[voice] token mint failed:', err);
     res.status(500).json({ error: 'failed to mint token' });
   }
 });

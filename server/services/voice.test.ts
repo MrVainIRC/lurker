@@ -6,25 +6,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   liveKitConfig,
   mintVoiceToken,
-  parseVoiceEnabled,
   roomFor,
   voiceEnabled,
   voiceMasterEnabled,
 } from './voice.js';
 
-describe('parseVoiceEnabled', () => {
-  it('treats the conventional truthy values as on (trimmed, case-insensitive)', () => {
-    for (const v of ['1', 'true', 'TRUE', 'yes', 'on', ' On ']) {
-      expect(parseVoiceEnabled(v)).toBe(true);
-    }
-  });
-
-  it('is off for unset / empty / anything else (opt-in only)', () => {
-    for (const v of [undefined, '', '0', 'false', 'no', 'off', 'maybe']) {
-      expect(parseVoiceEnabled(v)).toBe(false);
-    }
-  });
-});
+// LURKER_VOICE_ENABLED value parsing is the shared parseTruthyEnv — its accepted
+// set is pinned by truthyEnv's own tests; only the wiring is exercised here (in
+// the 'config gating' describe below).
 
 describe('roomFor', () => {
   it('makes a channel room everyone on the same host+channel derives identically', () => {
@@ -57,7 +46,16 @@ describe('roomFor', () => {
     const fromAlice = roomFor('irc.libera.chat', 'Bob', 'Alice');
     const fromBob = roomFor('irc.libera.chat', 'Alice', 'Bob');
     expect(fromAlice).toBe(fromBob);
-    expect(fromAlice).toBe('net-irc.libera.chat-d-alice-bob');
+    expect(fromAlice).toBe('net-irc.libera.chat-d-alice:bob');
+  });
+
+  it("joins the DM pair with ':' so pairs containing '-' can never collide", () => {
+    // '-' is legal inside a nick, so a '-' delimiter made ('john-w','ork') and
+    // ('john','w-ork') share a room — minting a DM token for the second pair
+    // would silently drop the caller into the first pair's private call.
+    const a = roomFor('irc.libera.chat', 'ork', 'john-w');
+    const b = roomFor('irc.libera.chat', 'w-ork', 'john');
+    expect(a).not.toBe(b);
   });
 
   it('scopes rooms by host, not by per-user network id', () => {

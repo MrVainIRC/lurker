@@ -102,8 +102,12 @@ export const useVoiceStore = defineStore('voice', {
           });
 
         await r.connect(url, token);
-        await r.localParticipant.setMicrophoneEnabled(true);
+        // Hold the handle BEFORE enabling the mic: if the user denies mic
+        // permission, the catch's cleanup() must still disconnect this
+        // already-joined room — otherwise they stay in the call as a ghost
+        // participant with no UI to leave.
         room = r;
+        await r.localParticipant.setMicrophoneEnabled(true);
         this.active = true;
         this.muted = false;
         this.error = null;
@@ -132,8 +136,20 @@ export const useVoiceStore = defineStore('voice', {
 
     async toggleMute() {
       if (!room) return;
-      this.muted = !this.muted;
-      await room.localParticipant.setMicrophoneEnabled(!this.muted);
+      // Flip state only after the SFU confirms. An optimistic flip that then
+      // rejects (device error, mid-reconnect) would render the mic-slash icon
+      // while the track is still transmitting — the worst kind of wrong.
+      const wantMuted = !this.muted;
+      try {
+        await room.localParticipant.setMicrophoneEnabled(!wantMuted);
+        this.muted = wantMuted;
+      } catch (e: unknown) {
+        this.error = e instanceof Error ? e.message : 'could not toggle mute';
+      }
+    },
+
+    clearError() {
+      this.error = null;
     },
 
     async leave() {
