@@ -134,6 +134,24 @@ const listEl = ref<HTMLElement | null>(null);
 const buffer = computed(() => (networks.activeKey ? buffers.byKey(networks.activeKey) : null));
 const members = computed((): BufferMember[] => buffer.value?.members || []);
 
+// ⚠ Declared BEFORE the voice section below: its guest-links watcher runs
+// IMMEDIATELY during setup and evaluates isOp → selfModes — a later `const`
+// here is a temporal-dead-zone crash that takes the whole chat view down
+// (regression-tested by MemberList.test.ts).
+const selfNick = computed(() => {
+  const b = buffer.value;
+  if (!b || b.networkId == null) return null;
+  return networks.states[b.networkId]?.nick || null;
+});
+// The current user's own modes in this channel, used to gate the operator
+// actions in the member context menu.
+const selfModes = computed<string[]>(() => {
+  const sn = selfNick.value;
+  if (!sn) return [];
+  const me = members.value.find((m) => nickOf(m).toLowerCase() === sn.toLowerCase());
+  return me && Array.isArray(me.modes) ? me.modes : [];
+});
+
 // ─── Voice call (channels only, and only when the instance offers it) ────────
 const config = useConfigStore();
 const voice = useVoiceStore();
@@ -319,20 +337,6 @@ async function onPolicyChange(e: Event) {
     });
   }
 }
-const selfNick = computed(() => {
-  const b = buffer.value;
-  if (!b || b.networkId == null) return null;
-  return networks.states[b.networkId]?.nick || null;
-});
-// The current user's own modes in this channel, used to gate the operator
-// actions in the member context menu.
-const selfModes = computed<string[]>(() => {
-  const sn = selfNick.value;
-  if (!sn) return [];
-  const me = members.value.find((m) => nickOf(m).toLowerCase() === sn.toLowerCase());
-  return me && Array.isArray(me.modes) ? me.modes : [];
-});
-
 watch(
   () => networks.activeKey,
   () => {
