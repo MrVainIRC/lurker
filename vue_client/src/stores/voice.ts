@@ -86,10 +86,15 @@ export const useVoiceStore = defineStore('voice', {
             if (stored != null) audio.setVolume(stored);
           }
         })
-          .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, _pub, participant) => {
+          .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, pub, participant) => {
             if (track.kind !== Track.Kind.Audio) return;
-            tracksByIdentity.delete(participant.identity);
-            track.detach().forEach((el) => el.remove());
+            // Only the mic unsubscribing clears the volume mapping — a
+            // participant can also carry screen-share audio, and losing THAT
+            // must not orphan their volume slider.
+            if (String(pub.source) === 'microphone') tracksByIdentity.delete(participant.identity);
+            const detached = track.detach();
+            detached.forEach((el) => el.remove());
+            audioEls = audioEls.filter((el) => !detached.includes(el));
           })
           .on(RoomEvent.ParticipantConnected, () => this.syncParticipants())
           .on(RoomEvent.ParticipantDisconnected, () => this.syncParticipants())

@@ -54,12 +54,14 @@ router.use(requireAuth);
 router.post('/token', async (req: Request, res: Response) => {
   const networkId = Number(req.body?.networkId);
   const target = typeof req.body?.target === 'string' ? req.body.target.trim() : '';
+  // Gate order matches CLIENT_PROTOCOL: a voice-disabled instance answers 503
+  // to everything (inside resolveCall), before any body validation.
+  const ctx = resolveCall(req, res, networkId);
+  if (!ctx) return;
   if (!target) {
     res.status(400).json({ error: 'target required' });
     return;
   }
-  const ctx = resolveCall(req, res, networkId);
-  if (!ctx) return;
   const { network, conn, nick } = ctx;
 
   // Channels require live membership (the one casemapping-correct probe — see

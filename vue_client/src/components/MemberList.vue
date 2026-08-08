@@ -93,7 +93,7 @@ function startCall() {
   const b = buffer.value;
   if (!b || b.networkId == null) return;
   // label = the channel target; the store mints its own token + room.
-  voice.startCall(b.networkId, b.target, b.target);
+  void voice.startCall(b.networkId, b.target, b.target);
 }
 const selfNick = computed(() => {
   const b = buffer.value;

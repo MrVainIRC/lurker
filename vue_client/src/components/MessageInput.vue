@@ -3123,7 +3123,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
         localInfo(networkId, target, `already in a call (${voice.label}) — /hangup first`);
         return true;
       }
-      voice.startCall(networkId, target, target);
+      void voice.startCall(networkId, target, target);
       return true;
     }
     case 'hangup': {

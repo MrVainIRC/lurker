@@ -91,10 +91,21 @@ describe('POST /api/voice/token', () => {
     expect(res.status).toBe(400);
   });
 
-  it('400 for a missing target', async () => {
+  it('400 for a missing target (after the instance/network gates)', async () => {
     enableVoice();
+    // Connected on purpose: target validation sits BEHIND the 503/404/409
+    // gates (CLIENT_PROTOCOL's documented order), so give it a live network.
+    fakeManager.conn = { currentNick: 'alice', isChannelJoined: () => true };
     const res = await agent.post('/api/voice/token').send({ networkId: network.id });
     expect(res.status).toBe(400);
+  });
+
+  it('503 beats body validation when voice is disabled (documented gate order)', async () => {
+    delete process.env.LURKER_VOICE_ENABLED;
+    delete process.env.LIVEKIT_WS_URL;
+    // No target either — a disabled instance must still answer 503, not 400.
+    const res = await agent.post('/api/voice/token').send({ networkId: network.id });
+    expect(res.status).toBe(503);
   });
 
   it('404 for a network the caller does not own (ownership gate)', async () => {
