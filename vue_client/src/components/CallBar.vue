@@ -16,10 +16,12 @@
   <div
     v-if="voice.active || voice.connecting || voice.error"
     class="call-bar"
+    :class="{ 'has-video': voice.videoTiles.length }"
+    :style="barStyle"
     role="dialog"
     aria-label="Voice call"
   >
-    <div class="call-head">
+    <div class="call-head" @pointerdown="onHeaderDown">
       <span class="dot" :class="{ live: voice.active }" aria-hidden="true"></span>
       <span class="call-title">{{ voice.label || 'Voice call' }}</span>
       <span class="call-status">{{ statusText }}</span>
@@ -32,6 +34,15 @@
     </div>
 
     <div v-if="voice.active || voice.connecting" class="call-body">
+      <div v-if="voice.videoTiles.length" class="video-grid">
+        <VideoTile
+          v-for="t in voice.videoTiles"
+          :key="`${t.identity}|${t.source}`"
+          :identity="t.identity"
+          :source="t.source"
+          :self="t.self"
+        />
+      </div>
       <ul v-if="voice.participants.length" class="call-parts">
         <li v-for="id in voice.participants" :key="id">
           <div class="part-row" :class="{ talking: voice.speaking.includes(id) }">
@@ -81,6 +92,19 @@
         :danger="voice.muted"
         @click="voice.toggleMute()"
       />
+      <IconButton
+        v-if="voice.canPublish"
+        :icon="voice.cameraOn ? 'fa-video' : 'fa-video-slash'"
+        :label="voice.cameraOn ? 'Turn camera off' : 'Turn camera on'"
+        @click="voice.toggleCamera()"
+      />
+      <IconButton
+        v-if="voice.canPublish"
+        icon="fa-desktop"
+        :label="voice.screenOn ? 'Stop sharing screen' : 'Share screen'"
+        :danger="voice.screenOn"
+        @click="voice.toggleScreen()"
+      />
       <IconButton icon="fa-phone-slash" label="Leave call" danger @click="voice.leave()" />
     </div>
 
@@ -89,7 +113,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onBeforeUnmount, ref } from 'vue';
 import { useVoiceStore } from '../stores/voice.js';
 import { useBuffersStore, bufferKey } from '../stores/buffers.js';
 import { useNetworksStore } from '../stores/networks.js';
@@ -97,6 +121,7 @@ import { useToastsStore } from '../stores/toasts.js';
 import { canModerateCall, isGuestIdentity, guestDisplayName } from '../../../shared/voiceModes.js';
 import { api } from '../api.js';
 import IconButton from './IconButton.vue';
+import VideoTile from './VideoTile.vue';
 
 const voice = useVoiceStore();
 const buffers = useBuffersStore();
@@ -107,6 +132,38 @@ const statusText = computed(() => {
   if (voice.active) return 'connected';
   return 'call failed';
 });
+
+// ─── Drag (pointer events — memory rule: pointerdown, not mousedown/hover) ──
+// Positioned by default via CSS (bottom-right); once dragged, an explicit
+// left/top pins it. Clamped so the header can never leave the viewport.
+const pos = ref<{ x: number; y: number } | null>(null);
+let grabOffset = { x: 0, y: 0 };
+const barStyle = computed(() =>
+  pos.value
+    ? { left: `${pos.value.x}px`, top: `${pos.value.y}px`, right: 'auto', bottom: 'auto' }
+    : {},
+);
+function onHeaderDown(e: PointerEvent) {
+  // Buttons in the header (dismiss) must stay clickable, not start a drag.
+  if ((e.target as HTMLElement).closest('button')) return;
+  const bar = (e.currentTarget as HTMLElement).closest('.call-bar') as HTMLElement | null;
+  if (!bar) return;
+  const rect = bar.getBoundingClientRect();
+  grabOffset = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  window.addEventListener('pointermove', onDragMove);
+  window.addEventListener('pointerup', onDragEnd);
+}
+function onDragMove(e: PointerEvent) {
+  pos.value = {
+    x: Math.max(4, Math.min(window.innerWidth - 60, e.clientX - grabOffset.x)),
+    y: Math.max(4, Math.min(window.innerHeight - 40, e.clientY - grabOffset.y)),
+  };
+}
+function onDragEnd() {
+  window.removeEventListener('pointermove', onDragMove);
+  window.removeEventListener('pointerup', onDragEnd);
+}
+onBeforeUnmount(onDragEnd);
 
 // ─── Op moderation (the same shared gate the server enforces) ───────────────
 // The server enforces; showing the buttons only to ops is UX, not security.
@@ -160,12 +217,20 @@ function onVol(id: string, e: Event) {
   display: flex;
   flex-direction: column;
   width: 240px;
+  min-width: 220px;
+  min-height: 96px;
   max-width: calc(100vw - var(--space-9));
-  max-height: 50vh;
+  max-height: calc(100vh - var(--space-9));
   background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-popover);
+  overflow: hidden;
+  resize: both;
+}
+.call-bar.has-video {
+  width: 480px;
+  min-height: 280px;
 }
 .call-head {
   display: flex;
@@ -173,6 +238,10 @@ function onVol(id: string, e: Event) {
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--border);
+  cursor: move;
+  user-select: none;
+  touch-action: none;
+  flex: 0 0 auto;
 }
 .dot {
   width: 8px;
@@ -199,6 +268,12 @@ function onVol(id: string, e: Event) {
   overflow-y: auto;
   padding: var(--space-3) var(--space-4);
   min-height: 0;
+}
+.video-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
 }
 .call-parts {
   list-style: none;

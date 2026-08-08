@@ -577,13 +577,25 @@ describe('POST /api/voice/guest-token (public)', () => {
     expect(res.body.canPublish).toBe(false);
     const claims = JSON.parse(
       Buffer.from(String(res.body.token).split('.')[1]!, 'base64url').toString(),
-    ) as { video?: { canPublish?: boolean; canSubscribe?: boolean; canPublishData?: boolean } };
+    ) as {
+      video?: {
+        canPublish?: boolean;
+        canSubscribe?: boolean;
+        canPublishData?: boolean;
+        canPublishSources?: unknown;
+      };
+    };
     expect(claims.video?.canPublish).toBe(false);
     expect(claims.video?.canSubscribe).toBe(true);
     // The data channel is an INDEPENDENT grant — listen-only must close it
     // too, or a "can hear but not speak" guest could spam data packets at the
     // room from a raw client for the token's whole hour.
     expect(claims.video?.canPublishData).toBe(false);
+    // canPublish:false covers EVERY source — mic, camera, AND screen share.
+    // Video needed zero new server gating precisely because no per-source
+    // override exists in the grant; this pins that claim instead of merely
+    // asserting it in a comment.
+    expect(claims.video?.canPublishSources).toBeUndefined();
   });
 
   it('throttles per IP (429 with Retry-After past the window cap)', async () => {

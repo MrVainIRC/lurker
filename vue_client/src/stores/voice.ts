@@ -16,7 +16,15 @@
 // primitives the UI renders.
 
 import { defineStore } from 'pinia';
-import type { Room, RemoteTrack, RemoteAudioTrack, Participant } from 'livekit-client';
+import type {
+  Room,
+  RemoteTrack,
+  RemoteAudioTrack,
+  RemoteVideoTrack,
+  LocalVideoTrack,
+  LocalTrackPublication,
+  Participant,
+} from 'livekit-client';
 import { api } from '../api.js';
 
 interface VoiceTokenResponse {
@@ -25,8 +33,21 @@ interface VoiceTokenResponse {
   url: string;
 }
 
+/** One video/screen tile the CallBar renders (self + remote). */
+export interface VideoTileSpec {
+  identity: string;
+  source: string; // 'camera' | 'screen_share'
+  self: boolean;
+}
+
 // Non-reactive session handles (see header note).
 let room: Room | null = null;
+// `${identity}|${source}` → remote video track; attached by VideoTile, which
+// owns the element lifecycle — the room runs adaptiveStream, so a remote video
+// track only flows once attach()ed to a VISIBLE <video>.
+let videoTracksByKey = new Map<string, RemoteVideoTrack>();
+// source ('camera' | 'screen_share') → our own local video track, for self tiles.
+let localVideoTracks = new Map<string, LocalVideoTrack>();
 // True while OUR OWN toggleMute() is awaiting the SFU — the TrackMuted event
 // fires before the await resolves, and without this flag a self-mute is
 // indistinguishable from an op's server-mute.
@@ -42,6 +63,11 @@ export const useVoiceStore = defineStore('voice', {
     active: false,
     connecting: false,
     muted: false,
+    cameraOn: false,
+    screenOn: false,
+    // Video/screen tiles to render (self + remote) — driven by track events,
+    // so device failures and permission revocations can't desync the flags.
+    videoTiles: [] as VideoTileSpec[],
     // Human label for what's being called, e.g. "#dev".
     label: '',
     // The channel/DM this call belongs to, so UI can tell "in THIS call" from
@@ -114,30 +140,64 @@ export const useVoiceStore = defineStore('voice', {
 
         const r = new Room({ adaptiveStream: true, dynacast: true });
         r.on(RoomEvent.TrackSubscribed, (track: RemoteTrack, pub, participant) => {
-          if (track.kind !== Track.Kind.Audio) return; // video: PR'd separately
-          const audio = track as RemoteAudioTrack;
-          // Attach ALL audio so it plays, but only bind the per-participant
-          // volume slider to the mic track (a native client may also send
-          // screen-share audio, which shares the participant identity).
-          const el = audio.attach() as HTMLAudioElement;
-          el.autoplay = true;
-          document.body.appendChild(el);
-          audioEls.push(el);
-          if (String(pub.source) === 'microphone') {
-            tracksByIdentity.set(participant.identity, audio);
-            const stored = this.volumes[participant.identity];
-            if (stored != null) audio.setVolume(stored);
+          if (track.kind === Track.Kind.Audio) {
+            const audio = track as RemoteAudioTrack;
+            // Attach ALL audio so it plays, but only bind the per-participant
+            // volume slider to the mic track (screen-share audio shares the
+            // participant identity).
+            const el = audio.attach() as HTMLAudioElement;
+            el.autoplay = true;
+            document.body.appendChild(el);
+            audioEls.push(el);
+            if (String(pub.source) === 'microphone') {
+              tracksByIdentity.set(participant.identity, audio);
+              const stored = this.volumes[participant.identity];
+              if (stored != null) audio.setVolume(stored);
+            }
+          } else if (track.kind === Track.Kind.Video) {
+            // NOT attached here: the room runs adaptiveStream, so video only
+            // flows into a visible element — VideoTile owns attach/detach.
+            const source = String(pub.source);
+            videoTracksByKey.set(`${participant.identity}|${source}`, track as RemoteVideoTrack);
+            this.addTile(participant.identity, source, false);
           }
         })
           .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, pub, participant) => {
-            if (track.kind !== Track.Kind.Audio) return;
-            // Only the mic unsubscribing clears the volume mapping — a
-            // participant can also carry screen-share audio, and losing THAT
-            // must not orphan their volume slider.
-            if (String(pub.source) === 'microphone') tracksByIdentity.delete(participant.identity);
-            const detached = track.detach();
-            detached.forEach((el) => el.remove());
-            audioEls = audioEls.filter((el) => !detached.includes(el));
+            if (track.kind === Track.Kind.Audio) {
+              // Only the mic unsubscribing clears the volume mapping — a
+              // participant can also carry screen-share audio, and losing THAT
+              // must not orphan their volume slider.
+              if (String(pub.source) === 'microphone') {
+                tracksByIdentity.delete(participant.identity);
+              }
+              const detached = track.detach();
+              detached.forEach((el) => el.remove());
+              audioEls = audioEls.filter((el) => !detached.includes(el));
+            } else if (track.kind === Track.Kind.Video) {
+              const source = String(pub.source);
+              videoTracksByKey.delete(`${participant.identity}|${source}`);
+              this.removeTile(participant.identity, source);
+              track.detach().forEach((el) => el.remove());
+            }
+          })
+          .on(RoomEvent.LocalTrackPublished, (pub: LocalTrackPublication) => {
+            if (pub.track?.kind !== Track.Kind.Video) return;
+            const source = String(pub.source);
+            localVideoTracks.set(source, pub.track as LocalVideoTrack);
+            if (source === 'screen_share') this.screenOn = true;
+            else this.cameraOn = true;
+            this.addTile(r.localParticipant.identity, source, true);
+          })
+          .on(RoomEvent.LocalTrackUnpublished, (pub: LocalTrackPublication) => {
+            // Fires for EVERY unpublish path — our toggle, the browser's
+            // "stop sharing" chrome, a device unplugged — so flags and tiles
+            // can never desync from reality.
+            if (pub.track?.kind !== Track.Kind.Video) return;
+            const source = String(pub.source);
+            localVideoTracks.delete(source);
+            if (source === 'screen_share') this.screenOn = false;
+            else this.cameraOn = false;
+            this.removeTile(r.localParticipant.identity, source);
           })
           .on(RoomEvent.TrackMuted, (pub, participant) => {
             // Keep `muted` honest when the mute didn't come from OUR toggle —
@@ -204,6 +264,55 @@ export const useVoiceStore = defineStore('voice', {
         : [];
     },
 
+    addTile(identity: string, source: string, self: boolean) {
+      if (!this.videoTiles.some((t) => t.identity === identity && t.source === source)) {
+        this.videoTiles.push({ identity, source, self });
+      }
+    },
+    removeTile(identity: string, source: string) {
+      this.videoTiles = this.videoTiles.filter(
+        (t) => !(t.identity === identity && t.source === source),
+      );
+    },
+
+    /** Attach a tile's track to its <video> element. VideoTile calls this on
+     *  mount — required for adaptiveStream to actually deliver remote video. */
+    attachVideo(identity: string, source: string, el: HTMLVideoElement, self: boolean) {
+      const track = self
+        ? localVideoTracks.get(source)
+        : videoTracksByKey.get(`${identity}|${source}`);
+      track?.attach(el);
+    },
+    detachVideo(identity: string, source: string, el: HTMLVideoElement, self: boolean) {
+      const track = self
+        ? localVideoTracks.get(source)
+        : videoTracksByKey.get(`${identity}|${source}`);
+      track?.detach(el);
+    },
+
+    async toggleCamera() {
+      if (!room || !this.canPublish) return; // listen-only: video is publish too
+      try {
+        // Flags + tiles are driven by LocalTrackPublished/Unpublished, so
+        // state stays correct even if the device fails mid-toggle.
+        await room.localParticipant.setCameraEnabled(!this.cameraOn);
+      } catch (e: unknown) {
+        this.error = e instanceof Error ? e.message : 'could not toggle camera';
+      }
+    },
+
+    async toggleScreen() {
+      if (!room || !this.canPublish) return;
+      try {
+        // { audio: true } also captures screen/tab audio where the browser+OS
+        // allow it (Chrome's "share tab audio"); it silently degrades to
+        // video-only otherwise.
+        await room.localParticipant.setScreenShareEnabled(!this.screenOn, { audio: true });
+      } catch {
+        /* user cancelled the screen picker — not an error */
+      }
+    },
+
     /** Set a remote participant's local playback volume (0..1). Kept in state so
      *  it survives a track re-subscribe within the same session. */
     setVolume(identity: string, volume: number) {
@@ -249,9 +358,14 @@ export const useVoiceStore = defineStore('voice', {
       audioEls.forEach((el) => el.remove());
       audioEls = [];
       tracksByIdentity = new Map();
+      videoTracksByKey = new Map();
+      localVideoTracks = new Map();
       this.active = false;
       this.connecting = false;
       this.muted = false;
+      this.cameraOn = false;
+      this.screenOn = false;
+      this.videoTiles = [];
       this.participants = [];
       this.speaking = [];
       this.volumes = {};
