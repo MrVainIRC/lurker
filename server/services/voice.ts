@@ -174,7 +174,10 @@ export async function mintVoiceToken(args: {
     room: args.room,
     canPublish: args.canPublish !== false,
     canSubscribe: true,
-    canPublishData: true,
+    // Data-channel publishing follows the same gate: canPublishData is an
+    // INDEPENDENT grant, so leaving it true would let a "listen-only" guest
+    // spam data packets at the room from a raw client for the token's hour.
+    canPublishData: args.canPublish !== false,
   });
   const token = await at.toJwt();
   return { token, room: args.room, url: cfg.wsUrl };

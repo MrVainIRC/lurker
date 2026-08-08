@@ -349,18 +349,24 @@ router.delete('/guest-link/:token', (req: Request, res: Response) => {
     res.status(404).json({ error: 'link not found' });
     return;
   }
-  // Authorize: the caller must be an op of the link's channel on ANY of their
-  // connections to the matching host — a user with two network rows on one
-  // host (main + alt) must be able to revoke from whichever holds the op, or
-  // the emergency revoke for a leaked link fails exactly when needed.
-  const authorized = ircManager
-    .listConnections(req.user!.id)
-    .some(
-      (c) =>
-        !!c.currentNick &&
-        foldKey(c.network.host) === link.networkHost &&
-        canAdminCall(memberModes(c, link.channelFolded, c.currentNick)),
-    );
+  // Authorize: on ANY of the caller's connections to the matching host — a
+  // user with two network rows on one host (main + alt) must be able to revoke
+  // from whichever holds the op, or the emergency revoke for a leaked link
+  // fails exactly when needed. The link's CREATOR may always revoke their own
+  // link too: the op-mode check compares the stored channel key (folded under
+  // the MINTER's row's casemapping) against a fold under the REVOKER's row,
+  // which can transiently diverge (see the invariant note at /token) — the
+  // creator path keeps revocation working through that window.
+  const authorized = ircManager.listConnections(req.user!.id).some((c) => {
+    if (!c.currentNick || foldKey(c.network.host) !== link.networkHost) return false;
+    if (
+      link.createdBy &&
+      foldTargetFor(c.network.id, c.currentNick) === foldTargetFor(c.network.id, link.createdBy)
+    ) {
+      return true;
+    }
+    return canAdminCall(memberModes(c, link.channelFolded, c.currentNick));
+  });
   if (!authorized) {
     res.status(403).json({ error: 'operators only' });
     return;

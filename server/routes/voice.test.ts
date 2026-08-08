@@ -494,6 +494,21 @@ describe('guest links — /api/voice/guest-link (op-only CRUD)', () => {
     expect(denied.status).toBe(403);
   });
 
+  it("the link's creator can revoke even without currently-resolvable op modes", async () => {
+    // The op-mode check folds the stored channel key under the REVOKER's row,
+    // which can transiently diverge from the minter's fold — the creator path
+    // keeps the emergency revoke working through that window.
+    enableVoice();
+    connectedAs(['o']);
+    const mint = await agent
+      .post('/api/voice/guest-link')
+      .send({ networkId: network.id, target: '#dev' });
+    // Same nick, but no longer op'd (deopped after minting).
+    connectedAs([]);
+    const del = await agent.delete(`/api/voice/guest-link/${mint.body.token}`);
+    expect(del.status).toBe(200);
+  });
+
   it('ops revoke; the link stops being usable for NEW joins', async () => {
     enableVoice();
     connectedAs(['o']);
@@ -562,9 +577,13 @@ describe('POST /api/voice/guest-token (public)', () => {
     expect(res.body.canPublish).toBe(false);
     const claims = JSON.parse(
       Buffer.from(String(res.body.token).split('.')[1]!, 'base64url').toString(),
-    ) as { video?: { canPublish?: boolean; canSubscribe?: boolean } };
+    ) as { video?: { canPublish?: boolean; canSubscribe?: boolean; canPublishData?: boolean } };
     expect(claims.video?.canPublish).toBe(false);
     expect(claims.video?.canSubscribe).toBe(true);
+    // The data channel is an INDEPENDENT grant — listen-only must close it
+    // too, or a "can hear but not speak" guest could spam data packets at the
+    // room from a raw client for the token's whole hour.
+    expect(claims.video?.canPublishData).toBe(false);
   });
 
   it('throttles per IP (429 with Retry-After past the window cap)', async () => {
