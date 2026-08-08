@@ -1141,10 +1141,12 @@ POST /moderate                 { networkId, target, action: mute|remove,
 (§7.1) — call it per connected network on every socket (re)connect. A token
 mint is gated by the channel's `minJoinMode` (403 with a human-readable
 `error` when below the bar; unknown modes on PUT are a 400, never coerced).
-`mute` is a server-side mute of every published track (the target cannot
-self-unmute); `remove` ejects them from the room — after which your client
-must NOT auto-reconnect that call (on self-hosted LiveKit the token itself
-stays valid until expiry, so honouring the removal is the client's job).
+`mute` server-mutes every published track — on self-hosted LiveKit this is
+advisory (the target CAN self-unmute; surface the mute to your user rather
+than pretending it's a lock). `remove` ejects them from the room — after
+which your client must NOT auto-reconnect that call (on self-hosted LiveKit
+the token itself stays valid until expiry, so honouring the removal is the
+client's job).
 `POST /webhook` also lives under `/api/voice` but is LiveKit↔Lurker internal
 (signature-authenticated) — never call it from a client.
 

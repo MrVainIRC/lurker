@@ -352,6 +352,7 @@ Channel operators get call controls that mirror their IRC standing: ops and half
 Two trust caveats, both in line with IRC's own model — fine among people you already trust:
 
 - Channel membership and the join policy are checked **when the call token is issued**, and tokens last 2 hours. Removing someone from a call ejects them now, but on self-hosted LiveKit it does **not** invalidate their token: Lurker's own clients won't rejoin after a removal, yet someone determined enough to use a raw LiveKit client can reconnect until the token expires. (Instant revocation on removal is a LiveKit Cloud feature.)
+- Likewise an op's **mute is a strong nudge, not a lock**: the muted person sees "a channel operator muted your microphone" but self-hosted LiveKit lets them unmute themselves. If someone won't stay muted, remove them — that's the enforcement tool.
 - DM call rooms are named by the two nicks, and IRC nicks are transferable: on networks without nick registration, someone who takes an offline person's nick could join a call room under that name.
 
 Disabling voice (removing the env vars) makes every call affordance disappear from clients; browsers only download the WebRTC code the first time someone actually joins a call.

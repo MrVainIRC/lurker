@@ -201,8 +201,11 @@ export async function removeFromCall(room: string, identity: string): Promise<vo
   await svc.removeParticipant(room, identity);
 }
 
-/** Server-mute all of a participant's published tracks (they cannot self-unmute
- *  a server mute). No-op if they are not currently in the room. */
+/** Server-mute all of a participant's published tracks. NOTE: on self-hosted
+ *  (OSS) LiveKit a server mute is not locked — the participant can unmute
+ *  themselves (mute-locking, like token revocation, is a Cloud feature). Their
+ *  client shows "an operator muted you", so it reads as a strong nudge; the
+ *  enforcement tool is remove. No-op if they are not currently in the room. */
 export async function muteParticipant(room: string, identity: string): Promise<void> {
   const svc = roomService();
   if (!svc) throw new Error('voice not configured');

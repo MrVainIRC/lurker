@@ -27,6 +27,12 @@ interface VoiceTokenResponse {
 
 // Non-reactive session handles (see header note).
 let room: Room | null = null;
+// True while OUR OWN toggleMute() is awaiting the SFU — the TrackMuted event
+// fires before the await resolves, and without this flag a self-mute is
+// indistinguishable from an op's server-mute.
+let selfMuteInFlight = false;
+
+const OP_MUTED_MSG = 'a channel operator muted your microphone';
 let audioEls: HTMLAudioElement[] = [];
 // identity → remote MIC track, for per-participant volume.
 let tracksByIdentity = new Map<string, RemoteAudioTrack>();
@@ -99,14 +105,28 @@ export const useVoiceStore = defineStore('voice', {
           .on(RoomEvent.TrackMuted, (pub, participant) => {
             // Keep `muted` honest when the mute didn't come from OUR toggle —
             // an op's server-mute would otherwise be invisible to the mutee
-            // (icon still live, no feedback at all).
+            // (icon still live, no feedback at all). selfMuteInFlight excludes
+            // our own toggle, whose TrackMuted lands before its await resolves.
             if (
+              !selfMuteInFlight &&
               String(pub.source) === 'microphone' &&
               participant.identity === r.localParticipant.identity &&
               !this.muted
             ) {
               this.muted = true;
-              this.error = 'a channel operator muted your microphone';
+              this.error = OP_MUTED_MSG;
+            }
+          })
+          .on(RoomEvent.TrackUnmuted, (pub, participant) => {
+            // Self-unmute after a server mute is ALLOWED on self-hosted
+            // LiveKit (mute-locking is a Cloud feature) — sync the state and
+            // retire the op-mute notice rather than leaving it lying around.
+            if (
+              String(pub.source) === 'microphone' &&
+              participant.identity === r.localParticipant.identity
+            ) {
+              this.muted = false;
+              if (this.error === OP_MUTED_MSG) this.error = null;
             }
           })
           .on(RoomEvent.ParticipantConnected, () => this.syncParticipants())
@@ -158,11 +178,14 @@ export const useVoiceStore = defineStore('voice', {
       // rejects (device error, mid-reconnect) would render the mic-slash icon
       // while the track is still transmitting — the worst kind of wrong.
       const wantMuted = !this.muted;
+      selfMuteInFlight = true;
       try {
         await room.localParticipant.setMicrophoneEnabled(!wantMuted);
         this.muted = wantMuted;
       } catch (e: unknown) {
         this.error = e instanceof Error ? e.message : 'could not toggle mute';
+      } finally {
+        selfMuteInFlight = false;
       }
     },
 
