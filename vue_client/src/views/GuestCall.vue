@@ -16,8 +16,16 @@
       <h1><i class="fa-solid fa-phone" aria-hidden="true"></i> Join voice call</h1>
 
       <!-- config arrives async and defaults voice OFF — don't flash
-           "unavailable" at a legitimate guest while the fetch is in flight. -->
-      <p v-if="!config.checked" class="hint">Loading…</p>
+           "unavailable" at a legitimate guest while the fetch is in flight,
+           and don't dead-end them if that one fetch fails (this page has no
+           router navigations to retrigger the store's retry path). -->
+      <template v-if="!config.checked">
+        <p v-if="!bootFailed" class="hint">Loading…</p>
+        <template v-else>
+          <p class="err">Couldn't reach the server.</p>
+          <button class="btn-secondary" type="button" @click="boot">Retry</button>
+        </template>
+      </template>
 
       <p v-else-if="!config.voiceEnabled" class="err">Voice calling isn't available here.</p>
 
@@ -59,7 +67,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { useVoiceStore } from '../stores/voice.js';
 import { useConfigStore } from '../stores/config.js';
@@ -74,6 +82,16 @@ const name = ref('');
 const joining = ref(false);
 const error = ref('');
 const listenOnly = ref(false);
+const bootFailed = ref(false);
+
+async function boot() {
+  bootFailed.value = false;
+  await config.fetch().catch(() => {});
+  if (!config.checked) bootFailed.value = true;
+}
+onMounted(() => {
+  if (!config.checked) void boot();
+});
 
 async function join() {
   if (!name.value.trim() || joining.value) return;

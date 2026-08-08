@@ -123,3 +123,17 @@ export function revokeGuestLink(token: string): boolean {
 export function bumpGuestLinkUse(token: string): void {
   bumpStmt.run(token);
 }
+
+const sweepStmt = db.prepare(`
+  DELETE FROM voice_guest_link
+  WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 days')
+     OR revoked_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 days')
+`);
+
+/** Hourly janitor (see server.ts): a guest link is dead 24h after expiry or
+ *  revocation and carries zero data value — without this, every link ever
+ *  minted lives in the table (and every backup) forever. The one-day grace
+ *  keeps a just-revoked link visible to `getGuestLink` for debugging. */
+export function sweepDeadGuestLinks(): number {
+  return sweepStmt.run().changes;
+}

@@ -42,7 +42,9 @@
         </div>
         <div v-if="guestUrl" class="guest-url">
           <input :value="guestUrl" readonly aria-label="Guest call link" @focus="selectAll" />
-          <button type="button" @click="copyGuest">{{ copied ? 'Copied' : 'Copy' }}</button>
+          <button type="button" @click="copyGuest">
+            {{ linkCopy.isCopied('mint') ? 'Copied' : 'Copy' }}
+          </button>
         </div>
         <ul v-if="activeLinks.length" class="link-list">
           <li v-for="l in activeLinks" :key="l.token">
@@ -51,7 +53,11 @@
                 l.useCount === 1 ? '' : 's'
               }}
             </span>
-            <IconButton icon="fa-copy" label="Copy link" @click="copyLink(l)" />
+            <IconButton
+              :icon="linkCopy.isCopied(l.token) ? 'fa-check' : 'fa-copy'"
+              :label="linkCopy.isCopied(l.token) ? 'Copied' : 'Copy link'"
+              @click="copyLink(l)"
+            />
             <IconButton
               icon="fa-ban"
               danger
@@ -107,6 +113,7 @@ import { useVoiceStore } from '../stores/voice.js';
 import { useCallPresenceStore } from '../stores/callPresence.js';
 import { useToastsStore } from '../stores/toasts.js';
 import { canAdminCall } from '../../../shared/voiceModes.js';
+import { useCopyFeedback } from '../composables/useCopyFeedback.js';
 import { api } from '../api.js';
 import {
   PREFIX_ORDER,
@@ -191,17 +198,24 @@ watch(
 // ─── Op guest links (mint / copy / revoke a public capability URL) ──────────
 interface GuestLinkRow {
   token: string;
-  url: string;
   canPublish: boolean;
   createdBy: string | null;
   useCount: number;
 }
 
+/** Build the shareable URL from OUR OWN origin. The server's `url` field is
+ *  derived from the request's Origin header, which browsers omit on
+ *  same-origin GETs — the listing's URLs would silently carry the internal
+ *  Express host. The web client always knows the right origin: its own. */
+function linkUrl(token: string): string {
+  return `${window.location.origin}/call/${token}`;
+}
+
 const guestUrl = ref('');
-const copied = ref(false);
 const guestBusy = ref(false);
 const listenOnly = ref(false);
 const activeLinks = ref<GuestLinkRow[]>([]);
+const linkCopy = useCopyFeedback();
 
 async function refreshLinks(b = buffer.value) {
   if (!config.voiceEnabled || !isOp.value || !b || b.kind !== 'channel' || b.networkId == null) {
@@ -223,7 +237,7 @@ watch(
   [buffer, isOp, () => config.voiceEnabled],
   ([b]) => {
     guestUrl.value = '';
-    copied.value = false;
+    linkCopy.reset();
     activeLinks.value = [];
     void refreshLinks(b);
   },
@@ -234,13 +248,16 @@ async function mintGuestLink() {
   const b = buffer.value;
   if (!b || b.networkId == null) return;
   guestBusy.value = true;
-  copied.value = false;
   try {
-    const r = await api<{ url: string }>('/api/voice/guest-link', {
+    const r = await api<{ token: string }>('/api/voice/guest-link', {
       method: 'POST',
       body: { networkId: b.networkId, target: b.target, canPublish: !listenOnly.value },
     });
-    guestUrl.value = r.url;
+    // Stale guard: a slow mint for the PREVIOUS channel must not surface its
+    // URL under the newly selected channel — that would hand out access to
+    // the wrong call.
+    if (buffer.value !== b) return;
+    guestUrl.value = linkUrl(r.token);
     void refreshLinks();
   } catch (err: unknown) {
     useToastsStore().push({
@@ -255,11 +272,10 @@ async function mintGuestLink() {
 
 function copyGuest() {
   if (!guestUrl.value) return;
-  void navigator.clipboard?.writeText(guestUrl.value);
-  copied.value = true;
+  void linkCopy.copy(guestUrl.value, 'mint');
 }
 function copyLink(l: GuestLinkRow) {
-  void navigator.clipboard?.writeText(l.url);
+  void linkCopy.copy(linkUrl(l.token), l.token);
 }
 function selectAll(e: FocusEvent) {
   (e.target as HTMLInputElement).select();
@@ -268,7 +284,7 @@ function selectAll(e: FocusEvent) {
 async function revokeLink(l: GuestLinkRow) {
   try {
     await api(`/api/voice/guest-link/${encodeURIComponent(l.token)}`, { method: 'DELETE' });
-    if (guestUrl.value === l.url) guestUrl.value = '';
+    if (guestUrl.value === linkUrl(l.token)) guestUrl.value = '';
     void refreshLinks();
   } catch (err: unknown) {
     useToastsStore().push({

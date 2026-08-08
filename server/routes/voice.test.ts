@@ -568,11 +568,12 @@ describe('POST /api/voice/guest-token (public)', () => {
   });
 
   it('throttles per IP (429 with Retry-After past the window cap)', async () => {
-    // Deterministic: the throttle was reset in beforeEach and allows 10/min —
-    // ten mints succeed, the eleventh trips.
+    // Deterministic: the throttle was reset in beforeEach and allows 60/min
+    // (sized for a NAT'd crowd joining one call) — sixty exchanges succeed,
+    // the sixty-first trips.
     enableVoice();
     const link = await mintLink();
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 60; i++) {
       const res = await testRequest(app)
         .post('/api/voice/guest-token')
         .send({ token: link, name: `g${i}` });
@@ -580,7 +581,7 @@ describe('POST /api/voice/guest-token (public)', () => {
     }
     const tripped = await testRequest(app)
       .post('/api/voice/guest-token')
-      .send({ token: link, name: 'g11' });
+      .send({ token: link, name: 'g61' });
     expect(tripped.status).toBe(429);
     expect(Number(tripped.headers['retry-after'])).toBeGreaterThan(0);
   });

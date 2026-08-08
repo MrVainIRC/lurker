@@ -51,6 +51,11 @@ export const useVoiceStore = defineStore('voice', {
     // True when this tab joined via a public guest link (no account/session) —
     // gates off member-only affordances like moderation.
     isGuest: false,
+    // False for a listen-only token (guest links below the talk threshold):
+    // the mic is never requested, and the mute toggle must not render — an
+    // unmute attempt would prompt for mic permission and then be rejected by
+    // the SFU anyway.
+    canPublish: true,
     // Remote participant identities (their IRC nicks).
     participants: [] as string[],
     // Subset of `participants` currently detected as speaking.
@@ -65,6 +70,10 @@ export const useVoiceStore = defineStore('voice', {
       if (this.active || this.connecting) return;
       this.connecting = true;
       this.error = null;
+      // Label BEFORE the token fetch: the CallBar renders it while connecting,
+      // and a mint failure (403 policy) must blame the channel it belongs to,
+      // not whatever call came before.
+      this.label = label;
       this.networkId = networkId;
       this.target = target;
       try {
@@ -94,9 +103,11 @@ export const useVoiceStore = defineStore('voice', {
     ) {
       if (this.active) return;
       this.connecting = true;
+      this.error = null; // a retry must not show the previous attempt's failure
       this.label = label;
       if (opts?.guest) this.isGuest = true;
       const listenOnly = opts?.canPublish === false;
+      this.canPublish = !listenOnly;
       try {
         // Lazy chunk: livekit-client only lands over the network at first call.
         const { Room, RoomEvent, Track } = await import('livekit-client');
@@ -202,7 +213,7 @@ export const useVoiceStore = defineStore('voice', {
     },
 
     async toggleMute() {
-      if (!room) return;
+      if (!room || !this.canPublish) return; // listen-only: nothing to toggle
       // Flip state only after the SFU confirms. An optimistic flip that then
       // rejects (device error, mid-reconnect) would render the mic-slash icon
       // while the track is still transmitting — the worst kind of wrong.
@@ -247,6 +258,7 @@ export const useVoiceStore = defineStore('voice', {
       this.networkId = null;
       this.target = '';
       this.isGuest = false;
+      this.canPublish = true;
       // In-call notices (op-mute, mute-toggle failures) die with the call —
       // otherwise the CallBar stays wedged open showing them after /leave.
       // startCall's catch re-sets its failure reason after calling this.

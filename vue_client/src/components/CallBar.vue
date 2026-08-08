@@ -70,7 +70,10 @@
     </div>
 
     <div v-if="voice.active || voice.connecting" class="call-actions">
+      <!-- Listen-only guests get no mute toggle: an unmute would prompt for
+           mic permission and then be refused by the SFU. -->
       <IconButton
+        v-if="voice.canPublish"
         :icon="voice.muted ? 'fa-microphone-slash' : 'fa-microphone'"
         :label="voice.muted ? 'Unmute' : 'Mute'"
         :danger="voice.muted"

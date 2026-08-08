@@ -1170,6 +1170,11 @@ exchanges only: already-minted guest tokens live out their hour (OSS LiveKit
 cannot revoke tokens) — ops `remove` lingering guests. The web client serves
 the joining UI at `/call/:token`.
 
+Build shareable URLs as `<your own origin>/call/<token>` — the `url` field in
+mint/list responses is best-effort (derived from the request's `Origin`
+header, which browsers omit on same-origin GETs) and may carry the server's
+internal host.
+
 ### Export / import
 
 `GET /api/exports/preview` · `POST /api/exports` (`{include_messages}`, allowed

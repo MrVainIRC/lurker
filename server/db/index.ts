@@ -643,6 +643,8 @@ function migrate() {
       revoked_at TEXT,
       use_count INTEGER NOT NULL DEFAULT 0
     );
+    CREATE INDEX IF NOT EXISTS idx_voice_guest_link_scope
+      ON voice_guest_link(network_host, channel_folded);
 
     -- Per-user data-export jobs. A request to export account data spawns a
     -- background worker (separate readonly SQLite connection) that builds the

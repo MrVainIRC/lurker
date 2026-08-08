@@ -349,13 +349,19 @@ router.delete('/guest-link/:token', (req: Request, res: Response) => {
     res.status(404).json({ error: 'link not found' });
     return;
   }
-  // Authorize: the caller must be an op of the link's channel on the matching
-  // host — resolved across ALL their connections, since the revoke may come
-  // from a different device/network row than the mint did.
-  const conn = ircManager
+  // Authorize: the caller must be an op of the link's channel on ANY of their
+  // connections to the matching host — a user with two network rows on one
+  // host (main + alt) must be able to revoke from whichever holds the op, or
+  // the emergency revoke for a leaked link fails exactly when needed.
+  const authorized = ircManager
     .listConnections(req.user!.id)
-    .find((c) => !!c.currentNick && foldKey(c.network.host) === link.networkHost);
-  if (!conn || !canAdminCall(memberModes(conn, link.channelFolded, conn.currentNick!))) {
+    .some(
+      (c) =>
+        !!c.currentNick &&
+        foldKey(c.network.host) === link.networkHost &&
+        canAdminCall(memberModes(c, link.channelFolded, c.currentNick)),
+    );
+  if (!authorized) {
     res.status(403).json({ error: 'operators only' });
     return;
   }
@@ -412,7 +418,11 @@ voicePublicRouter.post(
 // for a link an op just killed. A legit guest whose call outlives the token
 // re-clicks the link — the LINK lasts 24h.
 const GUEST_TOKEN_TTL_SECONDS = 60 * 60;
-const guestTokenThrottle = new RequestThrottle({ windowMs: 60_000, maxRequests: 10 });
+// 60/min per IP: generous enough for a whole NAT'd household joining a
+// community call at once (and behind an untrusted proxy the bucket is shared
+// instance-wide — see LURKER_TRUST_PROXY in rateLimit.ts), while still making
+// brute-force probing of 43-char base64url tokens a non-starter.
+const guestTokenThrottle = new RequestThrottle({ windowMs: 60_000, maxRequests: 60 });
 
 /** Test hook, mirroring resetAuthRateLimits — the throttle is module state. */
 export function resetGuestRateLimit(): void {
