@@ -14,8 +14,17 @@
         @click="startCall"
       >
         <i class="fa-solid fa-phone" aria-hidden="true"></i>
-        <span>{{ inThisCall ? 'In call' : 'Call' }}</span>
+        <span>{{ callBtnLabel }}</span>
       </button>
+      <label v-if="isOp" class="call-policy" title="Who may join this channel's call">
+        <span>Join</span>
+        <select :value="policy" @change="onPolicyChange">
+          <option value="none">anyone</option>
+          <option value="voice">voiced+</option>
+          <option value="halfop">halfop+</option>
+          <option value="op">ops only</option>
+        </select>
+      </label>
     </div>
     <ul ref="listEl">
       <li
@@ -59,6 +68,10 @@ import { useMemberActions } from '../composables/useMemberActions.js';
 import { useIgnoresStore } from '../stores/ignores.js';
 import { useConfigStore } from '../stores/config.js';
 import { useVoiceStore } from '../stores/voice.js';
+import { useCallPresenceStore } from '../stores/callPresence.js';
+import { useToastsStore } from '../stores/toasts.js';
+import { canAdminCall } from '../../../shared/voiceModes.js';
+import { api } from '../api.js';
 import {
   PREFIX_ORDER,
   prefixOf as modePrefixOf,
@@ -94,6 +107,73 @@ function startCall() {
   if (!b || b.networkId == null) return;
   // label = the channel target; the store mints its own token + room.
   void voice.startCall(b.networkId, b.target, b.target);
+}
+
+// "Join call (N)" badge for a call already in progress (webhook-driven counts,
+// hydrated on connect — see stores/callPresence).
+const callPresence = useCallPresenceStore();
+const callCount = computed(() => {
+  const b = buffer.value;
+  return b?.networkId != null ? callPresence.countFor(b.networkId, b.target) : 0;
+});
+const callBtnLabel = computed(() => {
+  if (inThisCall.value) return 'In call';
+  if (callCount.value > 0) return `Join call (${callCount.value})`;
+  return 'Call';
+});
+
+// ─── Op join policy (the same shared gate the server enforces) ──────────────
+const isOp = computed(() => canAdminCall(selfModes.value));
+
+const policy = ref('none');
+
+// Load the channel's join policy whenever the active channel changes — or when
+// voiceEnabled flips true, because the config fetch is async and can resolve
+// AFTER the immediate fire (a deep-linked cold load would otherwise show
+// 'anyone' for a locked channel and never retry).
+watch(
+  [buffer, () => config.voiceEnabled],
+  async ([b]) => {
+    policy.value = 'none';
+    if (!config.voiceEnabled || !b || b.kind !== 'channel' || b.networkId == null) return;
+    try {
+      const r = await api<{ minJoinMode: string }>(
+        `/api/voice/policy?networkId=${b.networkId}&target=${encodeURIComponent(b.target)}`,
+      );
+      // Staleness guard: a slow response for the PREVIOUS channel must not
+      // overwrite the picker after a switch.
+      if (buffer.value !== b) return;
+      policy.value = r.minJoinMode;
+    } catch {
+      /* leave default */
+    }
+  },
+  { immediate: true },
+);
+
+async function onPolicyChange(e: Event) {
+  const b = buffer.value;
+  const select = e.target as HTMLSelectElement;
+  if (!b || b.networkId == null) return;
+  const minJoinMode = select.value;
+  try {
+    const r = await api<{ minJoinMode: string }>('/api/voice/policy', {
+      method: 'PUT',
+      body: { networkId: b.networkId, target: b.target, minJoinMode },
+    });
+    policy.value = r.minJoinMode;
+  } catch (err: unknown) {
+    // The DOM select already moved to the rejected choice, and since
+    // policy.value didn't change Vue schedules no re-patch — reset the element
+    // directly, and say why (an op believing a call is locked when it isn't is
+    // the worst silent failure this picker can produce).
+    select.value = policy.value;
+    useToastsStore().push({
+      title: 'Call policy not saved',
+      body: err instanceof Error ? err.message : 'the server rejected the change',
+      kind: 'warn',
+    });
+  }
 }
 const selfNick = computed(() => {
   const b = buffer.value;
@@ -235,6 +315,17 @@ const sorted = computed(() => {
   align-items: center;
   justify-content: center;
   gap: var(--space-3);
+}
+.call-policy {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  color: var(--fg-muted);
+}
+.call-policy select {
+  flex: 1;
+  min-width: 0;
 }
 ul {
   list-style: none;

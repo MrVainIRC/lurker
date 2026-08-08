@@ -41,6 +41,19 @@
               aria-hidden="true"
             ></i>
             <span class="part-nick" :title="id">{{ id }}</span>
+            <IconButton
+              v-if="amOp"
+              icon="fa-microphone-slash"
+              :label="`Mute ${id} for everyone`"
+              @click="moderate(id, 'mute')"
+            />
+            <IconButton
+              v-if="amOp"
+              icon="fa-user-slash"
+              :label="`Remove ${id} from call`"
+              danger
+              @click="moderate(id, 'remove')"
+            />
           </div>
           <input
             class="vol"
@@ -73,15 +86,51 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useVoiceStore } from '../stores/voice.js';
+import { useBuffersStore, bufferKey } from '../stores/buffers.js';
+import { useNetworksStore } from '../stores/networks.js';
+import { useToastsStore } from '../stores/toasts.js';
+import { canModerateCall } from '../../../shared/voiceModes.js';
+import { api } from '../api.js';
 import IconButton from './IconButton.vue';
 
 const voice = useVoiceStore();
+const buffers = useBuffersStore();
+const networks = useNetworksStore();
 
 const statusText = computed(() => {
   if (voice.connecting) return 'connecting…';
   if (voice.active) return 'connected';
   return 'call failed';
 });
+
+// ─── Op moderation (the same shared gate the server enforces) ───────────────
+// The server enforces; showing the buttons only to ops is UX, not security.
+const amOp = computed(() => {
+  if (voice.networkId == null || !voice.target) return false;
+  const b = buffers.byKey(bufferKey(voice.networkId, voice.target));
+  const selfNick = networks.states[voice.networkId]?.nick;
+  if (!b || !selfNick) return false;
+  const me = b.members?.find((m) => m.nick.toLowerCase() === selfNick.toLowerCase());
+  return canModerateCall(me?.modes ?? []);
+});
+
+async function moderate(identity: string, action: 'mute' | 'remove') {
+  if (voice.networkId == null) return;
+  try {
+    await api('/api/voice/moderate', {
+      method: 'POST',
+      body: { networkId: voice.networkId, target: voice.target, action, identity },
+    });
+  } catch (e: unknown) {
+    // A toast, NOT voice.error — that field means "the CALL failed" and keeps
+    // the bar rendered; a failed moderation click must not wedge it open.
+    useToastsStore().push({
+      title: `Could not ${action} ${identity}`,
+      body: e instanceof Error ? e.message : 'the server rejected the action',
+      kind: 'warn',
+    });
+  }
+}
 
 function volPct(id: string): number {
   return Math.round((voice.volumes[id] ?? 1) * 100);

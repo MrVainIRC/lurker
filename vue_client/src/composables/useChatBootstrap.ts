@@ -13,6 +13,7 @@ import { onJumpIntent } from './useJumpIntent.js';
 import { connected } from './useSocket.js';
 import { startAppBadge } from './useAppBadge.js';
 import { startBufferHydration } from './useBufferHydration.js';
+import { startCallPresenceHydration } from './useCallPresenceHydration.js';
 import { whenReady } from './deferredReady.js';
 import type { Router } from 'vue-router';
 import { useRouter } from 'vue-router';
@@ -233,6 +234,11 @@ export function useChatBootstrap({ onJump }: ChatBootstrapOptions = {}): void {
     // send failures (idempotent module singleton, like the presence reporter —
     // survives the Desktop<->Mobile shell swap without double-registering).
     startBufferHydration();
+    // Re-snapshot voice-call presence per connect edge: the call-presence
+    // frame stream only carries deltas, so a call that started while this
+    // client was away would otherwise never badge. Same idempotent-singleton
+    // shape as the hydrators above.
+    startCallPresenceHydration();
     // Mirror the unread-highlight total onto the PWA app icon (#451). Idempotent
     // and feature-detected — a no-op where the Badging API is unavailable.
     startAppBadge();

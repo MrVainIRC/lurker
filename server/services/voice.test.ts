@@ -7,9 +7,18 @@ import {
   liveKitConfig,
   mintVoiceToken,
   roomFor,
+  parseRoom,
   voiceEnabled,
   voiceMasterEnabled,
+  meetsJoinMode,
+  canModerateCall,
+  canAdminCall,
+  webhookCallRoom,
+  liveCallCount,
+  receiveWebhook,
+  listActiveCalls,
 } from './voice.js';
+import type { WebhookEvent } from 'livekit-server-sdk';
 
 // LURKER_VOICE_ENABLED value parsing is the shared parseTruthyEnv — its accepted
 // set is pinned by truthyEnv's own tests; only the wiring is exercised here (in
@@ -145,5 +154,129 @@ describe('mintVoiceToken', () => {
     expect(claims.video?.room).toBe('net-x-c-#dev');
     expect(claims.video?.roomJoin).toBe(true);
     expect(claims.video?.canSubscribe).toBe(true);
+  });
+});
+
+describe('meetsJoinMode', () => {
+  it("'none' lets anyone in", () => {
+    expect(meetsJoinMode([], 'none')).toBe(true);
+    expect(meetsJoinMode(['v'], 'none')).toBe(true);
+  });
+  it('ranks voice < halfop < op; owner/admin count as op', () => {
+    expect(meetsJoinMode([], 'voice')).toBe(false);
+    expect(meetsJoinMode(['v'], 'voice')).toBe(true);
+    expect(meetsJoinMode(['v'], 'op')).toBe(false);
+    expect(meetsJoinMode(['h'], 'op')).toBe(false);
+    expect(meetsJoinMode(['h'], 'halfop')).toBe(true);
+    expect(meetsJoinMode(['o'], 'op')).toBe(true);
+    expect(meetsJoinMode(['q'], 'op')).toBe(true);
+    expect(meetsJoinMode(['o'], 'halfop')).toBe(true); // op exceeds the halfop bar
+  });
+});
+
+describe('canModerateCall / canAdminCall', () => {
+  it('moderation allows q/a/o/h; admin (join policy) allows q/a/o only', () => {
+    expect(canModerateCall(['h'])).toBe(true);
+    expect(canModerateCall(['o'])).toBe(true);
+    expect(canModerateCall(['v'])).toBe(false);
+    expect(canModerateCall([])).toBe(false);
+    expect(canAdminCall(['h'])).toBe(false);
+    expect(canAdminCall(['o'])).toBe(true);
+    expect(canAdminCall(['q'])).toBe(true);
+    expect(canAdminCall([])).toBe(false);
+  });
+});
+
+describe('parseRoom', () => {
+  it('is the inverse of roomFor for channel rooms', () => {
+    expect(parseRoom('net-irc.libera.chat-c-#dev')).toEqual({
+      host: 'irc.libera.chat',
+      channel: '#dev',
+    });
+    // Round-trips a host that contains dashes + a channel with brackets.
+    expect(parseRoom(roomFor('my-irc.host.net', '#Foo[Bar]', 'x'))).toEqual({
+      host: 'my-irc.host.net',
+      channel: '#foo[bar]',
+    });
+  });
+
+  it('round-trips ALL FOUR channel sigils (the #&+! rule)', () => {
+    for (const chan of ['#dev', '&local', '+modeless', '!ABCDEchan']) {
+      expect(parseRoom(roomFor('irc.libera.chat', chan, 'x'))).toEqual({
+        host: 'irc.libera.chat',
+        channel: chan.toLowerCase(),
+      });
+    }
+  });
+
+  it("anchors on the FIRST '-c-<sigil>' so a channel containing '-c-#' still parses", () => {
+    // Hostnames can contain '-c-' but never a sigil; channels can contain both.
+    expect(parseRoom('net-my-c-host.net-c-#dev')).toEqual({
+      host: 'my-c-host.net',
+      channel: '#dev',
+    });
+    expect(parseRoom('net-irc.host-c-#a-c-#b')).toEqual({
+      host: 'irc.host',
+      channel: '#a-c-#b',
+    });
+  });
+
+  it('folds ASCII-only so it matches roomFor / foldKey', () => {
+    expect(parseRoom('net-IRC.Libera.Chat-c-#DevOps')).toEqual({
+      host: 'irc.libera.chat',
+      channel: '#devops',
+    });
+  });
+
+  it('returns null for DM rooms and anything unparseable', () => {
+    expect(parseRoom('net-irc.libera.chat-d-alice:bob')).toBeNull();
+    expect(parseRoom('not-a-room')).toBeNull();
+    expect(parseRoom('net-irc.libera.chat-c-notachannel')).toBeNull();
+  });
+});
+
+describe('webhookCallRoom', () => {
+  const ev = (event: string, room: string): WebhookEvent =>
+    ({
+      event,
+      room: { name: room },
+      participant: { identity: 'someone' },
+    }) as WebhookEvent;
+
+  it('flags every occupancy-changing event for a channel room', () => {
+    // The event is only a TRIGGER — counts come from liveCallCount, because
+    // the event's own Room.numParticipants is not reliable (verified against
+    // a live SFU: absent on joins, stale on leaves).
+    const room = 'net-irc.libera.chat-c-#dev';
+    for (const e of [
+      'participant_joined',
+      'participant_left',
+      'participant_connection_aborted',
+      'room_finished',
+    ]) {
+      expect(webhookCallRoom(ev(e, room))).toEqual({
+        room,
+        host: 'irc.libera.chat',
+        channel: '#dev',
+      });
+    }
+  });
+
+  it('ignores DM rooms (no channel to badge) and non-occupancy events', () => {
+    expect(webhookCallRoom(ev('participant_joined', 'net-h-d-a:b'))).toBeNull();
+    expect(webhookCallRoom(ev('track_published', 'net-irc.libera.chat-c-#x'))).toBeNull();
+    expect(webhookCallRoom(ev('room_started', 'net-irc.libera.chat-c-#x'))).toBeNull();
+  });
+});
+
+describe('receiveWebhook / listActiveCalls / liveCallCount (unconfigured)', () => {
+  it('all fail closed when voice is unconfigured', async () => {
+    delete process.env.LIVEKIT_WS_URL;
+    delete process.env.LIVEKIT_API_KEY;
+    delete process.env.LIVEKIT_API_SECRET;
+    await expect(receiveWebhook('{}', 'whatever')).resolves.toBeNull();
+    await expect(listActiveCalls()).resolves.toEqual([]);
+    // null (unknown), NOT 0 — a fabricated zero would clear real badges.
+    await expect(liveCallCount('net-h-c-#x')).resolves.toBeNull();
   });
 });
