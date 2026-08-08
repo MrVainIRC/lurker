@@ -33,11 +33,23 @@ interface VoiceTokenResponse {
   url: string;
 }
 
+/** The video sources a tile can carry — a closed set, so a typo'd source is a
+ *  compile error instead of a tile that silently mis-renders at runtime. */
+export type VideoSource = 'camera' | 'screen_share';
+
 /** One video/screen tile the CallBar renders (self + remote). */
 export interface VideoTileSpec {
   identity: string;
-  source: string; // 'camera' | 'screen_share'
+  source: VideoSource;
   self: boolean;
+}
+
+/** Narrow LiveKit's open-ended Track.Source to our tile set at the event
+ *  boundary. Anything that isn't a screen share (including 'unknown' video
+ *  from an exotic client) renders as a camera tile — fill-fit, mirrored only
+ *  for self. */
+function videoSourceOf(pubSource: unknown): VideoSource {
+  return String(pubSource) === 'screen_share' ? 'screen_share' : 'camera';
 }
 
 // Non-reactive session handles (see header note).
@@ -46,8 +58,8 @@ let room: Room | null = null;
 // owns the element lifecycle — the room runs adaptiveStream, so a remote video
 // track only flows once attach()ed to a VISIBLE <video>.
 let videoTracksByKey = new Map<string, RemoteVideoTrack>();
-// source ('camera' | 'screen_share') → our own local video track, for self tiles.
-let localVideoTracks = new Map<string, LocalVideoTrack>();
+// source → our own local video track, for self tiles.
+let localVideoTracks = new Map<VideoSource, LocalVideoTrack>();
 // True while OUR OWN toggleMute() is awaiting the SFU — the TrackMuted event
 // fires before the await resolves, and without this flag a self-mute is
 // indistinguishable from an op's server-mute.
@@ -157,7 +169,7 @@ export const useVoiceStore = defineStore('voice', {
           } else if (track.kind === Track.Kind.Video) {
             // NOT attached here: the room runs adaptiveStream, so video only
             // flows into a visible element — VideoTile owns attach/detach.
-            const source = String(pub.source);
+            const source = videoSourceOf(pub.source);
             videoTracksByKey.set(`${participant.identity}|${source}`, track as RemoteVideoTrack);
             this.addTile(participant.identity, source, false);
           }
@@ -174,15 +186,19 @@ export const useVoiceStore = defineStore('voice', {
               detached.forEach((el) => el.remove());
               audioEls = audioEls.filter((el) => !detached.includes(el));
             } else if (track.kind === Track.Kind.Video) {
-              const source = String(pub.source);
+              const source = videoSourceOf(pub.source);
               videoTracksByKey.delete(`${participant.identity}|${source}`);
               this.removeTile(participant.identity, source);
-              track.detach().forEach((el) => el.remove());
+              // Detach stops the stream flowing — but do NOT .remove() the
+              // elements: unlike the store-created audio tags above, <video>
+              // nodes belong to VideoTile's template, and yanking Vue-owned
+              // DOM out from under the renderer corrupts its patching.
+              track.detach();
             }
           })
           .on(RoomEvent.LocalTrackPublished, (pub: LocalTrackPublication) => {
             if (pub.track?.kind !== Track.Kind.Video) return;
-            const source = String(pub.source);
+            const source = videoSourceOf(pub.source);
             localVideoTracks.set(source, pub.track as LocalVideoTrack);
             if (source === 'screen_share') this.screenOn = true;
             else this.cameraOn = true;
@@ -193,7 +209,7 @@ export const useVoiceStore = defineStore('voice', {
             // "stop sharing" chrome, a device unplugged — so flags and tiles
             // can never desync from reality.
             if (pub.track?.kind !== Track.Kind.Video) return;
-            const source = String(pub.source);
+            const source = videoSourceOf(pub.source);
             localVideoTracks.delete(source);
             if (source === 'screen_share') this.screenOn = false;
             else this.cameraOn = false;
@@ -264,12 +280,12 @@ export const useVoiceStore = defineStore('voice', {
         : [];
     },
 
-    addTile(identity: string, source: string, self: boolean) {
+    addTile(identity: string, source: VideoSource, self: boolean) {
       if (!this.videoTiles.some((t) => t.identity === identity && t.source === source)) {
         this.videoTiles.push({ identity, source, self });
       }
     },
-    removeTile(identity: string, source: string) {
+    removeTile(identity: string, source: VideoSource) {
       this.videoTiles = this.videoTiles.filter(
         (t) => !(t.identity === identity && t.source === source),
       );
@@ -277,13 +293,13 @@ export const useVoiceStore = defineStore('voice', {
 
     /** Attach a tile's track to its <video> element. VideoTile calls this on
      *  mount — required for adaptiveStream to actually deliver remote video. */
-    attachVideo(identity: string, source: string, el: HTMLVideoElement, self: boolean) {
+    attachVideo(identity: string, source: VideoSource, el: HTMLVideoElement, self: boolean) {
       const track = self
         ? localVideoTracks.get(source)
         : videoTracksByKey.get(`${identity}|${source}`);
       track?.attach(el);
     },
-    detachVideo(identity: string, source: string, el: HTMLVideoElement, self: boolean) {
+    detachVideo(identity: string, source: VideoSource, el: HTMLVideoElement, self: boolean) {
       const track = self
         ? localVideoTracks.get(source)
         : videoTracksByKey.get(`${identity}|${source}`);

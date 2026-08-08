@@ -34,8 +34,9 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount } from 'vue';
 import { useVoiceStore } from '../stores/voice.js';
+import type { VideoSource } from '../stores/voice.js';
 
-const props = defineProps<{ identity: string; source: string; self: boolean }>();
+const props = defineProps<{ identity: string; source: VideoSource; self: boolean }>();
 const voice = useVoiceStore();
 const el = ref<HTMLVideoElement | null>(null);
 const tileEl = ref<HTMLElement | null>(null);
