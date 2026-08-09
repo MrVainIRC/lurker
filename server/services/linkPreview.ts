@@ -382,8 +382,13 @@ export function pageRecord(
     // `thumbnail_height` describe `thumbnail_url` and nothing else, so pairing them with an
     // og:image that won instead reserves a box of the wrong shape — a 4:3 hole for a 16:9
     // picture — which is precisely the reflow these fields exist to prevent.
-    imageWidth: oembedImage ? (oembed?.thumbnailWidth ?? null) : null,
-    imageHeight: oembedImage ? (oembed?.thumbnailHeight ?? null) : null,
+    //
+    // ⚠ The other branch is the SCRAPED image's own `og:image:width`/`og:image:height`, which
+    // `scrapeMeta` gates on that same image having won its own ladder. These are what decide
+    // between a hero band and a 72px square on the card, so the pairing rule matters twice
+    // over: measured against the wrong picture, a logo gets a hero and an article gets a chip.
+    imageWidth: oembedImage ? (oembed?.thumbnailWidth ?? null) : (meta.imageWidth ?? null),
+    imageHeight: oembedImage ? (oembed?.thumbnailHeight ?? null) : (meta.imageHeight ?? null),
     embedUrl: embed?.embedUrl ?? null,
     mime: null,
     // ⚠ A record kept ONLY by the `!embed` clause has no title, no description and no

@@ -2,7 +2,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { describe, it, expect } from 'vitest';
-import { previewableUrls, MAX_CARDS_PER_MESSAGE, MAX_MEDIA_PER_MESSAGE } from './previewUrls.js';
+import {
+  previewableUrls,
+  hideableUrls,
+  segmentsWithoutUrls,
+  MAX_CARDS_PER_MESSAGE,
+  MAX_MEDIA_PER_MESSAGE,
+} from './previewUrls.js';
 import { applySpoilerMarkup } from './spoilerMarkup.js';
 
 const BOTH = { inlineMedia: true, linkPreviews: true };
@@ -195,5 +201,202 @@ describe('previewableUrls — limits', () => {
       'https://e.test/b',
       'https://e.test/c',
     ]);
+  });
+});
+
+describe('previewableUrls — <angle brackets> suppress a preview', () => {
+  it('refuses to resolve a URL the author wrapped in brackets', () => {
+    // RFC 3986 Appendix C's delimiter convention, borrowed from Discord as "link, but no unfurl".
+    // It is the only per-link control there is — the two settings are all-or-nothing — so a
+    // person sharing a URL they don't want unfolded has exactly this and nothing else.
+    expect(previewableUrls('<https://e.test/a.png>', BOTH)).toEqual([]);
+    expect(previewableUrls('see <https://e.test/article> for more', BOTH)).toEqual([]);
+  });
+
+  it('leaves an unbracketed URL in the same message alone', () => {
+    expect(previewableUrls('<https://e.test/a.png> https://e.test/b.png', BOTH)).toEqual([
+      'https://e.test/b.png',
+    ]);
+  });
+
+  it('needs BOTH brackets, so a stray one is not a suppression', () => {
+    // A `<` in prose is ordinary. Treating a half-open bracket as the convention would silently
+    // eat previews in messages that never asked for it.
+    expect(previewableUrls('<https://e.test/a.png', BOTH)).toEqual(['https://e.test/a.png']);
+    expect(previewableUrls('https://e.test/a.png>', BOTH)).toEqual(['https://e.test/a.png']);
+  });
+
+  it('recognises the brackets even when the URL ends in punctuation', () => {
+    // ⚠⚠ The end test measures from the UNTRIMMED match. `trimTrailingPunctuation` eats the `.`
+    // here, so a check against the trimmed length lands on `.` instead of `>` and the brackets
+    // stop working on exactly the URLs whose ends are ambiguous — which is the case the
+    // convention exists for.
+    expect(previewableUrls('<https://e.test/wiki/Foo.>', BOTH)).toEqual([]);
+  });
+
+  it('suppresses only the occurrence that is wrapped', () => {
+    // The brackets speak for the occurrence, not for the address: a URL posted bare earlier in
+    // the same message still resolves. (Gated BEFORE the dedupe, or the bracketed one would be
+    // recorded as `seen` and cancel its own bare twin.)
+    expect(previewableUrls('https://e.test/a.png and <https://e.test/a.png>', BOTH)).toEqual([
+      'https://e.test/a.png',
+    ]);
+  });
+});
+
+describe('hideableUrls — when the address stops being worth showing', () => {
+  const A = 'https://e.test/a.png';
+  const B = 'https://e.test/b.png';
+  const C = 'https://e.test/c.png';
+  const all = (...urls: string[]) => new Set(urls);
+
+  it('hides a URL that is the whole message', () => {
+    expect([...hideableUrls(A, all(A))]).toEqual([A]);
+  });
+
+  it('hides a URL the message begins or ends with', () => {
+    expect([...hideableUrls(`${A} look at this`, all(A))]).toEqual([A]);
+    expect([...hideableUrls(`look at this ${A}`, all(A))]).toEqual([A]);
+  });
+
+  it('KEEPS a URL with prose on both sides', () => {
+    // The rule's whole point. Mid-sentence the address is part of something somebody wrote —
+    // "I read $URL and then..." — and deleting it leaves a sentence with a hole in it.
+    expect([...hideableUrls(`I read ${A} this morning`, all(A))]).toEqual([]);
+  });
+
+  it('hides every URL in a message that is nothing but URLs', () => {
+    // ⚠⚠ Case (a), and the reason this is a peel rather than a per-URL edge test. `B` touches
+    // neither end of the message; it becomes an edge only once `A` has been taken.
+    const got = hideableUrls(`${A} ${B} ${C}`, all(A, B, C));
+    expect([...got].sort()).toEqual([A, B, C].sort());
+  });
+
+  it('stops peeling at a URL that is NOT a candidate', () => {
+    // A page link renders a card and KEEPS its address, so it is not something the peel may step
+    // over: anything behind it is still in the middle of the line. Without the candidate test the
+    // peel would consume the page as though it were hidden — and, worse, report it as hidden,
+    // taking the address off a card that is going to render one.
+    //
+    // ⚠ Both messages need a blocker at the FAR end, or the other peel reaches the image anyway
+    // and the assertion passes for the wrong reason. That is what the first draft of this test
+    // got wrong: `${PAGE} ${B}` really does end with the image, so hiding it is correct there.
+    const PAGE = 'https://news.example/article';
+    expect([...hideableUrls(`${PAGE} ${B} tail`, all(B))]).toEqual([]);
+    expect([...hideableUrls(`lead ${B} ${PAGE}`, all(B))]).toEqual([]);
+  });
+
+  it('hides a trailing image even when a card precedes it', () => {
+    // The flip side of the above, and the reason the peel is per-end: the message still ENDS with
+    // the picture, so its address is still a duplicate of what the reader is looking at.
+    const PAGE = 'https://news.example/article';
+    expect([...hideableUrls(`${PAGE} ${B}`, all(B))]).toEqual([B]);
+  });
+
+  it('peels from both ends independently', () => {
+    // Leading and trailing images hide; the one buried in the prose does not.
+    const text = `${A} some words ${B} more words ${C}`;
+    const got = hideableUrls(text, all(A, B, C));
+    expect([...got].sort()).toEqual([A, C].sort());
+  });
+
+  it('does not count a spoiler run as whitespace', () => {
+    // ⚠ Spoiler runs contribute no URLs (a hidden link must never be resolved) but their TEXT
+    // still occupies the line. Ignoring it entirely would make a URL that follows a spoiler look
+    // like the start of the message and take its address away from under the reveal box.
+    const text = `${applySpoilerMarkup('psst')} ${A}`;
+    expect([...hideableUrls(text, all(A))]).toEqual([A]);
+    const buried = `${applySpoilerMarkup('psst')} ${A} tail`;
+    expect([...hideableUrls(buried, all(A))]).toEqual([]);
+  });
+
+  it('hides nothing when there are no candidates', () => {
+    expect([...hideableUrls(`${A} ${B}`, new Set())]).toEqual([]);
+    expect([...hideableUrls(null, all(A))]).toEqual([]);
+  });
+
+  it('never hides a bracketed URL, which has no preview to stand in for it', () => {
+    expect([...hideableUrls(`<${A}>`, all(A))]).toEqual([]);
+  });
+});
+
+describe('segmentsWithoutUrls — closing the gap', () => {
+  const A = 'https://e.test/a.png';
+
+  it('returns the very same array when nothing is hidden', () => {
+    // Runs per message row, so the common case must not allocate.
+    const segs = [{ text: 'hello' }];
+    expect(segmentsWithoutUrls(segs, new Set())).toBe(segs);
+    expect(segmentsWithoutUrls(segs, new Set(['https://other']))).toBe(segs);
+  });
+
+  it('drops the segment and the whitespace it leaves behind', () => {
+    const segs = [{ text: 'look at this ' }, { text: A, url: A }];
+    expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([{ text: 'look at this' }]);
+  });
+
+  it('leaves nothing at all for a message that was only a link', () => {
+    expect(segmentsWithoutUrls([{ text: A, url: A }], new Set([A]))).toEqual([]);
+  });
+
+  it('trims the front too, so a leading link does not leave an indent', () => {
+    const segs = [{ text: A, url: A }, { text: ' and here it is' }];
+    expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([{ text: 'and here it is' }]);
+  });
+
+  it('keeps a coloured BACKGROUND run, whose spaces are ink', () => {
+    // ⚠ A mIRC background paints its whitespace, so collapsing it deletes part of a drawing —
+    // the one case where a whitespace-only segment is something a reader can see.
+    const segs = [
+      { text: '   ', bg: 4 },
+      { text: A, url: A },
+    ];
+    expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([{ text: '   ', bg: 4 }]);
+  });
+
+  it('does not mutate the segments it was given', () => {
+    // They are a Vue PROP, and `filter`/`slice` both preserve object identity — so an in-place
+    // trim writes back into the caller's array. Harmless only for as long as MessageList rebuilds
+    // that array every render; memoise the split and the body stays mangled after the preview
+    // goes away.
+    //
+    // ⚠⚠ BOTH ends, with fixtures chosen so each trim actually FIRES. The first version asserted
+    // one case (`[{text:'hi '}, {url}]`) that no mutation could redden: 'hi ' has no leading
+    // whitespace, so the front trim is a no-op on the string, and by the time the back trim runs
+    // `out[0]` has already been replaced by a copy. A probe said so in seconds; reasoning did not.
+    const front = [{ text: A, url: A }, { text: '  and here' }];
+    segmentsWithoutUrls(front, new Set([A]));
+    expect(front[1].text).toBe('  and here');
+
+    const back = [{ text: 'a ' }, { text: 'b  ' }, { text: A, url: A }];
+    segmentsWithoutUrls(back, new Set([A]));
+    expect(back[1].text).toBe('b  ');
+  });
+});
+
+describe('segmentsWithoutUrls — whitespace that is actually ink', () => {
+  const A = 'https://e.test/a.png';
+
+  // ⚠ /code-review high: the guard excluded `bg` and stopped there, while its own comment claimed
+  // to cover "whitespace a reader can see". An underline or a strike paints a rule across spaces
+  // just as a background paints a block.
+  it('keeps an UNDERLINED or STRUCK run of spaces', () => {
+    for (const attr of [{ underline: true }, { strike: true }]) {
+      const segs = [
+        { text: '   ', ...attr },
+        { text: A, url: A },
+      ];
+      expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([{ text: '   ', ...attr }]);
+    }
+  });
+
+  it('still trims ordinary whitespace that merely carries a colour', () => {
+    // ⚠ The complement, so the guard cannot be "widened" into never trimming anything. A
+    // FOREGROUND colour paints nothing on a space — only bg/underline/strike do.
+    const segs = [
+      { text: 'hi ', fg: 4 },
+      { text: A, url: A },
+    ];
+    expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([{ text: 'hi', fg: 4 }]);
   });
 });

@@ -122,17 +122,22 @@
               class="relay-via"
               :title="'Relayed via ' + row.m.relayBot"
               >[{{ relayLabel(row.m) }}]</span
-            ><RenderSegments
+            ><MessageBody
+              v-if="previewBody(row.m)"
+              :text="row.m?.text"
               :segments="textSegments(row.m)"
               :self-color="selfColor"
               :network-id="buffer?.networkId ?? null"
               interactive-nicks
               @nick-click="onMentionMenu"
-            />
-            <MessageAttachments
-              v-if="previewsActive && mightHaveLink(row.m?.text)"
-              :text="row.m?.text"
               @measured="repinAfterPreviewGrowth(true)"
+            /><RenderSegments
+              v-else
+              :segments="textSegments(row.m)"
+              :self-color="selfColor"
+              :network-id="buffer?.networkId ?? null"
+              interactive-nicks
+              @nick-click="onMentionMenu"
             />
           </span>
           <span class="time">{{ row.continuationTime ? '' : time(row.m?.time) }}</span>
@@ -158,8 +163,22 @@
               class="relay-via"
               :title="'Relayed via ' + row.m.relayBot"
               >[{{ relayLabel(row.m) }}]</span
-            ><RenderSegments
-              v-if="hasInlineText(row.m)"
+            ><!-- ⚠⚠ FIRST in the chain, and RenderSegments is now the `v-else-if` behind it.
+                 MessageBody is a strictly narrower case (message|action, previews live, text
+                 that could hold a link) than `hasInlineText`, so the order is what makes the
+                 two mutually exclusive — reversed, every previewable message would render its
+                 body twice. It has to be a branch of THIS chain rather than a sibling: see the
+                 note where MessageAttachments used to sit, a few branches down. --><MessageBody
+              v-if="previewBody(row.m)"
+              :text="row.m?.text"
+              :segments="textSegments(row.m)"
+              :self-color="selfColor"
+              :network-id="buffer?.networkId ?? null"
+              interactive-nicks
+              @nick-click="onMentionMenu"
+              @measured="repinAfterPreviewGrowth(true)"
+            /><RenderSegments
+              v-else-if="hasInlineText(row.m)"
               :segments="textSegments(row.m)"
               :self-color="selfColor"
               :network-id="buffer?.networkId ?? null"
@@ -267,23 +286,16 @@
             <template v-else-if="row.m?.type === 'error'"
               ><LinkedText :text="row.m.text ?? ''"
             /></template>
-            <!-- ⚠ OUTSIDE the v-if/v-else-if chain above, deliberately. Sitting between
-                 RenderSegments and the first `v-else-if` re-parented the ENTIRE event chain
-                 (join/part/quit/kick/…) onto this element's condition instead of
-                 `hasInlineText`. Output was identical only because message|action is a subset
-                 of what hasInlineText covers — so any later edit to the condition here (gating
-                 on a setting, adding `notice`, extracting the component) would have silently
-                 deleted or doubled every event row, from an edit site that gives no hint the
-                 two are connected. -->
-            <MessageAttachments
-              v-if="
-                (row.m?.type === 'message' || row.m?.type === 'action') &&
-                previewsActive &&
-                mightHaveLink(row.m?.text)
-              "
-              :text="row.m?.text"
-              @measured="repinAfterPreviewGrowth(true)"
-            />
+            <!-- ⚠ Attachments used to be mounted HERE, outside the chain, and the reason is
+                 worth keeping: a `v-if` sitting between RenderSegments and the first
+                 `v-else-if` re-parents the ENTIRE event chain (join/part/quit/kick/…) onto
+                 that element's condition instead of `hasInlineText`. The output stayed
+                 identical only because message|action is a subset of what hasInlineText
+                 covers, so any later edit to the condition — gating on a setting, adding
+                 `notice`, extracting a component — would have silently deleted or doubled
+                 every event row from an edit site giving no hint the two were connected.
+                 They now render inside MessageBody, which IS the chain's first branch, so the
+                 hazard is gone rather than avoided. -->
           </span>
         </template>
         <div
@@ -355,7 +367,7 @@ import { asEventMode, eventModeKey, isNoiseType } from '../../../shared/eventFil
 import NickRef from './NickRef.vue';
 import LinkedText from './LinkedText.vue';
 import RenderSegments from './RenderSegments.vue';
-import MessageAttachments from './MessageAttachments.vue';
+import MessageBody from './MessageBody.vue';
 import { previewRevision } from '../composables/useLinkPreview.js';
 import { useConfigStore } from '../stores/config.js';
 import IgnoreModal from './IgnoreModal.vue';
@@ -1800,6 +1812,26 @@ function mightHaveLink(text: string | null | undefined): boolean {
   return !!text && text.includes('://');
 }
 
+/**
+ * Whether this row's body goes through MessageBody rather than straight to RenderSegments.
+ *
+ * ⚠ The gate is unchanged from when it guarded MessageAttachments alone — the cost it exists to
+ * avoid is the same one. MessageBody builds a computed and runs the URL regex per instance, and
+ * mounting it on all 500 rows made every user of a default-off feature pay for it on every
+ * buffer switch. Everything that fails this test renders exactly the component it always did.
+ *
+ * ⚠ `notice` is excluded even though `hasInlineText` accepts it, matching what the attachments
+ * mount did: a notice is a service message, and unfurling links in one means unfurling whatever
+ * NickServ or a bot happens to send.
+ */
+function previewBody(m: ChatMessage | undefined): boolean {
+  return (
+    (m?.type === 'message' || m?.type === 'action') &&
+    previewsActive.value &&
+    mightHaveLink(m?.text)
+  );
+}
+
 // Watch the messages array shape so we can react to:
 //   - prepend (older history): pin the OLD first row's viewport position.
 //   - replace (wholesale snapshot): snap to bottom.
@@ -2357,19 +2389,22 @@ watch(
 /* Matched highlight (rule fired): warm background tint. Sits above .alt so
    striping doesn't drown it out. DMs are NOT styled here — they get their
    own buffer + unread badge already. */
+/* ⚠ A link-preview card inside a highlighted row is DELIBERATELY the ordinary neutral panel.
+   These rules used to re-tint it — `--embed-bg` overridden to a warm mix, one step further into
+   the highlight than the row, on the reasoning that a grey panel "reads as a foreign object
+   dropped onto the tint". Removed on looking at it again: the tint is a property of the ROW, and
+   a card that restates it makes the highlight louder rather than clearer, which is not the
+   distinction highlights exist to draw. A neutral card on a warm row reads as what it is — an
+   attachment to a message that happens to be highlighted.
+   ⚠ Recorded rather than deleted because the override is easy to re-derive and was tried twice:
+   the numbers were `--warn 18%/24% over --bg` against row tints of 12%/18%, and they moved with
+   the neutral panel's own contrast in main.css. Two dials, independent in the code, that had to
+   be kept in step by hand — which is itself part of why one dial is better. */
 .line.highlight {
   background: color-mix(in srgb, var(--warn) 12%, transparent);
-  /* A link-preview card inside a highlighted row needs a WARM panel: the neutral grey one
-     reads as a foreign object dropped onto the tint. Re-tinted rather than lightened, one
-     step further into the highlight than the row itself, so it still reads as raised.
-     Custom properties inherit through scoped styles, so overriding the token here is enough
-     — MessageAttachment needs no knowledge that highlights exist. */
-  --embed-bg: color-mix(in srgb, var(--warn) 24%, var(--bg));
 }
 .message-list:not(.compact) .line.highlight.alt {
   background: color-mix(in srgb, var(--warn) 18%, transparent);
-  /* Matched the alt row's stronger tint, so the panel stays a step above it. */
-  --embed-bg: color-mix(in srgb, var(--warn) 30%, var(--bg));
 }
 .line.scroll-target {
   animation: scroll-target-pulse 1.5s ease-out;
@@ -2468,6 +2503,38 @@ watch(
   width: 1px;
   background: var(--border);
 }
+/* ⚠⚠ A body that is nothing but its attachments — every URL in it hidden because the pictures
+   are on screen instead. It has NO line box, and `align-items: baseline` on `.line` then has
+   nothing to align to, so it falls back to whatever the attachment block exposes as a baseline:
+   the bottom margin edge of a lone image, the title of a card, the first row of a mosaic. The
+   nick and timestamp appear at the foot of the image, or halfway down it, seemingly at random —
+   the shape of the attachment decides.
+
+   `start` is correct rather than merely different HERE, and only here: with no text to sit on a
+   shared baseline with, the nick belongs level with the top of the thing it introduces. Every
+   other row keeps `baseline`, which is doing real work whenever a body's first line carries
+   something taller than its text (a spoiler box, an emoji glyph).
+
+   ⚠ Scoped with `:has()` rather than a class on `.line`, because the component that KNOWS the
+   text is gone is MessageBody, which renders inside `.body` and cannot reach the row. Matching
+   on the marker it sets is what keeps the two in step — an element-position selector could not,
+   since plain text renders as text NODES and `.attachments` is `:first-child` either way. */
+.line:has(> .body > .attachments.body-only) {
+  align-items: start;
+}
+/* ⚠⚠ The companion rule — "no text above it, so no top margin" — CANNOT live here, and the
+   version that did was dead CSS for two commits. Scoped styles append this component's attribute
+   to the last compound, giving `.body > .attachments.body-only[data-v-list]`, and `.attachments`
+   never carries that attribute: it is MessageAttachments' root, reached through MessageBody,
+   which is a MULTI-ROOT FRAGMENT — Vue only propagates a parent's scope id onto a child whose
+   root IS the subtree, which a fragment child never is. Verified by rendering the real hierarchy
+   and reading the attributes off the element: exactly one, MessageAttachments' own.
+   It lives in MessageAttachments.vue now, where `.attachments` is the component's own root.
+   ⚠ The `:has()` rule above is unaffected, and the difference is worth knowing: the plugin does
+   NOT rewrite inside `:has()`, so it compiles to `.line[data-v-list]:has(> .body > …)` and the
+   attribute lands on `.line`, which this component does own. Checked with `compileStyle` rather
+   than assumed — had it rewritten the argument too, the nick-alignment fix would have been dead
+   as well and nothing would have said so. */
 .body.meta-body {
   color: var(--fg-muted);
   font-style: italic;

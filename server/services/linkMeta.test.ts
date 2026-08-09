@@ -374,6 +374,89 @@ describe('scrapeMeta', () => {
     expect(meta.imageUrl).toBe('https://good.test/primary.png');
   });
 
+  it('reads the declared shape of the card image', () => {
+    // The client picks between a hero band and a 72px chip from this pair and nothing else, so
+    // its absence is a real answer ("no declared shape") rather than a missing field.
+    const meta = scrapeMeta(`<head>
+      <meta property="og:image" content="https://e.test/card.png">
+      <meta property="og:image:width" content="1200">
+      <meta property="og:image:height" content="630">
+    </head>`);
+    expect(meta.imageWidth).toBe(1200);
+    expect(meta.imageHeight).toBe(630);
+  });
+
+  it('attaches width and height to the og:image they FOLLOW', () => {
+    // ⚠⚠ Same defect shape as the secure_url case above, and worse to diagnose: a CMS emitting a
+    // hero image and then per-article ones declares a size for each, so read flat the LAST
+    // article's dimensions describe the FIRST image's picture. Nothing about the URL looks wrong
+    // — the card just renders a logo as a stretched band, or an article as a chip.
+    const meta = scrapeMeta(`<head>
+      <meta property="og:image" content="https://good.test/primary.png">
+      <meta property="og:image:width" content="256">
+      <meta property="og:image:height" content="256">
+      <meta property="og:image" content="https://other.test/second.png">
+      <meta property="og:image:width" content="1200">
+      <meta property="og:image:height" content="630">
+    </head>`);
+    expect(meta.imageUrl).toBe('https://good.test/primary.png');
+    expect(meta.imageWidth).toBe(256);
+    expect(meta.imageHeight).toBe(256);
+  });
+
+  it('drops the pair when the og:image is not the image being sent', () => {
+    // ⚠ The image ladder falls through to `twitter:image`, and `og:image:width` describes
+    // neither that nor the bare `<img src>` behind it. Pairing them anyway reserves a box of the
+    // wrong shape for a differently-shaped picture — the exact mistake `pageRecord` already
+    // carries a warning about on the oEmbed side.
+    //
+    // ⚠⚠ What holds this up is STRUCTURAL, not a guard: the pair is only ever recorded as a
+    // sub-property of an `og:image` tag, so with no such tag there is nothing to carry over. An
+    // explicit `usedPrimaryImage` condition was written for it first and DELETED — the drill
+    // showed this test passing with the condition gone, because `images.push` runs only for
+    // truthy content and so a `primaryImage` that exists has already won the ladder. Reddened
+    // instead by making the sub-property handler stash onto a synthetic entry, which is the
+    // mutation the structural rule actually forbids.
+    const meta = scrapeMeta(`<head>
+      <meta property="og:image:width" content="1200">
+      <meta property="og:image:height" content="630">
+      <meta name="twitter:image" content="https://e.test/tw.png">
+    </head>`);
+    expect(meta.imageUrl).toBe('https://e.test/tw.png');
+    expect(meta.imageWidth).toBeUndefined();
+    expect(meta.imageHeight).toBeUndefined();
+  });
+
+  it('treats a half-declared or nonsense shape as no shape at all', () => {
+    // A width with no height yields no ratio, and reading the one number as a shape is how a logo
+    // ends up in a band. `0` and `"large"` are the same answer.
+    for (const tags of [
+      '<meta property="og:image:width" content="1200">',
+      '<meta property="og:image:height" content="630">',
+      '<meta property="og:image:width" content="0"><meta property="og:image:height" content="0">',
+      '<meta property="og:image:width" content="large"><meta property="og:image:height" content="x">',
+    ]) {
+      const meta = scrapeMeta(
+        `<head><meta property="og:image" content="https://e.test/card.png">${tags}</head>`,
+      );
+      expect(meta.imageUrl).toBe('https://e.test/card.png');
+      expect(meta.imageWidth).toBeUndefined();
+      expect(meta.imageHeight).toBeUndefined();
+    }
+  });
+
+  it('drops the pair when the image URL itself is discarded as blank', () => {
+    // ⚠ `content="   "` is deleted by the entity-cleanup pass, so the ladder ends with no image —
+    // and a surviving width would then describe a picture that is not being sent at all.
+    const meta = scrapeMeta(`<head>
+      <meta property="og:image" content="   ">
+      <meta property="og:image:width" content="1200">
+      <meta property="og:image:height" content="630">
+    </head>`);
+    expect(meta.imageUrl).toBeUndefined();
+    expect(meta.imageWidth).toBeUndefined();
+  });
+
   it('does not retain the document a value was sliced out of', () => {
     // ⚠⚠ A memory bug that only manifests once PR 4 caches these, where nobody would trace it
     // back here: a V8 slice holds its ENTIRE parent, so a 60-character image URL pinned the

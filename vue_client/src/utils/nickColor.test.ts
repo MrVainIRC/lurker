@@ -318,3 +318,59 @@ describe('splitTextByTokens — emoji shortcodes', () => {
     ]);
   });
 });
+
+describe('splitTextByTokens — <angle-bracketed> URLs', () => {
+  // RFC 3986 Appendix C's delimiter convention. Discord reads it as "link, but no unfurl", and
+  // Lurker does the same — `previewableUrls` refuses to resolve what the brackets wrap. Here the
+  // job is the other half: the brackets are plumbing, so they are not rendered.
+
+  it('renders the link without its brackets', () => {
+    expect(parse('<https://example.com>')).toEqual([
+      { text: 'https://example.com', url: 'https://example.com' },
+    ]);
+  });
+
+  it('keeps the surrounding prose, minus the brackets', () => {
+    expect(parse('see <https://example.com> for more')).toEqual([
+      { text: 'see ' },
+      { text: 'https://example.com', url: 'https://example.com' },
+      { text: ' for more' },
+    ]);
+  });
+
+  it('does NOT trim trailing punctuation inside brackets', () => {
+    // ⚠⚠ The whole point of the convention: the author has said where the address ends, so it is
+    // not guessed at. Unbracketed, that period is sentence punctuation and comes off.
+    expect(parse('<https://example.com/a.>')).toEqual([
+      { text: 'https://example.com/a.', url: 'https://example.com/a.' },
+    ]);
+    expect(parse('https://example.com/a.')).toEqual([
+      { text: 'https://example.com/a', url: 'https://example.com/a' },
+      { text: '.' },
+    ]);
+  });
+
+  it('leaves a lone bracket alone, since it is ordinary prose', () => {
+    expect(parse('a < https://example.com')).toEqual([
+      { text: 'a < ' },
+      { text: 'https://example.com', url: 'https://example.com' },
+    ]);
+    expect(parse('<https://example.com')).toEqual([
+      { text: '<' },
+      { text: 'https://example.com', url: 'https://example.com' },
+    ]);
+  });
+
+  it('emits no empty segment where the opening bracket was', () => {
+    // Dropping the `<` can leave nothing between the previous token and the link — a message that
+    // IS a bracketed link starts its URL at index 1 — and an empty text segment is one more node
+    // for the renderer to walk on every row.
+    expect(parse('<https://example.com>').every((s) => s.text !== '')).toBe(true);
+  });
+
+  it('applies to a bare www host too, which is the same convention', () => {
+    expect(parse('<www.example.com>')).toEqual([
+      { text: 'www.example.com', url: 'http://www.example.com' },
+    ]);
+  });
+});

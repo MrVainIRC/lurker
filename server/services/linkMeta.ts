@@ -29,6 +29,14 @@ export interface ScrapedMeta {
   description?: string;
   siteName?: string;
   imageUrl?: string;
+  /**
+   * `og:image:width` / `og:image:height`, when the page declares them for the image that WON.
+   *
+   * ⚠ They decide the card's SHAPE, so a wrong pair is worse than no pair — see the assign site
+   * for why they are dropped whenever `imageUrl` came from anywhere but the primary og:image.
+   */
+  imageWidth?: number;
+  imageHeight?: number;
   // ⚠ No `ogType`. It was scraped, and documented as driving rendering, and read by nobody on
   // any branch — what actually decides a video card is the provider table in linkEmbed.ts,
   // because `og:type: video.other` on a site we have no embed URL for still renders as a page.
@@ -578,7 +586,7 @@ export function scrapeMeta(html: string): ScrapedMeta {
   const og = new Map<string, string>();
   const twitter = new Map<string, string>();
   /** og:image and its sub-properties, in document order — see the secure_url note below. */
-  const images: { url: string; secureUrl?: string }[] = [];
+  const images: { url: string; secureUrl?: string; width?: string; height?: string }[] = [];
   let titleText: string | undefined;
   let imageSrc: string | undefined;
 
@@ -607,6 +615,19 @@ export function scrapeMeta(html: string): ScrapedMeta {
       }
       if (key === 'og:image:secure_url') {
         if (images.length > 0) images[images.length - 1].secureUrl = content;
+        continue;
+      }
+      // ⚠ Sub-properties of the PRECEDING og:image, exactly like secure_url above, and tracked
+      // per-image for the same reason: a CMS emitting a hero image followed by per-article ones
+      // declares a width for each, and read flat the last one would describe the first one's
+      // picture. That mistake is invisible in a URL and loud in a layout — it decides whether
+      // the card renders a hero band or a 72px square.
+      if (key === 'og:image:width' || key === 'og:image:height') {
+        if (images.length > 0) {
+          const at = images[images.length - 1];
+          if (key === 'og:image:width') at.width ??= content;
+          else at.height ??= content;
+        }
         continue;
       }
 
@@ -644,7 +665,14 @@ export function scrapeMeta(html: string): ScrapedMeta {
   // always carried five keys — `'imageUrl' in meta` was true for a document with no metadata
   // at all, and `{...oembedValues, ...scrapeMeta(html)}` evaluated to all-undefined, silently
   // destroying every oEmbed field it was meant to fall back to.
-  const assign = (k: keyof ScrapedMeta, v: string | undefined) => {
+  // ⚠ Keyed on the STRING members only, derived rather than listed. `ScrapedMeta` gained numeric
+  // `imageWidth`/`imageHeight`, and a plain `keyof` then let this helper be called with a key
+  // whose value is a number — which typechecks as a widened union and writes a string into it.
+  // Deriving the set means adding another numeric field cannot quietly re-open that.
+  type StringMetaKey = {
+    [K in keyof ScrapedMeta]-?: ScrapedMeta[K] extends string | undefined ? K : never;
+  }[keyof ScrapedMeta];
+  const assign = (k: StringMetaKey, v: string | undefined) => {
     if (v !== undefined && v !== '') out[k] = v;
   };
 
@@ -685,6 +713,38 @@ export function scrapeMeta(html: string): ScrapedMeta {
     const clean = detach(decodeEntities(v).trim());
     if (clean) out[k] = clean;
     else delete out[k];
+  }
+
+  /**
+   * The declared shape of the image, and ONLY when the primary og:image is the one being sent.
+   *
+   * ⚠⚠ Three gates, each of which was a wrong card shape waiting to happen:
+   *
+   *   1. `out.imageUrl` must have SURVIVED the cleanup above. A `content="  "` og:image is
+   *      deleted there, and the ladder then has nothing — so a surviving width would describe
+   *      an image that is not being sent.
+   *   2. Both numbers must be present and sane. A page declaring only a width, or `0`, or
+   *      `"large"`, yields no ratio — and a half-known shape must read as unknown rather than
+   *      as a default, because the default is the hero and the thing it gets wrong is logos.
+   *
+   * ⚠⚠ A third gate belongs here on the face of it — "the primary og:image must be what WON",
+   * since the ladder falls through to `twitter:image` and then a bare `<img src>`, and
+   * `og:image:width` describes neither. It is NOT written, because it cannot fire: the pair is
+   * only ever recorded as a sub-property of an `og:image` tag, and `images.push` runs only for
+   * truthy content — so `primaryImage` existing at all means it won the ladder outright. It was
+   * written first, and the test aiming at it passed with the condition deleted, which is how the
+   * redundancy was found.
+   *
+   * ⚠ So the invariant is STRUCTURAL rather than guarded, and it breaks silently if the ladder is
+   * ever reordered to prefer `twitter:image`. That reordering must add the gate back.
+   */
+  if (out.imageUrl !== undefined) {
+    const w = Number(primaryImage?.width);
+    const h = Number(primaryImage?.height);
+    if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+      out.imageWidth = Math.round(w);
+      out.imageHeight = Math.round(h);
+    }
   }
   return out;
 }

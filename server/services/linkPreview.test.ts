@@ -97,6 +97,67 @@ describe('pageRecord: what is enough to be worth a card', () => {
     const { pageRecord } = await import('./linkPreview.js');
     expect(pageRecord(new URL('https://example.com/blank'), null, {}).status).toBe('unavailable');
   });
+
+  it('carries the SCRAPED image shape onto the record', async () => {
+    // ⚠⚠ The client picks between a hero band and a 72px chip from this pair, and before
+    // resolver v4 it was null on every og:image card — so the choice fell to the default on
+    // every link that was not an oEmbed. This is the plumbing that changed, and nothing else
+    // tests it: `scrapeMeta`'s own suite stops at the meta object, and the client's suite builds
+    // descriptors by hand. Reverting the pageRecord half left both of them green.
+    const { pageRecord } = await import('./linkPreview.js');
+    const out = pageRecord(new URL('https://news.example/article'), null, {
+      title: 'A headline',
+      imageUrl: 'https://news.example/card.png',
+      imageWidth: 1200,
+      imageHeight: 630,
+    });
+    expect(out.imageWidth).toBe(1200);
+    expect(out.imageHeight).toBe(630);
+  });
+
+  it('prefers the oEmbed thumbnail SHAPE when the oEmbed thumbnail is the image taken', async () => {
+    // ⚠ The pairing rule, in the direction it already had: `thumbnail_width` describes
+    // `thumbnail_url`, so when that image wins the ladder the scraped og:image's numbers must not
+    // ride along. A 4:3 hole for a 16:9 picture is the reflow these fields exist to prevent —
+    // and now also a hero band for what is really a logo.
+    const { pageRecord } = await import('./linkPreview.js');
+    const out = pageRecord(
+      new URL('https://news.example/article'),
+      {
+        thumbnailUrl: 'https://news.example/oembed.png',
+        thumbnailWidth: 256,
+        thumbnailHeight: 256,
+      },
+      {
+        title: 'A headline',
+        imageUrl: 'https://news.example/card.png',
+        imageWidth: 1200,
+        imageHeight: 630,
+      },
+    );
+    expect(out.imageUrl).toBe('https://news.example/oembed.png');
+    expect(out.imageWidth).toBe(256);
+    expect(out.imageHeight).toBe(256);
+  });
+
+  it('leaves the shape null when the oEmbed thumbnail wins but declares no size', async () => {
+    // ⚠ The scraped numbers describe the og:image, which just LOST — so they are not a fallback,
+    // they are a different picture's dimensions. Unknown is the correct answer here.
+    const { pageRecord } = await import('./linkPreview.js');
+    const out = pageRecord(
+      new URL('https://news.example/article'),
+      { thumbnailUrl: 'https://news.example/oembed.png' },
+      {
+        title: 'A headline',
+        imageUrl: 'https://news.example/card.png',
+        imageWidth: 1200,
+        imageHeight: 630,
+      },
+    );
+    expect(out.imageUrl).toBe('https://news.example/oembed.png');
+    expect(out.imageWidth).toBeNull();
+    expect(out.imageHeight).toBeNull();
+  });
 });
 
 describe('toDescriptor', () => {
