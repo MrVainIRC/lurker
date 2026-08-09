@@ -113,7 +113,7 @@ const OBJECT_CONTENT_DISPOSITION = 'inline';
  * request timeout, inside a `mediaPool` slot, for bytes nobody wants. Cancelling
  * releases the socket without reading a byte. (Copilot.)
  */
-export async function discard(res: Response): Promise<void> {
+async function discard(res: Response): Promise<void> {
   try {
     await res.body?.cancel();
   } catch {

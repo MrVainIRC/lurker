@@ -162,7 +162,9 @@ function resolveS3(warn: (msg: string) => void): CacheConfig {
     return { mode: 'off' };
   }
 
-  if (!validHttpsBase(publicBaseUrl, 'S3_PUBLIC_BASE_URL', warn)) return { mode: 'off' };
+  if (!validHttpsBase(publicBaseUrl, 'LURKER_PREVIEW_CACHE_S3_PUBLIC_BASE_URL', warn)) {
+    return { mode: 'off' };
+  }
 
   // ⚠ SANITISED, per segment, with the uploader's own function. An operator's
   // prefix reaches `new URL()` and an S3 key; left raw, a '#' in it truncates the
@@ -214,16 +216,20 @@ function resolveDropper(warn: (msg: string) => void): CacheConfig {
     return { mode: 'off' };
   }
 
+  // ⚠ Warnings name the FULL env var, so the log line an operator greps for is
+  // the line in their env file.
   let service: URL;
   try {
     service = new URL(url);
   } catch {
-    warn(`[preview-cache] DROPPER_URL "${url}" is not a URL — caching is OFF.`);
+    warn(
+      `[preview-cache] LURKER_PREVIEW_CACHE_DROPPER_URL "${url}" is not a URL — caching is OFF.`,
+    );
     return { mode: 'off' };
   }
   if (service.protocol !== 'https:' && service.protocol !== 'http:') {
     warn(
-      `[preview-cache] DROPPER_URL must be http(s) (got "${service.protocol}") — caching is OFF.`,
+      `[preview-cache] LURKER_PREVIEW_CACHE_DROPPER_URL must be http(s) (got "${service.protocol}") — caching is OFF.`,
     );
     return { mode: 'off' };
   }
@@ -235,13 +241,15 @@ function resolveDropper(warn: (msg: string) => void): CacheConfig {
   // validation exists to catch at boot instead.
   if ((service.pathname !== '/' && service.pathname !== '') || service.search || service.hash) {
     warn(
-      `[preview-cache] DROPPER_URL must have no path, query or fragment (got "${url}") — ` +
-        `the /api/previews path is appended automatically. Caching is OFF.`,
+      `[preview-cache] LURKER_PREVIEW_CACHE_DROPPER_URL must have no path, query or fragment ` +
+        `(got "${url}") — the /api/previews path is appended automatically. Caching is OFF.`,
     );
     return { mode: 'off' };
   }
 
-  if (!validHttpsBase(publicBaseUrl, 'DROPPER_PUBLIC_BASE_URL', warn)) return { mode: 'off' };
+  if (!validHttpsBase(publicBaseUrl, 'LURKER_PREVIEW_CACHE_DROPPER_PUBLIC_BASE_URL', warn)) {
+    return { mode: 'off' };
+  }
 
   return {
     mode: 'dropper',
