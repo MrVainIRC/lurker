@@ -15,6 +15,7 @@ import { usePushSubscriptionsStore } from '../stores/pushSubscriptions.js';
 import { usePinsStore } from '../stores/pins.js';
 import { useFavoritesStore } from '../stores/favorites.js';
 import { useNetworkPresetsStore } from '../stores/networkPresets.js';
+import { useSplitsStore } from '../stores/splits.js';
 import { resetSocket } from './useSocket.js';
 import { resetPresence } from './usePresence.js';
 import { resetAllScrollState } from './useScrollState.js';
@@ -54,6 +55,11 @@ export function resetSession(): void {
   // isn't — leaving it loaded would hand the next user a picker built from a
   // response fetched under someone else's session.
   useNetworkPresetsStore().$reset();
+  // Pane layout is per-session view state — $reset() rather than the store's own
+  // reset() for the same reason every other store here uses it: the buffers this
+  // layout points at were wiped above, so there is no per-pane teardown left to
+  // run, only state to drop.
+  useSplitsStore().$reset();
   resetPresence();
   resetAllScrollState();
   resetViewedBuffers();
