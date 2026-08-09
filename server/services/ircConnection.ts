@@ -3080,8 +3080,7 @@ export class IrcConnection {
   //
   // Deliberately unconditional (no setting): weechat and irssi both do this
   // without asking. irssi's user@host re-identification (renaming when the
-  // peer RECONNECTS under a new nick, no NICK seen) is out of scope — see
-  // ROADMAP.
+  // peer RECONNECTS under a new nick, no NICK seen) is out of scope — see #695.
   private renameDmForNickChange(
     oldNick: string,
     newNick: string,
