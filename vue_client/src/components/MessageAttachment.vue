@@ -777,7 +777,13 @@ function activate(): void {
    common case fills the frame exactly and nothing is bordered at all.
    ⚠ `contain`, not `cover`. The convention is not a rule — 4:3 and portrait share images are
    ordinary — and cropping one to a 1.9:1 band cuts the subject out. Fitted, it merely sits in a
-   wider frame, against the card's own panel rather than the chat background. */
+   wider frame.
+   ⚠⚠ NO fill, so the letterbox is the card's own panel. It was `var(--bg)` — the CHAT background,
+   which is darker than the panel — while both comments here claimed the opposite, so an
+   undeclared-size logo (which now defaults to the hero) rendered as a small picture inside a dark
+   rectangle inside a lighter card: three nested tones, and exactly the "reads as a layout
+   mistake" failure the width note above was written to avoid. Transparent rather than
+   `--embed-bg` so it cannot drift from whatever the card is actually painted with. */
 .card-hero {
   aspect-ratio: 1200 / 630;
   /* ⚠ NO width cap of its own — the card's 400px does the work (MessageAttachments), and the
@@ -789,7 +795,6 @@ function activate(): void {
      image between two bars. Width is the only honest control, and it belongs to the card. */
   border-radius: var(--radius-md);
   overflow: hidden;
-  background: var(--bg);
 }
 /* ⚠⚠ Scoped to the column, exactly like `.card-video .card-media` below and for the identical
    reason: unscoped, a `width: 100%` basis beside `.card-text`'s 0% basis resolves the text to

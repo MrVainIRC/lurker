@@ -2522,10 +2522,19 @@ watch(
 .line:has(> .body > .attachments.body-only) {
   align-items: start;
 }
-/* The top margin separates an attachment from the text above it. There is no text above it. */
-.body > .attachments.body-only {
-  margin-top: 0;
-}
+/* ⚠⚠ The companion rule — "no text above it, so no top margin" — CANNOT live here, and the
+   version that did was dead CSS for two commits. Scoped styles append this component's attribute
+   to the last compound, giving `.body > .attachments.body-only[data-v-list]`, and `.attachments`
+   never carries that attribute: it is MessageAttachments' root, reached through MessageBody,
+   which is a MULTI-ROOT FRAGMENT — Vue only propagates a parent's scope id onto a child whose
+   root IS the subtree, which a fragment child never is. Verified by rendering the real hierarchy
+   and reading the attributes off the element: exactly one, MessageAttachments' own.
+   It lives in MessageAttachments.vue now, where `.attachments` is the component's own root.
+   ⚠ The `:has()` rule above is unaffected, and the difference is worth knowing: the plugin does
+   NOT rewrite inside `:has()`, so it compiles to `.line[data-v-list]:has(> .body > …)` and the
+   attribute lands on `.line`, which this component does own. Checked with `compileStyle` rather
+   than assumed — had it rewritten the argument too, the nick-alignment fix would have been dead
+   as well and nothing would have said so. */
 .body.meta-body {
   color: var(--fg-muted);
   font-style: italic;

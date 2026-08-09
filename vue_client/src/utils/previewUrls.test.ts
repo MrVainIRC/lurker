@@ -373,3 +373,30 @@ describe('segmentsWithoutUrls — closing the gap', () => {
     expect(back[1].text).toBe('b  ');
   });
 });
+
+describe('segmentsWithoutUrls — whitespace that is actually ink', () => {
+  const A = 'https://e.test/a.png';
+
+  // ⚠ /code-review high: the guard excluded `bg` and stopped there, while its own comment claimed
+  // to cover "whitespace a reader can see". An underline or a strike paints a rule across spaces
+  // just as a background paints a block.
+  it('keeps an UNDERLINED or STRUCK run of spaces', () => {
+    for (const attr of [{ underline: true }, { strike: true }]) {
+      const segs = [
+        { text: '   ', ...attr },
+        { text: A, url: A },
+      ];
+      expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([{ text: '   ', ...attr }]);
+    }
+  });
+
+  it('still trims ordinary whitespace that merely carries a colour', () => {
+    // ⚠ The complement, so the guard cannot be "widened" into never trimming anything. A
+    // FOREGROUND colour paints nothing on a space — only bg/underline/strike do.
+    const segs = [
+      { text: 'hi ', fg: 4 },
+      { text: A, url: A },
+    ];
+    expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([{ text: 'hi', fg: 4 }]);
+  });
+});

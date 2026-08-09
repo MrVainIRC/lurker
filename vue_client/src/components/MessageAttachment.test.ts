@@ -654,6 +654,35 @@ describe('MessageAttachments — arrangement', () => {
     expect(wrapper.find('.sr-only').text()).toBe('2 more images');
   });
 
+  it('does not render the images it capped away a SECOND time, below the grid', () => {
+    // ⚠⚠ Regression, /code-review high. `stacked` subtracted `mosaic` — the four DRAWN tiles —
+    // so every image from the fifth on fell through and rendered again at full size underneath,
+    // while the `+2` badge above announced those same pictures as not shown. At
+    // MAX_MEDIA_PER_MESSAGE (20) that is a four-cell grid followed by sixteen photographs, which
+    // is the exact screenful the cap exists to prevent.
+    //
+    // ⚠ The test above this one could not catch it: it counts `.mosaic .tile`, which was
+    // correctly 4 the whole time. Counting what you capped is not counting what rendered — so
+    // this asserts the TOTAL number of images in the block.
+    const urls: string[] = [];
+    for (let n = 1; n <= 6; n++) {
+      urls.push(`https://e.test/${n}.png`);
+      seed(img(n, 800, 600));
+    }
+    const wrapper = mountFor(urls.join(' '));
+    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(4);
+    expect(wrapper.findAll('img.inline-image')).toHaveLength(4);
+  });
+
+  it('still stacks a LONE image, which the mosaic never stands in for', () => {
+    // The other side of the fix: with no mosaic nothing is spoken for, so the single image has to
+    // reach `stacked` or a one-image message renders no picture at all.
+    seed(img(1, 800, 600));
+    const wrapper = mountFor('https://e.test/1.png');
+    expect(wrapper.find('.mosaic').exists()).toBe(false);
+    expect(wrapper.findAll('img.inline-image')).toHaveLength(1);
+  });
+
   it('draws no overflow badge when everything fits', () => {
     seed(img(1, 800, 600), img(2, 800, 600));
     expect(mountFor('https://e.test/1.png https://e.test/2.png').find('.more').exists()).toBe(

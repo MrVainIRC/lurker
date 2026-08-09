@@ -214,11 +214,17 @@ export function hideableUrls(
  * Whitespace in this segment is dead space rather than ink, so trimming it changes nothing a
  * reader can see.
  *
- * ⚠ `bg` is the interesting exclusion. A mIRC background run paints its spaces, so a colour
- * block either side of a hidden link is a drawing — collapsing it deletes part of the message.
+ * ⚠⚠ Three attributes make whitespace VISIBLE, not one. A mIRC background run paints its spaces,
+ * so a colour block beside a hidden link is a drawing and collapsing it deletes part of the
+ * message — that was the case this guard was written for. `underline` and `strike` do the same
+ * thing with a rule instead of a fill: `look \x1f   \x1f https://x.png` draws a short line, and
+ * trimming it takes the line away. Same class, and the first version was two conditions short of
+ * the rule its own comment stated.
  */
 function isTrimmableText(seg: RenderSegment): boolean {
-  return !seg.url && !seg.channel && !seg.spoiler && seg.bg == null;
+  return (
+    !seg.url && !seg.channel && !seg.spoiler && seg.bg == null && !seg.underline && !seg.strike
+  );
 }
 
 /**

@@ -101,10 +101,22 @@ const overflow = computed(() => Math.max(0, images.value.length - mosaic.value.l
  * Everything the mosaic didn't take: cards, video, audio — and a lone image, which renders on its
  * own at its own size. That last case is the common one, and a one-cell mosaic would only crop it
  * for no reason.
+ *
+ * ⚠⚠ Excludes every image the mosaic STANDS IN FOR, not merely the four it draws. Subtracting
+ * `mosaic` was the obvious spelling and it re-rendered the overflow: with six images the grid
+ * showed four tiles and a `+2` badge, and then images five and six rendered AGAIN underneath at
+ * full size — the badge announcing as hidden the very pictures sitting below it. At
+ * `MAX_MEDIA_PER_MESSAGE` (20) that is a four-cell grid followed by sixteen stacked photographs,
+ * which is precisely the screenful the cap exists to prevent.
+ *
+ * ⚠ The tests could not see it: they counted `.mosaic .tile`, which was correct at 4, and never
+ * the total number of images in the block. Counting what you capped is not the same as counting
+ * what rendered.
  */
 const stacked = computed(() => {
-  const tiled = new Set(mosaic.value);
-  return props.previews.filter((p) => !tiled.has(p));
+  // Empty when there is no mosaic, so a lone image still stacks — that is the common case.
+  const spokenFor = new Set<LinkPreview>(mosaic.value.length ? images.value : []);
+  return props.previews.filter((p) => !spokenFor.has(p));
 });
 
 /**
@@ -150,6 +162,15 @@ function openAt(item: LinkPreview): void {
   max-width: 100%;
   min-width: 0;
 }
+/* The top margin separates an attachment from the text above it. On a body whose every URL was
+   hidden there is no text above it — MessageBody sets this class, and MessageList's `:has()`
+   companion top-aligns the row's nick for the same reason.
+   ⚠ It lives HERE rather than beside that companion because a scoped rule in MessageList cannot
+   reach this element: MessageBody is a multi-root fragment, so MessageList's scope id never
+   propagates onto `.attachments`. The rule was written there first and did nothing at all. */
+.attachments.body-only {
+  margin-top: 0;
+}
 /* A card wants the width it's given — its text has to wrap against something — but not the
    full width of a wide window, where it stops reading as part of the message and starts
    reading as a page element.
@@ -178,9 +199,12 @@ function openAt(item: LinkPreview): void {
   grid-auto-rows: 160px;
   gap: var(--space-2);
   width: 100%;
-  /* Matches the card's cap. Past this the mosaic stops reading as part of a message and starts
-     reading as a page element — and on a wide window a 2-up grid of full-width cells is a
-     slideshow, not an annotation. */
+  /* Past this the mosaic stops reading as part of a message and starts reading as a page element
+     — on a wide window a 2-up grid of full-width cells is a slideshow, not an annotation.
+     ⚠ This used to say "matches the card's cap" and no longer does: the card narrowed to 400px
+     when the hero band landed, and the mosaic was left at 480. Deliberately NOT changed to match,
+     because the two were looked at side by side at these values and approved — but they are now
+     two independent dials, so anything claiming they agree is wrong. */
   max-width: 480px;
 }
 /* Three images: a full-height picture beside two stacked ones. Discord's arrangement, and it is
