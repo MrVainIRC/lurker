@@ -119,14 +119,13 @@
         </template>
         <button
           v-if="canCall"
-          class="icon call-btn"
-          :class="{ 'in-call': inThisCall }"
+          class="icon"
+          :class="{ 'call-live': inThisCall || callCount > 0 }"
           :title="callLabel"
           :aria-label="callLabel"
           @click="openCall"
         >
           <i class="fa-solid fa-phone"></i>
-          <span v-if="callCount > 0" class="call-count">{{ callCount }}</span>
         </button>
         <button
           v-if="isChannel"
@@ -668,21 +667,14 @@ useChatBootstrap({ onJump: onJumpToMessage });
 .icon.dcc-btn.pending {
   color: var(--warn);
 }
-/* Call button: the live participant count rides inline next to the glyph
-   (a header icon is already accent here, so the count carries the signal),
-   and the glyph goes `good`-green while YOU are in the call — same language
-   as the CallBar's live dot and DesktopChat's header. One font size holds
-   here as everywhere: the count is separated by spacing, not shrunk. */
-.icon.call-btn {
-  gap: var(--space-2);
-}
-.icon.call-btn .call-count {
-  font-variant-numeric: tabular-nums;
-}
-.icon.in-call {
-  color: var(--good);
-}
-.icon.in-call:hover {
+/* Call button: color-as-signal, no count badge — same call the Transfers
+   button above makes, and the Members button beside it carries no number
+   either. (DesktopChat DOES show the count, because its Members button shows
+   one too; each header stays internally consistent.) `good`-green whenever a
+   call is live here, yours or not — the same language as the CallBar's live
+   dot; which of the two it is, is what opening the modal answers. */
+.icon.call-live,
+.icon.call-live:hover {
   color: var(--good);
 }
 .icon.back {
