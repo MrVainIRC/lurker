@@ -17,7 +17,7 @@ import { isChannelTarget } from '../../../shared/channels.js';
 // A BufferPane provides its own key here instead, and those components resolve
 // "my buffer" through `useBufferKey()` — which falls back to the global
 // activeKey when nothing is provided. So an un-provided subtree behaves exactly
-// as it did before, and a windowed one renders whatever its pane says.
+// as it did before, and a split pane renders whatever its pane says.
 export const BUFFER_KEY: InjectionKey<Ref<string | null>> = Symbol('lurker:buffer-key');
 
 // Call from a component that owns a buffer's subtree (BufferPane). Pass a ref
@@ -53,10 +53,15 @@ export interface ActiveBufferState {
   hasNicklist: ComputedRef<boolean>;
 }
 
-export function useActiveBuffer(): ActiveBufferState {
+// `key` names the buffer to describe. A BufferPane MUST pass its own key
+// explicitly: inject() resolves against the PARENT's provides, so a pane asking
+// for the injected key would get the global activeKey rather than the one it
+// just provided to its own subtree. Everything below the pane omits it and gets
+// the provided key, and everything outside a pane omits it and gets activeKey.
+export function useActiveBuffer(key?: Ref<string | null>): ActiveBufferState {
   const networks = useNetworksStore();
   const buffers = useBuffersStore();
-  const activeKey = useBufferKey();
+  const activeKey = key ?? useBufferKey();
 
   const active = computed(() => networks.bufferFor(activeKey.value));
   const virtualCfg = computed(() => virtualConfig(activeKey.value));

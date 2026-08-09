@@ -7,7 +7,7 @@ import { useSplitsStore, MAX_PANES } from './splits.js';
 import { useBuffersStore } from './buffers.js';
 import { useNetworksStore } from './networks.js';
 
-vi.mock('../composables/useSocket.js', () => ({ socketSend: vi.fn() }));
+vi.mock('../composables/useSocket.js', () => ({ socketSend: vi.fn<() => void>() }));
 
 // leaveBuffer is the teardown the pane lifecycle owns — spy on it rather than
 // asserting on divider/unread fields, since what matters here is WHICH buffers
@@ -166,7 +166,7 @@ describe('splits closing', () => {
     splits.collapseTo(1);
     expect(splits.panes).toEqual(['1::#b']);
     expect(splits.focused).toBe(0);
-    expect(leave.mock.calls.flat().sort()).toEqual(['1::#a', '1::#c']);
+    expect(leave.mock.calls.flat().toSorted()).toEqual(['1::#a', '1::#c']);
   });
 });
 
