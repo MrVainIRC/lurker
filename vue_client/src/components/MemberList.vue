@@ -5,69 +5,6 @@
 
 <template>
   <div class="members">
-    <div v-if="canCall" class="members-head">
-      <button
-        type="button"
-        class="call-btn"
-        :disabled="voice.connecting || voice.active"
-        :title="inThisCall ? 'You are in this call' : 'Start or join a voice call in this channel'"
-        @click="startCall"
-      >
-        <i class="fa-solid fa-phone" aria-hidden="true"></i>
-        <span>{{ callBtnLabel }}</span>
-      </button>
-      <label v-if="isOp" class="call-policy" title="Who may join this channel's call">
-        <span>Join</span>
-        <select :value="policy" @change="onPolicyChange">
-          <option value="none">anyone</option>
-          <option value="voice">voiced+</option>
-          <option value="halfop">halfop+</option>
-          <option value="op">ops only</option>
-        </select>
-      </label>
-      <div v-if="isOp" class="guest-links">
-        <div class="guest-mint">
-          <button
-            type="button"
-            class="guest-btn"
-            :disabled="guestBusy"
-            title="Create a public link a guest can use to join this channel's call without an account (expires in 24h)"
-            @click="mintGuestLink"
-          >
-            <i class="fa-solid fa-link" aria-hidden="true"></i> Guest link
-          </button>
-          <label class="listen-only" title="Guests via this link can hear the call but not speak">
-            <input v-model="listenOnly" type="checkbox" /> listen-only
-          </label>
-        </div>
-        <div v-if="guestUrl" class="guest-url">
-          <input :value="guestUrl" readonly aria-label="Guest call link" @focus="selectAll" />
-          <button type="button" @click="copyGuest">
-            {{ linkCopy.isCopied('mint') ? 'Copied' : 'Copy' }}
-          </button>
-        </div>
-        <ul v-if="activeLinks.length" class="link-list">
-          <li v-for="l in activeLinks" :key="l.token">
-            <span class="link-meta" :title="`created by ${l.createdBy ?? 'unknown'}`">
-              {{ l.canPublish ? 'talk' : 'listen' }} · {{ l.useCount }} use{{
-                l.useCount === 1 ? '' : 's'
-              }}
-            </span>
-            <IconButton
-              :icon="linkCopy.isCopied(l.token) ? 'fa-check' : 'fa-copy'"
-              :label="linkCopy.isCopied(l.token) ? 'Copied' : 'Copy link'"
-              @click="copyLink(l)"
-            />
-            <IconButton
-              icon="fa-ban"
-              danger
-              label="Revoke — stops new guests from joining; anyone already in the call stays until removed"
-              @click="revokeLink(l)"
-            />
-          </li>
-        </ul>
-      </div>
-    </div>
     <ul ref="listEl">
       <li
         v-for="m in sorted"
@@ -108,20 +45,12 @@ import { useBuffersStore, type BufferMember } from '../stores/buffers.js';
 import { useNickColors } from '../composables/useNickColors.js';
 import { useMemberActions } from '../composables/useMemberActions.js';
 import { useIgnoresStore } from '../stores/ignores.js';
-import { useConfigStore } from '../stores/config.js';
-import { useVoiceStore } from '../stores/voice.js';
-import { useCallPresenceStore } from '../stores/callPresence.js';
-import { useToastsStore } from '../stores/toasts.js';
-import { canAdminCall } from '../../../shared/voiceModes.js';
-import { useCopyFeedback } from '../composables/useCopyFeedback.js';
-import { api } from '../api.js';
 import {
   PREFIX_ORDER,
   prefixOf as modePrefixOf,
   prefixClass as modePrefixClass,
 } from '../utils/memberPrefix.js';
 import IgnoreModal from './IgnoreModal.vue';
-import IconButton from './IconButton.vue';
 
 const networks = useNetworksStore();
 const buffers = useBuffersStore();
@@ -134,10 +63,6 @@ const listEl = ref<HTMLElement | null>(null);
 const buffer = computed(() => (networks.activeKey ? buffers.byKey(networks.activeKey) : null));
 const members = computed((): BufferMember[] => buffer.value?.members || []);
 
-// ⚠ Declared BEFORE the voice section below: its guest-links watcher runs
-// IMMEDIATELY during setup and evaluates isOp → selfModes — a later `const`
-// here is a temporal-dead-zone crash that takes the whole chat view down
-// (regression-tested by MemberList.test.ts).
 const selfNick = computed(() => {
   const b = buffer.value;
   if (!b || b.networkId == null) return null;
@@ -152,191 +77,6 @@ const selfModes = computed<string[]>(() => {
   return me && Array.isArray(me.modes) ? me.modes : [];
 });
 
-// ─── Voice call (channels only, and only when the instance offers it) ────────
-const config = useConfigStore();
-const voice = useVoiceStore();
-const canCall = computed(
-  () => config.voiceEnabled && buffer.value?.kind === 'channel' && buffer.value?.networkId != null,
-);
-const inThisCall = computed(
-  () =>
-    voice.active &&
-    voice.networkId === (buffer.value?.networkId ?? null) &&
-    voice.target === buffer.value?.target,
-);
-function startCall() {
-  const b = buffer.value;
-  if (!b || b.networkId == null) return;
-  // label = the channel target; the store mints its own token + room.
-  void voice.startCall(b.networkId, b.target, b.target);
-}
-
-// "Join call (N)" badge for a call already in progress (webhook-driven counts,
-// hydrated on connect — see stores/callPresence).
-const callPresence = useCallPresenceStore();
-const callCount = computed(() => {
-  const b = buffer.value;
-  return b?.networkId != null ? callPresence.countFor(b.networkId, b.target) : 0;
-});
-const callBtnLabel = computed(() => {
-  if (inThisCall.value) return 'In call';
-  if (callCount.value > 0) return `Join call (${callCount.value})`;
-  return 'Call';
-});
-
-// ─── Op join policy (the same shared gate the server enforces) ──────────────
-const isOp = computed(() => canAdminCall(selfModes.value));
-
-const policy = ref('none');
-
-// Load the channel's join policy whenever the active channel changes — or when
-// voiceEnabled flips true, because the config fetch is async and can resolve
-// AFTER the immediate fire (a deep-linked cold load would otherwise show
-// 'anyone' for a locked channel and never retry).
-watch(
-  [buffer, () => config.voiceEnabled],
-  async ([b]) => {
-    policy.value = 'none';
-    if (!config.voiceEnabled || !b || b.kind !== 'channel' || b.networkId == null) return;
-    try {
-      const r = await api<{ minJoinMode: string }>(
-        `/api/voice/policy?networkId=${b.networkId}&target=${encodeURIComponent(b.target)}`,
-      );
-      // Staleness guard: a slow response for the PREVIOUS channel must not
-      // overwrite the picker after a switch.
-      if (buffer.value !== b) return;
-      policy.value = r.minJoinMode;
-    } catch {
-      /* leave default */
-    }
-  },
-  { immediate: true },
-);
-
-// ─── Op guest links (mint / copy / revoke a public capability URL) ──────────
-interface GuestLinkRow {
-  token: string;
-  canPublish: boolean;
-  createdBy: string | null;
-  useCount: number;
-}
-
-/** Build the shareable URL from OUR OWN origin. The server's `url` field is
- *  derived from the request's Origin header, which browsers omit on
- *  same-origin GETs — the listing's URLs would silently carry the internal
- *  Express host. The web client always knows the right origin: its own. */
-function linkUrl(token: string): string {
-  return `${window.location.origin}/call/${token}`;
-}
-
-const guestUrl = ref('');
-const guestBusy = ref(false);
-const listenOnly = ref(false);
-const activeLinks = ref<GuestLinkRow[]>([]);
-const linkCopy = useCopyFeedback();
-
-async function refreshLinks(b = buffer.value) {
-  if (!config.voiceEnabled || !isOp.value || !b || b.kind !== 'channel' || b.networkId == null) {
-    activeLinks.value = [];
-    return;
-  }
-  try {
-    const r = await api<{ links: GuestLinkRow[] }>(
-      `/api/voice/guest-link?networkId=${b.networkId}&target=${encodeURIComponent(b.target)}`,
-    );
-    if (buffer.value !== b) return; // stale response for a previous channel
-    activeLinks.value = r.links ?? [];
-  } catch {
-    /* leave as-is */
-  }
-}
-
-watch(
-  [buffer, isOp, () => config.voiceEnabled],
-  ([b]) => {
-    guestUrl.value = '';
-    linkCopy.reset();
-    activeLinks.value = [];
-    void refreshLinks(b);
-  },
-  { immediate: true },
-);
-
-async function mintGuestLink() {
-  const b = buffer.value;
-  if (!b || b.networkId == null) return;
-  guestBusy.value = true;
-  try {
-    const r = await api<{ token: string }>('/api/voice/guest-link', {
-      method: 'POST',
-      body: { networkId: b.networkId, target: b.target, canPublish: !listenOnly.value },
-    });
-    // Stale guard: a slow mint for the PREVIOUS channel must not surface its
-    // URL under the newly selected channel — that would hand out access to
-    // the wrong call.
-    if (buffer.value !== b) return;
-    guestUrl.value = linkUrl(r.token);
-    void refreshLinks();
-  } catch (err: unknown) {
-    useToastsStore().push({
-      title: 'Could not create guest link',
-      body: err instanceof Error ? err.message : 'the server rejected the request',
-      kind: 'warn',
-    });
-  } finally {
-    guestBusy.value = false;
-  }
-}
-
-function copyGuest() {
-  if (!guestUrl.value) return;
-  void linkCopy.copy(guestUrl.value, 'mint');
-}
-function copyLink(l: GuestLinkRow) {
-  void linkCopy.copy(linkUrl(l.token), l.token);
-}
-function selectAll(e: FocusEvent) {
-  (e.target as HTMLInputElement).select();
-}
-
-async function revokeLink(l: GuestLinkRow) {
-  try {
-    await api(`/api/voice/guest-link/${encodeURIComponent(l.token)}`, { method: 'DELETE' });
-    if (guestUrl.value === linkUrl(l.token)) guestUrl.value = '';
-    void refreshLinks();
-  } catch (err: unknown) {
-    useToastsStore().push({
-      title: 'Could not revoke guest link',
-      body: err instanceof Error ? err.message : 'the server rejected the request',
-      kind: 'warn',
-    });
-  }
-}
-
-async function onPolicyChange(e: Event) {
-  const b = buffer.value;
-  const select = e.target as HTMLSelectElement;
-  if (!b || b.networkId == null) return;
-  const minJoinMode = select.value;
-  try {
-    const r = await api<{ minJoinMode: string }>('/api/voice/policy', {
-      method: 'PUT',
-      body: { networkId: b.networkId, target: b.target, minJoinMode },
-    });
-    policy.value = r.minJoinMode;
-  } catch (err: unknown) {
-    // The DOM select already moved to the rejected choice, and since
-    // policy.value didn't change Vue schedules no re-patch — reset the element
-    // directly, and say why (an op believing a call is locked when it isn't is
-    // the worst silent failure this picker can produce).
-    select.value = policy.value;
-    useToastsStore().push({
-      title: 'Call policy not saved',
-      body: err instanceof Error ? err.message : 'the server rejected the change',
-      kind: 'warn',
-    });
-  }
-}
 watch(
   () => networks.activeKey,
   () => {
@@ -451,82 +191,6 @@ const sorted = computed(() => {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-}
-.members-head {
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--border);
-}
-/* Layout only — color/border/disabled come from the global button language. */
-.call-btn {
-  width: 100%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-3);
-}
-.call-policy {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-top: var(--space-3);
-  color: var(--fg-muted);
-}
-.call-policy select {
-  flex: 1;
-  min-width: 0;
-}
-.guest-links {
-  margin-top: var(--space-3);
-}
-.guest-mint {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-}
-.guest-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-.listen-only {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  color: var(--fg-muted);
-  cursor: pointer;
-}
-.guest-url {
-  display: flex;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-}
-.guest-url input {
-  flex: 1;
-  min-width: 0;
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: inherit;
-  font: inherit;
-}
-.link-list {
-  list-style: none;
-  margin: var(--space-2) 0 0;
-  padding: 0;
-}
-.link-list li {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-1) 0;
-}
-.link-meta {
-  flex: 1;
-  min-width: 0;
-  color: var(--fg-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 ul {
   list-style: none;

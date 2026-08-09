@@ -205,6 +205,17 @@
             >
               <i class="fa-solid fa-note-sticky"></i>
             </button>
+            <button
+              v-if="canCall"
+              type="button"
+              class="link"
+              :class="{ 'in-call': inThisCall }"
+              :title="callLabel"
+              :aria-label="callLabel"
+              @click="openCall"
+            >
+              <i class="fa-solid fa-phone"></i>
+            </button>
           </template>
           <template v-else-if="isChannel">
             <button
@@ -221,6 +232,20 @@
               :title="`${memberCount} ${memberCount === 1 ? 'user' : 'users'} in channel`"
               >{{ memberCount }}</span
             >
+            <button
+              v-if="canCall"
+              type="button"
+              class="link"
+              :class="{ 'in-call': inThisCall }"
+              :title="callLabel"
+              :aria-label="callLabel"
+              @click="openCall"
+            >
+              <i class="fa-solid fa-phone"></i>
+            </button>
+            <span v-if="callCount > 0" class="member-count call-count" :title="callLabel">{{
+              callCount
+            }}</span>
           </template>
         </template>
       </div>
@@ -259,6 +284,12 @@
       v-if="joinChannelModal.isOpen && joinChannelModal.networkId !== null"
       :network-id="joinChannelModal.networkId!"
       @close="joinChannelModal.close()"
+    />
+    <CallModal
+      v-if="callModal.isOpen && callModal.networkId !== null"
+      :network-id="callModal.networkId!"
+      :target="callModal.target"
+      @close="callModal.close()"
     />
     <RecentUploadsModal v-if="showUploads" @close="showUploads = false" />
     <TransfersModal v-if="dcc.panelOpen" @close="dcc.close()" />
@@ -325,6 +356,7 @@ import LinkedText from '../components/LinkedText.vue';
 import TopicModal from '../components/TopicModal.vue';
 import ChannelListModal from '../components/ChannelListModal.vue';
 import JoinChannelModal from '../components/JoinChannelModal.vue';
+import CallModal from '../components/CallModal.vue';
 import RecentUploadsModal from '../components/RecentUploadsModal.vue';
 import TransfersModal from '../components/TransfersModal.vue';
 import QuickSwitcher from '../components/QuickSwitcher.vue';
@@ -341,6 +373,8 @@ import { useDccStore } from '../stores/dcc.js';
 import { useWhoisStore } from '../stores/whois.js';
 import { useChannelListModal } from '../composables/useChannelListModal.js';
 import { useJoinChannelModal } from '../composables/useJoinChannelModal.js';
+import { useCallModal } from '../composables/useCallModal.js';
+import { useCallButton } from '../composables/useCallButton.js';
 import { useMediaViewer } from '../composables/useMediaViewer.js';
 import { useNetworkEditor } from '../composables/useNetworkEditor.js';
 import { useJumpToMessage } from '../composables/useJumpToMessage.js';
@@ -390,6 +424,11 @@ const railToggleTitle = computed(() =>
 
 const channelListModal = reactive(useChannelListModal());
 const joinChannelModal = reactive(useJoinChannelModal());
+// Voice call: the header phone button + the modal behind it. All the call
+// chrome (confirm, join policy, guest links) lives in CallModal so the chat
+// surfaces carry exactly one affordance.
+const callModal = reactive(useCallModal());
+const { canCall, inThisCall, callCount, callLabel, openCall } = useCallButton();
 const viewer = reactive(useMediaViewer());
 const networkEditor = reactive(useNetworkEditor());
 const navHistory = useNavHistoryStore();
@@ -950,5 +989,15 @@ button.topic-text:focus-visible {
 .topic .member-count {
   color: var(--fg-muted);
   font-variant-numeric: tabular-nums;
+}
+/* A call in progress is worth the eye — this is the only cue a non-participant
+   gets that one is happening. The phone glyph itself goes `good`-green while
+   YOU are in it, matching the CallBar's live dot, so the header still says
+   "you're live" when the bar has been dragged into a corner. */
+.topic .call-count {
+  color: var(--accent);
+}
+.topic .link.in-call {
+  color: var(--good);
 }
 </style>

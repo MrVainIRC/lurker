@@ -127,6 +127,17 @@
           <i class="fa-solid fa-users"></i>
         </button>
         <button
+          v-if="canCall"
+          class="icon call-btn"
+          :class="{ 'in-call': inThisCall }"
+          :title="callLabel"
+          :aria-label="callLabel"
+          @click="openCall"
+        >
+          <i class="fa-solid fa-phone"></i>
+          <span v-if="callCount > 0" class="call-count">{{ callCount }}</span>
+        </button>
+        <button
           v-if="active"
           ref="bufferCogBtn"
           class="icon"
@@ -186,6 +197,12 @@
       v-if="joinChannelModal.isOpen && joinChannelModal.networkId !== null"
       :network-id="joinChannelModal.networkId!"
       @close="joinChannelModal.close()"
+    />
+    <CallModal
+      v-if="callModal.isOpen && callModal.networkId !== null"
+      :network-id="callModal.networkId!"
+      :target="callModal.target"
+      @close="callModal.close()"
     />
     <RecentUploadsModal v-if="showUploads" @close="showUploads = false" />
     <TransfersModal v-if="dcc.panelOpen" @close="dcc.close()" />
@@ -249,6 +266,7 @@ import BookmarksModal from '../components/BookmarksModal.vue';
 import TopicModal from '../components/TopicModal.vue';
 import ChannelListModal from '../components/ChannelListModal.vue';
 import JoinChannelModal from '../components/JoinChannelModal.vue';
+import CallModal from '../components/CallModal.vue';
 import RecentUploadsModal from '../components/RecentUploadsModal.vue';
 import TransfersModal from '../components/TransfersModal.vue';
 import SearchModal from '../components/SearchModal.vue';
@@ -263,6 +281,8 @@ import { useDccStore } from '../stores/dcc.js';
 import { useWhoisStore } from '../stores/whois.js';
 import { useChannelListModal } from '../composables/useChannelListModal.js';
 import { useJoinChannelModal } from '../composables/useJoinChannelModal.js';
+import { useCallModal } from '../composables/useCallModal.js';
+import { useCallButton } from '../composables/useCallButton.js';
 import { useMediaViewer } from '../composables/useMediaViewer.js';
 import { useNetworkEditor } from '../composables/useNetworkEditor.js';
 import { useJumpToMessage } from '../composables/useJumpToMessage.js';
@@ -323,6 +343,11 @@ function openSystemConsole() {
 
 const channelListModal = reactive(useChannelListModal());
 const joinChannelModal = reactive(useJoinChannelModal());
+// Voice call: the header phone button + the modal behind it. All the call
+// chrome (confirm, join policy, guest links) lives in CallModal so the chat
+// surfaces carry exactly one affordance.
+const callModal = reactive(useCallModal());
+const { canCall, inThisCall, callCount, callLabel, openCall } = useCallButton();
 const viewer = reactive(useMediaViewer());
 const networkEditor = reactive(useNetworkEditor());
 
@@ -642,6 +667,23 @@ useChatBootstrap({ onJump: onJumpToMessage });
    (color-as-signal, no count badge — matches DesktopChat). */
 .icon.dcc-btn.pending {
   color: var(--warn);
+}
+/* Call button: the live participant count rides inline next to the glyph
+   (a header icon is already accent here, so the count carries the signal),
+   and the glyph goes `good`-green while YOU are in the call — same language
+   as the CallBar's live dot and DesktopChat's header. */
+.icon.call-btn {
+  gap: var(--space-2);
+}
+.icon.call-btn .call-count {
+  font-size: 0.8em;
+  font-variant-numeric: tabular-nums;
+}
+.icon.in-call {
+  color: var(--good);
+}
+.icon.in-call:hover {
+  color: var(--good);
 }
 .icon.back {
   margin-left: -4px;
