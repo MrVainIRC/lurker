@@ -2389,25 +2389,22 @@ watch(
 /* Matched highlight (rule fired): warm background tint. Sits above .alt so
    striping doesn't drown it out. DMs are NOT styled here — they get their
    own buffer + unread badge already. */
+/* ⚠ A link-preview card inside a highlighted row is DELIBERATELY the ordinary neutral panel.
+   These rules used to re-tint it — `--embed-bg` overridden to a warm mix, one step further into
+   the highlight than the row, on the reasoning that a grey panel "reads as a foreign object
+   dropped onto the tint". Removed on looking at it again: the tint is a property of the ROW, and
+   a card that restates it makes the highlight louder rather than clearer, which is not the
+   distinction highlights exist to draw. A neutral card on a warm row reads as what it is — an
+   attachment to a message that happens to be highlighted.
+   ⚠ Recorded rather than deleted because the override is easy to re-derive and was tried twice:
+   the numbers were `--warn 18%/24% over --bg` against row tints of 12%/18%, and they moved with
+   the neutral panel's own contrast in main.css. Two dials, independent in the code, that had to
+   be kept in step by hand — which is itself part of why one dial is better. */
 .line.highlight {
   background: color-mix(in srgb, var(--warn) 12%, transparent);
-  /* A link-preview card inside a highlighted row needs a WARM panel: the neutral grey one
-     reads as a foreign object dropped onto the tint. Re-tinted rather than lightened, one
-     step further into the highlight than the row itself, so it still reads as raised.
-     Custom properties inherit through scoped styles, so overriding the token here is enough
-     — MessageAttachment needs no knowledge that highlights exist.
-     ⚠ The STEP above the row was halved (12 points to 6) when the neutral panel's own contrast
-     came down in main.css. Left alone, a card on a highlighted row would have stayed at full
-     strength while every other card softened — so highlighted rows would read as having a
-     louder card treatment rather than a warmer one, which is not the distinction they exist
-     to draw. The two dials are independent in the code and have to be moved together. */
-  --embed-bg: color-mix(in srgb, var(--warn) 18%, var(--bg));
 }
 .message-list:not(.compact) .line.highlight.alt {
   background: color-mix(in srgb, var(--warn) 18%, transparent);
-  /* Matched the alt row's stronger tint, so the panel stays a step above it — the same 6-point
-     step as above, measured from this row's own 18% rather than from the plain row's 12%. */
-  --embed-bg: color-mix(in srgb, var(--warn) 24%, var(--bg));
 }
 .line.scroll-target {
   animation: scroll-target-pulse 1.5s ease-out;
