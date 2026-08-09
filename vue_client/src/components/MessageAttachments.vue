@@ -4,313 +4,133 @@
 -->
 
 <template>
-  <div v-if="visible.length" class="attachments">
-    <!-- Two or more images/videos become one horizontally-scrolling row rather than a
-         vertical stack, following Slack. Three portrait screenshots stacked is most of a
-         screen of somebody else's message; as a strip it's one glance.
+  <div class="attachments">
+    <!-- Two or more images become one MOSAIC: a grid whose cells are chosen by the COUNT, each
+         image cropped to fill its cell.
 
-         The row's height is ALSO the sizing win: it comes from the server's dimensions, so
-         it's known before a single byte of image data arrives, and it's ONE height for the
-         whole group instead of N unknown ones. -->
-    <div
-      v-if="strip.length > 1"
-      ref="stripEl"
-      class="filmstrip"
-      :class="{ 'fade-start': !atStart, 'fade-end': !atEnd }"
-      :style="{ height: `${stripHeight}px` }"
-      @scroll.passive="updateEdges"
-    >
-      <MessageAttachment
-        v-for="item in strip"
-        :key="item.url"
-        :preview="item"
-        in-strip
-        @measured="$emit('measured')"
-        @activate="openStripAt(item)"
-      />
+         ⚠⚠ This replaced a horizontally-scrolling filmstrip, and the reason is the interaction
+         rather than the look. A sideways scroller inside a vertically-scrolling list is a
+         gesture conflict on touch — a diagonal drag has to be arbitrated, and the loser is
+         whichever one the reader meant — and it hides content behind an affordance (a mask
+         fade) that has to be measured, observed and kept in sync. The mosaic shows everything at
+         once, needs no scroll container, no ResizeObserver and no fade.
+
+         It keeps the property the strip was built for: the group's height is a function of the
+         IMAGE COUNT alone, so a message has one of two possible attachment heights instead of
+         one per picture. That is what makes it byte-independent AND descriptor-independent —
+         nothing here reads a dimension. Cropping is what buys it, and cropping is recoverable
+         because any cell opens the whole set in the viewer. -->
+    <div v-if="mosaic.length > 1" class="mosaic" :class="`n${mosaic.length}`">
+      <div v-for="(item, i) in mosaic" :key="item.url" class="tile">
+        <MessageAttachment
+          :preview="item"
+          tiled
+          @measured="$emit('measured')"
+          @activate="openAt(item)"
+        />
+        <!-- The overflow indicator. It sits on the LAST visible tile rather than adding a cell,
+             so the grid stays 2x2 whether a message carries four images or forty. -->
+        <template v-if="i === mosaic.length - 1 && overflow > 0">
+          <span class="more" aria-hidden="true">+{{ overflow }}</span>
+          <span class="sr-only">{{ overflow }} more image{{ overflow === 1 ? '' : 's' }}</span>
+        </template>
+      </div>
     </div>
     <MessageAttachment
       v-for="item in stacked"
       :key="item.url"
       :preview="item"
       @measured="$emit('measured')"
-      @activate="openSingle(item)"
+      @activate="openAt(item)"
     />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, useTemplateRef, watch } from 'vue';
-import { useSettingsStore } from '../stores/settings.js';
-import { useConfigStore } from '../stores/config.js';
-import { previewableUrls, MAX_CARDS_PER_MESSAGE } from '../utils/previewUrls.js';
-import {
-  useLinkPreview,
-  usePreviewsSettled,
-  type LinkPreview,
-} from '../composables/useLinkPreview.js';
+import { computed } from 'vue';
 import { useMediaViewer } from '../composables/useMediaViewer.js';
+import type { LinkPreview } from '../composables/useLinkPreview.js';
 import MessageAttachment from './MessageAttachment.vue';
 
-// Owns the ARRANGEMENT of a message's attachments; MessageAttachment owns how any one of
-// them looks. That split is what makes grouping possible at all — while each child resolved
-// its own preview, nothing was in a position to know that a message had three images and
-// could lay them out as a row.
-//
-// Reads are pure (see composables/useLinkPreview): resolution happens at message ingest, so
-// nothing here triggers a fetch no matter how often it re-renders.
-const props = defineProps<{ text: string | null | undefined }>();
+/**
+ * The ARRANGEMENT of one message's attachments; MessageAttachment owns how any one of them
+ * looks, and MessageBody owns which of them exist.
+ *
+ * ⚠ Purely presentational — it receives an already-resolved, already-latched, already-permitted
+ * list. It used to take the message TEXT and derive all of that itself, and it cannot any more:
+ * the body's text needs the same resolved set in order to drop a URL whose image is on screen,
+ * and two components deriving one fact is the defect class this feature keeps producing. The
+ * derivation moved up to MessageBody; this renders what it is handed.
+ */
+const props = defineProps<{ previews: LinkPreview[] }>();
 
 defineEmits<{ measured: [] }>();
 
-const settings = useSettingsStore();
-const config = useConfigStore();
 const viewer = useMediaViewer();
 
-/** Row heights for a strip, picked by the group's dominant orientation.
+/**
+ * How many tiles the mosaic draws before it starts counting instead.
  *
- *  Slack effectively has two, and it's the right simplification: it means a message list has
- *  a small, known set of possible attachment heights instead of one per image. Portrait gets
- *  more room because a tall photo squeezed into a landscape row is unreadable — but only a
- *  little more, or one message wins the screen. */
-const STRIP_LANDSCAPE = 200;
-const STRIP_PORTRAIT = 300;
-
-// ⚠ ANDed with the instance feature flag. A stored `true` from an instance that had the feature
-// on must not render anything on one that doesn't — the routes aren't even mounted there, so a
-// preview could never resolve and the setting rows aren't shown either. One choke point, so the
-// render path and the priming path can't disagree.
-const toggles = computed(() => ({
-  inlineMedia: config.linkPreviews && settings.effective('chat.inline_media.enabled') === true,
-  linkPreviews: config.linkPreviews && settings.effective('chat.link_previews.enabled') === true,
-}));
-
-const urls = computed(() => previewableUrls(props.text, toggles.value));
-
-// One ref per URL, read-only. `useLinkPreview` on a URL nobody primed returns a permanently
-// null ref, which is exactly the "render nothing" case.
-const entries = computed(() => urls.value.map((url) => useLinkPreview(url)));
-
-// ─── Atomic reveal ────────────────────────────────────────────────────────────
-//
-// A message shows NONE of its attachments until every URL in it has an answer, then the whole
-// block appears at once.
-//
-// The rule this serves: no layout may depend on WHEN A SIBLING RESOLVES. Deriving the
-// arrangement from the resolved set meant a message with three images, one of which was already
-// cached from an earlier post, painted as a lone image (natural aspect, `max-height: 240px`) and
-// then re-arranged into a 200px filmstrip when the other two landed — and `stripHeight` re-picked
-// portrait-vs-landscape as the mix changed, a 100px collapse mid-read. Both are sibling-timing
-// dependencies, and both are invisible to a scrolled-up reader's re-pin because the growth has
-// already happened by the time anything hears about it.
-//
-// ⚠ Deciding the arrangement from the URL list instead was considered and does NOT work:
-// `mediaKindForUrl` charges extensionless hosts to the CARD budget (previewUrls.ts), so an imgur
-// or twimg link — the common case on IRC — is predicted as a card and flips to a strip when it
-// resolves as an image. The prediction is wrong exactly where it matters.
-//
-// What this deliberately does NOT cost: a preview's own descriptor arrives atomically with the
-// decision to render it, so there is no earlier layout for it to disturb. `STRIP_PORTRAIT` stays,
-// and a lone image keeps `object-fit: contain` at its natural aspect.
-//
-// Two residuals, both deliberate, both stated so a later reader doesn't take them for oversights:
-//
-//   1. A short-TTL failure that RECOVERS on a re-ask grows the block, and can re-arrange it (one
-//      image becoming two is a strip). Holding the gate for it instead would hide a whole message
-//      for up to five minutes on the strength of one saturated fetch, which is far worse. The
-//      growth goes through `previewRevision`, so it is compensated; only its arrangement isn't.
-//      ⚠ The gate cannot RE-CLOSE for this: `flush` writes the answer into the ref before it
-//      branches on status, so a transient `unavailable` carries a value, and nothing ever writes
-//      null back to a cached ref. The only way a settled URL becomes pending again is cache
-//      eviction followed by a re-prime against a fresh ref — which is why `shown` latches.
-//   2. A message mixing an image with a slow PAGE link shows nothing until the page answers, and
-//      that can be tens of seconds. The page URL cannot be excluded from the gate: an
-//      extension-less URL might itself resolve as an image and belong in the arrangement, so
-//      "what could render" is not knowable before the answer. This is the trade atomic reveal
-//      makes — late but stable, rather than early and re-arranging.
-//
-// ⚠⚠ Asked, never timed. The first version of this gate revealed on a 1500ms deadline, on the
-// reasoning that a message's URLs all land in one batch "~24ms after ingest" — which was the
-// coalescing debounce (`FLUSH_MS`) mistaken for the round trip. The server allows 10s of queue
-// wait plus a 30s resolve deadline per URL and answers a slice with one `Promise.all`, so the
-// deadline fired on any cold link and revealed a PARTIAL set: a lone image that then became a
-// filmstrip when the straggler landed, which is verbatim the defect above. `usePreviewsSettled`
-// asks the module that actually knows, so there is no latency to guess at and no partial reveal
-// to recover from.
-const settled = usePreviewsSettled(urls);
+ * Four is two full rows. A fifth would either add a row — and a message's height stops being a
+ * small known set — or shrink every cell to fit, which is worse the more images there are.
+ * Everything past the fourth is reachable through the viewer, which has always been a gallery.
+ */
+const MOSAIC_CELLS = 4;
 
 /**
- * The URLs this message has already committed to showing.
+ * Every image in the message, in order.
  *
- * ⚠⚠ A PER-URL latch, not a per-component boolean, and the difference is a defect. The boolean
- * had to be re-derived whenever `urls` changed — otherwise a settings flip grew the set under an
- * already-open latch and the new images painted one at a time — and re-deriving it meant
- * `revealed = settled`, which could go true→false and tear the whole block down. Enabling inline
- * media with ten resolved cards on screen therefore collapsed all ten, buffer-wide, in one frame:
- * ~1200px of uncompensated shrink, for a setting that has nothing to do with cards.
+ * ⚠ IMAGES only, and video is the deliberate omission. MediaViewerModal derives which element to
+ * render from the URL's extension, and a proxy path has none — `mediaKindForUrl` returns null for
+ * a relative URL — so it falls back to `image` and would mount a video's bytes in an `<img>`,
+ * producing the "open in browser" failure card for a file that plays fine inline.
  *
- * A set only ever grows. New URLs stay hidden until the whole set settles, which is the property
- * the gate exists for; anything already painted stays painted, which is the property the latch
- * exists for.
- *
- * ⚠⚠ Watches `urls` AS WELL, and watching `settled` alone was a bug. Vue runs a watcher when its
- * source's VALUE changes, so a flip that admits a URL which is ALREADY resolved — the same image
- * posted earlier in the session, or previewed in another buffer — left `settled` true before and
- * true after. The watcher never ran, the URL was never admitted, and its attachment stayed hidden
- * for the life of the row with everything about it resolved and ready.
- *
- * The array identity churns on any settings write (`urls` allocates a fresh array each
- * evaluation), so this fires more often than it strictly needs to. That is harmless HERE and was
- * not in the version this replaced: the callback only ever ADDS, and re-adding a URL already in
- * the set changes nothing, so no spurious render can follow. The defect before was a callback
- * that could REMOVE.
+ * ⚠ It is also why a video is never a mosaic tile. A player cropped into a grid cell is not a
+ * player: its controls are the part that gets cut. Video and audio stack at full width, where
+ * their transport has room, which is what audio has always done.
  */
-const shown = ref<ReadonlySet<string>>(new Set());
-watch(
-  [settled, urls],
-  ([ok]) => {
-    if (!ok) return;
-    const next = new Set(shown.value);
-    for (const url of urls.value) next.add(url);
-    if (next.size !== shown.value.size) shown.value = next;
-  },
-  { immediate: true },
-);
+const images = computed(() => props.previews.filter((p) => p.kind === 'image'));
+
+/** The tiles actually drawn. A lone image is not a one-cell mosaic — see `stacked`. */
+const mosaic = computed(() => (images.value.length > 1 ? images.value.slice(0, MOSAIC_CELLS) : []));
+
+/** How many images the mosaic is standing in for. Zero unless the message is genuinely long. */
+const overflow = computed(() => Math.max(0, images.value.length - mosaic.value.length));
 
 /**
- * Previews that are resolved AND allowed by the settings.
- *
- * Re-checked against the server's answer rather than the extension guess that prompted the
- * request: an extensionless URL that turns out to be a PNG is inline media, and a `.jpg` that
- * redirects to an HTML login page is not. Otherwise "link previews off" could still be talked
- * into rendering a card.
+ * Everything the mosaic didn't take: cards, video, audio — and a lone image, which renders on its
+ * own at its own size. That last case is the common one, and a one-cell mosaic would only crop it
+ * for no reason.
  */
-const visible = computed<LinkPreview[]>(() => {
-  const out: LinkPreview[] = [];
-  let cards = 0;
-  for (const entry of entries.value) {
-    const p = entry.value;
-    if (!p || p.status !== 'ok') continue;
-    // All-or-nothing, per URL: see `shown` above.
-    if (!shown.value.has(p.url)) continue;
-    const isMedia = p.kind === 'image' || p.kind === 'video' || p.kind === 'audio';
-    if (isMedia ? !toggles.value.inlineMedia : !toggles.value.linkPreviews) continue;
-    // ⚠ The card cap is re-applied to the SERVER's answer, not just to the extension guess that
-    // prompted the request. `previewableUrls` charges anything that looks like media to the
-    // generous media budget (20), so twenty image-looking URLs that all resolve as pages —
-    // extensionless CDN links, a `.png` that redirects to an HTML login page — arrived as twenty
-    // stacked cards and took over the screen. The tight cap exists because a card costs real
-    // vertical space, and only the resolved kind knows whether one is being built.
-    if (!isMedia) {
-      if (cards >= MAX_CARDS_PER_MESSAGE) continue;
-      cards++;
-    }
-    out.push(p);
-  }
-  return out;
+const stacked = computed(() => {
+  const tiled = new Set(mosaic.value);
+  return props.previews.filter((p) => !tiled.has(p));
 });
 
-/** Strip candidates: pictures and video, which read as a row. Audio doesn't — a row of
- *  transport controls is not a gallery — so it stays stacked and full-width. */
-const strip = computed(() => visible.value.filter((p) => p.kind === 'image' || p.kind === 'video'));
-
-/** Everything the strip didn't take. A lone image renders on its own, at its own size: it's
- *  the common case and a one-item strip would only make it smaller for no reason. */
-const stacked = computed(() =>
-  strip.value.length > 1 ? visible.value.filter((p) => !strip.value.includes(p)) : visible.value,
-);
-
 /**
- * Open the lightbox over the WHOLE strip, positioned on the image that was clicked.
+ * Open the viewer over EVERY image in the message, positioned on the one that was clicked.
  *
- * This is what makes a generous media cap safe: however many images a message carries, every
- * one of them is reachable by arrowing through the viewer rather than only by scrolling the
- * strip. The viewer has always been a gallery — a single file is a gallery of one — so this
- * needed no work there.
- */
-/**
- * ⚠ The viewer gets `src` — OUR proxy path — never the origin URL.
+ * ⚠ The gallery is `images`, not `mosaic`, and that is what makes both the cap and the crop
+ * safe: the fifth image of a message is not drawn, and the reader still reaches it by arrowing.
+ * A lone image is a gallery of one, which the viewer has always handled.
  *
- * Handing it `preview.url` broke the promise the setting makes in so many words ("the file is
- * fetched and served by your Lurker server, so the site hosting it never sees your device"):
- * the image rendered inline through the proxy, and then clicking it went straight to the remote
- * host. It also meant an `http://` image displayed fine inline but was blocked as mixed content
- * once the lightbox loaded it directly, so the click produced a dead "open in browser" card.
+ * ⚠ The viewer gets `src` — OUR proxy path — never the origin URL. Handing it `preview.url` broke
+ * the promise the setting makes in so many words ("the file is fetched and served by your Lurker
+ * server, so the site hosting it never sees your device"): the image rendered inline through the
+ * proxy, and then clicking it went straight to the remote host. It also meant an `http://` image
+ * displayed fine inline but was blocked as mixed content once the lightbox loaded it directly.
+ * `shareUrl` carries the ORIGIN address alongside, so "copy link" hands over something another
+ * person can actually open.
  */
-function openStripAt(item: LinkPreview): void {
-  // ⚠ IMAGES only. MediaViewerModal derives which element to render from the URL's extension,
-  // and a proxy path has none — `mediaKindForUrl` even throws on a relative URL and returns
-  // null — so it falls back to `image` and would mount a <video>'s bytes in an <img>, producing
-  // the "open in browser" failure card for a file that plays fine inline. A video in a strip has
-  // its own inline controls anyway; it isn't a lightbox item.
-  const gallery = strip.value.filter((p) => p.kind === 'image');
-  // `shareUrl` carries the ORIGIN address alongside the proxy path we render, so "copy link"
-  // hands over something another person can actually open.
-  const items = gallery.map((p) => ({ url: p.src ?? p.url, shareUrl: p.url }));
+function openAt(item: LinkPreview): void {
+  const gallery = images.value;
   const at = gallery.indexOf(item);
   if (at === -1) return;
-  viewer.openGallery(items, at);
+  viewer.openGallery(
+    gallery.map((p) => ({ url: p.src ?? p.url, shareUrl: p.url })),
+    at,
+  );
 }
-
-function openSingle(item: LinkPreview): void {
-  viewer.openGallery([{ url: item.src ?? item.url, shareUrl: item.url }], 0);
-}
-
-// ─── Scroll affordance ────────────────────────────────────────────────────────
-//
-// A strip that scrolls has to LOOK like it scrolls, or the images past the edge simply don't
-// exist as far as the reader is concerned. The fade is applied with `mask-image`, so the
-// content itself dissolves at the boundary rather than having a gradient laid over it — which
-// means it works on any background, including the highlight tint, with nothing to keep in sync.
-//
-// Only faded on a side that can actually move. A permanent fade would be a lie in both
-// directions: it implies more content when the strip is fully scrolled, and it dims the first
-// image for no reason when there's nothing to the left.
-const stripEl = useTemplateRef<HTMLElement>('stripEl');
-const atStart = ref(true);
-const atEnd = ref(true);
-
-function updateEdges(): void {
-  const el = stripEl.value;
-  if (!el) return;
-  const max = el.scrollWidth - el.clientWidth;
-  // A pixel of slack: fractional scroll positions and sub-pixel layout mean an exact
-  // comparison flickers the fade on and off at the extremes.
-  atStart.value = el.scrollLeft <= 1;
-  atEnd.value = el.scrollLeft >= max - 1;
-}
-
-// The strip's scrollable width changes without it being scrolled — the window resizes, images
-// finish laying out, a re-render swaps the group. One observer catches all of those, including
-// the initial measurement, which is why there's no separate onMounted call.
-// ⚠ Re-runs when the strip's CONTENTS change, not only when the element itself is swapped. The
-// children were enumerated once, so a strip that gained an item — a later preview resolving into
-// a group that was already on screen — kept observing the old set and never re-measured. Its
-// `atEnd` then stayed true while there was now something to scroll to, and the fade that
-// advertises it silently stopped appearing. `flush: 'post'` so the new children exist to observe.
-let observer: ResizeObserver | null = null;
-watch(
-  [stripEl, strip],
-  () => {
-    observer?.disconnect();
-    observer = null;
-    const el = stripEl.value;
-    if (!el) return;
-    observer = new ResizeObserver(() => updateEdges());
-    observer.observe(el);
-    for (const child of el.children) observer.observe(child);
-    updateEdges();
-  },
-  { flush: 'post' },
-);
-onBeforeUnmount(() => observer?.disconnect());
-
-const stripHeight = computed(() => {
-  const portrait = strip.value.filter((p) => (p.thumbHeight ?? 0) > (p.thumbWidth ?? 0)).length;
-  // "Primarily portrait" rather than "any portrait": one tall image among four wide ones
-  // shouldn't make the whole row tall.
-  return portrait * 2 > strip.value.length ? STRIP_PORTRAIT : STRIP_LANDSCAPE;
-});
 </script>
 
 <style scoped>
@@ -327,9 +147,6 @@ const stripHeight = computed(() => {
      belonging to the message below it rather than the one above. */
   margin-top: var(--space-2);
   margin-bottom: var(--space-4);
-  /* No width cap HERE. The cap belongs to the card (below), not to the container: a strip
-     scrolls, so capping it at card width would mean two images visible out of five for no
-     reason other than that cards need a limit. */
   max-width: 100%;
   min-width: 0;
 }
@@ -341,50 +158,69 @@ const stripHeight = computed(() => {
   max-width: 480px;
 }
 
-.filmstrip {
-  display: flex;
+/* ─── The mosaic ──────────────────────────────────────────────────────────────
+   Cells from the count, height from the cells. Nothing reads an image's dimensions, so the
+   whole grid is laid out correctly before a single byte of any picture arrives — the same
+   byte-independence a lone image gets from its reserved box, reached without needing one.
+
+   ⚠ One row height, and every layout is a whole number of rows: 1 row for two images, 2 rows
+   for three or more. So a mosaic is 160px or 324px tall (2 × 160 plus the 4px gap) and never
+   anything else, which is the property the filmstrip's fixed height existed to provide. */
+.mosaic {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-auto-rows: 160px;
   gap: var(--space-2);
-  /* The strip scrolls itself; the message list must never scroll sideways. */
-  overflow-x: auto;
-  overflow-y: hidden;
-  max-width: 100%;
-  /* Height comes from the inline style — one known value for the whole group. */
-  align-items: stretch;
-  /* No visible scrollbar: it would eat into a height that's deliberately fixed, and change the
-     strip's height depending on the platform's scrollbar style. The fade is the affordance. */
-  scrollbar-width: none;
-  /* Snap so a flick lands on an image rather than halfway across one. `proximity` rather than
-     `mandatory` — mandatory fights a deliberate small drag. */
-  scroll-snap-type: x proximity;
+  width: 100%;
+  /* Matches the card's cap. Past this the mosaic stops reading as part of a message and starts
+     reading as a page element — and on a wide window a 2-up grid of full-width cells is a
+     slideshow, not an annotation. */
+  max-width: 480px;
 }
-.filmstrip::-webkit-scrollbar {
-  display: none;
-}
-/* ⚠ Targets the media itself, not the direct child. An inline image is wrapped in a
-   `display: contents` span (see MessageAttachment), which generates no box — so a snap point on
-   the direct child would have nothing to align. */
-.filmstrip :deep(.inline-image),
-.filmstrip :deep(.inline-video) {
-  scroll-snap-align: start;
+/* Three images: a full-height picture beside two stacked ones. Discord's arrangement, and it is
+   the one that gives an odd count a shape rather than a gap — a 2x2 grid with three items leaves
+   a hole, and stretching the third across the bottom makes it the subject of the message. */
+.mosaic.n3 > .tile:first-child {
+  grid-row: span 2;
 }
 
-/* The fade, as a mask on the content rather than a gradient laid over it — so it works on any
-   background (including the highlight tint) with nothing to keep in sync.
-   The three cases are spelled out rather than composited, because `mask-composite` for the
-   both-sides case is more machinery than three declarations. */
-.filmstrip.fade-end {
-  mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent 100%);
+/* The grid item. The image inside is a `display: contents` wrapper's child (see
+   MessageAttachment), so it becomes this element's own child for layout — which is why the
+   clipping, the rounding and the overlay all live here rather than on the picture. */
+.tile {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  /* A grid item's automatic minimum is its content, so a wide image would otherwise refuse to
+     shrink and push the second column off the row. */
+  min-width: 0;
 }
-.filmstrip.fade-start {
-  mask-image: linear-gradient(to right, transparent 0, #000 40px);
+
+/* The overflow count, drawn over the last tile.
+   ⚠ `inset: 0` rather than a corner badge: the whole cell is the target, and the cell is already
+   a button (the image carries the role). A small badge would read as a separate control sitting
+   on top of one, with no way to tell which a tap would hit. */
+.more {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg) 60%, transparent);
+  color: var(--fg);
+  font-weight: 600;
+  /* The image beneath owns the click; this is a label, not a control. */
+  pointer-events: none;
 }
-.filmstrip.fade-start.fade-end {
-  mask-image: linear-gradient(
-    to right,
-    transparent 0,
-    #000 40px,
-    #000 calc(100% - 40px),
-    transparent 100%
-  );
+
+/* The count again, for a screen reader, because `+6` is not a sentence. Clipped rather than
+   `display: none`, which would take it out of the accessibility tree along with the layout. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 </style>

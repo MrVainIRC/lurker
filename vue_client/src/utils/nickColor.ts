@@ -103,6 +103,27 @@ function urlHref(matched: string): string {
   return matched;
 }
 
+/**
+ * Whether a URL match is wrapped in angle brackets — `<https://example.com>`.
+ *
+ * The convention is RFC 3986 Appendix C's: brackets delimit a URL so a reader (and a parser)
+ * doesn't have to guess where it ends inside prose. Discord borrowed it as "link, but no
+ * unfurl", and that is the meaning both callers here implement — `splitTextByUrls` strips the
+ * brackets from the rendered text, and `previewableUrls` refuses to resolve what they wrap.
+ *
+ * ⚠⚠ The end test uses the UNTRIMMED match. `trimTrailingPunctuation` eats the `.` off
+ * `<https://example.com/a.>`, so measuring from the trimmed length looks one character short of
+ * the `>` and the brackets stop being recognised on exactly the URLs whose ends are ambiguous —
+ * which is the case the convention exists for.
+ *
+ * ⚠ No scheme test, deliberately: `<www.example.com>` is the same convention, and the callers
+ * apply their own scheme rules afterwards.
+ */
+export function isBracketedUrl(text: string, index: number, rawMatch: string): boolean {
+  // `text[-1]` is undefined rather than an error, so a match at position 0 falls out here.
+  return text[index - 1] === '<' && text[index + rawMatch.length] === '>';
+}
+
 interface UrlSegment {
   kind: 'url';
   text: string;
@@ -126,17 +147,27 @@ function splitTextByUrls(text: string): UrlOrTextSegment[] {
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const start = m.index;
-    const matched = trimTrailingPunctuation(m[0]);
+    // ⚠ Inside brackets the whole match is the URL, with NO trailing-punctuation trim. That is
+    // the entire point of the convention: the author has stated where the address ends, so
+    // `<https://en.wikipedia.org/wiki/Foo.>` keeps its period instead of having it guessed away.
+    const bracketed = isBracketedUrl(text, start, m[0]);
+    const matched = bracketed ? m[0] : trimTrailingPunctuation(m[0]);
     if (!matched) {
       // The whole match was punctuation (shouldn't happen given the regex
       // requires a scheme/www prefix, but guard anyway).
       re.lastIndex = start + 1;
       continue;
     }
-    re.lastIndex = start + matched.length;
-    if (start > lastIdx) out.push({ kind: 'text', text: text.slice(lastIdx, start) });
+    // The brackets themselves are plumbing and are not rendered, so both the scan position and
+    // the preceding text segment step over them.
+    re.lastIndex = start + matched.length + (bracketed ? 1 : 0);
+    // ⚠ Emptiness checked rather than `start > lastIdx`. Dropping the `<` can leave nothing at
+    // all between the previous token and this one — a message that IS a bracketed link starts at
+    // index 1 — and an empty text segment renders as an extra node for the renderer to walk.
+    const before = text.slice(lastIdx, bracketed ? start - 1 : start);
+    if (before) out.push({ kind: 'text', text: before });
     out.push({ kind: 'url', text: matched, href: urlHref(matched) });
-    lastIdx = start + matched.length;
+    lastIdx = start + matched.length + (bracketed ? 1 : 0);
   }
   if (lastIdx < text.length) out.push({ kind: 'text', text: text.slice(lastIdx) });
   return out;

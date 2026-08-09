@@ -19,9 +19,9 @@
        inline image in Chrome jumped 0 -> 240px at DECODE time, long after the atomic reveal's
        `previewRevision` re-pin had run, so a buffer opened at the tail landed 240px short of it.
 
-       So the wrapper carries the geometry for every non-strip image, derived from the server's
+       So the wrapper carries the geometry for every untiled image, derived from the server's
        dimensions rather than from bytes: `reserveStyle` resolves to exactly the box the loaded
-       image occupies. In a strip the row's fixed height governs and the wrapper stays out of the
+       image occupies. In a mosaic the cell's fixed size governs and the wrapper stays out of the
        way — see `dim-passthrough`.
 
        ⚠ Geometry on the WRAPPER also keeps the empty letterbox out of the image: pinned on the
@@ -32,14 +32,12 @@
        pixels keep belonging to the row. Same defect class as the `@click.stop` note below. -->
   <span
     v-if="preview.kind === 'image' && preview.src"
-    :class="
-      inStrip ? 'dim-passthrough' : hasDimensions ? 'dim-reserve' : 'dim-reserve dim-fallback'
-    "
+    :class="tiled ? 'dim-passthrough' : hasDimensions ? 'dim-reserve' : 'dim-reserve dim-fallback'"
     :style="reserveStyle"
   >
     <img
       class="inline-image"
-      :class="{ 'strip-item': inStrip, 'in-reserve': !inStrip }"
+      :class="{ 'tile-item': tiled, 'in-reserve': !tiled }"
       :src="preview.src"
       :width="preview.thumbWidth || undefined"
       :height="preview.thumbHeight || undefined"
@@ -60,10 +58,12 @@
        out at the UA default 300x150 until its metadata arrives — then jumps to full size. The
        resolve-time `previewRevision` has already fired by then, and the scroller's ResizeObserver
        watches its own box rather than its content, so without this nothing at all notices. -->
+  <!-- ⚠ Never tiled. A player cropped into a grid cell loses its controls, which are the part
+       that matters, so MessageAttachments stacks video and audio at full width and the mosaic
+       is images only. -->
   <video
     v-else-if="preview.kind === 'video' && preview.src"
     class="inline-video"
-    :class="{ 'strip-item': inStrip }"
     :src="preview.src"
     controls
     preload="metadata"
@@ -210,8 +210,8 @@ import { useSettingsStore } from '../stores/settings.js';
 // MessageAttachments, which needs the resolved set anyway to decide the arrangement.
 const props = defineProps<{
   preview: LinkPreview;
-  /** Sized by the strip's row height rather than by its own dimensions. */
-  inStrip?: boolean;
+  /** A mosaic cell: sized by the grid rather than by its own dimensions, and cropped to fill. */
+  tiled?: boolean;
 }>();
 
 // ⚠⚠ `measured` is emitted by IMAGE, VIDEO and AUDIO. The image `@load` emit was removed once,
@@ -226,8 +226,9 @@ const props = defineProps<{
 // that makes it safe lives in the list: `repinAfterPreviewGrowth(true)` returns immediately
 // unless the reader is at the tail, so a scrolled-up reader is never moved by a late decode.
 // `activate` rather than opening the viewer here: what a click MEANS depends on the
-// arrangement, and the arrangement is the parent's business. A tap on one image of a strip
-// should open the whole strip as a gallery, and only the parent knows what the strip holds.
+// arrangement, and the arrangement is the parent's business. A tap on one tile of a mosaic
+// should open the whole message's images as a gallery — including the ones the mosaic capped
+// away — and only the parent knows what those are.
 const emit = defineEmits<{ measured: []; activate: [] }>();
 
 const settings = useSettingsStore();
@@ -313,8 +314,8 @@ const MAX_IMAGE_HEIGHT = 240;
 /**
  * The box this image will occupy, resolved from the server's dimensions instead of from bytes.
  *
- * Null in the two cases that must not carry geometry: inside a strip, where the row's fixed
- * height governs and a second box would fight it, and for an unmeasured image, which has no
+ * Null in the two cases that must not carry geometry: inside a mosaic, where the cell's fixed
+ * size governs and a second box would fight it, and for an unmeasured image, which has no
  * ratio to derive one from and falls back to `.dim-fallback`'s flat height.
  *
  * ⚠⚠ The HEIGHT CAP IS APPLIED AS A WIDTH, and that is what makes this exact rather than
@@ -338,7 +339,7 @@ const MAX_IMAGE_HEIGHT = 240;
  * binding were deleted. Two plain declarations are observable by the test that guards them.
  */
 const reserveStyle = computed(() => {
-  if (props.inStrip || !hasDimensions.value) return null;
+  if (props.tiled || !hasDimensions.value) return null;
   const w = props.preview.thumbWidth!;
   const h = props.preview.thumbHeight!;
   return {
@@ -378,11 +379,11 @@ const reserveStyle = computed(() => {
  *     never runs. And an `ok` preview is never re-asked at all, so the flag was permanent — a
  *     two-second network blip greyed out every inline image for the life of the row.
  *   - Dropping `role`/`tabindex` on failure removed them from an element that may currently HOLD
- *     focus, dumping a keyboard user back to `<body>` mid-strip.
+ *     focus, dumping a keyboard user back to `<body>` mid-mosaic.
  *
  * The byte-independence rule this file serves is already satisfied without any of it, and since
  * lurker#705 it is satisfied MORE strongly than this paragraph used to claim: the reservation does
- * not depend on the image element at all — `.dim-reserve` holds the box for every non-strip image,
+ * not depend on the image element at all — `.dim-reserve` holds the box for every untiled image,
  * from the descriptor, whether the bytes arrive or not. (The old claim, that "the width/height
  * attributes survive a failed load", was doubly wrong: those attributes reserve nothing once author
  * CSS sets `width: auto`, so what survived a failed load was nothing at all in Blink.)
@@ -396,7 +397,7 @@ const reserveStyle = computed(() => {
  * `document.activeElement` at the moment a keyboard user presses Enter on it, so focus falls to
  * `<body>` and the next Tab restarts at the top of the document — past every message above, and
  * never reaching the player they just opened. This file already names that failure in so many
- * words for a different case ("dumping a keyboard user back to `<body>` mid-strip"), which is
+ * words for a different case ("dumping a keyboard user back to `<body>` mid-mosaic"), which is
  * how it was noticed here.
  *
  * `nextTick` because the iframe does not exist until the re-render, and `?.` because a card
@@ -420,7 +421,7 @@ const viewerEnabled = computed(() => settings.effective('chat.image_modal.enable
  * time this is a control at all — a plain inline image stays decoration of the message text,
  * which the surrounding link already names.
  *
- * The filename is included when the URL yields one, so a strip of five doesn't present five
+ * The filename is included when the URL yields one, so a mosaic of four doesn't present four
  * identically-named buttons to anyone moving through them by keyboard.
  */
 const imageLabel = computed(() => {
@@ -476,10 +477,10 @@ function activate(): void {
   border-radius: var(--radius-md);
   display: block;
 }
-/* In a strip the ROW's fixed height is the reservation, so the wrapper generates no box at all
-   and layout, flex participation and the strip's snap points behave exactly as they did when the
-   image was the direct child (MessageAttachments' `.filmstrip :deep(.inline-image)` depends on
-   this — a snap point on a `display: contents` span would have nothing to align). */
+/* In a mosaic the CELL is the reservation, so the wrapper generates no box at all and the image
+   becomes the tile's own child for layout. That is load-bearing rather than incidental:
+   `.tile`'s clipping, rounding and overflow overlay all apply to the picture only because
+   nothing boxed stands between them. */
 .dim-passthrough {
   display: contents;
 }
@@ -535,8 +536,8 @@ function activate(): void {
    Pinning the height removes the jump instead of compensating for it: the box is correct before
    a single byte arrives. Width still settles when the ratio is known, which costs nothing —
    only vertical movement disturbs a scroll position.
-   Matches the filmstrip's landscape row, so a lone video and a video in a group are the same
-   height. */
+   200px rather than the mosaic's 160px row: a video is always on its own line, so it is not
+   matching anything, and a player wants more room than a thumbnail does. */
 .inline-video {
   height: 200px;
 }
@@ -544,17 +545,18 @@ function activate(): void {
   width: 100%;
 }
 
-/* Inside a strip the ROW decides the height and every item fills it, so the group reads as
-   one band. Widths then vary with each image's aspect ratio, which is what makes a strip look
-   like a strip rather than a grid of letterboxed cells. `cover` because a uniform height is
-   the point — a panorama is cropped rather than allowed to be 2000px wide. */
-.strip-item {
+/* A mosaic cell: fill it exactly, whatever shape the picture is.
+   ⚠ All four of `.inline-image`'s sizing declarations have to be undone, not merely added to —
+   `max-height: 240px` would letterbox a tile in the two-row layouts and `width/height: auto`
+   would leave a portrait image sitting in a corner of its cell. `cover` is the whole bargain the
+   mosaic makes: a uniform grid, laid out before any bytes arrive, at the price of a crop that
+   any tap undoes by opening the full picture in the viewer. */
+.tile-item {
+  width: 100%;
   height: 100%;
-  width: auto;
-  max-width: 360px;
+  max-width: none;
   max-height: none;
   object-fit: cover;
-  flex: none;
 }
 
 .card {
