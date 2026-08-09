@@ -218,34 +218,41 @@
             </button>
           </template>
           <template v-else-if="isChannel">
-            <button
-              class="link"
-              :title="showMembers ? 'Hide members' : 'Show members'"
-              :aria-label="showMembers ? 'Hide members' : 'Show members'"
-              @click="toggleMembers"
-            >
-              <i class="fa-solid fa-users"></i>
-            </button>
-            <span
-              v-if="memberCount != null"
-              class="member-count"
-              :title="`${memberCount} ${memberCount === 1 ? 'user' : 'users'} in channel`"
-              >{{ memberCount }}</span
-            >
-            <button
-              v-if="canCall"
-              type="button"
-              class="link"
-              :class="{ 'in-call': inThisCall }"
-              :title="callLabel"
-              :aria-label="callLabel"
-              @click="openCall"
-            >
-              <i class="fa-solid fa-phone"></i>
-            </button>
-            <span v-if="callCount > 0" class="member-count call-count" :title="callLabel">{{
-              callCount
-            }}</span>
+            <!-- Each glyph and its count are one unit (.action-pair), so the
+                 number reads as belonging to the icon rather than as another
+                 item in the action row — .topic-actions' gap separates the
+                 PAIRS, not a button from its own count. -->
+            <span v-if="canCall" class="action-pair">
+              <button
+                type="button"
+                class="link"
+                :class="{ 'in-call': inThisCall }"
+                :title="callLabel"
+                :aria-label="callLabel"
+                @click="openCall"
+              >
+                <i class="fa-solid fa-phone"></i>
+              </button>
+              <span v-if="callCount > 0" class="member-count call-count" :title="callLabel">{{
+                callCount
+              }}</span>
+            </span>
+            <span class="action-pair">
+              <button
+                class="link"
+                :title="showMembers ? 'Hide members' : 'Show members'"
+                :aria-label="showMembers ? 'Hide members' : 'Show members'"
+                @click="toggleMembers"
+              >
+                <i class="fa-solid fa-users"></i>
+              </button>
+              <span
+                v-if="memberCount != null"
+                class="member-count"
+                :title="`${memberCount} ${memberCount === 1 ? 'user' : 'users'} in channel`"
+                >{{ memberCount }}</span
+              >
+            </span>
           </template>
         </template>
       </div>
@@ -985,6 +992,14 @@ button.topic-text:focus-visible {
   align-items: baseline;
   gap: var(--space-4);
   flex-shrink: 0;
+}
+/* A glyph + its count. gap:0 leaves only the .link's own 4px side padding
+   between them — before this the count also inherited .topic-actions' 8px
+   gap and floated 12px off its icon, reading as a separate control. */
+.topic .action-pair {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0;
 }
 .topic .member-count {
   color: var(--fg-muted);
