@@ -377,8 +377,6 @@ function toggleServerConnection() {
     serverConnectionState.value === 'connected' ? networks.disconnect(id) : networks.reconnect(id);
   p.catch((err) => console.error('[BufferPane] toggle server connection failed', err));
 }
-
-defineExpose<PaneApi>(api);
 </script>
 
 <style scoped>

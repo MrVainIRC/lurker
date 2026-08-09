@@ -20,6 +20,7 @@ import { resetSocket } from './useSocket.js';
 import { resetPresence } from './usePresence.js';
 import { resetAllScrollState } from './useScrollState.js';
 import { resetViewedBuffers } from './useViewedBuffer.js';
+import { resetPanes } from './usePaneRegistry.js';
 import { resetOnboarding } from './useOnboarding.js';
 import { clearAppBadgeNow } from './useAppBadge.js';
 
@@ -63,6 +64,11 @@ export function resetSession(): void {
   resetPresence();
   resetAllScrollState();
   resetViewedBuffers();
+  // Module-level Map of pane handles, like the two above — not Pinia state, so
+  // $reset() doesn't reach it. Panes unmount on logout and deregister
+  // themselves, but clear it explicitly so a handle can't outlive the session
+  // if teardown order ever changes.
+  resetPanes();
   // Closing the first-run flow unmounts it, which is what drops the half-filled
   // form (nick, SASL password) with it — the next user re-evaluates from scratch.
   resetOnboarding();

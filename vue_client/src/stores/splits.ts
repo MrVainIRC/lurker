@@ -121,8 +121,9 @@ export const useSplitsStore = defineStore('splits', {
       const nextFocused = this.focused > index ? this.focused - 1 : this.focused;
       this.setPanes(next, nextFocused);
     },
-    // Drop every pane but one — the "maximize this pane" affordance, and what a
-    // plain click has to do when the user wants out of a split.
+    // Drop every pane but one — the "maximize this pane" affordance, and the
+    // only way back to a single pane. A plain click deliberately does NOT do
+    // this: it swaps the focused pane's buffer and leaves the split standing.
     collapseTo(index: number) {
       const key = this.panes[index];
       if (key === undefined) return;
