@@ -224,6 +224,55 @@ If you set this rule up before Lurker 1.0 it will say `/uploads/local/`. Uploads
 See [Uploaded images are broken for other people](#uploaded-images-are-broken-for-other-people-403) if you've already hit this.
 :::
 
+### Link previews & inline media
+
+Off by default. When enabled, a link pasted into chat can unfurl into a preview card
+(title, description, image — the way Slack or Discord do it), and a link that points
+straight at an image or video can render inline. It's off by default because it makes
+your server fetch third-party URLs that appear in chat, which is a behavior an
+operator should choose, not inherit.
+
+Turn it on for the instance:
+
+```yaml
+environment:
+  - LURKER_LINK_PREVIEWS=on
+```
+
+**Enabling the instance flag doesn't show anyone a preview yet.** The feature is
+double-gated: each user also has two toggles in **Settings → Chat** — **Link
+previews** and **Inline media** — and both default to off. Those toggles only
+_appear_ once the instance flag is on, so if a user says they can't find the
+setting, this env var is the reason.
+
+The server fetches previews itself (the URL never leaves your instance to a
+third-party unfurler), identifies itself honestly in its User-Agent (see
+[Outbound contact info](#outbound-contact-info-user-agent)), and proxies preview
+images to your users so their browsers never touch the third-party host directly.
+
+#### Caching preview images (optional)
+
+Without a cache this already works — the server just re-fetches an image when
+nobody's browser has it cached. `LURKER_PREVIEW_CACHE_MODE` trades a little disk
+or a bucket for not re-fetching popular images:
+
+- **`off`** (default) — fetch through, store nothing.
+- **`local`** — the sensible self-host choice. Cached bytes live in a directory
+  next to the database (2 GiB cap by default, least-recently-used eviction).
+  It's a cache, not data: safe to delete while the server is stopped.
+- **`s3`** — for instances already running behind a CDN: cached images go to a
+  bucket you own and get served from its **public** base URL, so your server
+  ships zero bytes for an image it has already fetched. This one has real
+  operational requirements — the objects are publicly readable, the base URL
+  must be https, and **you** own eviction via a lifecycle rule on the bucket.
+- **`dropper`** — the hosted-fleet mode; not for self-hosters.
+
+Misconfiguration is never fatal: a bad cache config logs one warning, caching
+turns off, and previews keep working. The full per-mode reference — every
+variable, the s3 caveats, and the reasoning — lives in
+[`.env.example`](https://github.com/amiantos/lurker/blob/main/.env.example),
+which is worth reading in full before turning on `s3`.
+
 ### Secure cookies
 
 Lurker's session cookies are **not** flagged `Secure` by default. This sounds wrong but is correct for the common self-hosted shapes:
