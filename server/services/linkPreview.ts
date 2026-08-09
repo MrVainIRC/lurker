@@ -39,9 +39,10 @@ import {
   type PreviewKind,
 } from '../db/linkPreviews.js';
 import { mintProxyToken } from './mediaProxyToken.js';
-// ⚠ From `previewCache/s3.js`, not `previewCache/index.js`. The index imports this
-// module for `kindForContentType`, so reaching back through it would close a cycle.
-import { publicByteUrl } from './previewCache/s3.js';
+// ⚠ From `previewCache/publicUrl.js`, not `previewCache/index.js`. The index
+// imports this module for `kindForContentType`, so reaching back through it would
+// close a cycle.
+import { publicByteUrl } from './previewCache/publicUrl.js';
 
 /** Clamps, applied server-side so no client has to think about them and no
  *  client can be surprised by a 40 KB og:description. */
