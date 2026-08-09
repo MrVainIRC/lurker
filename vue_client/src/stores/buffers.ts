@@ -598,7 +598,21 @@ export const useBuffersStore = defineStore('buffers', {
         // `bob` while the user sits in the `Bob` buffer reads as inactive and
         // the divider/read-sync below silently skips (#327). Mirrors the same
         // resolve-then-compare applyReadState does.
-        const isActive = networks.activeKey === bufferKey(buf.networkId, buf.target);
+        // "The user is sitting in this buffer" is what this gates, and in a
+        // split frame that stopped being the same as "this is THE active
+        // buffer": a side pane is on screen and being read while another pane
+        // holds focus. Left as an activeKey test, such a pane accrued an unread
+        // badge and a growing divider and never advanced the server's read
+        // pointer — while its toasts WERE suppressed, because suppression asks
+        // the viewed set. Ask the same question here so the two halves of "can
+        // the user see this" cannot disagree.
+        //
+        // activeKey stays beside it for the states where no message list is
+        // mounted at all yet the buffer is still the active one — the Settings
+        // route and the mobile list/members screens, where this has always
+        // marked read.
+        const key = bufferKey(buf.networkId, buf.target);
+        const isActive = isBufferViewed(key) || networks.activeKey === key;
         if (isActive) {
           // While the user is sitting in this buffer, keep the divider
           // tracking the bottom UNLESS there's already an unread boundary

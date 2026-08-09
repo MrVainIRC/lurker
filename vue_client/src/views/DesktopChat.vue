@@ -323,7 +323,25 @@ function focusedPane() {
 // immediate, so a remount (a viewport flip back to desktop, coming back from
 // Settings) reconciles the frame with whatever is active instead of painting an
 // empty pane until the next click.
-watch(() => networks.activeKey, splits.syncActive, { immediate: true });
+watch(
+  () => networks.activeKey,
+  (key) => {
+    if (key) {
+      splits.syncActive(key);
+      return;
+    }
+    // Closing a buffer nulls activeKey (networks.dropBuffer) — right when it
+    // was the only view of it, wrong when other panes are still up. The sweep
+    // is synchronous and this watcher flushes after it, so by now the splits
+    // store has closed that pane and focus has landed on a survivor: adopt it,
+    // rather than leave the app with no active buffer while a conversation is
+    // plainly on screen (no sidebar highlight, and type-ahead refusing to focus
+    // the composer). With no panes left there's nothing to adopt, and the
+    // land-on-system-buffer rule below takes it from here.
+    activateFocusedPane();
+  },
+  { immediate: true },
+);
 
 // Any modal open? Type-ahead must not steal focus from a modal's own fields.
 const anyModalOpen = computed(

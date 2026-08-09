@@ -333,7 +333,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
-import type { CSSProperties, ComponentPublicInstance } from 'vue';
+import type { CSSProperties, ComponentPublicInstance, Ref } from 'vue';
 import { useNetworksStore, type AwayState } from '../stores/networks.js';
 import { useBuffersStore, type BufferMember } from '../stores/buffers.js';
 import { useSettingsStore } from '../stores/settings.js';
@@ -1987,10 +1987,31 @@ watch(compactMode, async () => {
   if (stickToBottom.value) scrollToBottom();
 });
 
+// The scroll-request tokens are PER-BUFFER counters, so they only mean "the
+// user asked" while the buffer stays put: changing buffer re-resolves the
+// computed to another buffer's count, which can move it in either direction and
+// is not a request. (A bare `token > previous` test isn't enough — switching to
+// a buffer whose count happens to be higher reads as an increase.) So a change
+// counts only when the key it belongs to is the same one we last saw it under.
+//
+// Not split-only: this fires in the plain single-pane shell too, where clicking
+// "jump to unread" in one buffer and then switching to another used to run the
+// new buffer's jump unrequested — overriding its fresh scroll-to-bottom, or
+// tripping an unasked-for loadAround.
+function onScrollRequest(token: Readonly<Ref<number>>, run: () => void): void {
+  let seen = { key: paneKey.value, token: token.value };
+  watch([paneKey, token], () => {
+    const now = { key: paneKey.value, token: token.value };
+    const requested = now.key === seen.key && now.token > seen.token;
+    seen = now;
+    if (requested) run();
+  });
+}
+
 // StatusBar's "Return to present ↓" click increments scrollToBottomToken.
 // Watching the token (rather than wiring a callback) keeps the composable
 // stateless and avoids leaking refs to MessageList's DOM out of the component.
-watch(scrollToBottomToken, async () => {
+onScrollRequest(scrollToBottomToken, async () => {
   await nextTick();
   stickToBottom.value = true;
   setStuckToBottom(true);
@@ -2017,7 +2038,7 @@ function scrollDividerIntoView() {
 // the history pager, and stalls before reaching the seam (issue #216). In that
 // case fetch a slice centered on the boundary first — the same loadAround path
 // jump-to-message uses — then center the real divider once it lands.
-watch(scrollToUnreadToken, async () => {
+onScrollRequest(scrollToUnreadToken, async () => {
   await nextTick();
   if (!scroller.value) return;
   const buf = buffer.value;
