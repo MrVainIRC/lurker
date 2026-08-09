@@ -5,7 +5,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { useSplitsStore, MAX_PANES } from './splits.js';
 import { useBuffersStore } from './buffers.js';
-import { useNetworksStore } from './networks.js';
 
 vi.mock('../composables/useSocket.js', () => ({ socketSend: vi.fn<() => void>() }));
 
@@ -15,14 +14,6 @@ vi.mock('../composables/useSocket.js', () => ({ socketSend: vi.fn<() => void>() 
 function spyOnLeave() {
   const buffers = useBuffersStore();
   return vi.spyOn(buffers, 'leaveBuffer').mockImplementation(() => {});
-}
-
-// Declare which buffer keys the buffers store currently holds. pruneClosed
-// reads them through the real byKey getter, so seed the state rather than
-// stubbing the getter — the rows only need to exist, not to be well-formed.
-function openBuffers(...keys: string[]) {
-  const buffers = useBuffersStore();
-  buffers.buffers = Object.fromEntries(keys.map((k) => [k, { key: k } as never]));
 }
 
 beforeEach(() => {
@@ -170,41 +161,66 @@ describe('splits closing', () => {
   });
 });
 
-describe('splits pruning', () => {
-  // A pane pointing at a buffer the store has forgotten renders an empty shell
-  // no click can fix.
-  it('drops panes whose buffer is gone', () => {
+// The splits store keys state by buffer, so it joins the lifecycle sweep in
+// lib/bufferLifecycle.ts like every other store that does.
+describe('splits buffer lifecycle', () => {
+  it('closes the pane of a buffer that went away', () => {
     const splits = useSplitsStore();
     for (const k of ['1::#a', '1::#b', '1::#c']) splits.addPane(k);
-    openBuffers('1::#a', '1::#c');
 
-    splits.pruneClosed();
+    splits.dropBuffer(1, '#b');
     expect(splits.panes).toEqual(['1::#a', '1::#c']);
   });
 
-  // An empty frame has no focused pane for the next activation to land in, so
-  // the last pane survives even when its buffer is gone.
-  it('never prunes the frame down to nothing', () => {
+  it('ignores a drop for a buffer no pane is showing', () => {
     const splits = useSplitsStore();
-    const networks = useNetworksStore();
-    networks.activeKey = '1::#a';
     for (const k of ['1::#a', '1::#b']) splits.addPane(k);
-    openBuffers();
 
-    splits.pruneClosed();
-    expect(splits.panes).toEqual(['1::#a']);
-    expect(splits.focusedKey).toBe('1::#a');
+    splits.dropBuffer(1, '#zzz');
+    expect(splits.panes).toEqual(['1::#a', '1::#b']);
   });
 
-  it('keeps focus on the focused buffer when an earlier pane is pruned', () => {
+  // The system buffer is permanent — the buffers store refuses to drop it too.
+  it('never drops the system pane', () => {
     const splits = useSplitsStore();
-    for (const k of ['1::#a', '1::#b', '1::#c']) splits.addPane(k);
-    splits.focusPane(2);
-    openBuffers('1::#b', '1::#c');
+    for (const k of [':system:', '1::#a']) splits.addPane(k);
 
-    splits.pruneClosed();
-    expect(splits.panes).toEqual(['1::#b', '1::#c']);
-    expect(splits.focusedKey).toBe('1::#c');
+    splits.dropBuffer(null, ':system:');
+    expect(splits.panes).toEqual([':system:', '1::#a']);
+  });
+
+  // A rename swaps one key for another, so a pane holding the old name would
+  // silently stop tracking the conversation it is showing. It keeps its slot
+  // and its focus — nothing moved on screen.
+  it('follows a rename in place', () => {
+    const splits = useSplitsStore();
+    const leave = spyOnLeave();
+    for (const k of ['1::#a', '1::#b', '1::#c']) splits.addPane(k);
+    splits.focusPane(1);
+
+    splits.rekeyBuffer(1, '#b', '#b-renamed');
+    expect(splits.panes).toEqual(['1::#a', '1::#b-renamed', '1::#c']);
+    expect(splits.focused).toBe(1);
+    // Same buffer under a new name: nothing left the screen.
+    expect(leave).not.toHaveBeenCalled();
+  });
+
+  // A merge renames one open buffer onto another that is also open, which would
+  // otherwise leave two panes on one conversation.
+  it('closes the source pane when a rename merges onto an open buffer', () => {
+    const splits = useSplitsStore();
+    for (const k of ['1::#a', '1::#b']) splits.addPane(k);
+
+    splits.rekeyBuffer(1, '#a', '#b');
+    expect(splits.panes).toEqual(['1::#b']);
+  });
+
+  it('ignores a rename for a buffer no pane is showing', () => {
+    const splits = useSplitsStore();
+    splits.addPane('1::#a');
+
+    splits.rekeyBuffer(1, '#other', '#renamed');
+    expect(splits.panes).toEqual(['1::#a']);
   });
 });
 

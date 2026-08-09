@@ -301,14 +301,6 @@ function focusedPane() {
 // empty pane until the next click.
 watch(() => networks.activeKey, splits.syncActive, { immediate: true });
 
-// A buffer can stop existing while a pane is showing it — parted, closed, or
-// dropped by a reconnect snapshot. Those panes would render a shell no click
-// can fix, so drop them once the buffer is gone.
-watch(
-  () => Object.keys(buffers.buffers).length,
-  () => splits.pruneClosed(),
-);
-
 // Any modal open? Type-ahead must not steal focus from a modal's own fields.
 const anyModalOpen = computed(
   () =>

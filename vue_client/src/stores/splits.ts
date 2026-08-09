@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { defineStore } from 'pinia';
-import { useBuffersStore } from './buffers.js';
-import { useNetworksStore } from './networks.js';
+import { useBuffersStore, bufferKey } from './buffers.js';
 
 // How many buffers can share the desktop chat frame at once. Four is the point
 // where a pane stops being able to show a useful number of message rows beside
@@ -141,26 +140,42 @@ export const useSplitsStore = defineStore('splits', {
       if (!key) return;
       this.show(key);
     },
-    // Drop panes whose buffer is no longer open (parted, closed, or wiped by a
-    // session reset). A pane pointing at a buffer the store has forgotten
-    // renders an empty shell that no click can fix, so it shouldn't survive.
-    // The last pane is kept regardless: an empty frame has no focused pane for
-    // the next activation to land in.
-    pruneClosed() {
-      if (this.panes.length <= 1) return;
-      const buffers = useBuffersStore();
-      const networks = useNetworksStore();
-      const next = this.panes.filter((k) => buffers.byKey(k) != null);
-      if (next.length === this.panes.length) return;
-      if (next.length === 0) {
-        // Everything went at once. Keep the active buffer's pane if there is
-        // one so the frame still has somewhere to render.
-        this.setPanes(networks.activeKey ? [networks.activeKey] : [], 0);
+    // --- buffer lifecycle (lib/bufferLifecycle.ts) ---
+    //
+    // Panes are keyed by buffer, so this store keys per-buffer state and has to
+    // join the lifecycle sweep like every other store that does. Without it a
+    // pane holding a closed buffer renders a shell no click can fix, and a pane
+    // holding a RENAMED one silently stops tracking the conversation it's
+    // showing — and a rename swaps one key for another, so nothing watching the
+    // buffer count would even notice.
+
+    /** The buffer is gone: close whichever pane was showing it. */
+    dropBuffer(networkId: number | string | null, target: string) {
+      if (networkId == null) return; // the system buffer is permanent
+      const at = this.panes.indexOf(bufferKey(networkId, target));
+      if (at !== -1) this.closePane(at);
+    },
+
+    /** The buffer changed names: the pane follows it, keeping its slot. */
+    rekeyBuffer(networkId: number | string | null, from: string, to: string) {
+      if (networkId == null) return;
+      const fromKey = bufferKey(networkId, from);
+      const toKey = bufferKey(networkId, to);
+      if (fromKey === toKey) return;
+      const at = this.panes.indexOf(fromKey);
+      if (at === -1) return;
+      // A merge can rename one open buffer onto another that's also open, which
+      // would leave two panes on one conversation. The destination pane wins —
+      // matching the destination-wins merge in the other rekey hooks — and the
+      // source pane closes.
+      if (this.panes.includes(toKey)) {
+        this.closePane(at);
         return;
       }
-      const focusedKey = this.panes[this.focused];
-      const stillThere = focusedKey ? next.indexOf(focusedKey) : -1;
-      this.setPanes(next, stillThere === -1 ? 0 : stillThere);
+      // Assigned in place rather than through setPanes: this is the same buffer
+      // under a new name, so nothing left the screen and nothing should be torn
+      // down.
+      this.panes[at] = toKey;
     },
   },
 });
