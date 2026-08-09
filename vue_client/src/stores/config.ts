@@ -16,7 +16,6 @@ export type Edition = 'standalone' | 'node';
  *  a flag doesn't have the feature. */
 export interface Features {
   linkPreviews: boolean;
-  voice: boolean;
 }
 
 // Shared in-flight fetch so concurrent callers — App.vue's boot fetch and the
@@ -31,7 +30,7 @@ export const useConfigStore = defineStore('config', {
     // ⚠ Defaults to OFF, unlike `edition`, which defaults to the fully-featured value. A fetch
     // failure must not conjure a feature the server may not have: guessing "on" here would show
     // the two settings and then have every resolve 404.
-    features: { linkPreviews: false, voice: false } as Features,
+    features: { linkPreviews: false } as Features,
     checked: false,
   }),
   getters: {
@@ -39,9 +38,6 @@ export const useConfigStore = defineStore('config', {
     isNode: (s): boolean => s.edition === 'node',
     /** Whether this instance has link previews / inline media enabled at all. */
     linkPreviews: (s): boolean => s.features.linkPreviews === true,
-    /** Whether this instance offers voice calls (operator opt-in + a configured
-     *  LiveKit SFU). False hides every call affordance. */
-    voiceEnabled: (s): boolean => s.features.voice === true,
   },
   actions: {
     async fetch(): Promise<Edition> {
@@ -51,10 +47,7 @@ export const useConfigStore = defineStore('config', {
         try {
           const data = await api<{ edition?: string; features?: Partial<Features> }>('/api/config');
           this.edition = data.edition === 'node' ? 'node' : 'standalone';
-          this.features = {
-            linkPreviews: data.features?.linkPreviews === true,
-            voice: data.features?.voice === true,
-          };
+          this.features = { linkPreviews: data.features?.linkPreviews === true };
           // Latch `checked` ONLY on success. A transient failure must not wedge
           // the session on the safe defaults — leaving it false lets the next
           // caller retry and self-heal. That second caller is the router guard,

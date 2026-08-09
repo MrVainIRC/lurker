@@ -16,10 +16,6 @@ const chatShell = () => import('./views/Chat.vue');
 const routes: RouteRecordRaw[] = [
   { path: '/login', name: 'login', component: () => import('./views/Login.vue') },
   { path: '/invite/:token', name: 'invite', component: () => import('./views/InviteAccept.vue') },
-  // Public guest voice-call page — deliberately NO requiresAuth. The :token is
-  // a capability link an op minted (POST /api/voice/guest-link); the page
-  // exchanges it for a room-scoped LiveKit token.
-  { path: '/call/:token', name: 'guest-call', component: () => import('./views/GuestCall.vue') },
   // The three chat locations. All render the same shell; only the params differ.
   //
   // `/buffer/:id` names ONE buffer by its SERVER ID (#744) — never by name. The

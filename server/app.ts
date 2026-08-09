@@ -27,7 +27,6 @@ import uploadsRouter from './routes/uploads.js';
 import uploadersRouter from './routes/uploaders.js';
 import localUploadsRouter from './routes/localUploads.js';
 import dccRouter from './routes/dcc.js';
-import voiceRouter, { voicePublicRouter } from './routes/voice.js';
 import draftsRouter from './routes/drafts.js';
 import { exportsRouter, importRouter } from './routes/exports.js';
 import apiTokensRouter from './routes/apiTokens.js';
@@ -99,11 +98,6 @@ export function buildApp(sessionSecret: string): Express {
     app.use('/uploads', localUploadsRouter);
   }
   app.use('/api/dcc', dccRouter);
-  // Public voice sub-routes (LiveKit webhook + guest join) FIRST — they
-  // authenticate by capability (webhook signature / guest-link token), not the
-  // session cookie, so they must match before the requireAuth'd router 401s them.
-  app.use('/api/voice', voicePublicRouter);
-  app.use('/api/voice', voiceRouter);
   app.use('/api/drafts', draftsRouter);
   app.use('/api/exports', exportsRouter);
   app.use('/api/imports', importRouter);

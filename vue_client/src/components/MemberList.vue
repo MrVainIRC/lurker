@@ -62,7 +62,6 @@ const listEl = ref<HTMLElement | null>(null);
 
 const buffer = computed(() => (networks.activeKey ? buffers.byKey(networks.activeKey) : null));
 const members = computed((): BufferMember[] => buffer.value?.members || []);
-
 const selfNick = computed(() => {
   const b = buffer.value;
   if (!b || b.networkId == null) return null;
