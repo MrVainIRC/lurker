@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
-// Call-presence counts feed the "Join call (N)" badge. These lock in the two
+// Call-presence counts feed the header phone button's participant count. These lock in the two
 // behaviors that matter: live deltas fold case-insensitively into the same key
 // a buffer lookup uses, and a hydrate() snapshot REPLACES the network's counts
 // (a call that ended while this client had no socket must clear, not linger).

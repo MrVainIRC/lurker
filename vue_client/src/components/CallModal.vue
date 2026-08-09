@@ -16,9 +16,11 @@
 
   Scoped to the (networkId, target) it was opened for, for its whole lifetime.
   It mounts fresh on every open, so the policy and guest-link reads are plain
-  onMounted fetches rather than watchers — no buffer-switch staleness to guard
-  and no {immediate:true} setup-order trap (see MemberList.test.ts for the
-  crash that pattern caused when it lived in the member list).
+  onMounted fetches — no buffer-switch staleness to guard, and no
+  {immediate:true} setup-order trap (see MemberList.test.ts for the crash that
+  pattern caused when it lived in the member list). The one watcher left keys
+  on `isOp`, because op status can land after mount; it deliberately does NOT
+  fire immediately.
 -->
 
 <template>
@@ -106,10 +108,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import AppModal from './AppModal.vue';
 import IconButton from './IconButton.vue';
-import { useBuffersStore, bufferKey } from '../stores/buffers.js';
+import { useBuffersStore } from '../stores/buffers.js';
 import { useNetworksStore } from '../stores/networks.js';
 import { useVoiceStore } from '../stores/voice.js';
 import { useCallPresenceStore } from '../stores/callPresence.js';
@@ -127,7 +129,12 @@ const networks = useNetworksStore();
 const voice = useVoiceStore();
 const callPresence = useCallPresenceStore();
 
-const buffer = computed(() => buffers.byKey(bufferKey(props.networkId, props.target)));
+// findByTarget, not byKey: IRC targets are case-insensitive and servers hand
+// back divergent casing (#289/#327), so an exact-key lookup can miss the open
+// buffer entirely. A miss here is silent and consequential — no buffer means
+// no members, no modes, and a real op quietly loses the policy picker and the
+// guest-link minter.
+const buffer = computed(() => buffers.findByTarget(props.networkId, props.target));
 // Prefer the server's own classification; fall back to the shared sigil test
 // (all four of #&+!) for a target with no buffer row yet.
 const isChannel = computed(() =>
@@ -144,13 +151,21 @@ const selfModes = computed<string[]>(() => {
 const isOp = computed(() => canAdminCall(selfModes.value));
 
 const count = computed(() => callPresence.countFor(props.networkId, props.target));
-const inThisCall = computed(
-  () => voice.active && voice.networkId === props.networkId && voice.target === props.target,
+// The voice store's session — connecting OR connected — points at this target.
+// startCall sets networkId/target BEFORE awaiting the token, so this is true
+// through the whole connect window; keying "am I elsewhere" on voice.active
+// alone made the 1-3s connect read as a DIFFERENT call and told the user to
+// leave the call they were in the middle of joining.
+const isThisSession = computed(
+  () => voice.networkId === props.networkId && voice.target === props.target,
 );
-const inOtherCall = computed(() => (voice.active || voice.connecting) && !inThisCall.value);
+const inThisCall = computed(() => voice.active && isThisSession.value);
+const connectingThisCall = computed(() => voice.connecting && isThisSession.value);
+const inOtherCall = computed(() => (voice.active || voice.connecting) && !isThisSession.value);
 
 const statusText = computed(() => {
   if (inThisCall.value) return "You're in this call.";
+  if (connectingThisCall.value) return 'Connecting…';
   if (inOtherCall.value) return `You're already in a call (${voice.label}). Leave it first.`;
   if (count.value > 0) {
     return `${count.value} ${count.value === 1 ? 'person is' : 'people are'} in this call.`;
@@ -294,6 +309,16 @@ onMounted(() => {
   void loadPolicy();
   void refreshLinks();
 });
+
+// refreshLinks bails when we aren't (yet) an op, and op status can arrive
+// AFTER mount: on a cold deep-link the header renders as soon as activeKey is
+// set, while the channel's members hydrate over the WS a beat later — open the
+// modal in that window and the .guests section appears when modes land, but
+// with a permanently empty link list until it's closed and reopened. Same if
+// someone /ops you mid-modal. Not { immediate: true }: the onMounted above is
+// the initial load, and an immediate watcher evaluating isOp during setup is
+// exactly the temporal-dead-zone shape that blanked the chat view in #763.
+watch(isOp, () => void refreshLinks());
 </script>
 
 <style scoped>
