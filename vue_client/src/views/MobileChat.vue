@@ -118,15 +118,6 @@
           </button>
         </template>
         <button
-          v-if="isChannel"
-          class="icon"
-          title="Members"
-          aria-label="Members"
-          @click="goMembers"
-        >
-          <i class="fa-solid fa-users"></i>
-        </button>
-        <button
           v-if="canCall"
           class="icon call-btn"
           :class="{ 'in-call': inThisCall }"
@@ -136,6 +127,15 @@
         >
           <i class="fa-solid fa-phone"></i>
           <span v-if="callCount > 0" class="call-count">{{ callCount }}</span>
+        </button>
+        <button
+          v-if="isChannel"
+          class="icon"
+          title="Members"
+          aria-label="Members"
+          @click="goMembers"
+        >
+          <i class="fa-solid fa-users"></i>
         </button>
         <button
           v-if="active"
@@ -671,12 +671,12 @@ useChatBootstrap({ onJump: onJumpToMessage });
 /* Call button: the live participant count rides inline next to the glyph
    (a header icon is already accent here, so the count carries the signal),
    and the glyph goes `good`-green while YOU are in the call — same language
-   as the CallBar's live dot and DesktopChat's header. */
+   as the CallBar's live dot and DesktopChat's header. One font size holds
+   here as everywhere: the count is separated by spacing, not shrunk. */
 .icon.call-btn {
   gap: var(--space-2);
 }
 .icon.call-btn .call-count {
-  font-size: 0.8em;
   font-variant-numeric: tabular-nums;
 }
 .icon.in-call {
