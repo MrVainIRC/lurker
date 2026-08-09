@@ -32,6 +32,7 @@ import { imageSignatureOf, SIGNATURE_BYTES } from '../../utils/imageSignature.js
 import { cacheConfig, cacheEnabled, expired, MAX_AGE_MS } from './config.js';
 import { evictLocal, objectPath, openLocalWrite, readLocal, removeLocal } from './local.js';
 import { openS3Write, readS3, removeS3, type S3Writer } from './s3.js';
+import { openDropperWrite, readDropper } from './dropper.js';
 
 export type { CacheConfig, CacheMode } from './config.js';
 export { objectPath };
@@ -40,7 +41,7 @@ export { objectPath };
 // `kindForContentType` — so anything the resolver has to reach must sit BELOW that
 // import or the two modules form a cycle. Callers still see one surface.
 export { byteCacheKey, cacheConfig, cacheEnabled, resetCacheConfigForTests } from './config.js';
-export { publicByteUrl } from './s3.js';
+export { publicByteUrl } from './publicUrl.js';
 
 /**
  * Served from bytes we hold.
@@ -202,7 +203,9 @@ export async function lookup(key: string): Promise<CacheHit | null> {
     const read =
       cfg.mode === 'local'
         ? await readLocal(cfg, key)
-        : await readS3(cfg, key, MAX_IMAGE_PROXY_BYTES);
+        : cfg.mode === 's3'
+          ? await readS3(cfg, key, MAX_IMAGE_PROXY_BYTES)
+          : await readDropper(cfg, key, MAX_IMAGE_PROXY_BYTES);
     // ⚠⚠ Only a GENUINELY MISSING object forgets its row. `readLocal` used to
     // collapse every errno to null, so a transient EMFILE — 24 concurrent reads is
     // within this pool's own budget — or an EACCES after a permissions change
@@ -327,7 +330,8 @@ export async function beginStore(key: string, expected: number): Promise<StoreWr
         abort: () => local.abort(),
       };
     } else {
-      const remote = await openS3Write(cfg, key);
+      const remote =
+        cfg.mode === 's3' ? await openS3Write(cfg, key) : await openDropperWrite(cfg, key);
       if (!remote) return null;
       writer = remote;
     }
@@ -405,8 +409,13 @@ export async function beginStore(key: string, expected: number): Promise<StoreWr
             // file is dead weight on a volume the operator can see and reclaim, but
             // an unindexed object is dead weight they are billed for until a
             // lifecycle rule they may not have set gets round to it.
+            // ⚠ `dropper` gets NO rollback, and that is a capability fact, not an
+            // oversight: the cell holds an upload key only — the split key sets
+            // exist so a compromised cell cannot delete from the fleet's bucket —
+            // and hosted previews/ always has the 30-day lifecycle rule to reclaim
+            // an unindexed object.
             if (cfg.mode === 'local') await removeLocal(cfg, key);
-            else await removeS3(cfg, key);
+            else if (cfg.mode === 's3') await removeS3(cfg, key);
             return false;
           }
           return true;

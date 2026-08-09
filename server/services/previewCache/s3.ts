@@ -4,8 +4,9 @@
 // The bucket backend. Objects are PUT with SigV4 and then read DIRECTLY by
 // browsers from the bucket's public base URL — the descriptor hands out that URL
 // instead of a proxy path once an object is known to exist, so the cell ships
-// zero bytes for a cached image. `publicByteUrl` below is where that decision is
-// made; it lives here rather than in ./index.ts because the resolver has to call
+// zero bytes for a cached image. That decision is made in ./publicUrl.ts
+// (`publicByteUrl`), which dispatches to this module's `publicUrl` formatter; it
+// lives in a leaf module rather than ./index.ts because the resolver has to call
 // it, and ./index.ts imports the resolver.
 //
 // ⚠ Reuses the UPLOADER's `signObjectRequest`, `hashOf` and `putSource` rather
@@ -74,12 +75,17 @@
 // document but cannot enforce from here.
 
 import fs from 'fs/promises';
-import { peekCached } from '../../db/previewCache.js';
 import { fileSource, hashOf } from '../uploadProviders/source.js';
 import { putSource } from '../uploadProviders/multipart.js';
 import { signObjectRequest } from '../uploadProviders/s3.js';
 import { openTempFile } from './tempFile.js';
-import { byteCacheKey, cacheConfig, expired, type S3CacheConfig } from './config.js';
+import { tryAcquireStoreSlot, warnOnce } from './inflight.js';
+import type { S3CacheConfig } from './config.js';
+
+// The store bounds and the warn throttle moved to ./inflight.ts when the dropper
+// backend arrived (they are per-process, not per-backend). Re-exported here so
+// the s3 route suite — which imports its seams from this module — is untouched.
+export { storesInFlightForTests, resetWarnThrottleForTests } from './inflight.js';
 
 /**
  * What a CACHED object advertises to the browsers that read it directly.
@@ -97,49 +103,6 @@ const OBJECT_CACHE_CONTROL = 'public, max-age=86400';
 const OBJECT_CONTENT_DISPOSITION = 'inline';
 
 /**
- * Stores whose bytes are still moving — staged, hashing, or mid-PUT.
- *
- * ⚠ Module state rather than a field on the config, because the config is a plain
- * value that is re-resolved by tests and the bound has to survive that. One
- * process, one bucket, one ceiling.
- */
-let storesInFlight = 0;
-/** Generous next to `mediaPool`'s 24, because these are meant to be short — the
- *  ceiling is a backstop against a stalled bucket, not a throughput knob. */
-const MAX_STORES_IN_FLIGHT = 16;
-
-/** Test seam: the bound is invisible from outside until it bites. */
-export function storesInFlightForTests(): number {
-  return storesInFlight;
-}
-
-/**
- * ⚠ A cache is not a failure path, but a cache that fails FOREVER and SILENTLY is
- * an operator support burden. Config validation only proves the five env vars are
- * present — a wrong secret, a bucket policy denial, a typo'd bucket name or a
- * scheme-less endpoint all resolve to a working-looking `s3` mode where every
- * store fails, nothing populates, and no line is ever logged. `local` at least
- * leaves errno-shaped evidence on the volume.
- *
- * ⚠ Throttled to once a minute, and deliberately not per-key: the failure mode
- * this exists for is EVERY store failing, so an unthrottled warning would be one
- * line per image request in the log of a server that is otherwise fine.
- */
-let lastWarnAt = 0;
-
-/** Test seam: the throttle is global, so one test warning silences the next. */
-export function resetWarnThrottleForTests(): void {
-  lastWarnAt = 0;
-}
-
-function warnOnce(message: string): void {
-  const now = Date.now();
-  if (now - lastWarnAt < 60_000) return;
-  lastWarnAt = now;
-  console.warn(`[preview-cache] ${message}`);
-}
-
-/**
  * Let go of a response we are not going to read.
  *
  * ⚠⚠ CANCEL, never `res.text()`. Undici keeps the connection alive for an unread
@@ -151,7 +114,7 @@ function warnOnce(message: string): void {
  * request timeout, inside a `mediaPool` slot, for bytes nobody wants. Cancelling
  * releases the socket without reading a byte. (Copilot.)
  */
-async function discard(res: Response): Promise<void> {
+export async function discard(res: Response): Promise<void> {
   try {
     await res.body?.cancel();
   } catch {
@@ -164,45 +127,6 @@ async function discard(res: Response): Promise<void> {
 /** Where a reader is sent. Public by construction — that is the point of the mode. */
 export function publicUrl(cfg: S3CacheConfig, key: string): string {
   return `${cfg.publicBaseUrl}/${objectKey(cfg, key)}`;
-}
-
-/**
- * The public URL for a cached image, or null to use the proxy.
- *
- * ⚠⚠ THIS IS THE WHOLE POINT OF THE `s3` MODE, and it is the reason there is no
- * redirect anywhere in this feature. `toDescriptor` mints `src`/`thumb` per
- * request and clients treat both as opaque, so the cheapest place to send a reader
- * to the CDN is at MINT time: no 302, no second round trip through the cell, and
- * no chance of a client forwarding its `Authorization` header to a third-party
- * host, which is what a redirect would have invited.
- *
- * ⚠ Returning null is always SAFE, and that property is what makes this
- * comfortable. The caller falls back to the proxy path, which works regardless of
- * cache state — an empty bucket, a stale index, a mode change mid-flight all
- * degrade to exactly the behaviour that shipped before any of this existed. The
- * one shape that CANNOT self-correct is minting a URL for an object that is not
- * there: the client fetches the CDN directly, so its 404 never reaches us. That is
- * why the age bound is enforced here and not only on the read path.
- *
- * ⚠ `peekCached`, never `lookupCached`: this runs once per image per resolve, and
- * once per image per row once Part 2's `previewsForTexts` ships it into snapshot
- * building. The `last_access` touch is a WAL write on the shared connection.
- *
- * ⚠ Never throws — same promise the rest of the cache makes. It sits in the middle
- * of `toDescriptor`, which has no business failing because a cache lookup did.
- */
-export function publicByteUrl(imageUrl: string): string | null {
-  try {
-    const cfg = cacheConfig();
-    if (cfg.mode !== 's3') return null;
-
-    const key = byteCacheKey(imageUrl);
-    const entry = peekCached(key);
-    if (!entry || entry.backend !== 's3' || expired(entry.createdAt)) return null;
-    return publicUrl(cfg, key);
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -358,22 +282,18 @@ export async function openS3Write(cfg: S3CacheConfig, key: string): Promise<S3Wr
   // a directory nothing sweeps for `s3`) and hundreds of simultaneous sockets, in
   // the process running every tenant's IRC connections.
   //
-  // ⚠ DECLINED at the ceiling, never queued. A queue would bound the sockets and
-  // not the files, and would make an already-slow bucket slower still; declining
-  // is free, because the reader has their bytes and all that is lost is the saving
-  // on the next read.
-  if (storesInFlight >= MAX_STORES_IN_FLIGHT) return null;
+  // ⚠ DECLINED at the ceiling, never queued (see ./inflight.ts). A queue would
+  // bound the sockets and not the files, and would make an already-slow bucket
+  // slower still; declining is free, because the reader has their bytes and all
+  // that is lost is the saving on the next read.
+  const settle = tryAcquireStoreSlot();
+  if (!settle) return null;
 
   const staged = await openTempFile(cfg.stagingDir, key);
-  if (!staged) return null;
-
-  storesInFlight++;
-  let settled = false;
-  const settle = (): void => {
-    if (settled) return;
-    settled = true;
-    storesInFlight--;
-  };
+  if (!staged) {
+    settle();
+    return null;
+  }
 
   return {
     write(chunk: Buffer): void {

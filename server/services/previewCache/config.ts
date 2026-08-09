@@ -22,7 +22,7 @@ import path from 'path';
 import { resolveDataDir } from '../../utils/dataDir.js';
 import { sanitizeSegment } from '../uploadProviders/s3.js';
 
-export type CacheMode = 'off' | 'local' | 's3';
+export type CacheMode = 'off' | 'local' | 's3' | 'dropper';
 
 export interface LocalCacheConfig {
   mode: 'local';
@@ -55,7 +55,33 @@ export interface S3CacheConfig {
   stagingDir: string;
 }
 
-export type CacheConfig = { mode: 'off' } | LocalCacheConfig | S3CacheConfig;
+/**
+ * The hosted backend: the operator-run dropper service stores the bytes in the
+ * fleet's bucket and the CDN serves them. This mode exists because hosted cells
+ * deliberately hold NO bucket credentials (CP #63) — the dropper is the only
+ * thing that writes to R2, cells only hold an upload key for it.
+ */
+export interface DropperCacheConfig {
+  mode: 'dropper';
+  /** The dropper service base, e.g. `http://10.0.0.2:8025`. May be plain http —
+   *  this URL is dialled over the fleet's private VPC, never by a browser. */
+  url: string;
+  /** Bearer key for POST /api/previews — the same upload key the cell already
+   *  presents to POST /api/upload. Never a delete-capable key, by design. */
+  apiKey: string;
+  /**
+   * Where readers are sent, INCLUDING the prefix the dropper stores under —
+   * e.g. `https://cdn.lurker.chat/previews`. The cell mints `${base}/${key}`
+   * as a pure function of config, so this must agree with the dropper's
+   * `KEY_PREFIX` + `previews/` layout or every minted URL 404s.
+   */
+  publicBaseUrl: string;
+  /** Where bytes are staged before the multipart POST. Same reasoning as the s3
+   *  mode's staging file: the POST needs an exact Content-Length up front. */
+  stagingDir: string;
+}
+
+export type CacheConfig = { mode: 'off' } | LocalCacheConfig | S3CacheConfig | DropperCacheConfig;
 
 /** 2 GiB. Big enough that a normal instance never evicts, small enough to notice. */
 const DEFAULT_LOCAL_MAX_BYTES = 2 * 1024 * 1024 * 1024;
@@ -100,6 +126,7 @@ export function resolveCacheConfig(warn: (msg: string) => void = defaultWarn): C
   }
 
   if (mode === 's3') return resolveS3(warn);
+  if (mode === 'dropper') return resolveDropper(warn);
 
   warn(`[preview-cache] unknown LURKER_PREVIEW_CACHE_MODE "${mode}" — caching is OFF.`);
   return { mode: 'off' };
@@ -173,6 +200,72 @@ function resolveS3(warn: (msg: string) => void): CacheConfig {
     secretAccessKey,
     publicBaseUrl: publicBaseUrl.replace(/\/+$/, ''),
     prefix,
+    stagingDir: env('LURKER_PREVIEW_CACHE_DIR') || path.join(resolveDataDir(), 'preview-cache'),
+  };
+}
+
+/**
+ * The hosted backend. Same validation posture as `resolveS3`, and for the same
+ * reason: `publicBaseUrl` is handed to browsers as an image source, so a
+ * half-configured mode degrades to a public URL that 404s for everyone, not to
+ * slow. The one deliberate difference: `url` (the dropper service itself) may be
+ * plain http — it is dialled over the fleet's private VPC, never by a browser,
+ * and the fleet's provisioning genuinely uses `http://<vpc-ip>:8025`.
+ */
+function resolveDropper(warn: (msg: string) => void): CacheConfig {
+  const missing: string[] = [];
+  const required = (name: string): string => {
+    const value = env(name);
+    if (!value) missing.push(name);
+    return value;
+  };
+  const url = required('LURKER_PREVIEW_CACHE_DROPPER_URL');
+  const apiKey = required('LURKER_PREVIEW_CACHE_DROPPER_API_KEY');
+  const publicBaseUrl = required('LURKER_PREVIEW_CACHE_DROPPER_PUBLIC_BASE_URL');
+
+  if (missing.length) {
+    warn(`[preview-cache] mode "dropper" needs ${missing.join(', ')} — caching is OFF.`);
+    return { mode: 'off' };
+  }
+
+  let service: URL;
+  try {
+    service = new URL(url);
+  } catch {
+    warn(`[preview-cache] DROPPER_URL "${url}" is not a URL — caching is OFF.`);
+    return { mode: 'off' };
+  }
+  if (service.protocol !== 'https:' && service.protocol !== 'http:') {
+    warn(
+      `[preview-cache] DROPPER_URL must be http(s) (got "${service.protocol}") — caching is OFF.`,
+    );
+    return { mode: 'off' };
+  }
+
+  // ⚠⚠ https, not merely a valid URL — same rationale as the s3 mode: these URLs
+  // are handed to browsers as image sources on a page served over https, where an
+  // http:// image is blocked as mixed content and simply never renders.
+  let base: URL;
+  try {
+    base = new URL(publicBaseUrl);
+  } catch {
+    warn(
+      `[preview-cache] DROPPER_PUBLIC_BASE_URL "${publicBaseUrl}" is not a URL — caching is OFF.`,
+    );
+    return { mode: 'off' };
+  }
+  if (base.protocol !== 'https:') {
+    warn(
+      `[preview-cache] DROPPER_PUBLIC_BASE_URL must be https (got "${base.protocol}") — caching is OFF.`,
+    );
+    return { mode: 'off' };
+  }
+
+  return {
+    mode: 'dropper',
+    url: url.replace(/\/+$/, ''),
+    apiKey,
+    publicBaseUrl: publicBaseUrl.replace(/\/+$/, ''),
     stagingDir: env('LURKER_PREVIEW_CACHE_DIR') || path.join(resolveDataDir(), 'preview-cache'),
   };
 }
