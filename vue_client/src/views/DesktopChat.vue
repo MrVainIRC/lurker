@@ -94,7 +94,7 @@
         :pending-scroll-id="i === splits.focused ? pendingScrollId : null"
         @focus="onPaneFocus(i)"
         @close="onPaneClose(i)"
-        @maximize="splits.collapseTo(i)"
+        @maximize="onPaneMaximize(i)"
         @open-search="openSearch"
         @open-highlights="openHighlights"
         @show-topic="showTopic = true"
@@ -297,6 +297,13 @@ function onPaneFocus(index: number) {
 // leaves focus where it was, and this no-ops.)
 function onPaneClose(index: number) {
   splits.closePane(index);
+  activateFocusedPane();
+}
+
+// Maximize is the same story: collapsing to one pane changes which buffer is
+// focused whenever the maximized pane wasn't the focused one.
+function onPaneMaximize(index: number) {
+  splits.collapseTo(index);
   activateFocusedPane();
 }
 

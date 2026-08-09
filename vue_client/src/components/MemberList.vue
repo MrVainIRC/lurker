@@ -78,8 +78,11 @@ const selfModes = computed<string[]>(() => {
   return me && Array.isArray(me.modes) ? me.modes : [];
 });
 
+// This pane's buffer, not the app's active one: a member list renders per pane,
+// so keying the reset on activeKey scrolled EVERY nicklist back to the top
+// whenever focus moved between panes.
 watch(
-  () => networks.activeKey,
+  paneKey,
   () => {
     if (listEl.value) listEl.value.scrollTop = 0;
   },
