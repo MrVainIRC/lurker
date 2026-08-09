@@ -130,6 +130,22 @@ describe('splits closing', () => {
     expect(splits.focusedKey).toBe('1::#c');
   });
 
+  // Closing the focused pane hands focus to a different buffer, and the shell
+  // has to re-activate it — otherwise activeKey is stranded on a buffer no pane
+  // shows, which strands the sidebar highlight AND keeps advancing that
+  // buffer's read pointer while the user looks at another one. The store's half
+  // of that contract is reporting the new focusedKey; DesktopChat's
+  // activateFocusedPane() reads it.
+  it('reports a new focused buffer after the focused pane closes', () => {
+    const splits = useSplitsStore();
+    for (const k of ['1::#a', '1::#b']) splits.addPane(k);
+    splits.focusPane(1);
+    expect(splits.focusedKey).toBe('1::#b');
+
+    splits.closePane(1);
+    expect(splits.focusedKey).toBe('1::#a');
+  });
+
   it('clamps focus when the focused pane was the last one', () => {
     const splits = useSplitsStore();
     for (const k of ['1::#a', '1::#b']) splits.addPane(k);

@@ -93,7 +93,7 @@
         :focused="i === splits.focused"
         :pending-scroll-id="i === splits.focused ? pendingScrollId : null"
         @focus="onPaneFocus(i)"
-        @close="splits.closePane(i)"
+        @close="onPaneClose(i)"
         @maximize="splits.collapseTo(i)"
         @open-search="openSearch"
         @open-highlights="openHighlights"
@@ -267,20 +267,37 @@ const splits = useSplitsStore();
 // bar and "No messages yet." body), and it still does.
 const paneKeys = computed<(string | null)[]>(() => (splits.count ? splits.panes : [null]));
 
-// Focus follows the click, and the ACTIVE buffer follows focus — that's what
-// keeps a split frame coherent with everything outside it: the buffer-list
-// highlight, scoped search, the nav history, and the keyboard shortcuts all
-// still ask "what is the active buffer" and get the pane the user is in.
+// Point the app's active buffer at whatever the focused pane is showing. This
+// is what keeps a split frame coherent with everything outside it: the
+// buffer-list highlight, scoped search, the nav history and the keyboard
+// shortcuts all still ask "what is the active buffer" and get the pane the user
+// is in. It also keeps READ state honest — pushMessage advances the read
+// pointer of the active buffer, so leaving activeKey on a buffer no pane is
+// showing would mark it read while the user looks at something else.
 //
-// retainPrevious because nothing left the screen: the pane we focused away from
-// is still sitting there. The splits store owns that lifecycle now.
+// retainPrevious because nothing left the screen by getting here: either the
+// outgoing pane is still sitting there, or the splits store already tore it
+// down when it closed. That lifecycle is the store's, not activate()'s.
+function activateFocusedPane() {
+  const key = splits.focusedKey;
+  if (!key || key === networks.activeKey) return;
+  const buf = networks.bufferFor(key);
+  if (buf) buffers.activate(buf.networkId, buf.target, { retainPrevious: true });
+  else if (key === SYSTEM_KEY) buffers.activate(null, SYSTEM_KEY, { retainPrevious: true });
+}
+
 function onPaneFocus(index: number) {
   if (index === splits.focused) return;
   splits.focusPane(index);
-  const key = splits.panes[index];
-  const buf = key ? networks.bufferFor(key) : null;
-  if (buf) buffers.activate(buf.networkId, buf.target, { retainPrevious: true });
-  else if (key === SYSTEM_KEY) buffers.activate(null, SYSTEM_KEY, { retainPrevious: true });
+  activateFocusedPane();
+}
+
+// Closing the FOCUSED pane hands focus to a neighbour showing a different
+// buffer, so the active buffer has to follow it there. (Closing any other pane
+// leaves focus where it was, and this no-ops.)
+function onPaneClose(index: number) {
+  splits.closePane(index);
+  activateFocusedPane();
 }
 
 // The keyboard and the click-anywhere-to-type behavior address "the pane the
