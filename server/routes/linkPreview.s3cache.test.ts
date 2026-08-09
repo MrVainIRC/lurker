@@ -447,18 +447,23 @@ describe('resource bounds and diagnostics', () => {
     const cfg = cacheConfig();
     if (cfg.mode !== 's3') throw new Error('unreachable');
 
+    // ⚠ Slots released in a FINALLY: the counter is module state with no reset
+    // seam, so an assertion failure that skipped the aborts would pin the shared
+    // ceiling at 16 and cascade into every later store test in this file.
     const opened = [];
-    for (let i = 0; i < 16; i++) {
-      const w = await openS3Write(cfg, `bound-${i}`);
-      expect(`writer ${i}: ${w ? 'open' : 'refused'}`).toBe(`writer ${i}: open`);
-      opened.push(w!);
+    try {
+      for (let i = 0; i < 16; i++) {
+        const w = await openS3Write(cfg, `bound-${i}`);
+        expect(`writer ${i}: ${w ? 'open' : 'refused'}`).toBe(`writer ${i}: open`);
+        if (w) opened.push(w);
+      }
+      expect(storesInFlightForTests()).toBe(16);
+      // ⚠ The 17th is REFUSED, not queued — a queue would bound sockets and not files.
+      expect(await openS3Write(cfg, 'bound-over')).toBeNull();
+    } finally {
+      // ...and the ceiling is released, not leaked, so the next request can store.
+      for (const w of opened) await w.abort();
     }
-    expect(storesInFlightForTests()).toBe(16);
-    // ⚠ The 17th is REFUSED, not queued — a queue would bound sockets and not files.
-    expect(await openS3Write(cfg, 'bound-over')).toBeNull();
-
-    // ...and the ceiling is released, not leaked, so the next request can store.
-    for (const w of opened) await w.abort();
     expect(storesInFlightForTests()).toBe(0);
     const after = await openS3Write(cfg, 'bound-after');
     expect(after).not.toBeNull();

@@ -239,6 +239,30 @@ describe('resolveCacheConfig', () => {
       expect(warnings.length).toBeGreaterThan(0);
     });
 
+    // ⚠ The backend appends /api/previews itself, so a pasted full endpoint (a
+    // natural misread of "the dropper URL") would make every store POST to
+    // /api/previews/api/previews — a working-looking mode where every store
+    // fails. Caught at boot instead.
+    it('refuses a service URL carrying a path, query or fragment', () => {
+      for (const bad of [
+        'http://10.0.0.2:8025/api/previews',
+        'http://10.0.0.2:8025/dropper',
+        'http://10.0.0.2:8025?token=x',
+        'http://10.0.0.2:8025#frag',
+      ]) {
+        setDropperEnv();
+        process.env.LURKER_PREVIEW_CACHE_DROPPER_URL = bad;
+        const warnings: string[] = [];
+        const cfg = resolveCacheConfig((m) => warnings.push(m));
+        expect(`${bad} → ${cfg.mode}`).toBe(`${bad} → off`);
+        expect(`${bad}: ${warnings.length > 0 ? 'warned' : 'silent'}`).toBe(`${bad}: warned`);
+      }
+      // ...but a bare trailing slash is the pathname '/', which is fine.
+      setDropperEnv();
+      process.env.LURKER_PREVIEW_CACHE_DROPPER_URL = 'http://10.0.0.2:8025/';
+      expect(resolveCacheConfig().mode).toBe('dropper');
+    });
+
     it('trims trailing slashes so minted URLs never double up a separator', () => {
       setDropperEnv();
       process.env.LURKER_PREVIEW_CACHE_DROPPER_URL = 'http://10.0.0.2:8025/';

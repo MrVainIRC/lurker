@@ -70,10 +70,12 @@ export interface DropperCacheConfig {
    *  presents to POST /api/upload. Never a delete-capable key, by design. */
   apiKey: string;
   /**
-   * Where readers are sent, INCLUDING the prefix the dropper stores under —
-   * e.g. `https://cdn.lurker.chat/previews`. The cell mints `${base}/${key}`
-   * as a pure function of config, so this must agree with the dropper's
-   * `KEY_PREFIX` + `previews/` layout or every minted URL 404s.
+   * Where readers are sent, INCLUDING the `/previews` prefix — e.g.
+   * `https://cdn.lurker.chat/previews`. The dropper always stores previews at
+   * the literal `previews/<key>` (its KEY_PREFIX deliberately does not apply),
+   * and the cell mints `${base}/${key}` as a pure function of config — a
+   * disagreement is caught at store time, when the dropper's answered URL is
+   * compared against the mint (see dropper.ts).
    */
   publicBaseUrl: string;
   /** Where bytes are staged before the multipart POST. Same reasoning as the s3
@@ -160,23 +162,7 @@ function resolveS3(warn: (msg: string) => void): CacheConfig {
     return { mode: 'off' };
   }
 
-  // ⚠⚠ https, not merely a valid URL. These URLs are handed to browsers as image
-  // sources on a page served over https, where an http:// image is blocked as
-  // mixed content and simply never renders. Refusing here makes that a warning at
-  // boot instead of every cached preview silently going blank.
-  let base: URL;
-  try {
-    base = new URL(publicBaseUrl);
-  } catch {
-    warn(`[preview-cache] S3_PUBLIC_BASE_URL "${publicBaseUrl}" is not a URL — caching is OFF.`);
-    return { mode: 'off' };
-  }
-  if (base.protocol !== 'https:') {
-    warn(
-      `[preview-cache] S3_PUBLIC_BASE_URL must be https (got "${base.protocol}") — caching is OFF.`,
-    );
-    return { mode: 'off' };
-  }
+  if (!validHttpsBase(publicBaseUrl, 'S3_PUBLIC_BASE_URL', warn)) return { mode: 'off' };
 
   // ⚠ SANITISED, per segment, with the uploader's own function. An operator's
   // prefix reaches `new URL()` and an S3 key; left raw, a '#' in it truncates the
@@ -241,25 +227,21 @@ function resolveDropper(warn: (msg: string) => void): CacheConfig {
     );
     return { mode: 'off' };
   }
+  // ⚠ Scheme://host[:port] ONLY. The backend appends `/api/previews` itself, so
+  // an operator who pastes the full endpoint (a natural misread of "the dropper
+  // URL") would have every store POST to /api/previews/api/previews and fail —
+  // for the life of the process, surfaced only as one throttled warning a
+  // minute. That is exactly the working-looking-but-broken state this
+  // validation exists to catch at boot instead.
+  if ((service.pathname !== '/' && service.pathname !== '') || service.search || service.hash) {
+    warn(
+      `[preview-cache] DROPPER_URL must have no path, query or fragment (got "${url}") — ` +
+        `the /api/previews path is appended automatically. Caching is OFF.`,
+    );
+    return { mode: 'off' };
+  }
 
-  // ⚠⚠ https, not merely a valid URL — same rationale as the s3 mode: these URLs
-  // are handed to browsers as image sources on a page served over https, where an
-  // http:// image is blocked as mixed content and simply never renders.
-  let base: URL;
-  try {
-    base = new URL(publicBaseUrl);
-  } catch {
-    warn(
-      `[preview-cache] DROPPER_PUBLIC_BASE_URL "${publicBaseUrl}" is not a URL — caching is OFF.`,
-    );
-    return { mode: 'off' };
-  }
-  if (base.protocol !== 'https:') {
-    warn(
-      `[preview-cache] DROPPER_PUBLIC_BASE_URL must be https (got "${base.protocol}") — caching is OFF.`,
-    );
-    return { mode: 'off' };
-  }
+  if (!validHttpsBase(publicBaseUrl, 'DROPPER_PUBLIC_BASE_URL', warn)) return { mode: 'off' };
 
   return {
     mode: 'dropper',
@@ -268,6 +250,28 @@ function resolveDropper(warn: (msg: string) => void): CacheConfig {
     publicBaseUrl: publicBaseUrl.replace(/\/+$/, ''),
     stagingDir: env('LURKER_PREVIEW_CACHE_DIR') || path.join(resolveDataDir(), 'preview-cache'),
   };
+}
+
+/**
+ * ⚠⚠ https, not merely a valid URL — shared by every remote mode's PUBLIC base,
+ * because the rationale is identical: these URLs are handed to browsers as image
+ * sources on a page served over https, where an http:// image is blocked as
+ * mixed content and simply never renders. Refusing here makes that one warning
+ * at boot instead of every cached preview silently going blank.
+ */
+function validHttpsBase(raw: string, label: string, warn: (msg: string) => void): boolean {
+  let base: URL;
+  try {
+    base = new URL(raw);
+  } catch {
+    warn(`[preview-cache] ${label} "${raw}" is not a URL — caching is OFF.`);
+    return false;
+  }
+  if (base.protocol !== 'https:') {
+    warn(`[preview-cache] ${label} must be https (got "${base.protocol}") — caching is OFF.`);
+    return false;
+  }
+  return true;
 }
 
 function defaultWarn(msg: string): void {

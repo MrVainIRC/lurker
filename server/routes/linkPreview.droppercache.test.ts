@@ -40,6 +40,9 @@ interface Stored {
 let stores: Stored[] = [];
 /** Flip to make every store fail, without changing anything else. */
 let dropperRejects = false;
+/** Flip to answer stores with a URL from a DIFFERENT layout — the KEY_PREFIX /
+ *  wrong-base misconfiguration the cell must refuse to record. */
+let dropperWrongLayout = false;
 
 let dropper: http.Server;
 let dropperBase: string;
@@ -90,7 +93,14 @@ beforeAll(async () => {
             .end('{"error":"storage error"}');
           return;
         }
-        res.writeHead(200, { 'content-type': 'application/json' }).end('{"url":"ignored"}');
+        // Answer the way the real dropper does: the public URL for the stored
+        // key, which the cell checks against its own mint before recording.
+        const match = /name="key"\r?\n\r?\n([0-9a-f]{64})/.exec(body.toString('latin1'));
+        const storedKey = match ? match[1] : 'unparsed';
+        const url = dropperWrongLayout
+          ? `https://cdn.example.com/uploads/previews/${storedKey}`
+          : `${CDN}/${storedKey}`;
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ url }));
         return;
       }
       res.writeHead(404).end();
@@ -141,6 +151,7 @@ beforeEach(async () => {
   originHits = 0;
   stores = [];
   dropperRejects = false;
+  dropperWrongLayout = false;
   const { default: db } = await import('../db/index.js');
   db.prepare('DELETE FROM preview_cache').run();
 });
@@ -161,6 +172,9 @@ describe('the dropper byte cache, end to end', () => {
     expect(store.url).toBe('/api/previews');
     expect(store.headers.authorization).toBe(`Bearer ${API_KEY}`);
     expect(String(store.headers['content-type'])).toMatch(/^multipart\/form-data; boundary=/);
+    // Same protocol the upload driver speaks, down to the User-Agent — fleet
+    // logs must be able to attribute preview traffic the way they do uploads.
+    expect(String(store.headers['user-agent'])).toContain('Lurker');
 
     const raw = store.body.toString('latin1');
     const key = byteCacheKey(`${base}/stored.png`);
@@ -212,6 +226,30 @@ describe('the dropper byte cache, end to end', () => {
 
     expect(stores.some((s) => s.method === 'POST')).toBe(true);
     expect(countCached()).toBe(0);
+  });
+
+  it('refuses to record a store whose answered URL disagrees with the minted layout', async () => {
+    // ⚠⚠ The one misconfiguration the pure-function mint cannot see on its own:
+    // a KEY_PREFIX on the dropper (or a wrong PUBLIC_BASE_URL here) makes every
+    // store "succeed" while every minted URL 404s, with no request ever
+    // reaching the cell. The dropper's answered URL is the free cross-check.
+    const { resetWarnThrottleForTests } = await import('../services/previewCache/inflight.js');
+    resetWarnThrottleForTests();
+    const warns: string[] = [];
+    const spy = vi.spyOn(console, 'warn').mockImplementation((m) => void warns.push(String(m)));
+    try {
+      dropperWrongLayout = true;
+      servePng();
+      const res = await agent.get(`/api/link-preview/media/${tokenFor('/mislayout.png')}`);
+      // The reader is still served; only the row is refused.
+      expect(res.status).toBe(200);
+      await whenStoresSettle();
+      expect(stores.some((s) => s.method === 'POST')).toBe(true);
+      expect(countCached()).toBe(0);
+      expect(warns.some((w) => w.includes('layout mismatch'))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('leaves no staging file behind, whether the store lands or fails', async () => {
@@ -359,16 +397,21 @@ describe('resource bounds and diagnostics', () => {
     const cfg = cacheConfig();
     if (cfg.mode !== 'dropper') throw new Error('unreachable');
 
+    // ⚠ Slots released in a FINALLY: the counter is module state with no reset
+    // seam, so an assertion failure that skipped the aborts would pin the shared
+    // ceiling at 16 and cascade into every later store test in this file.
     const opened = [];
-    for (let i = 0; i < 16; i++) {
-      const w = await openDropperWrite(cfg, `bound-${i}`);
-      expect(`writer ${i}: ${w ? 'open' : 'refused'}`).toBe(`writer ${i}: open`);
-      opened.push(w!);
+    try {
+      for (let i = 0; i < 16; i++) {
+        const w = await openDropperWrite(cfg, `bound-${i}`);
+        expect(`writer ${i}: ${w ? 'open' : 'refused'}`).toBe(`writer ${i}: open`);
+        if (w) opened.push(w);
+      }
+      expect(storesInFlightForTests()).toBe(16);
+      expect(await openDropperWrite(cfg, 'bound-over')).toBeNull();
+    } finally {
+      for (const w of opened) await w.abort();
     }
-    expect(storesInFlightForTests()).toBe(16);
-    expect(await openDropperWrite(cfg, 'bound-over')).toBeNull();
-
-    for (const w of opened) await w.abort();
     expect(storesInFlightForTests()).toBe(0);
     const after = await openDropperWrite(cfg, 'bound-after');
     expect(after).not.toBeNull();
@@ -409,8 +452,7 @@ describe('resource bounds and diagnostics', () => {
     };
     try {
       const ok = await readDropper(cfg, 'somekey', 1024 * 1024);
-      expect(ok.kind).toBe('ok');
-      if (ok.kind === 'ok') expect(ok.body.equals(PNG)).toBe(true);
+      expect(ok.kind === 'ok' && ok.body.equals(PNG)).toBe(true);
 
       mode = 'no-length';
       expect((await readDropper(cfg, 'somekey', 1024 * 1024)).kind).toBe('error');
