@@ -90,7 +90,11 @@
        ⚠ No site/author LINE. Discord doesn't have one and it was the least useful line on the
        card: the URL it names is already in the message, a word above it. The site name is still
        what the card falls back to when a page has no title — see `heading`. -->
-  <div v-else class="card" :class="{ 'card-video': isVideo }">
+  <div
+    v-else
+    class="card"
+    :class="{ 'card-video': isVideo, 'card-column': isVideo || cardShape === 'hero' }"
+  >
     <!-- ⚠⚠ BOTH unconditional, and that is the fix for a whole class of empty card. `pageRecord`
          returns ok on a title OR an image, so `preview.title` is absent on ordinary answers —
          an og:image with no og:title, and the deliberately-degraded video record that keeps an
@@ -186,11 +190,26 @@
         <span class="play-badge" aria-hidden="true">▶</span>
       </button>
     </div>
+    <!-- THE HERO. A full-width band under the text, Discord's large-embed shape, and the default
+         for any card whose picture is not a logo — see `cardShape`.
+         ⚠⚠ A FIXED box with the image fitted inside it, rather than a box derived from the
+         image. `og:image:width`/`og:image:height` are DECLARED, not measured: a page can lie,
+         omit one of the pair, or describe an image it isn't sending. Sizing the band from those
+         numbers would put a card's height at the mercy of a stranger's markup — and R1 says no
+         layout may depend on bytes, so the alternative (read the real ratio at decode) is not
+         available either. One box the whole app agrees on cannot be wrong about anything; the
+         declared shape is used only to CHOOSE between the two shapes, never to size one.
+         ⚠ `contain`, not `cover`: 1200x630 is a convention rather than a rule, and a 4:3 or a
+         portrait share image cropped to a 1.9:1 band loses its subject. Letterboxed against the
+         card's own panel it merely sits in a wider frame. -->
+    <div v-else-if="cardShape === 'hero'" class="card-hero">
+      <img class="card-hero-img" :src="preview.thumb" alt="" loading="lazy" decoding="async" />
+    </div>
     <!-- ⚠ NO block at all without an image, rather than an empty square. A card is `ok` on a
          title OR an image, so a title-only card is an ordinary answer — and a reserved box with
          nothing coming is furniture. -->
     <img
-      v-else-if="preview.thumb"
+      v-else-if="cardShape === 'square'"
       class="card-thumb"
       :src="preview.thumb"
       alt=""
@@ -275,29 +294,58 @@ const heading = computed(() => {
   }
 });
 
-/*
- * ⚠⚠ There is deliberately NO per-card layout choice, and it is a decision rather than an
- * omission — the version that had one was built and then removed.
+/**
+ * Which of the two card layouts this preview gets, from the DECLARED shape of its image.
  *
- * It read `thumbWidth`/`thumbHeight` and gave a landscape image the full-width band Discord uses,
- * keeping the square for logos and portraits. It worked, and the shape it produced was worse:
- * a 240px picture per link reads as the message rather than as a note about it, and two links in
- * a row take a screenful. The square annotates. That is what a preview is for, and it is now the
- * answer for every image regardless of its shape.
+ * ⚠⚠ HISTORY, because this reverses a decision and the evidence is the expensive part. A
+ * landscape band was built once, run against real links, and REJECTED on looking at it: "a 240px
+ * picture per link reads as the message rather than as a note about it". What made that verdict
+ * fair at the time was that it fired almost at random — `imageWidth`/`imageHeight` were only ever
+ * populated from an oEmbed thumbnail, so for an ordinary og:image card they were NULL and the
+ * choice fell through to a default. `scrapeMeta` reads `og:image:width`/`og:image:height` now
+ * (resolver v4), so the rule finally has the input it always assumed it had.
  *
- * Recorded because the evidence gathered for it is the expensive part and someone will want it
- * again. Real markup, sampled from the sites themselves: GitHub declares `og:image:width` 1200 by
- * 600, Ars Technica 512x512 (a square LOGO), Wikipedia 869x1200 (portrait), while the New York
- * Times and the BBC declare an image and no size at all. And ⚠⚠ `twitter:card` cannot stand in
- * for the missing sizes: Ars Technica declares `summary_large_image` beside that square logo, so
- * the author's stated intent disagrees with the author's own picture in exactly the direction
- * that produces the bad crop.
+ * Measured from the live markup, twice, a week apart:
  *
- * Whatever replaces this must still take its shape from the DESCRIPTOR rather than the image.
- * Reading `naturalWidth` on load would be accurate and is the one thing this component may not
+ *   reddit.com, /r/irc     256x256     square  — the case this exception exists for
+ *   Ars Technica           512x512     square  — a LOGO
+ *   Wikipedia              869x1200    square  — portrait; a hero band would crop its subject out
+ *   GitHub                 1200x600    hero
+ *   firecore.com/infuse    1200x630    hero
+ *   bradroot.me            undeclared  hero    — by the default below
+ *   NYT, BBC               undeclared  hero    — by the default below
+ *
+ * ⚠⚠ HERO IS THE DEFAULT when nothing is declared, and the trade is deliberate. The undeclared
+ * population is mostly editorial (NYT, BBC), which is exactly what wants a hero; the cost is that
+ * an undeclared square logo gets letterboxed in a wide frame. `contain` is what makes that cost
+ * survivable — the logo is small and centred rather than cropped into a band.
+ *
+ * ⚠⚠ `twitter:card` is NOT consulted, and it is the obvious thing to reach for. It is the
+ * author's stated INTENT and it disagrees with the author's own picture in exactly the direction
+ * that produces the bad result: Ars Technica declares `summary_large_image` beside that 512x512
+ * logo. Re-verified against live markup while writing this. Declared dimensions can be wrong too,
+ * but they are wrong about the thing they describe rather than about something else.
+ *
+ * ⚠ Reading `naturalWidth` on load would be accurate and is the one thing this component may not
  * do: the layout would then depend on bytes and every card would re-arrange on decode, which is
  * R1, the rule the rest of this file exists to keep.
+ *
+ * Not consulted for a video — `isVideo` claims that branch first, because a player's box is the
+ * embed's geometry rather than a choice about a picture.
  */
+const SQUARE_MAX_RATIO = 1.3;
+
+const cardShape = computed<'hero' | 'square' | 'none'>(() => {
+  // A card is `ok` on a title OR an image, so having no picture at all is an ordinary answer.
+  if (!props.preview.thumb) return 'none';
+  const w = props.preview.thumbWidth;
+  const h = props.preview.thumbHeight;
+  // ⚠ Square AND portrait both take the chip. The threshold sits just under 4:3 (1.333), so a
+  // conventional photo is a hero and anything approaching square is not — the shapes that read
+  // as "this is an icon of the site" rather than "this is a picture of the thing".
+  if (w && h && w / h < SQUARE_MAX_RATIO) return 'square';
+  return 'hero';
+});
 
 /**
  * Whether the server could measure this image.
@@ -591,17 +639,17 @@ function activate(): void {
     padding-left: var(--space-5);
   }
 }
-/* The exception: a video's facade goes UNDER the text and full width, because a player reduced
-   to a 72px square is not a player. ⚠ This is about the PLAYER, not about the picture — an
-   iframe replaces that box on the first click, so its 16:9 is the embed's geometry and not a
-   choice about how to present an image.
+/* The picture goes UNDER the text and full width — a video's facade, because a player reduced to
+   a 72px square is not a player, and a hero image, because that is the shape being asked for.
+   ⚠ For a video this is about the PLAYER, not the picture: an iframe replaces that box on the
+   first click, so its 16:9 is the embed's geometry and not a choice about how to present an image.
    ⚠⚠ Load-bearing beyond the arrangement: without it the card stays a ROW, and the flex maths
-   then deletes the text rather than shrinking the player. `.card-text` is `flex: 1` (basis 0%)
-   while `.card-media` carries `width: 100%` (basis = the whole content box), so the bases
+   then deletes the text rather than shrinking the picture. `.card-text` is `flex: 1` (basis 0%)
+   while the media box carries `width: 100%` (basis = the whole content box), so the bases
    already consume the line and the text resolves to 0px wide — title and description vanish
    behind their own `overflow: hidden`, with no overflow anywhere to hint at it. The class
    binding has a test for exactly this reason. */
-.card-video {
+.card-column {
   flex-direction: column;
   gap: var(--space-3);
 }
@@ -669,6 +717,45 @@ function activate(): void {
   line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* The hero band: a fixed box with the picture fitted inside it.
+   ⚠⚠ The RATIO IS A CONSTANT, never derived from `thumbWidth`/`thumbHeight`. Those are numbers a
+   stranger's page declared about a file we have not measured — a page can lie, ship one of the
+   pair, or describe an image it is not serving — and a band sized from them puts a card's height
+   at the mercy of that markup. Deriving it from the bytes instead is R1, which this file exists
+   to keep. A constant box cannot be wrong: the declared shape only picks BETWEEN this and the
+   chip, and a wrong pick is a letterboxed logo rather than a broken layout.
+   1200x630 because that is the og:image convention the declaring half of the web targets, so the
+   common case fills the frame exactly and nothing is bordered at all.
+   ⚠ `contain`, not `cover`. The convention is not a rule — 4:3 and portrait share images are
+   ordinary — and cropping one to a 1.9:1 band cuts the subject out. Fitted, it merely sits in a
+   wider frame, against the card's own panel rather than the chat background. */
+.card-hero {
+  aspect-ratio: 1200 / 630;
+  /* ⚠ NO width cap of its own — the card's 400px does the work (MessageAttachments), and the
+     ratio carries the height down with it: ~197px against ~239px at the old 480. A cap here
+     instead was tried and is worse in a way that only shows on screen, which is why it is
+     recorded: a hero narrower than its own card sits against a band of empty panel, and that
+     reads as a layout mistake rather than as a deliberately smaller picture. Height is not a
+     handle either — capping it holds the box full-width and letterboxes a correctly-shaped
+     image between two bars. Width is the only honest control, and it belongs to the card. */
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--bg);
+}
+/* ⚠⚠ Scoped to the column, exactly like `.card-video .card-media` below and for the identical
+   reason: unscoped, a `width: 100%` basis beside `.card-text`'s 0% basis resolves the text to
+   0px wide and deletes it. Expressed in the selector because happy-dom applies no stylesheet, so
+   no test can observe it. */
+.card-column .card-hero {
+  width: 100%;
+}
+.card-hero-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
 }
 
 /* The small square. ⚠ A fixed CSS box, so it reserves its own height with no dimensions and no

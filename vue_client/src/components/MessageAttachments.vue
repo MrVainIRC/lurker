@@ -152,10 +152,16 @@ function openAt(item: LinkPreview): void {
 }
 /* A card wants the width it's given — its text has to wrap against something — but not the
    full width of a wide window, where it stops reading as part of the message and starts
-   reading as a page element. */
+   reading as a page element.
+   ⚠ 400 rather than 480, and the CARD is what was narrowed rather than the picture inside it.
+   A hero capped below its card's width leaves a band of empty panel down one side, which reads
+   as a layout mistake rather than as a smaller image; narrowing the card keeps the picture
+   flush to both edges and takes the height down with it (376px of content box at 1200/630 is
+   ~197px tall, against ~239px at 480). The square card gets narrower too, which costs its text
+   80px of wrapping width it did not need. */
 .attachments > :deep(.card) {
   align-self: stretch;
-  max-width: 480px;
+  max-width: 400px;
 }
 
 /* ─── The mosaic ──────────────────────────────────────────────────────────────

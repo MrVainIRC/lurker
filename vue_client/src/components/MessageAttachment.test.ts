@@ -203,8 +203,8 @@ describe('MessageAttachment — video embed', () => {
     expect(wrapper.find('.card-play').exists()).toBe(false);
     expect(wrapper.find('iframe').exists()).toBe(false);
     // The thumbnail survives — as an ordinary page card's image, and YOUTUBE declares no
-    // dimensions, so it takes the small square. See the layout suite below.
-    expect(wrapper.find('.card-thumb').attributes('src')).toBe('/api/link-preview/media/tok');
+    // dimensions, so it takes the default hero. See the layout suite below.
+    expect(wrapper.find('.card-hero-img').attributes('src')).toBe('/api/link-preview/media/tok');
     expect(wrapper.find('.card-title').attributes('href')).toBe(YOUTUBE.url);
   });
 
@@ -253,17 +253,21 @@ describe('MessageAttachment — video embed', () => {
 describe('MessageAttachment — the two card shapes', () => {
   beforeEach(() => seedSettings());
 
-  // #692 items 2 and 3. A card is a small square beside its text, or text on its own.
+  // A card is a hero band under its text, a small square beside it, or text on its own — chosen
+  // by the DECLARED shape of the image (`og:image:width`/`og:image:height`, resolver v4).
   //
-  // ⚠⚠ A THIRD shape — the landscape band under the text, Discord's large embed — was built and
-  // removed after looking at it on real links. Its tests are gone with it, but the property they
-  // were really guarding survives here: whatever shape a card takes, it must take it from the
-  // DESCRIPTOR and not from the image. Measuring the picture on load would make the layout depend
-  // on bytes, so every card would lay out once and re-arrange on decode (R1).
+  // ⚠⚠ The hero was built once before and REMOVED after looking at it on real links. It is back
+  // because the input it needed did not exist then: `imageWidth`/`imageHeight` were populated
+  // only from an oEmbed thumbnail, so for an ordinary og:image card they were null and the choice
+  // fired essentially at random. The property those tests were really guarding is unchanged and
+  // is asserted below: whatever shape a card takes, it takes from the DESCRIPTOR and never from
+  // the image. Measuring the picture on load would make layout depend on bytes, so every card
+  // would lay out once and re-arrange on decode (R1).
   //
   // ⚠ The LINE BUDGET half of #692 (title 2, description 3) is pure CSS with no class binding to
   // observe, and happy-dom applies no stylesheet — so there is deliberately no test for it here
-  // rather than one that would stay green with every clamp deleted.
+  // rather than one that would stay green with every clamp deleted. Same for the hero's own
+  // `aspect-ratio` and `object-fit: contain`.
 
   const page = (over: Partial<LinkPreview> = {}) =>
     preview({
@@ -275,27 +279,75 @@ describe('MessageAttachment — the two card shapes', () => {
       ...over,
     });
 
-  it('puts the image beside the text as a small square, whatever shape it is', () => {
-    // ⚠ The dimensions here are GitHub's real 1200x600 — a landscape share image, and once the
-    // trigger for the band. They must change nothing now: a shape that varies per link is
-    // exactly what was removed, and a descriptor field nothing reads is the easiest thing in the
-    // world to start reading again by accident.
-    const wide = mount(MessageAttachment, {
-      props: { preview: page({ thumbWidth: 1200, thumbHeight: 600 }) },
-    });
-    const square = mount(MessageAttachment, {
-      props: { preview: page({ thumbWidth: 512, thumbHeight: 512 }) },
-    });
-    const undeclared = mount(MessageAttachment, { props: { preview: page() } });
+  // Every pair below is real markup, read off the live sites.
+  it('gives a landscape image the hero band, under the text', () => {
+    for (const [w, h] of [
+      [1200, 600], // GitHub
+      [1200, 630], // firecore.com/infuse — the og:image convention
+    ]) {
+      const wrapper = mount(MessageAttachment, {
+        props: { preview: page({ thumbWidth: w, thumbHeight: h }) },
+      });
+      expect(wrapper.find('.card-hero-img').attributes('src')).toBe('/api/link-preview/media/tokP');
+      expect(wrapper.find('.card-thumb').exists()).toBe(false);
+      // ⚠⚠ The column class, and it is not cosmetic: in a ROW the hero's `width: 100%` basis sits
+      // beside `.card-text`'s 0% basis, the two consume the line, and the text resolves to 0px
+      // wide — title and description vanish behind their own `overflow: hidden` with nothing to
+      // hint at it. Same failure the video card carries a warning about.
+      expect(wrapper.find('.card').classes()).toContain('card-column');
+      // Text still leads in source order — nothing is re-ordered visually.
+      const kids = [...wrapper.find('.card').element.children].map((el) => el.className);
+      expect(kids).toEqual(['card-text', 'card-hero']);
+    }
+  });
 
-    for (const wrapper of [wide, square, undeclared]) {
+  it('keeps the small square for a logo, which is what reddit ships', () => {
+    // ⚠ Square AND portrait. A hero band would crop a portrait's subject out, and a 256px logo
+    // stretched across a card reads as a picture of nothing.
+    for (const [w, h] of [
+      [256, 256], // reddit.com and /r/irc
+      [512, 512], // Ars Technica — a LOGO, beside which it declares `summary_large_image`
+      [869, 1200], // Wikipedia — portrait
+    ]) {
+      const wrapper = mount(MessageAttachment, {
+        props: { preview: page({ thumbWidth: w, thumbHeight: h }) },
+      });
       expect(wrapper.find('.card-thumb').attributes('src')).toBe('/api/link-preview/media/tokP');
-      // Not the player's box either, which is the only ratio-reserved block left.
-      expect(wrapper.find('.card-media').exists()).toBe(false);
-      // Text leads, in source order — nothing is re-ordered visually.
+      expect(wrapper.find('.card-hero').exists()).toBe(false);
+      expect(wrapper.find('.card').classes()).not.toContain('card-column');
       const kids = [...wrapper.find('.card').element.children].map((el) => el.className);
       expect(kids).toEqual(['card-text', 'card-thumb']);
     }
+  });
+
+  it('defaults an UNDECLARED image to the hero', () => {
+    // ⚠⚠ The deliberate trade. NYT, BBC and bradroot.me declare an og:image and no size at all —
+    // all three editorial, all three wanting a hero — so the default serves the common case. What
+    // it costs is an undeclared square logo letterboxed in a wide frame, which `object-fit:
+    // contain` makes survivable: small and centred rather than cropped into a band.
+    const wrapper = mount(MessageAttachment, { props: { preview: page() } });
+    expect(wrapper.find('.card-hero-img').exists()).toBe(true);
+    expect(wrapper.find('.card-thumb').exists()).toBe(false);
+  });
+
+  it('treats a HALF-declared shape as undeclared', () => {
+    // A page shipping a width and no height yields no ratio. Reading the one number as though it
+    // were a shape is how a logo ends up in a band.
+    for (const over of [{ thumbWidth: 256 }, { thumbHeight: 256 }, { thumbWidth: 0 }]) {
+      const wrapper = mount(MessageAttachment, { props: { preview: page(over) } });
+      expect(wrapper.find('.card-hero-img').exists()).toBe(true);
+    }
+  });
+
+  it('never lets the PLAYER box be talked into a card shape', () => {
+    // A video's box is the embed's geometry, so `isVideo` claims the branch before `cardShape` is
+    // consulted — even for the square oEmbed thumbnail that would otherwise select the chip.
+    const wrapper = mount(MessageAttachment, {
+      props: { preview: preview({ ...YOUTUBE, thumbWidth: 480, thumbHeight: 480 }) },
+    });
+    expect(wrapper.find('.card-media .card-play').exists()).toBe(true);
+    expect(wrapper.find('.card-hero').exists()).toBe(false);
+    expect(wrapper.find('.card-thumb').exists()).toBe(false);
   });
 
   it('degrades to text only when the card has no image', () => {

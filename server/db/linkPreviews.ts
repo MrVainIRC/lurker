@@ -88,8 +88,16 @@ export const FAIL_TTL_MS = 60 * 60 * 1000;
  *        a targeted migration could use, because the blunt cost is not a cost here: link
  *        previews have not shipped to anyone, so there is no cache in the world worth keeping.
  *        A later bump against a live fleet should weigh that predicate instead.
+ *   v4 — `scrapeMeta` now reads `og:image:width`/`og:image:height`, so `kind: 'page'` rows carry
+ *        the declared shape of their card image where they stored null. Squarely the
+ *        fills-in-a-FIELD case this comment warns about two paragraphs up: every page row cached
+ *        before this is a live, perfectly valid `ok` with no dimensions on it, and the client
+ *        reads their absence as "no declared shape" — which is the HERO default. So without the
+ *        bump, every link anyone had already pasted would render a logo as a stretched band for
+ *        a week, and only newly-seen URLs would come out right. Nothing about that presents as
+ *        a stale cache.
  */
-const RESOLVER_VERSION = 3;
+const RESOLVER_VERSION = 4;
 
 /**
  * Cache key: the requested URL, scoped to the resolver version.
