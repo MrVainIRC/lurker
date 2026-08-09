@@ -6,7 +6,6 @@ import type { Request, Response } from 'express';
 import { getEdition } from '../utils/edition.js';
 import { PROTOCOL_VERSION, MIN_PROTOCOL_VERSION } from '../protocol.js';
 import { previewsEnabled } from '../utils/previews.js';
-import { voiceEnabled } from '../services/voice.js';
 
 const router = Router();
 
@@ -29,9 +28,6 @@ router.get('/', (_req: Request, res: Response) => {
     // presenting toggles that can't do anything.
     features: {
       linkPreviews: previewsEnabled(),
-      // Voice calls (LiveKit): operator opt-in + a configured SFU. Clients
-      // render zero call UI when false.
-      voice: voiceEnabled(),
     },
   });
 });

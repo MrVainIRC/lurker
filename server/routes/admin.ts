@@ -4,7 +4,6 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
-import { originFromRequest } from '../utils/requestOrigin.js';
 import {
   listUsers,
   findUserById,
@@ -55,7 +54,18 @@ function publicInvite(row: any, { origin }: { origin: string }): Record<string, 
   };
 }
 
-// Link origin rule shared with guest call links — see utils/requestOrigin.ts.
+// Prefer the browser-supplied Origin header so the link reflects the URL the
+// admin is actually using — through Vite's dev proxy that's
+// https://irc.local.bradroot.me:5173, and in prod it's whatever the public
+// origin is, regardless of how the reverse proxy forwards to Express.
+// req.protocol/req.get('host') would otherwise leak the upstream Express
+// scheme + host (http://localhost:8010). Falls back to scheme://host for the
+// rare request without an Origin header.
+function originFromRequest(req: Request): string {
+  const origin = req.get('origin');
+  if (origin) return origin;
+  return `${req.protocol}://${req.get('host')}`;
+}
 
 function effectiveIdent(u: User): string {
   return deriveIdent({

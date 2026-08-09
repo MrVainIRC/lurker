@@ -20,7 +20,6 @@ import { nodeUploadConfigured } from './services/uploadProviders/nodeUpload.js';
 import * as systemLog from './services/systemLog.js';
 import { purgeExpiredSessions } from './db/sessions.js';
 import { sweepExpiredPreviews } from './db/linkPreviews.js';
-import { sweepDeadGuestLinks } from './db/voiceLinks.js';
 import { sweepPreviewCache } from './services/previewCache/index.js';
 import { listGrandfatheredUsernames } from './db/users.js';
 import { backfillEncryptColumns } from './db/secretBackfill.js';
@@ -124,12 +123,6 @@ setInterval(purgeExpiredSessions, 60 * 60 * 1000).unref();
 // feature off still has whatever it cached while it was on, and that should still expire.
 sweepExpiredPreviews();
 setInterval(sweepExpiredPreviews, 60 * 60 * 1000).unref();
-
-// Guest call links die 24h after expiry/revocation (voice, #680 stack) — same
-// only-ever-grows shape as the preview cache, same janitor cadence. Not gated
-// on voiceEnabled() for the same reason as above.
-sweepDeadGuestLinks();
-setInterval(sweepDeadGuestLinks, 60 * 60 * 1000).unref();
 
 // The BYTE cache's index needs the same treatment, and for `s3` it is not merely
 // hygiene: nothing else bounds that table, and a row that outlives its object has

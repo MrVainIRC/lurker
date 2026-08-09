@@ -48,7 +48,7 @@ GET /api/config            (no auth)
 → { "edition": "standalone" | "node",
     "protocolVersion": 1,
     "minProtocolVersion": 1,
-    "features": { "linkPreviews": false, "voice": false } }
+    "features": { "linkPreviews": false } }
 ```
 
 `features` carries instance-level flags an operator turned on. Treat a missing
@@ -57,8 +57,7 @@ Settings whose registry entry names a feature (`requiresFeature`) must be
 **hidden**, not merely disabled, when that flag is false: there is no server
 behind them, and the endpoints aren't mounted, so a toggle would do nothing.
 `linkPreviews` gates `chat.inline_media.enabled`, `chat.link_previews.enabled`,
-and the `/api/link-preview/*` endpoints. `voice` gates the `/api/voice/*`
-endpoints — when false, render no call UI at all.
+and the `/api/link-preview/*` endpoints.
 
 Node edition disables `/api/api-tokens`, `/mcp`, and `/uploads/*` static serving;
 standalone has no `/api/node/*`. The WS protocol itself is identical in both.
@@ -657,7 +656,6 @@ a v1 client.
 | `chanlist-state` / `chanlist-result`                                                                                             | `/LIST` cache meta / result page                                                                                                                                                                                                                                                                                                                                                                            | Channel browser                                                                                                                                           |
 | `e2eExport` / `e2eImport`                                                                                                        | E2E key material / import result                                                                                                                                                                                                                                                                                                                                                                            | Replies, this socket only                                                                                                                                 |
 | `dcc-transfer`                                                                                                                   | full transfer row (snake_case)                                                                                                                                                                                                                                                                                                                                                                              | DCC state changes                                                                                                                                         |
-| `call-presence`                                                                                                                  | `networkId, target, active, count` — a voice call's participant count in a channel you've joined changed. `target` is in your connection's own spelling. Deltas only: re-snapshot via `GET /api/voice/presence` on every (re)connect, or a call that started while you had no socket never badges. Channels only — DM calls broadcast no presence                                                           | Voice-enabled instances, on SFU join/leave                                                                                                                |
 | `upload-progress`                                                                                                                | `token, phase, destination, percent`                                                                                                                                                                                                                                                                                                                                                                        | During REST upload (correlate via `progressToken`)                                                                                                        |
 | `export`                                                                                                                         | `job`                                                                                                                                                                                                                                                                                                                                                                                                       | Export job progress                                                                                                                                       |
 | `error`                                                                                                                          | `text`                                                                                                                                                                                                                                                                                                                                                                                                      | Non-fatal; also the reply to unknown verbs                                                                                                                |
@@ -1103,77 +1101,6 @@ check before uploading.
 
 `GET /?limit` list · `POST /:id/accept|reject|cancel`. Live updates via
 `dcc-transfer` frames; file bytes move over IRC, not HTTP.
-
-### Voice calls — `/api/voice` (503 unless the instance enables voice)
-
-Lurker never carries call media — it mints room-scoped tokens for the
-operator's LiveKit SFU, and your client connects to the SFU directly (any
-LiveKit client SDK).
-
-```
-POST /token   { networkId, target }
-→ { token, room, url }        url = the SFU's ws(s):// origin
-```
-
-Gates, in order: `503` voice not enabled · `404` network not owned · `409`
-network not connected · `403` target is a channel you haven't joined (DMs skip
-this — opening a DM call **is** the invite). The token is a 2-hour JWT granting
-join/publish/subscribe on exactly one room; `identity` inside it is your
-current IRC nick, which is what other participants render.
-
-Room names are derived server-side from the network **host** (never the
-`networkId`): `net-<host>-c-<channel>` for channels,
-`net-<host>-d-<nickA>:<nickB>` (sorted pair, `:`-joined) for DMs. Channel and
-nick are folded with the network's declared CASEMAPPING, the host ASCII-folded
-— so every member of a channel lands in the same room, even from another
-Lurker instance sharing the SFU. The host string must match **exactly** across
-users: different DNS aliases of one network derive different rooms.
-
-```
-GET  /presence?networkId       → { calls: [{ target, count }] }
-GET  /policy?networkId&target  → { minJoinMode }        none|voice|halfop|op
-PUT  /policy                   { networkId, target, minJoinMode }   ops (q/a/o)
-POST /moderate                 { networkId, target, action: mute|remove,
-                                 identity }             channel q/a/o/h only
-```
-
-`/presence` is the connect-time snapshot behind the `call-presence` frame
-(§7.1) — call it per connected network on every socket (re)connect. A token
-mint is gated by the channel's `minJoinMode` (403 with a human-readable
-`error` when below the bar; unknown modes on PUT are a 400, never coerced).
-`mute` server-mutes every published track — on self-hosted LiveKit this is
-advisory (the target CAN self-unmute; surface the mute to your user rather
-than pretending it's a lock). `remove` ejects them from the room — after
-which your client must NOT auto-reconnect that call (on self-hosted LiveKit
-the token itself stays valid until expiry, so honouring the removal is the
-client's job).
-`POST /webhook` also lives under `/api/voice` but is LiveKit↔Lurker internal
-(signature-authenticated) — never call it from a client.
-
-**Guest links** (ops, `q/a/o`): capability URLs that let someone without an
-account join one channel's call.
-
-```
-POST   /guest-link          { networkId, target, canPublish? }  → { url, token,
-                              canPublish, expiresAt }           24h link TTL
-GET    /guest-link?networkId&target → { links: [...] }          active links
-DELETE /guest-link/:token   → { ok }                            revoke
-POST   /guest-token         { token, name }                     PUBLIC, throttled
-       → { token, url, canPublish }
-```
-
-`/guest-token` exchanges the link for a **1-hour** room token (`canPublish:
-false` = listen-only — don't try to publish, the SFU refuses). Guest
-identities are always `guest-<name>-<hex>` — render them differently from
-members; a bare-nick identity is never a guest. Revoking a link stops NEW
-exchanges only: already-minted guest tokens live out their hour (OSS LiveKit
-cannot revoke tokens) — ops `remove` lingering guests. The web client serves
-the joining UI at `/call/:token`.
-
-Build shareable URLs as `<your own origin>/call/<token>` — the `url` field in
-mint/list responses is best-effort (derived from the request's `Origin`
-header, which browsers omit on same-origin GETs) and may carry the server's
-internal host.
 
 ### Export / import
 
