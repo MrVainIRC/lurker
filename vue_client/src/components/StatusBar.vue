@@ -98,7 +98,7 @@
          (which owns the textarea) and StatusBar (which renders the popover)
          stay decoupled. -->
     <SuggestionStrip
-      v-show="overlay.nickOpen"
+      v-show="isFocusedPane && overlay.nickOpen"
       :items="overlay.nickItems"
       :key-for="nickKeyFor"
       :active-index="overlay.nickActiveIndex"
@@ -110,7 +110,7 @@
       </template>
     </SuggestionStrip>
     <SuggestionStrip
-      v-show="overlay.emojiOpen"
+      v-show="isFocusedPane && overlay.emojiOpen"
       :items="overlay.emojiItems"
       :key-for="emojiKeyFor"
       :active-index="overlay.emojiActiveIndex"
@@ -123,7 +123,7 @@
       </template>
     </SuggestionStrip>
     <MircColorPicker
-      v-if="overlay.colorPickerOpen"
+      v-if="isFocusedPane && overlay.colorPickerOpen"
       :open="overlay.colorPickerOpen"
       @apply="applyColor"
       @reset="resetColor"
@@ -187,6 +187,14 @@ const auth = useAuthStore();
 const nickColors = useNickColors();
 const composing = useComposing();
 
+// Is this the pane the user is typing in? The composing chip and the composer
+// overlays are module-level singletons describing ONE draft, and a split frame
+// renders a status bar per pane — so without this the pane being typed in
+// painted its SPLIT/FLOOD chip and its suggestion strip across all four bars.
+// activeKey follows pane focus, so exactly one bar answers true; with one pane
+// (and on mobile) it is always true.
+const isFocusedPane = computed(() => paneKey.value === networks.activeKey);
+
 // SPLIT at 2 chunks, FLOOD (n) at 3+. Lives just before the typing indicator so
 // heavy composers can see it without taking their eyes off the input. Empty /
 // single-chunk drafts render nothing. On a multiline network `composing.chunks`
@@ -194,6 +202,7 @@ const composing = useComposing();
 // 2+ → MULTILINE ×N. (#381) The label always states what will happen; see
 // splitClass below for when that's coloured as a warning.
 const splitLabel = computed(() => {
+  if (!isFocusedPane.value) return '';
   if (composing.multiline) {
     return composing.chunks <= 1 ? 'MULTILINE' : `MULTILINE ×${composing.chunks}`;
   }
@@ -206,6 +215,7 @@ const splitLabel = computed(() => {
 // neutral count rather than crying wolf in warn/bad on every long message
 // (#578). An overlong /me is still bad: actions never split, they're refused.
 const splitClass = computed(() => {
+  if (!isFocusedPane.value) return '';
   if (composing.multiline) {
     if (composing.chunks <= 1) return '';
     if (settings.effective('chat.allow_split_messages')) return '';
