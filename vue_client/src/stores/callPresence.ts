@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 // Tracks which channels currently have an active voice call, so the UI can show
-// "Join call (N)" even for users who are not in the call. Fed two ways:
+// a live participant count beside the header phone button even for users who
+// are not in the call. Fed two ways:
 //   - live deltas: the server's `call-presence` frame (driven by LiveKit
 //     webhooks, see routes/voice.ts broadcastCallPresence)
 //   - snapshots: hydrate() on each (re)connect edge, because the frame stream
