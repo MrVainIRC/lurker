@@ -584,10 +584,24 @@ function activate(): void {
    Pinning the height removes the jump instead of compensating for it: the box is correct before
    a single byte arrives. Width still settles when the ratio is known, which costs nothing —
    only vertical movement disturbs a scroll position.
-   200px rather than the mosaic's 160px row: a video is always on its own line, so it is not
-   matching anything, and a player wants more room than a thumbnail does. */
+
+   ⚠⚠ 300px, half as much again as the 200px it replaced, and the reason is that THIS IS THE ONLY
+   PLACE A VIDEO IS EVER WATCHED. The media viewer is images-only — `openAt` filters on
+   `kind === 'image'`, because MediaViewerModal picks its element from the URL's extension and a
+   proxy path has none, so a video handed to it mounts MP4 bytes in an `<img>` and fails. Discord
+   is the same: its inline player has no lightbox behind it either. An image can afford to be a
+   thumbnail because a click opens the real thing; a video at thumbnail size is just small.
+
+   ⚠ The cost is on a narrow column, and it grows with this number. `max-width: 100%` clamps the
+   width while this height stays put, so a 16:9 clip on a phone letterboxes — ~49px of bar top
+   and bottom at 360px wide, where at 200px there was none. That is the thing to look at before
+   raising this again. Accepted rather than fixed, because every fix trades it for something
+   worse: `max-height` restores the 300x150 jump this rule exists to remove, and a fixed
+   `aspect-ratio` box (the mosaic's trick) would letterbox every phone-shot VERTICAL video down
+   its sides instead, which is the more common shape on IRC. Letting the width follow the real
+   ratio is what makes a portrait clip render as a portrait clip. */
 .inline-video {
-  height: 200px;
+  height: 300px;
 }
 .inline-audio {
   width: 100%;
