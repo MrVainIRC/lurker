@@ -518,6 +518,31 @@ describe('MessageAttachment — the click must not be eaten', () => {
 });
 
 describe('MessageAttachment — growth the list can react to', () => {
+  it('asks the browser to seek, which is the only poster frame available', async () => {
+    // ⚠⚠ Without this a `<video>` paints nothing until it decodes, so an unplayed clip is a black
+    // rectangle with controls on it. There is no ffmpeg to make a real poster with, and no
+    // lightbox behind the player to recover from a bad guess — the inline element is the whole
+    // affordance. `#t=0.1` seeks on load, forcing a decode.
+    //
+    // ⚠ Asserted on the ELEMENT, not on the computed: a fragment appended to the wrong attribute
+    // (or dropped by a template refactor) is invisible to a type check and silent at runtime.
+    // ⚠ And the token path must survive intact ahead of the `#` — the proxy URL is an HMAC over
+    // the URL, so mangling it 404s every video rather than merely losing the poster.
+    seedSettings();
+    const video = preview({ url: 'https://e.test/c.mp4', kind: 'video', src: '/api/lp/media/v' });
+    const wrapper = mount(MessageAttachment, { props: { preview: video } });
+    expect(wrapper.find('video').attributes('src')).toBe('/api/lp/media/v#t=0.1');
+  });
+
+  it('leaves AUDIO alone, which has no frame to paint', () => {
+    // A seek buys nothing for a waveform-less transport bar, and it would spend the bandwidth
+    // anyway.
+    seedSettings();
+    const audio = preview({ url: 'https://e.test/s.mp3', kind: 'audio', src: '/api/lp/media/a' });
+    const wrapper = mount(MessageAttachment, { props: { preview: audio } });
+    expect(wrapper.find('audio').attributes('src')).toBe('/api/lp/media/a');
+  });
+
   it('tells the list when a video finally reports its size', async () => {
     // ⚠ The server measures dimensions for IMAGES only, so a video has no width/height to
     // reserve a box with: it lays out at the UA default 300x150 and jumps to full size when

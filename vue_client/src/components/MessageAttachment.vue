@@ -61,10 +61,12 @@
   <!-- ⚠ Never tiled. A player cropped into a grid cell loses its controls, which are the part
        that matters, so MessageAttachments stacks video and audio at full width and the mosaic
        is images only. -->
+  <!-- ⚠ `videoSrc`, not `preview.src` — it carries a `#t=` fragment that stands in for the poster
+       frame we have no ffmpeg to generate. See the computed. -->
   <video
     v-else-if="preview.kind === 'video' && preview.src"
     class="inline-video"
-    :src="preview.src"
+    :src="videoSrc"
     controls
     preload="metadata"
     @click.stop
@@ -255,6 +257,37 @@ const playing = ref(false);
 const embedEl = useTemplateRef<HTMLIFrameElement>('embedEl');
 
 const isVideo = computed(() => props.preview.kind === 'video-embed' && !!props.preview.embedUrl);
+
+/**
+ * The player's source, with a Media Fragment asking the browser to start at 0.1s.
+ *
+ * ⚠⚠ THIS IS THE POSTER FRAME, and it is a substitute for one. A `<video>` with no `poster`
+ * paints nothing until it has decoded a frame, so an unplayed clip is a black rectangle with
+ * controls on it — you cannot tell one video in a buffer from another. Discord does not have
+ * this problem because it decodes the first frame SERVER-side: their media library (Lilliput,
+ * open source) bundles libavcodec precisely to thumbnail MP4. We have no ffmpeg anywhere — see
+ * `uploads.test.ts`, which asserts an empty `thumbnail_url` for exactly that reason — and adding
+ * it would mean decoding arbitrary third-party video on the server, a far larger parser surface
+ * than sharp reading 64 KB of image header.
+ *
+ * `#t=0.1` seeks on load, which forces a decode, which paints. It works only because the media
+ * proxy does real Range plumbing (`routes/linkPreview.ts`) — a source that ignores byte ranges
+ * cannot be seeked, so this would be inert against a naive proxy.
+ *
+ * ⚠ A fragment is never transmitted, so the HMAC token in the path and the request the server
+ * sees are both untouched. This cannot invalidate a proxy URL.
+ *
+ * ⚠ It COSTS BANDWIDTH, per viewer rather than once per cell: `preload="metadata"` alone fetches
+ * roughly the container header, and this makes the browser pull far enough in to decode. The
+ * trade was taken deliberately — inline images already spend per-viewer bytes on exactly this
+ * kind of at-a-glance legibility, and a video is the one attachment with no lightbox behind it
+ * to recover from a bad guess.
+ *
+ * ⚠ 0.1s rather than 0: some encoders have no decodable frame exactly at zero, and a seek to 0
+ * is frequently a no-op that paints nothing. The cost is that playback and replay both begin
+ * 100ms in.
+ */
+const videoSrc = computed(() => `${props.preview.src ?? ''}#t=0.1`);
 
 /**
  * What the card is called, and what its link says. Never empty.
