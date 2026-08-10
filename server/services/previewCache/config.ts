@@ -325,6 +325,24 @@ export function expired(createdAt: string): boolean {
  * ⚠ Canonicalised the way `urlHash` does — fragment stripped — so `#a` and `#b` of
  * one image share an object rather than being fetched and stored twice.
  */
+/**
+ * Cache key for a STORED POSTER FRAME — bytes this instance decoded itself, which
+ * therefore have NO origin URL to fall back to. Kept alongside `byteCacheKey` so the
+ * two key spaces visibly cannot collide (distinct version prefixes), and derived from
+ * the MEDIA's URL so a re-resolve of the same clip lands on the same object.
+ */
+export function posterCacheKey(url: string): string {
+  let key: string;
+  try {
+    const canonical = new URL(url);
+    canonical.hash = '';
+    key = canonical.toString();
+  } catch {
+    key = url.replace(/#[\s\S]*$/, '');
+  }
+  return crypto.createHash('sha256').update(`poster-v1|${key}`).digest('hex');
+}
+
 export function byteCacheKey(url: string): string {
   let key: string;
   try {

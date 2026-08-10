@@ -21,11 +21,7 @@ import type { AddressInfo } from 'node:net';
 import type { Express } from 'express';
 import type { LurkerTestAgent } from '../test-utils/testApp.js';
 import { setupTestDb, createTestApp, createAuthedAgent } from '../test-utils/testApp.js';
-
-vi.mock('../utils/ipGuard.js', () => ({
-  isBlockedIpLiteral: (host: string) => host.replace(/^\[|\]$/g, '') !== '127.0.0.1',
-  isBlockedIpv4: (ip: string) => ip !== '127.0.0.1',
-}));
+import { startStubDecoder, type StubDecoder } from '../test-utils/stubDecoder.js';
 
 const ctx = setupTestDb('routes-link-preview-droppercache');
 
@@ -50,6 +46,7 @@ let dropperBase: string;
 const API_KEY = 'test-upload-key';
 const CDN = 'https://cdn.example.com/previews';
 
+let stub: StubDecoder;
 let app: Express;
 let agent: LurkerTestAgent;
 let mintProxyToken: typeof import('../services/mediaProxyToken.js').mintProxyToken;
@@ -78,6 +75,13 @@ function servePng(body = PNG): void {
 }
 
 beforeAll(async () => {
+  stub = await startStubDecoder();
+  // These suites resolve direct-image URLs cold, so the stub answers the way the real
+  // decoder answers direct media: the URL IS the content, echoed back as `imageUrl`.
+  stub.onResolve = (url) => ({
+    status: 'ok',
+    meta: { kind: 'image', imageUrl: url, mime: 'image/png' },
+  });
   // The stub dropper. Started BEFORE the cache config is read, because the
   // config is resolved once per process and has to point at a real port.
   dropper = http.createServer((req, res) => {
@@ -135,6 +139,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await stub.close();
   await new Promise<void>((resolve) => origin.close(() => resolve()));
   dropper.closeAllConnections();
   await new Promise<void>((resolve) => dropper.close(() => resolve()));
