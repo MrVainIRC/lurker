@@ -80,14 +80,16 @@ const MOSAIC_CELLS = 4;
 /**
  * Every image in the message, in order.
  *
- * ⚠ IMAGES only, and video is the deliberate omission. MediaViewerModal derives which element to
- * render from the URL's extension, and a proxy path has none — `mediaKindForUrl` returns null for
- * a relative URL — so it falls back to `image` and would mount a video's bytes in an `<img>`,
- * producing the "open in browser" failure card for a file that plays fine inline.
+ * ⚠ IMAGES only, and video is the deliberate omission — but no longer for the reason this
+ * comment used to give. The old hazard was that MediaViewerModal derives its element from the
+ * URL's extension, a proxy path has none, and a video handed to it mounted MP4 bytes in an
+ * `<img>`. That cannot arise now: the server mints no `src` for video or audio at all, so there
+ * are no bytes to hand anywhere. The filter stays because the mosaic is a grid of PICTURES, and
+ * a file card is not one.
  *
- * ⚠ It is also why a video is never a mosaic tile. A player cropped into a grid cell is not a
- * player: its controls are the part that gets cut. Video and audio stack at full width, where
- * their transport has room, which is what audio has always done.
+ * ⚠ It is also why video and audio are never mosaic tiles. They render as full-width file cards
+ * (see MessageAttachment), and a card cropped into a grid cell loses the text that is the whole
+ * of it.
  */
 const images = computed(() => props.previews.filter((p) => p.kind === 'image'));
 

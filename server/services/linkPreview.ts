@@ -728,7 +728,30 @@ export function toDescriptor(record: PreviewRecord): PreviewDescriptor {
     d.kind = 'page';
   }
 
-  if (record.imageUrl) {
+  // ⚠⚠ VIDEO AND AUDIO ARE GIVEN NO BYTE URL AT ALL, AND THAT IS THE FEATURE.
+  //
+  // The proxy exists to stop a card the reader never asked for from telling a stranger's
+  // server who is reading — unintended view stats. It was never meant to be an anonymizing
+  // relay for content someone deliberately plays: hiding an IP at the moment a reader presses
+  // play conceals nothing that clicking the link itself wouldn't reveal a second later.
+  //
+  // ⚠ Withholding `src` is what makes the card click-to-activate. A `<video src>` fetches
+  // unasked — metadata at minimum, and the `#t=` poster trick the clients used to run made it
+  // a range request for real frames — so emitting one is itself the involuntary fetch this
+  // rule is about. There is no "don't preload" flag that survives every client.
+  //
+  // ⚠⚠ It is also what stops one 44 MB clip being relayed once PER VIEWER, PER VIEW, forever:
+  // the byte cache stores images only (`previewCache/index.ts`), so video never became cheap
+  // on the second read the way an image does. On 2026-08-10 that relay exhausted the control
+  // plane's kernel socket memory and capped EVERY connection on the box — chat included — at
+  // ~7 KB/s. The user-facing half of this policy is in docs/SELF_HOSTING.md, under "Link
+  // previews & inline media".
+  //
+  // ⚠ No migration and no RESOLVER_VERSION bump accompany this. The record is unchanged —
+  // `imageUrl`, `mime` and `kind` all still mean what they meant — and descriptors are minted
+  // per request, so rows cached under the old behaviour render the new card on the next read.
+  const relaysBytes = record.kind !== 'video' && record.kind !== 'audio';
+  if (record.imageUrl && relaysBytes) {
     // ⚠⚠ A CACHED object is served from its own public URL, and only the mint site
     // knows that. `src`/`thumb` are opaque to every client — nothing constructs one,
     // nothing parses one — so substituting a CDN URL for a proxy path here is
@@ -749,7 +772,9 @@ export function toDescriptor(record: PreviewRecord): PreviewDescriptor {
     // For direct media the bytes ARE the content (`src`); for a page they're
     // decoration on a card (`thumb`). Same proxy, different slot, so a client
     // never has to re-derive which one it's looking at from `kind`.
-    if (record.kind === 'image' || record.kind === 'video' || record.kind === 'audio') {
+    // ⚠ `image` is now the ONLY direct-media kind that reaches here — video and audio were
+    // filtered out above — so this is a two-way split, not the three-kind test it replaced.
+    if (record.kind === 'image') {
       d.src = proxied;
     } else {
       d.thumb = proxied;
@@ -764,11 +789,8 @@ export function toDescriptor(record: PreviewRecord): PreviewDescriptor {
   return d;
 }
 
-/** Ceiling on preview IMAGE bytes the proxy will serve. */
+/** Ceiling on preview IMAGE bytes the proxy will serve — now the ONLY ceiling it has. */
 export const MAX_IMAGE_PROXY_BYTES = 8 * 1024 * 1024;
-/** Ceiling on VIDEO/AUDIO bytes. Larger because these stream to a media element rather than
- *  being decoded whole — an 8 MB cut-off truncated ordinary clips mid-playback. */
-export const MAX_MEDIA_PROXY_BYTES = 64 * 1024 * 1024;
 
 /**
  * Whether the byte proxy will serve this content type.
@@ -778,8 +800,13 @@ export const MAX_MEDIA_PROXY_BYTES = 64 * 1024 * 1024;
  * format wearing a picture's clothes, served under OUR origin — existed in two places that had
  * to be kept in step by hand. One definition, and the proxy serves exactly the kinds the
  * resolver is willing to call media.
+ *
+ * ⚠⚠ IMAGES ONLY, as of the media-policy change. The former `MAX_MEDIA_PROXY_BYTES` (64 MB)
+ * was deleted rather than lowered: video and audio are not relayed at any size now, so a
+ * ceiling for them would only describe a path that no longer exists. `toDescriptor` stops
+ * minting a `src` for those kinds, so nothing should ask — but this is the enforcement point,
+ * and it has to refuse a replayed token from a client holding an older descriptor.
  */
 export function proxyableContentType(contentType: string): boolean {
-  const kind = kindForContentType(contentType);
-  return kind === 'image' || kind === 'video' || kind === 'audio';
+  return kindForContentType(contentType) === 'image';
 }

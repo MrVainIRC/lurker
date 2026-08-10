@@ -95,6 +95,38 @@ describe('serving bytes', () => {
     expect(res.status).toBe(404);
   });
 
+  // ⚠⚠ THE MEDIA-POLICY CONTRACT, asserted at the enforcement point rather than only at the
+  // mint. `toDescriptor` no longer hands out a `src` for these kinds, so in normal operation
+  // nothing asks — but a token is a pure HMAC of the URL, so a descriptor minted before the
+  // change (sitting in an open tab, or replayed by anyone who kept one) still verifies. The
+  // route is what has to say no, and saying no here is what makes the relay actually gone
+  // rather than merely unadvertised. The policy is stated for operators under "Link previews
+  // & inline media" in docs/SELF_HOSTING.md.
+  for (const [kind, contentType, path] of [
+    ['video', 'video/mp4', '/clip.mp4'],
+    ['video', 'video/quicktime', '/phone.mov'],
+    ['audio', 'audio/mpeg', '/song.mp3'],
+  ] as const) {
+    it(`refuses ${contentType}: ${kind} is never relayed, at any size`, async () => {
+      // ⚠ A TINY body, deliberately. Refusing a 44 MB clip could be explained by a size
+      // ceiling; refusing five bytes can only be explained by the kind. That is the property
+      // under test — there is no longer a size at which video is served.
+      handler = (_req, res) => {
+        res.writeHead(200, { 'content-type': contentType, 'content-length': '5' });
+        res.end('bytes');
+      };
+      const res = await agent.get(`/api/link-preview/media/${tokenFor(path)}`);
+      // ⚠ 404, not 413. A size ceiling would be the wrong answer twice over: it implies a
+      // smaller clip would be served, and `MAX_MEDIA_PROXY_BYTES` no longer exists to name one.
+      expect(res.status).toBe(404);
+      // ⚠⚠ None of the origin's bytes reached the client, and the response does not wear the
+      // media type. Status alone would pass if the route 404'd a header while still piping the
+      // body — which is exactly the shape of the bug this whole change is about.
+      expect(res.text ?? '').not.toContain('bytes');
+      expect(res.headers['content-type'] ?? '').not.toContain(contentType);
+    });
+  }
+
   it('refuses text/html, which is the other way to get script into our origin', async () => {
     handler = (_req, res) => {
       res.writeHead(200, { 'content-type': 'text/html' });
@@ -119,12 +151,12 @@ describe('serving bytes', () => {
   it('forwards a range, and says so, when the origin honours one', async () => {
     handler = (req, res) => {
       if (!req.headers.range) {
-        res.writeHead(200, { 'content-type': 'video/mp4' });
+        res.writeHead(200, { 'content-type': 'image/png' });
         res.end('whole');
         return;
       }
       res.writeHead(206, {
-        'content-type': 'video/mp4',
+        'content-type': 'image/png',
         'content-range': `bytes 0-4/1000`,
         'content-length': '5',
       });
@@ -132,7 +164,7 @@ describe('serving bytes', () => {
     };
 
     const res = await agent
-      .get(`/api/link-preview/media/${tokenFor('/clip.mp4')}`)
+      .get(`/api/link-preview/media/${tokenFor('/clip.png')}`)
       .set('Range', 'bytes=0-4')
       .expect(206);
     expect(res.headers['content-range']).toBe('bytes 0-4/1000');
@@ -146,7 +178,7 @@ describe('serving bytes', () => {
     // resource. The real size is the figure after the slash in Content-Range.
     handler = (_req, res) => {
       res.writeHead(206, {
-        'content-type': 'video/mp4',
+        'content-type': 'image/png',
         'content-range': `bytes 0-1023/${1024 * 1024 * 1024}`,
         'content-length': '1024',
       });
@@ -154,7 +186,7 @@ describe('serving bytes', () => {
     };
 
     const res = await agent
-      .get(`/api/link-preview/media/${tokenFor('/huge.mp4')}`)
+      .get(`/api/link-preview/media/${tokenFor('/huge.png')}`)
       .set('Range', 'bytes=0-1023');
     expect(res.status).toBe(413);
   });
@@ -179,7 +211,7 @@ describe('serving bytes', () => {
       res.end();
     };
     const res = await agent
-      .get(`/api/link-preview/media/${tokenFor('/short.mp4')}`)
+      .get(`/api/link-preview/media/${tokenFor('/short.png')}`)
       .set('Range', 'bytes=9999-')
       .expect(416);
     expect(res.headers['content-range']).toBe('bytes */500');
@@ -235,7 +267,7 @@ describe('holding and releasing the fetch slot', () => {
         // Deliberately slow: the fetch is still in flight when the client leaves.
         setTimeout(() => {
           if (!res.destroyed) {
-            res.writeHead(200, { 'content-type': 'video/mp4' });
+            res.writeHead(200, { 'content-type': 'image/png' });
             res.end('too late');
           }
         }, 3_000).unref();
@@ -245,7 +277,7 @@ describe('holding and releasing the fetch slot', () => {
     // ⚠ `.end()` to DISPATCH. A superagent request is lazy — it isn't sent until something
     // subscribes — so building one and aborting it proves nothing at all; the origin never sees
     // a connection and the assertion below waits forever for a close that cannot come.
-    const req = agent.get(`/api/link-preview/media/${tokenFor('/abandoned.mp4')}`);
+    const req = agent.get(`/api/link-preview/media/${tokenFor('/abandoned.png')}`);
     req.end(() => {});
     await new Promise((r) => setTimeout(r, 150));
     req.abort();
@@ -295,7 +327,7 @@ describe('the resource-size cap on a partial response', () => {
   const partial = (contentRange: string): void => {
     handler = (_req, res) => {
       res.writeHead(206, {
-        'content-type': 'video/mp4',
+        'content-type': 'image/png',
         'content-range': contentRange,
         'content-length': '1024',
       });
@@ -308,7 +340,7 @@ describe('the resource-size cap on a partial response', () => {
     // that as "no total stated, carry on".
     partial(`bytes 0-1023/${'9'.repeat(400)}`);
     const res = await agent
-      .get(`/api/link-preview/media/${tokenFor('/absurd.mp4')}`)
+      .get(`/api/link-preview/media/${tokenFor('/absurd.png')}`)
       .set('Range', 'bytes=0-1023');
     expect(res.status).toBe(413);
   });
@@ -316,7 +348,7 @@ describe('the resource-size cap on a partial response', () => {
   it('refuses a Content-Range it cannot parse', async () => {
     partial('bytes 0-1023/not-a-number');
     const res = await agent
-      .get(`/api/link-preview/media/${tokenFor('/garbage.mp4')}`)
+      .get(`/api/link-preview/media/${tokenFor('/garbage.png')}`)
       .set('Range', 'bytes=0-1023');
     expect(res.status).toBe(413);
   });
@@ -326,7 +358,7 @@ describe('the resource-size cap on a partial response', () => {
     // origin could state an acceptable size second and be believed.
     partial(`bytes 0-1023/${1024 * 1024 * 1024}, bytes 0-1023/1024`);
     const res = await agent
-      .get(`/api/link-preview/media/${tokenFor('/twohdr.mp4')}`)
+      .get(`/api/link-preview/media/${tokenFor('/twohdr.png')}`)
       .set('Range', 'bytes=0-1023');
     expect(res.status).toBe(413);
   });
@@ -336,7 +368,7 @@ describe('the resource-size cap on a partial response', () => {
     // outright would be the other failure: the per-response byte counter is what bounds it.
     partial('bytes 0-1023/*');
     const res = await agent
-      .get(`/api/link-preview/media/${tokenFor('/unknown.mp4')}`)
+      .get(`/api/link-preview/media/${tokenFor('/unknown.png')}`)
       .set('Range', 'bytes=0-1023');
     expect(res.status).toBe(206);
   });
@@ -350,10 +382,10 @@ describe('range advertisement', () => {
     handler = (_req, res) => {
       // Set as an array so node emits the header twice, which is the case under test.
       res.setHeader('Accept-Ranges', ['bytes', 'bytes']);
-      res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': '5' });
+      res.writeHead(200, { 'content-type': 'image/png', 'content-length': '5' });
       res.end('whole');
     };
-    const res = await agent.get(`/api/link-preview/media/${tokenFor('/dupehdr.mp4')}`);
+    const res = await agent.get(`/api/link-preview/media/${tokenFor('/dupehdr.png')}`);
     expect(res.status).toBe(200);
     expect(res.headers['accept-ranges']).toBe('bytes');
   });

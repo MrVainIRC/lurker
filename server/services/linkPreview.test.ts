@@ -169,12 +169,33 @@ describe('toDescriptor', () => {
     expect(JSON.stringify(d)).not.toContain('cdn.example.com');
   });
 
-  it('puts direct media in src, because the bytes ARE the content', () => {
-    for (const kind of ['image', 'video', 'audio'] as const) {
-      const d = toDescriptor(record({ kind, imageUrl: 'https://cdn.example.com/a.bin' }));
-      expect(d.src).toMatch(/^\/api\/link-preview\/media\//);
+  it('puts a direct IMAGE in src, because the bytes ARE the content', () => {
+    const d = toDescriptor(record({ kind: 'image', imageUrl: 'https://cdn.example.com/a.png' }));
+    expect(d.src).toMatch(/^\/api\/link-preview\/media\//);
+    expect(d.thumb).toBeUndefined();
+  });
+
+  // ⚠⚠ The media-policy change, and the reason it is asserted on BOTH fields: an earlier shape
+  // of this could plausibly have demoted video to `thumb` rather than dropping it, which would
+  // have rendered a card with a 44 MB "thumbnail" — the relay this exists to end, wearing a
+  // different field name. Neither slot may carry a byte URL for these kinds.
+  it('gives video and audio NO byte url at all, in either slot', () => {
+    for (const kind of ['video', 'audio'] as const) {
+      const d = toDescriptor(record({ kind, imageUrl: 'https://cdn.example.com/a.mp4' }));
+      expect(d.src).toBeUndefined();
       expect(d.thumb).toBeUndefined();
+      // The card still has to be drawable: the origin URL and the measured type survive.
+      expect(d.url).toBe('https://example.com/a');
+      expect(d.kind).toBe(kind);
     }
+  });
+
+  // ⚠ The whole descriptor, not just the two byte fields. `mintProxyToken` is an HMAC of the
+  // URL, so a leak here would be a token that still resolves — and the point of withholding
+  // `src` is that nothing reaches the client that a player could be pointed at.
+  it('leaks no proxy path anywhere in a video descriptor', () => {
+    const d = toDescriptor(record({ kind: 'video', imageUrl: 'https://cdn.example.com/a.mp4' }));
+    expect(JSON.stringify(d)).not.toContain('/api/link-preview/media/');
   });
 
   it('withholds thumb dimensions when there is no thumb to describe', () => {
