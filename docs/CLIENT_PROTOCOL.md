@@ -1056,17 +1056,29 @@ form.
 
 ### Uploads — `/api/uploads`
 
-| Endpoint         | Notes                                                                                                                                                                                                                                                                       |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /`         | `multipart/form-data`, file field **`image`**; optional `uploaderId`, `progressToken` (≤64 chars — progress arrives as `upload-progress` WS frames). → `{id, url, mime, can_delete, thumbnail_url?}`. `413` over cap, `415` rejected type, `502` provider error (never 401) |
-| `GET /`          | `?before, limit, q, kind` → `{items, providers, maxUploadBytes}`                                                                                                                                                                                                            |
-| `GET /:id/thumb` | Binary thumbnail                                                                                                                                                                                                                                                            |
-| `DELETE /:id`    | `409` if not deletable                                                                                                                                                                                                                                                      |
+| Endpoint               | Notes                                                                                                                                                                                                                                                                       |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /`               | `multipart/form-data`, file field **`image`**; optional `uploaderId`, `progressToken` (≤64 chars — progress arrives as `upload-progress` WS frames). → `{id, url, mime, can_delete, thumbnail_url?}`. `413` over cap, `415` rejected type, `502` provider error (never 401) |
+| `GET /`                | `?before, limit, q, kind, favorites` → `{items, providers, maxUploadBytes}`. Each item carries `favorite: boolean`                                                                                                                                                          |
+| `GET /:id/thumb`       | Binary thumbnail                                                                                                                                                                                                                                                            |
+| `PUT /:id/favorite`    | Star it → `{ok, favorite:true}`. `404` if no such upload                                                                                                                                                                                                                    |
+| `DELETE /:id/favorite` | Unstar it → `{ok, favorite:false}`. Succeeds on an already-unstarred row; `404` only means no such upload                                                                                                                                                                   |
+| `DELETE /:id`          | `409` if not deletable                                                                                                                                                                                                                                                      |
 
 `/api/uploaders` manages upload destinations (list/select/create/update/delete;
 secrets write-only). Standalone serves local files publicly at
 `GET /uploads/:key` (no auth, sandboxed CSP). Paste the returned `url` into a
 message — the server does the rest.
+
+**Favourites** (`?favorites=1`) is the user's starred set — a curated quick-access
+list, not another page of history, and it behaves differently in two ways worth
+coding to. It is ordered by **when the upload was starred**, newest star first,
+not by upload id; and because that ordering is incompatible with the `before` id
+cursor, the server **ignores `before`** here and returns the whole set in one
+response (ceiling 200). Page it and you will get the same rows back. Moderated
+(`removed`) uploads are excluded even when starred, since their bytes are gone —
+they still appear in an unfiltered `GET /` as tombstones, and can still be
+unstarred. `favorites` composes normally with `q` and `kind`.
 
 **Size cap.** `maxUploadBytes` — on the `snapshot` frame and on `GET /api/uploads`
 — is the largest **file** this account may send, and the number to compress media
