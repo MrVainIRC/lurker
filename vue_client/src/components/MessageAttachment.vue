@@ -68,8 +68,10 @@
        defect the wrapper note above is written about.
        ⚠ No `measured` emit: unlike an image or a player this box has no bytes coming, so its
        height is final at first paint and there is no late growth for the scroller to chase. -->
-  <div v-else-if="isMediaFile" class="card card-file">
-    <span class="file-badge" aria-hidden="true">{{ preview.kind === 'video' ? '▶' : '♪' }}</span>
+  <div v-else-if="isMediaFile" class="card card-file" :class="{ 'card-column': !!preview.thumb }">
+    <span v-if="!preview.thumb" class="file-badge" aria-hidden="true">{{
+      preview.kind === 'video' ? '▶' : '♪'
+    }}</span>
     <div class="card-text">
       <a
         class="card-title"
@@ -81,6 +83,30 @@
       >
       <div class="card-desc">{{ mediaTypeLabel }}</div>
     </div>
+    <!-- THE POSTER: a first frame the SERVER decoded and stored (lurker-previews), so unlike
+         every other thumb it was never fetched from the origin — rendering it costs the reader
+         nothing and tells the origin nothing, which is what lets it appear unasked. Clicking is
+         the same deliberate act as the title link: straight to the origin, no relay — the media
+         policy's line is untouched, this is decoration on the card, never the clip.
+         ⚠ A FIXED 16:9 box with the image fitted inside, same rule as the hero: no layout may
+         depend on when (or whether) bytes arrive, and a poster route answers 404 for a missing
+         poster as a supported state — the box shows its panel and the card's height never moves.
+         ⚠ aria-hidden + tabindex=-1: it is a duplicate of the title link one line up, and a
+         second identically-targeted tab stop with an empty-alt image for a name is noise for
+         exactly the reader who relies on tab stops. -->
+    <a
+      v-if="preview.thumb"
+      class="card-poster"
+      :href="preview.url"
+      target="_blank"
+      rel="noreferrer noopener"
+      aria-hidden="true"
+      tabindex="-1"
+      @click.stop
+    >
+      <img class="card-hero-img" :src="preview.thumb" alt="" loading="lazy" decoding="async" />
+      <span class="play-badge">{{ preview.kind === 'video' ? '▶' : '♪' }}</span>
+    </a>
   </div>
 
   <!-- A page, or a video page. Discord's panel treatment: the card sits on its own slightly
@@ -629,6 +655,22 @@ function activate(): void {
    height is known at first paint and R1 is satisfied by construction rather than by a pin. */
 .card-file {
   align-items: center;
+}
+/* The poster variant stacks: name and type first (source order, same as every card), the
+   fixed band under them. `stretch` overrides the row layout's centring so the band takes the
+   card's full width like the hero does. */
+.card-file.card-column {
+  align-items: stretch;
+}
+.card-poster {
+  position: relative;
+  display: block;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  /* The panel the letterbox shows through — same reasoning as `.play-badge`'s ring: a poster
+     narrower than 16:9 sits against something deliberate, not against a hole. */
+  background: color-mix(in srgb, var(--bg) 40%, transparent);
 }
 /* ⚠ Sized and centred like `.play-badge`, and for the same reason: it is the only thing on a
    card with no picture that says at a glance what sort of file this is. It is NOT a control —

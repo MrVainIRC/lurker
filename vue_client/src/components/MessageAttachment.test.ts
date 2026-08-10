@@ -562,6 +562,41 @@ describe('MessageAttachment — growth the list can react to', () => {
     expect(wrapper.find('.card-file .card-desc').text()).toBe('Video · MP4');
   });
 
+  it('renders a stored poster as the card’s band, still linking only to the origin', () => {
+    // The server-decoded first frame (lurker-previews): the one thumb that was never fetched
+    // from the origin, so showing it unasked costs the reader nothing. The card must stay a
+    // CARD — a link to the origin, no player, no byte URL for the clip itself.
+    seedSettings();
+    const p = preview({
+      url: 'https://cdn.e.test/holiday.mp4',
+      kind: 'video',
+      mime: 'video/mp4',
+      thumb: '/api/link-preview/poster/abc123',
+      thumbWidth: 640,
+      thumbHeight: 360,
+    });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    const poster = wrapper.find('.card-poster');
+    expect(poster.exists()).toBe(true);
+    expect(poster.attributes('href')).toBe('https://cdn.e.test/holiday.mp4');
+    expect(poster.find('img').attributes('src')).toBe('/api/link-preview/poster/abc123');
+    // The glyph moved onto the poster; two play markers on one card is one too many.
+    expect(wrapper.find('.file-badge').exists()).toBe(false);
+    // Still no player and no inline media element — the media policy's line.
+    expect(wrapper.find('video').exists()).toBe(false);
+    expect(wrapper.find('iframe').exists()).toBe(false);
+  });
+
+  it('keeps the posterless file card exactly as it was', () => {
+    // Cache off, decode failed, or a row from before posters existed: the compact card with
+    // the ▶ badge is the complete state everything degrades to.
+    seedSettings();
+    const p = preview({ url: 'https://e.test/c.mp4', kind: 'video', mime: 'video/mp4' });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    expect(wrapper.find('.card-poster').exists()).toBe(false);
+    expect(wrapper.find('.file-badge').text()).toBe('▶');
+  });
+
   it('emits no measurement for a file card, which has nothing to load', () => {
     // The player it replaces laid out at the UA default 300x150 and jumped when metadata
     // arrived, which is what `measured` existed to report. A card's height is final at first
