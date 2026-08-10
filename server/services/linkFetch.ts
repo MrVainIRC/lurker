@@ -48,13 +48,16 @@ const HOP_DEADLINE_MS = 20_000;
 /**
  * Idle allowance once a STREAMING consumer has its headers — see `FetchOptions.streaming`.
  *
- * ⚠ Both of the bounds above are wrong for a body that is piped rather than buffered, and the
- * combination made `MAX_MEDIA_PROXY_BYTES` unreachable. `HOP_DEADLINE_MS` is cleared on the
- * request's `close`, which does not fire during a body transfer, so any response still
- * streaming at 20 s was cut — 64 MB inside 20 s needs ~26 Mbit/s sustained, so ordinary inline
- * video died mid-playback. And `IDLE_TIMEOUT_MS` fires on a backpressured pipe: a <video> that
- * has filled its buffer and stopped reading is normal playback, not a stall, but no bytes move
- * and the socket times out.
+ * ⚠ Both of the bounds above are wrong for a body that is piped rather than buffered.
+ * `HOP_DEADLINE_MS` is cleared on the request's `close`, which does not fire during a body
+ * transfer, so any response still streaming at 20 s was cut. And `IDLE_TIMEOUT_MS` fires on a
+ * backpressured pipe: a consumer that has filled its buffer and stopped reading is behaving
+ * normally, but no bytes move and the socket times out.
+ *
+ * ⚠ The example this was written for is gone: the ceiling it named (`MAX_MEDIA_PROXY_BYTES`,
+ * 64 MB, needing ~26 Mbit/s sustained to land inside 20 s) belonged to inline video, which the
+ * proxy no longer relays at all. The bound still earns its place for images — 8 MB over a slow
+ * link crosses 20 s easily — so what changed is the size of the problem, not its shape.
  *
  * So a streaming caller keeps the deadline for connect-and-headers — the part that can hang
  * with nothing to show for it — and then trades it for this, which bounds a genuinely dead

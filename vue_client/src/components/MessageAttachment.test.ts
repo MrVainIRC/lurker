@@ -518,41 +518,58 @@ describe('MessageAttachment — the click must not be eaten', () => {
 });
 
 describe('MessageAttachment — growth the list can react to', () => {
-  it('asks the browser to seek, which is the only poster frame available', async () => {
-    // ⚠⚠ Without this a `<video>` paints nothing until it decodes, so an unplayed clip is a black
-    // rectangle with controls on it. There is no ffmpeg to make a real poster with, and no
-    // lightbox behind the player to recover from a bad guess — the inline element is the whole
-    // affordance. `#t=0.1` seeks on load, forcing a decode.
-    //
-    // ⚠ Asserted on the ELEMENT, not on the computed: a fragment appended to the wrong attribute
-    // (or dropped by a template refactor) is invisible to a type check and silent at runtime.
-    // ⚠ And the token path must survive intact ahead of the `#` — the proxy URL is an HMAC over
-    // the URL, so mangling it 404s every video rather than merely losing the poster.
+  // ⚠⚠ MOUNTS NO PLAYER AT ALL — the media-policy change, and the reason it is asserted as an
+  // ABSENCE. A `<video>` fetches before anyone asks (`preload="metadata"` at minimum, and the
+  // `#t=0.1` poster trick this replaces made it a range request for real frames), so the element
+  // existing IS the involuntary fetch the proxy is meant to prevent. It is also what had one
+  // clip relayed per viewer, per view, forever — the byte cache stores images only — which
+  // exhausted the control plane's socket memory on 2026-08-10.
+  // See lurker-dev/LINK_PREVIEWS_MEDIA_POLICY.md.
+  //
+  // ⚠ `src` is set on the fixture DELIBERATELY, though the server no longer mints one. A
+  // descriptor from before the change may still be in an open tab, and honouring it would mount
+  // a player against a token the route now 404s — a broken source instead of a card.
+  for (const [kind, url, glyph] of [
+    ['video', 'https://e.test/c.mp4', '▶'],
+    ['audio', 'https://e.test/s.mp3', '♪'],
+  ] as const) {
+    it(`renders ${kind} as a file card, never a player, even with a stale src`, () => {
+      seedSettings();
+      const p = preview({ url, kind, src: '/api/lp/media/x', mime: `${kind}/mp4` });
+      const wrapper = mount(MessageAttachment, { props: { preview: p } });
+      expect(wrapper.find('video').exists()).toBe(false);
+      expect(wrapper.find('audio').exists()).toBe(false);
+      expect(wrapper.find('.card-file').exists()).toBe(true);
+      expect(wrapper.find('.file-badge').text()).toBe(glyph);
+      // ⚠ The link points at the ORIGIN, not at the proxy. That is the whole hand-off: a
+      // deliberate click goes where the bytes actually live.
+      expect(wrapper.find('.card-file .card-title').attributes('href')).toBe(url);
+    });
+  }
+
+  it('names a media file by its filename, not by its hostname', () => {
+    // ⚠ These records have no title and no siteName — nothing was scraped, because the URL IS
+    // the content — so the shared `heading` falls through to the hostname. Three clips from one
+    // CDN would then present as three identical cards.
     seedSettings();
-    const video = preview({ url: 'https://e.test/c.mp4', kind: 'video', src: '/api/lp/media/v' });
-    const wrapper = mount(MessageAttachment, { props: { preview: video } });
-    expect(wrapper.find('video').attributes('src')).toBe('/api/lp/media/v#t=0.1');
+    const p = preview({
+      url: 'https://cdn.e.test/holiday%20clip.mp4',
+      kind: 'video',
+      mime: 'video/mp4',
+    });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    expect(wrapper.find('.card-file .card-title').text()).toBe('holiday clip.mp4');
+    expect(wrapper.find('.card-file .card-desc').text()).toBe('Video · MP4');
   });
 
-  it('leaves AUDIO alone, which has no frame to paint', () => {
-    // A seek buys nothing for a waveform-less transport bar, and it would spend the bandwidth
-    // anyway.
+  it('emits no measurement for a file card, which has nothing to load', () => {
+    // The player it replaces laid out at the UA default 300x150 and jumped when metadata
+    // arrived, which is what `measured` existed to report. A card's height is final at first
+    // paint, so there is no late growth for the scroller to chase.
     seedSettings();
-    const audio = preview({ url: 'https://e.test/s.mp3', kind: 'audio', src: '/api/lp/media/a' });
-    const wrapper = mount(MessageAttachment, { props: { preview: audio } });
-    expect(wrapper.find('audio').attributes('src')).toBe('/api/lp/media/a');
-  });
-
-  it('tells the list when a video finally reports its size', async () => {
-    // ⚠ The server measures dimensions for IMAGES only, so a video has no width/height to
-    // reserve a box with: it lays out at the UA default 300x150 and jumps to full size when
-    // metadata arrives. `previewRevision` has already fired by then and the scroller's
-    // ResizeObserver watches its own box rather than its content, so nothing else notices.
-    seedSettings();
-    const video = preview({ url: 'https://e.test/c.mp4', kind: 'video', src: '/api/lp/media/v' });
-    const wrapper = mount(MessageAttachment, { props: { preview: video } });
-    await wrapper.find('video').trigger('loadedmetadata');
-    expect(wrapper.emitted('measured')).toHaveLength(1);
+    const p = preview({ url: 'https://e.test/c.mp4', kind: 'video', mime: 'video/mp4' });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    expect(wrapper.emitted('measured')).toBeUndefined();
   });
 
   it('tells the list when an image decodes, even though its box was reserved', async () => {
@@ -713,16 +730,17 @@ describe('MessageAttachments — arrangement', () => {
     expect(wrapper.find('.card').exists()).toBe(true);
   });
 
-  it('stacks a video at full width instead of cropping it into a cell', () => {
-    // ⚠ A player reduced to a mosaic cell loses its controls, which are the part that matters.
-    // Two images plus a video is a two-cell mosaic and a stacked player, not a three-cell grid.
+  it('stacks a video card at full width instead of cropping it into a cell', () => {
+    // ⚠ The mosaic is a grid of PICTURES and a file card is not one — cropped into a cell it
+    // would lose the filename, which is the whole of it. Two images plus a video is a two-cell
+    // mosaic and a stacked card, not a three-cell grid.
     seed(img(1, 800, 600), img(2, 800, 600));
-    const video = preview({ url: 'https://e.test/c.mp4', kind: 'video', src: '/api/lp/media/v' });
+    const video = preview({ url: 'https://e.test/c.mp4', kind: 'video', mime: 'video/mp4' });
     seed(video);
     const wrapper = mountFor(`https://e.test/1.png https://e.test/2.png ${video.url}`);
     expect(wrapper.findAll('.mosaic .tile')).toHaveLength(2);
-    expect(wrapper.find('.mosaic video').exists()).toBe(false);
-    expect(wrapper.find('video.inline-video').exists()).toBe(true);
+    expect(wrapper.find('.mosaic .card-file').exists()).toBe(false);
+    expect(wrapper.find('.card-file').exists()).toBe(true);
   });
 
   it('renders nothing at all when both settings are off', () => {

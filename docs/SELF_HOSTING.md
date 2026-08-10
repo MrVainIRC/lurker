@@ -228,9 +228,17 @@ See [Uploaded images are broken for other people](#uploaded-images-are-broken-fo
 
 Off by default. When enabled, a link pasted into chat can unfurl into a preview card
 (title, description, image — the way Slack or Discord do it), and a link that points
-straight at an image or video can render inline. It's off by default because it makes
+straight at an image can render inline. It's off by default because it makes
 your server fetch third-party URLs that appear in chat, which is a behavior an
 operator should choose, not inherit.
+
+A link to a **video or audio file** gets a card naming the file and its type, not an
+inline player. Your server never relays those bytes: the card links straight to the
+origin, and nothing is fetched from it until someone chooses to open it. The proxy
+below exists to stop a card that renders _by itself_ from reporting your users to a
+stranger's server — it was never meant to anonymize a download somebody deliberately
+started, and relaying whole videos through your instance costs bandwidth and memory
+for a privacy gain that ends the moment the reader clicks anyway.
 
 Turn it on for the instance:
 
@@ -248,7 +256,8 @@ setting, this env var is the reason.
 The server fetches previews itself (the URL never leaves your instance to a
 third-party unfurler), identifies itself honestly in its User-Agent (see
 [Outbound contact info](#outbound-contact-info-user-agent)), and proxies preview
-images to your users so their browsers never touch the third-party host directly.
+**images** to your users so their browsers never touch the third-party host when a
+card draws itself. Video and audio are named rather than relayed — see above.
 
 #### Caching preview images (optional)
 

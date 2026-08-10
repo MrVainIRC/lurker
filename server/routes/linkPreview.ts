@@ -28,7 +28,6 @@ import {
   toDescriptor,
   proxyableContentType,
   MAX_IMAGE_PROXY_BYTES,
-  MAX_MEDIA_PROXY_BYTES,
   MAX_URLS_PER_REQUEST,
 } from '../services/linkPreview.js';
 import { verifyProxyToken } from '../services/mediaProxyToken.js';
@@ -336,10 +335,14 @@ router.get('/media/:token', async (req: Request, res: Response) => {
 
   try {
     upstream = await safeRequest(url, {
-      accept: 'image/*,video/*,audio/*;q=0.9,*/*;q=0.5',
-      // Forwarded so inline video works at all. Safari (iOS and macOS) refuses to play a
-      // <video> whose source doesn't honour byte ranges, and seeking is broken everywhere
-      // without it — and this route is what serves `kind === 'video'`.
+      // ⚠ Images only — the route refuses everything else at `proxyableContentType` below, so
+      // asking for video/audio would only invite a body we are going to destroy at its headers.
+      accept: 'image/*,*/*;q=0.5',
+      // ⚠ Still forwarded, though no media element reaches here any more. An origin may answer
+      // a plain GET with a 206 of its own accord, and a request that arrives with a Range (an
+      // old descriptor's token replayed, a resumed download) must be asked about the SAME bytes
+      // the client wants — not silently answered from byte zero, which is the bug that made a
+      // seek look like a jump back to the start.
       range: typeof req.headers.range === 'string' ? req.headers.range : undefined,
       // Piped, not buffered: the scrape-tuned deadlines cut a healthy media transfer at 20 s
       // and read a backpressured <video> as a dead origin. See FetchOptions.streaming.
@@ -402,14 +405,14 @@ router.get('/media/:token', async (req: Request, res: Response) => {
     // together, several are refused and arm the hold, and a single success then
     // tears it down before it can stop anything. The hold expires on its own
     // clock, which is short by design.
-    // ⚠ Per-KIND cap. The single 8 MB ceiling was named for images and silently applied to
-    // everything, so a 30 MB mp4 rendered inline was streamed to 8 MB and then had both ends
-    // destroyed — the <video> died with a network error partway through, and since the
-    // `immutable` Cache-Control had already gone out the browser could cache the truncated
-    // body. Video and audio are streamed to a media element and are legitimately larger.
-    const cap = upstream.contentType.startsWith('image/')
-      ? MAX_IMAGE_PROXY_BYTES
-      : MAX_MEDIA_PROXY_BYTES;
+    // ⚠ ONE cap again, and this time it is honest: `proxyableContentType` has already refused
+    // anything that is not an image, so there is no larger kind for a second ceiling to
+    // describe. The per-kind split this replaces existed because a single 8 MB ceiling named
+    // for images was silently applied to video too — a 30 MB mp4 was streamed to 8 MB and then
+    // had both ends destroyed, dying mid-playback with the `immutable` Cache-Control already
+    // sent, so the browser could cache the stump. Video is no longer relayed at all, which
+    // dissolves that failure rather than re-tuning around it.
+    const cap = MAX_IMAGE_PROXY_BYTES;
     const declared = Number(upstream.headers['content-length']);
     // ⚠ On a 206 the declared length is the length of the PART, so checking it alone let the
     // cap be walked straight past: a client asking for a gigabyte 1 MB at a time satisfies
