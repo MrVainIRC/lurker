@@ -195,7 +195,7 @@ const visible = computed<LinkPreview[]>(() => {
     // extensionless CDN links, a `.png` that redirects to an HTML login page — arrived as twenty
     // stacked cards and took over the screen. The tight cap exists because a card costs real
     // vertical space, and only the resolved kind knows whether one is being built.
-    if (!isMedia(p)) {
+    if (!rendersInline(p)) {
       if (cards >= MAX_CARDS_PER_MESSAGE) continue;
       cards++;
     }
@@ -204,26 +204,54 @@ const visible = computed<LinkPreview[]>(() => {
   return out;
 });
 
-/** A link that IS a file, as the SERVER classified it — never as the extension guessed. */
+/** A link that IS a file, as the SERVER classified it — never as the extension guessed.
+ *
+ * ⚠ This answers "which SETTING governs it", and nothing else. It still counts video and audio
+ * even though they no longer render inline, because `previewableUrls` charges them to the same
+ * toggle on the way in — moving them to the card toggle would start showing cards to people who
+ * turned inline media off and stop showing them to people who turned it on, which is a product
+ * decision and not this change's to make. See LINK_PREVIEWS_MEDIA_POLICY.md, open question 6. */
 function isMedia(p: LinkPreview): boolean {
   return p.kind === 'image' || p.kind === 'video' || p.kind === 'audio';
+}
+
+/** A link whose CONTENT is put on screen, rather than a card describing it.
+ *
+ * ⚠⚠ IMAGES ONLY, and the split from `isMedia` is the whole point. Video and audio used to be
+ * players — the file itself, on screen — and are now cards naming a file, so every rule that
+ * asks "is the thing itself visible?" has to follow them across. Two rules did, and both broke
+ * quietly when the kinds moved:
+ *
+ *   · the card cap (below) counted only `!isMedia`, so twenty pasted `.mp4` links rendered
+ *     twenty uncapped full-width cards — the exact screenful MAX_CARDS_PER_MESSAGE exists to
+ *     prevent, and which twenty page links or twenty images both avoid.
+ *   · `hiddenUrls` dropped their address from the message, on the reasoning that the file was
+ *     already on screen. Nothing is on screen now but a filename, so the address became
+ *     unreadable and uncopyable — and this file's own rule is that a card never takes its
+ *     link away. */
+function rendersInline(p: LinkPreview): boolean {
+  return p.kind === 'image';
 }
 
 /**
  * URLs whose address is dropped from the body because the thing itself is on screen.
  *
- * ⚠⚠ MEDIA ONLY, and the asymmetry is deliberate. An image, a video or an audio file IS the
- * message — the address above it is a machine-readable duplicate of something the reader is
- * already looking at, and on a giphy link it is most of the row. A CARD is a note ABOUT a page:
- * its heading is different text from the URL, the URL is what somebody would copy or read before
- * deciding to click, and a card can legitimately be titled with nothing but the hostname. So a
- * card never takes its link away.
+ * ⚠⚠ INLINE-RENDERED ONLY, and the asymmetry is deliberate. An image IS the message — the
+ * address above it is a machine-readable duplicate of something the reader is already looking
+ * at, and on a giphy link it is most of the row. A CARD is a note ABOUT something: its heading
+ * is different text from the URL, the URL is what somebody would copy or read before deciding
+ * to click, and a card can legitimately be titled with nothing but a filename or a hostname. So
+ * a card never takes its link away.
+ *
+ * ⚠ `rendersInline`, not `isMedia`. Video and audio were on the left of this line while they
+ * were players; as cards they belong on the right, and leaving them behind meant a message
+ * reading "look at this" with a card saying `a1b2c3.mp4` and the address gone from the text.
  *
  * Drawn from `visible` rather than from `urls`, so a URL that failed to resolve, was capped, or
  * is switched off keeps its text. Nothing is ever hidden without something rendered in its place.
  */
 const hiddenUrls = computed(() =>
-  hideableUrls(props.text, new Set(visible.value.filter(isMedia).map((p) => p.url))),
+  hideableUrls(props.text, new Set(visible.value.filter(rendersInline).map((p) => p.url))),
 );
 
 const shownSegments = computed(() => segmentsWithoutUrls(props.segments, hiddenUrls.value));

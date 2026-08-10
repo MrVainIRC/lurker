@@ -233,12 +233,17 @@ your server fetch third-party URLs that appear in chat, which is a behavior an
 operator should choose, not inherit.
 
 A link to a **video or audio file** gets a card naming the file and its type, not an
-inline player. Your server never relays those bytes: the card links straight to the
-origin, and nothing is fetched from it until someone chooses to open it. The proxy
-below exists to stop a card that renders _by itself_ from reporting your users to a
-stranger's server — it was never meant to anonymize a download somebody deliberately
-started, and relaying whole videos through your instance costs bandwidth and memory
-for a privacy gain that ends the moment the reader clicks anyway.
+inline player. Your server never relays those bytes — the card links straight to the
+origin — though it does still make one request to the host when the link is first
+posted, reading only the response headers to find out what the URL is and then
+dropping the connection. That classifying request is the same one every link costs;
+what's gone is the transfer of the file itself.
+
+The proxy below exists to stop a card that renders _by itself_ from reporting your
+users to a stranger's server. It was never meant to anonymize a download somebody
+deliberately started — and relaying whole videos through your instance costs
+bandwidth and memory for a privacy gain that ends the moment the reader clicks
+anyway.
 
 Turn it on for the instance:
 

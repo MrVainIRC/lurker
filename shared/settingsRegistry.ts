@@ -1078,10 +1078,19 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     group: 'viewing',
     type: 'bool',
     default: false,
+    // ⚠⚠ THE PRIVACY SENTENCE IS SCOPED TO IMAGES, and the scoping is the point rather than
+    // pedantry. This string is the whole basis on which someone decides to turn the setting on,
+    // and it used to promise that "the file is fetched and served by your Lurker server" for
+    // video and audio too. That stopped being true when those kinds stopped being relayed: the
+    // card links straight to the origin, so a reader who enabled this on the old promise would
+    // hand their address to a stranger's host the moment they pressed the filename. A guarantee
+    // a user acts on has to be narrower than the truth, never wider.
     description:
-      'When enabled, a link that points straight at an image, video, or audio file ' +
-      'renders under the message instead of showing only as a link. The file is fetched ' +
-      'and served by your Lurker server, so the site hosting it never sees your device.',
+      'When enabled, a link that points straight at an image renders under the message ' +
+      'instead of showing only as a link, and the image is fetched and served by your ' +
+      'Lurker server, so the site hosting it never sees your device. Video and audio ' +
+      'links get a card naming the file — opening one goes to the site hosting it, ' +
+      'like any other link.',
   },
   {
     key: 'chat.link_previews.enabled',

@@ -743,6 +743,56 @@ describe('MessageAttachments — arrangement', () => {
     expect(wrapper.find('.card-file').exists()).toBe(true);
   });
 
+  // ⚠⚠ Both of these are regressions the media-policy change introduced and a review caught.
+  // Video and audio crossed from "the file, on screen" to "a card about a file", and every rule
+  // keyed on the old meaning had to cross with them. Neither failure was visible from the
+  // component's own tests, because both live in MessageBody's arrangement rather than in the
+  // card. See LINK_PREVIEWS_MEDIA_POLICY.md.
+  it('charges video cards to the CARD cap, not the generous media budget', () => {
+    // A card costs real vertical space whatever kind produced it. Charged to the media budget
+    // (20) and skipped by the card counter, a message of pasted clips rendered a full-width
+    // card per link — the screenful MAX_CARDS_PER_MESSAGE exists to prevent, and which the
+    // same count of images (a 4-tile mosaic) or pages (3 cards) both avoid.
+    const clips = Array.from({ length: 8 }, (_, i) =>
+      preview({ url: `https://e.test/clip${i}.mp4`, kind: 'video', mime: 'video/mp4' }),
+    );
+    seed(...clips);
+    const wrapper = mountFor(clips.map((c) => c.url).join(' '));
+    expect(wrapper.findAll('.card-file').length).toBe(MAX_CARDS_PER_MESSAGE);
+  });
+
+  // ⚠ These two mount with real SEGMENTS. `mountFor` passes `segments: []` because the tests
+  // around it are about arrangement, and with no segments there is no body text for a URL to be
+  // kept in or dropped from — the assertion would pass vacuously either way.
+  function mountWithBody(url: string) {
+    seedSettings();
+    return mount(MessageBody, {
+      props: {
+        text: `look at this ${url}`,
+        segments: [{ text: 'look at this ' }, { text: url, url }],
+      },
+    });
+  }
+
+  it('keeps the address in the text for a video, the way it does for any other card', () => {
+    // ⚠ The URL is dropped from the body only when the thing itself is on screen. A card names
+    // a file — it is not the file — so removing the address leaves a reader with "look at this"
+    // and a filename, unable to read or copy where it points.
+    const video = preview({ url: 'https://e.test/a1b2c3.mp4', kind: 'video', mime: 'video/mp4' });
+    seed(video);
+    const wrapper = mountWithBody(video.url);
+    expect(wrapper.find('.card-file').exists()).toBe(true);
+    expect(wrapper.text()).toContain(video.url);
+  });
+
+  it('still drops the address for an image, which IS on screen', () => {
+    // The other half of the same rule — asserted so a fix for the above can't quietly delete it.
+    seed(img(1, 800, 600));
+    const wrapper = mountWithBody('https://e.test/1.png');
+    expect(wrapper.find('img.inline-image').exists()).toBe(true);
+    expect(wrapper.text()).not.toContain('https://e.test/1.png');
+  });
+
   it('renders nothing at all when both settings are off', () => {
     seed(img(1, 800, 600), YOUTUBE);
     const wrapper = mountFor(`https://e.test/1.png ${YOUTUBE.url}`, {
