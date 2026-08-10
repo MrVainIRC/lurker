@@ -39,18 +39,24 @@ function emitInsert(url: string) {
 const FAILURE_VISIBLE_MS = 10_000;
 const PAGE_SIZE = 50;
 
-// Favourites are a CURATED set, so both views that show them fetch the whole thing
-// in one request instead of paging (the server orders them by when you starred,
-// which the id-keyset cursor can't page — see listUploads). FAVORITES_LIMIT mirrors
-// the server's ceiling; hitting it is disclosed in the UI rather than silently
-// truncating. The picker shows only the head of that list — enough to fill a couple
-// of rows above the composer without becoming a second uploads browser.
+// The browser's starred view fetches the whole curated set in one request instead
+// of paging it (the server orders favourites by when you starred, which the
+// id-keyset cursor can't page — see listUploads). FAVORITES_LIMIT mirrors the
+// server's ceiling; hitting it is disclosed in the UI rather than silently
+// truncating.
 const FAVORITES_LIMIT = 200;
-const FAVORITES_PICKER_LIMIT = 24;
+// The attach menu shows only the head of a list — enough to fill a couple of rows
+// above the composer without becoming a second uploads browser. Same number in
+// either mode: it is a function of the panel, not of what is in it.
+const UPLOAD_MENU_LIMIT = 24;
 
 /** The kinds the uploads browser filters by. Mirrors UPLOAD_KINDS on the server, which
  *  derives each one from the mime prefix. */
 export type UploadKind = 'image' | 'video' | 'audio' | 'text';
+
+/** Which list the composer's attach menu is showing: the curated starred set, or
+ *  the tail of everything uploaded. */
+export type UploadMenuMode = 'favorites' | 'recent';
 
 function uploadsUrl({
   q,
@@ -161,14 +167,21 @@ export const useUploadsStore = defineStore('uploads', {
     // lands after the faster "screenshot" one and overwrites it.
     generation: 0,
 
-    // ─── The favourites picker's own list ──────────────────────────────────────
+    // ─── The composer's attach menu ────────────────────────────────────────────
     // Kept SEPARATE from `recent` on purpose: `recent` holds whatever the uploads
-    // browser is currently filtered to, and the composer's quick-access picker must
-    // not change contents because someone left a search term in a modal.
-    favorites: [] as UploadItem[],
-    favoritesLoaded: false,
-    favoritesLoading: false,
-    favoritesError: '',
+    // browser is currently filtered to, and the attach menu must not change
+    // contents because someone left a search term in a modal.
+    menuItems: [] as UploadItem[],
+    // Which list is currently ON SCREEN.
+    menuMode: 'favorites' as UploadMenuMode,
+    // ⚠ Which list the user ASKED for, which is not the same thing and must not be
+    // collapsed into it. openMenu falls back to 'recent' when nothing is starred,
+    // and if that fallback wrote back to the preference it would latch: star your
+    // first upload and the menu would still lead with 'recent' forever, because the
+    // one time it was empty is the only time it ever checked.
+    menuPreferredMode: 'favorites' as UploadMenuMode,
+    menuLoading: false,
+    menuError: '',
   }),
   getters: {
     // Is there a composer listening? Gates every "put this in my message"
@@ -405,27 +418,59 @@ export const useUploadsStore = defineStore('uploads', {
     async remove(id: number) {
       await api(`/api/uploads/${id}`, { method: 'DELETE' });
       this.recent = this.recent.filter((u) => u.id !== id);
-      // The file is gone, so it cannot stay in the quick-access picker — otherwise
-      // the picker keeps offering to insert a URL that now 404s until a reload.
-      this.favorites = this.favorites.filter((u) => u.id !== id);
+      // The file is gone, so it cannot stay in the attach menu — in EITHER mode, or
+      // the menu keeps offering to insert a URL that now 404s until a reload.
+      this.menuItems = this.menuItems.filter((u) => u.id !== id);
     },
 
     /**
-     * Load the composer picker's quick-access list. Refetched on every open rather
-     * than cached for the session: starring happens on other devices too, and the
-     * request is one small page of a curated set.
+     * Load one page for the attach menu, in whichever mode it is in. Refetched on
+     * every open rather than cached for the session: uploads and stars both happen
+     * on other devices, and this is one small page either way.
      */
-    async loadFavorites() {
-      this.favoritesLoading = true;
-      this.favoritesError = '';
+    async loadMenu(mode?: UploadMenuMode) {
+      this.menuMode = mode ?? this.menuMode;
+      this.menuLoading = true;
+      this.menuError = '';
       try {
-        const { items } = await api(uploadsUrl({ favorites: true, limit: FAVORITES_PICKER_LIMIT }));
-        this.favorites = items || [];
-        this.favoritesLoaded = true;
+        const { items } = await api(
+          uploadsUrl({ favorites: this.menuMode === 'favorites', limit: UPLOAD_MENU_LIMIT }),
+        );
+        // ⚠ Moderated rows have to go. The favourites query already excludes them
+        // server-side, but the unfiltered list returns them as tombstones — and a
+        // tombstone in a menu whose only action is "insert this" would paste a URL
+        // whose bytes are gone. The browser shows them because seeing WHY a file
+        // vanished is the point there; here there is nothing to offer.
+        this.menuItems = ((items || []) as UploadItem[]).filter((u) => !u.removed);
       } catch (e: any) {
-        this.favoritesError = e.message || 'failed to load favorites';
+        this.menuError = e.message || 'failed to load uploads';
       } finally {
-        this.favoritesLoading = false;
+        this.menuLoading = false;
+      }
+    },
+
+    /** Switch lists because the user said so. The only thing that moves the
+     *  preference — see menuPreferredMode for why that is not the same as the mode
+     *  actually being displayed. */
+    async selectMenuMode(mode: UploadMenuMode) {
+      this.menuPreferredMode = mode;
+      await this.loadMenu(mode);
+    },
+
+    /**
+     * The menu was opened. Shows the starred set by default — that is the point of
+     * having curated one — but falls back to recent uploads when nothing is starred,
+     * so someone who has never used the feature gets a useful panel instead of an
+     * empty tab above two buttons.
+     *
+     * Reads the PREFERENCE, and the fallback deliberately doesn't write to it: an
+     * explicit switch to 'recent' sticks for the session, while a fallback is
+     * re-decided on every open.
+     */
+    async openMenu() {
+      await this.loadMenu(this.menuPreferredMode);
+      if (this.menuMode === 'favorites' && !this.menuItems.length && !this.menuError) {
+        await this.loadMenu('recent');
       }
     },
 
@@ -439,23 +484,33 @@ export const useUploadsStore = defineStore('uploads', {
 
       const row = this.recent.find((u) => u.id === id);
       if (row) row.favorite = favorite;
+      // Keep the flag honest wherever the row also sits, so the menu doesn't need a
+      // refetch to agree with the browser about what is starred.
+      const menuRow = this.menuItems.find((u) => u.id === id);
+      if (menuRow) menuRow.favorite = favorite;
 
-      if (favorite) {
-        // Front of the picker, matching the server's "most recently starred first"
-        // ordering — so the list the user sees now is the one a refetch returns.
-        const known = row ?? this.favorites.find((u) => u.id === id);
-        if (known)
-          this.favorites = [
-            { ...known, favorite: true },
-            ...this.favorites.filter((u) => u.id !== id),
-          ];
-      } else {
-        this.favorites = this.favorites.filter((u) => u.id !== id);
-        // Unstarring from inside the starred-only view: the row no longer belongs to
-        // the list being displayed, so drop it instead of leaving an unstarred tile
-        // sitting in a view that claims to show only starred ones.
-        if (this.favoritesOnly) this.recent = this.recent.filter((u) => u.id !== id);
+      // Only the menu's FAVOURITES mode is a list of starred things; in 'recent' it
+      // is showing everything, where a star is a property of a row rather than the
+      // reason the row is there, and membership must not change.
+      if (this.menuMode === 'favorites') {
+        if (favorite) {
+          // Front of the list, matching the server's "most recently starred first"
+          // ordering — so what the user sees now is what a refetch returns.
+          const known = row ?? menuRow;
+          if (known)
+            this.menuItems = [
+              { ...known, favorite: true },
+              ...this.menuItems.filter((u) => u.id !== id),
+            ];
+        } else {
+          this.menuItems = this.menuItems.filter((u) => u.id !== id);
+        }
       }
+
+      // Unstarring from inside the browser's starred-only view: the row no longer
+      // belongs to the list being displayed, so drop it instead of leaving an
+      // unstarred tile sitting in a view that claims to show only starred ones.
+      if (!favorite && this.favoritesOnly) this.recent = this.recent.filter((u) => u.id !== id);
     },
 
     requestInsert(url: string) {

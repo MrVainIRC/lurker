@@ -268,8 +268,8 @@ describe('uploads — browser filters', () => {
 });
 
 // Starred uploads. Two surfaces read this state — the browser's starred filter
-// (`recent`) and the composer's quick-access picker (`favorites`) — and the store's
-// real job is keeping both true after a star without refetching either.
+// (`recent`) and the composer's attach menu (`menuItems`) — and the store's real
+// job is keeping both true after a star without refetching either.
 describe('uploads — favourites', () => {
   const row = (id: number, filename: string, favorite = false) => ({
     id,
@@ -299,24 +299,24 @@ describe('uploads — favourites', () => {
   // agree with it or the list reshuffles under the user on the next open.
   it('puts a freshly starred upload at the front of the picker list', async () => {
     const uploads = useUploadsStore();
-    uploads.favorites = [row(1, 'old-favorite.webp', true)];
+    uploads.menuItems = [row(1, 'old-favorite.webp', true)];
     uploads.recent = [row(2, 'new-favorite.webp')];
 
     api.mockResolvedValueOnce({ ok: true, favorite: true });
     await uploads.setFavorite(2, true);
 
-    expect(uploads.favorites.map((u) => u.id)).toEqual([2, 1]);
-    expect(uploads.favorites[0].favorite).toBe(true);
+    expect(uploads.menuItems.map((u) => u.id)).toEqual([2, 1]);
+    expect(uploads.menuItems[0].favorite).toBe(true);
   });
 
   it('drops an unstarred upload out of the picker list', async () => {
     const uploads = useUploadsStore();
-    uploads.favorites = [row(1, 'a.webp', true), row(2, 'b.webp', true)];
+    uploads.menuItems = [row(1, 'a.webp', true), row(2, 'b.webp', true)];
 
     api.mockResolvedValueOnce({ ok: true, favorite: false });
     await uploads.setFavorite(1, false);
 
-    expect(uploads.favorites.map((u) => u.id)).toEqual([2]);
+    expect(uploads.menuItems.map((u) => u.id)).toEqual([2]);
   });
 
   // Unstarring from inside the starred-only view: the row no longer belongs to the
@@ -343,19 +343,19 @@ describe('uploads — favourites', () => {
     await expect(uploads.setFavorite(1, true)).rejects.toThrow('nope');
 
     expect(uploads.recent[0].favorite).toBe(false);
-    expect(uploads.favorites).toEqual([]);
+    expect(uploads.menuItems).toEqual([]);
   });
 
   it('deleting an upload also takes it out of the picker', async () => {
     const uploads = useUploadsStore();
     uploads.recent = [row(1, 'a.webp', true)];
-    uploads.favorites = [row(1, 'a.webp', true)];
+    uploads.menuItems = [row(1, 'a.webp', true)];
 
     api.mockResolvedValueOnce({ ok: true });
     await uploads.remove(1);
 
     // The bytes are gone; a picker still offering to insert its URL would paste a 404.
-    expect(uploads.favorites).toEqual([]);
+    expect(uploads.menuItems).toEqual([]);
     expect(uploads.recent).toEqual([]);
   });
 
@@ -395,13 +395,96 @@ describe('uploads — favourites', () => {
     await uploads.setFilters({ query: 'browsing' });
 
     api.mockResolvedValueOnce({ items: [row(2, 'starred.webp', true)] });
-    await uploads.loadFavorites();
+    await uploads.loadMenu('favorites');
 
     const params = new URL(api.mock.calls.at(-1)![0], 'https://x.test').searchParams;
     expect(params.get('favorites')).toBe('1');
     expect(params.get('q')).toBeNull(); // the modal's search must not scope the picker
-    expect(uploads.favorites.map((u) => u.id)).toEqual([2]);
+    expect(uploads.menuItems.map((u) => u.id)).toEqual([2]);
     expect(uploads.recent.map((u) => u.id)).toEqual([1]);
+  });
+
+  it('leads with starred when there is a starred set', async () => {
+    const uploads = useUploadsStore();
+    api.mockResolvedValueOnce({ items: [row(1, 'starred.webp', true)] });
+    await uploads.openMenu();
+
+    expect(uploads.menuMode).toBe('favorites');
+    expect(api).toHaveBeenCalledTimes(1); // no pointless second request
+    expect(uploads.menuItems.map((u) => u.id)).toEqual([1]);
+  });
+
+  // Starred-by-default is only useful once you have starred something. Landing a
+  // new user on an empty tab next to two buttons is a worse panel than just showing
+  // them what they have uploaded.
+  it('falls back to recent when nothing is starred', async () => {
+    const uploads = useUploadsStore();
+    api.mockResolvedValueOnce({ items: [] }); // favourites
+    api.mockResolvedValueOnce({ items: [row(5, 'anything.webp')] }); // recent
+    await uploads.openMenu();
+
+    expect(uploads.menuMode).toBe('recent');
+    expect(uploads.menuItems.map((u) => u.id)).toEqual([5]);
+    expect(
+      new URL(api.mock.calls.at(-1)![0], 'https://x.test').searchParams.get('favorites'),
+    ).toBeNull();
+  });
+
+  // The fallback must not latch: star your first upload and the next open should
+  // lead with it again, not stay stuck on recent because it was empty once.
+  it('re-evaluates the fallback on every open', async () => {
+    const uploads = useUploadsStore();
+    api.mockResolvedValueOnce({ items: [] });
+    api.mockResolvedValueOnce({ items: [row(5, 'anything.webp')] });
+    await uploads.openMenu();
+    expect(uploads.menuMode).toBe('recent');
+
+    // Something got starred in the meantime.
+    api.mockResolvedValueOnce({ items: [row(6, 'now-starred.webp', true)] });
+    await uploads.openMenu();
+    expect(uploads.menuMode).toBe('favorites');
+    expect(uploads.menuItems.map((u) => u.id)).toEqual([6]);
+  });
+
+  // An explicit switch is a choice, not a fallback — it outlives the panel closing,
+  // and the next open must not drag the user back to starred.
+  it('keeps an explicitly chosen mode across opens', async () => {
+    const uploads = useUploadsStore();
+    api.mockResolvedValueOnce({ items: [row(9, 'all-of-them.webp')] });
+    await uploads.selectMenuMode('recent');
+
+    api.mockResolvedValueOnce({ items: [row(9, 'all-of-them.webp')] });
+    await uploads.openMenu();
+    expect(uploads.menuMode).toBe('recent');
+  });
+
+  // ⚠ The menu's only action is "insert this". A moderated row's bytes are gone, so
+  // offering it would paste a URL that 404s — unlike the browser, which shows the
+  // tombstone because seeing WHY a file vanished is the point there. The favourites
+  // query excludes them server-side; the unfiltered one does not.
+  it('never offers a moderated upload in recent mode', async () => {
+    const uploads = useUploadsStore();
+    api.mockResolvedValueOnce({
+      items: [row(1, 'fine.webp'), { ...row(2, 'gone.webp'), removed: true }],
+    });
+    await uploads.loadMenu('recent');
+
+    expect(uploads.menuItems.map((u) => u.id)).toEqual([1]);
+  });
+
+  // In 'recent' the menu is showing everything, where a star is a property of a row
+  // rather than the reason it is listed — so starring must update the flag without
+  // reordering or removing anything.
+  it('does not reshuffle recent mode when a row is starred', async () => {
+    const uploads = useUploadsStore();
+    api.mockResolvedValueOnce({ items: [row(1, 'a.webp'), row(2, 'b.webp')] });
+    await uploads.loadMenu('recent');
+
+    api.mockResolvedValueOnce({ ok: true, favorite: true });
+    await uploads.setFavorite(2, true);
+
+    expect(uploads.menuItems.map((u) => u.id)).toEqual([1, 2]);
+    expect(uploads.menuItems[1].favorite).toBe(true);
   });
 
   // A fresh upload is never starred, so it must not flash into a starred-only view

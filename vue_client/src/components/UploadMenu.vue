@@ -28,7 +28,27 @@
 <template>
   <div ref="panelEl" class="upload-menu" @pointerdown.stop @mousedown.prevent.stop>
     <div class="head">
-      <span class="title">attach</span>
+      <!-- The title IS the mode switch when there is something to switch between.
+           A separate heading plus a pair of tabs is two rows of chrome on a panel
+           whose whole job is being smaller than the uploads browser. -->
+      <div v-if="showList" class="modes" role="group" aria-label="Which uploads to show">
+        <div
+          v-for="m in MODES"
+          :key="m.value"
+          role="button"
+          class="mode"
+          :class="{ active: uploads.menuMode === m.value }"
+          tabindex="0"
+          :aria-pressed="uploads.menuMode === m.value"
+          @mousedown.prevent
+          @click="onMode(m.value)"
+          @keydown.enter.prevent="onMode(m.value)"
+          @keydown.space.prevent="onMode(m.value)"
+        >
+          {{ m.label }}
+        </div>
+      </div>
+      <span v-else class="title">attach</span>
       <div
         role="button"
         class="close"
@@ -44,18 +64,21 @@
       </div>
     </div>
 
-    <!-- Starred uploads. Absent entirely when there is nothing starred, or when no
-         composer is subscribed to the insert bus — inserting into nothing does
-         nothing, silently. The upload actions below still work in both cases, so
-         the menu always has a reason to exist. -->
-    <template v-if="showFavorites">
+    <!-- Absent entirely when there is nothing to show, or when no composer is
+         subscribed to the insert bus — inserting into nothing does nothing,
+         silently. The upload actions below still work in both cases, so the menu
+         always has a reason to exist. -->
+    <template v-if="showList">
       <!-- The error rides ABOVE the grid rather than replacing it: every open
            refetches, and a failed refresh should not take away the perfectly
            usable list from the last one. -->
-      <p v-if="uploads.favoritesError" class="note error">{{ uploads.favoritesError }}</p>
+      <p v-if="uploads.menuError" class="note error">{{ uploads.menuError }}</p>
+      <p v-else-if="emptyStarred" class="note">
+        Nothing starred yet. Star an upload in the uploads browser to keep it here.
+      </p>
       <div class="grid">
         <div
-          v-for="u in uploads.favorites"
+          v-for="u in uploads.menuItems"
           :key="u.id"
           role="button"
           class="cell"
@@ -98,7 +121,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
 import { useUploadsStore } from '../stores/uploads.js';
-import type { UploadItem } from '../stores/uploads.js';
+import type { UploadItem, UploadMenuMode } from '../stores/uploads.js';
 import { useViewport } from '../composables/useViewport.js';
 import { pickComposerFile, pickComposerCamera } from '../composables/useComposerOverlay.js';
 import { iconForMime } from '../utils/uploaders.js';
@@ -116,11 +139,38 @@ const props = withDefaults(
 
 const emit = defineEmits<{ close: [] }>();
 
+const MODES: Array<{ label: string; value: UploadMenuMode }> = [
+  { label: 'starred', value: 'favorites' },
+  { label: 'recent', value: 'recent' },
+];
+
 const uploads = useUploadsStore();
 const { canHover } = useViewport();
 const panelEl = ref<HTMLElement | null>(null);
 
-const showFavorites = computed(() => uploads.canInsert && uploads.favorites.length > 0);
+// The list section, mode switch included. Hidden when there is nothing this panel
+// could insert: no composer listening, or an account with no uploads at all —
+// openMenu already fell back from starred to recent, so an empty list in 'recent'
+// mode means there is genuinely nothing, and a mode switch over two empty lists is
+// just noise above the upload buttons.
+const showList = computed(
+  () => uploads.canInsert && (uploads.menuItems.length > 0 || uploads.menuMode === 'favorites'),
+);
+
+// Starred mode, deliberately chosen (openMenu only lands here when there IS
+// something starred), and then emptied — you unstarred the last one from the
+// browser while the menu was open. Explains the empty grid rather than leaving it
+// looking broken.
+const emptyStarred = computed(
+  () => uploads.menuMode === 'favorites' && !uploads.menuItems.length && !uploads.menuLoading,
+);
+
+function onMode(mode: UploadMenuMode): void {
+  if (uploads.menuMode === mode) return;
+  // selectMenuMode, not loadMenu: this is a choice, and it has to outlive the panel
+  // rather than be re-decided by the next open's starred-by-default rule.
+  void uploads.selectMenuMode(mode);
+}
 
 function pick(u: UploadItem): void {
   // The store's insert bus reaches MessageInput wherever it is mounted, so the
@@ -157,8 +207,10 @@ function onKey(e: KeyboardEvent): void {
 }
 
 onMounted(() => {
-  // Every open, not once per session: stars set on another device should be here.
-  void uploads.loadFavorites();
+  // Every open, not once per session: uploads and stars both happen on other
+  // devices. openMenu also picks the mode — starred when there is a starred set,
+  // recent when there isn't.
+  void uploads.openMenu();
   document.addEventListener('pointerdown', onDocPointerDown);
   document.addEventListener('keydown', onKey);
 });
@@ -196,6 +248,31 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: var(--space-6);
   color: var(--fg-muted);
+}
+/* Reads as the panel's title until you notice the inactive word is clickable —
+   which is the intent. Underline rather than a chip border: at this size a pair of
+   bordered chips is more chrome than the grid they label. */
+.modes {
+  display: flex;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.mode {
+  cursor: pointer;
+  user-select: none;
+  touch-action: manipulation;
+  border-bottom: 1px solid transparent;
+}
+.mode:hover {
+  color: var(--fg);
+}
+.mode.active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+.mode:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
 }
 .close {
   cursor: pointer;
