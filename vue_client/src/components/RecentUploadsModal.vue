@@ -52,9 +52,10 @@
         :class="{ active: uploads.favoritesOnly }"
         :aria-pressed="uploads.favoritesOnly"
         title="Show only starred uploads"
+        aria-label="Show only starred uploads"
         @click="onToggleFavoritesFilter"
       >
-        <i class="fa-solid fa-star"></i> Starred
+        <i class="fa-solid fa-star"></i><span class="label">Starred</span>
       </button>
     </div>
 
@@ -538,6 +539,18 @@ function metaLine(u: UploadRow): string {
 }
 .chip.starred.active i {
   color: var(--warn);
+}
+/* At phone width the five kind chips already fill the row, so the word tips this
+   one onto a line of its own — a whole row of chrome spent on one control. The
+   star alone is unambiguous next to them, and the button keeps its aria-label, so
+   dropping the word costs nothing but the pixels. */
+@media (max-width: 768px) {
+  .chip.starred {
+    gap: 0;
+  }
+  .chip.starred .label {
+    display: none;
+  }
 }
 
 .error {
