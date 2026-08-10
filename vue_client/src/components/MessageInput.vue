@@ -69,6 +69,19 @@
       class="file-hidden"
       @change="onFileSelected"
     />
+    <!-- Shoot-now, from the attach menu on touch devices. A SECOND input rather
+         than toggling `capture` on the one above: the attribute is read when the
+         browser opens the picker, so flipping it per tap would race the click it
+         is meant to configure. Its @change is the same handler — a captured photo
+         is just a File. -->
+    <input
+      ref="cameraInputEl"
+      type="file"
+      :accept="CAMERA_CAPTURE_TYPES"
+      capture="environment"
+      class="file-hidden"
+      @change="onFileSelected"
+    />
     <input
       ref="e2eImportInputEl"
       type="file"
@@ -175,7 +188,7 @@ import { parseIgnoreArgs } from '../../../shared/parseIgnore.js';
 import { parseHighlightArgs } from '../../../shared/parseHighlight.js';
 import { highlightRuleDetailParts } from '../utils/highlightFormat.js';
 import { joinMeta } from '../utils/metaLine.js';
-import { ACCEPTED_FILE_TYPES, isUploadableType } from '../utils/uploaders.js';
+import { ACCEPTED_FILE_TYPES, CAMERA_CAPTURE_TYPES, isUploadableType } from '../utils/uploaders.js';
 import { useWhoisStore } from '../stores/whois.js';
 import { useChanlistStore } from '../stores/chanlist.js';
 import { useChannelListModal } from '../composables/useChannelListModal.js';
@@ -213,7 +226,7 @@ import {
   setNickStrip,
   setEmojiStrip,
   setColorPickerOpen,
-  setFavoritesPickerOpen,
+  setUploadMenuOpen,
   moveEmojiActive,
   confirmEmojiActive,
   hasEmojiCandidates,
@@ -277,6 +290,7 @@ function combinedHighlights(
 const inputEl = ref<HTMLTextAreaElement | null>(null);
 const formEl = ref<HTMLElement | null>(null);
 const fileInputEl = ref<HTMLInputElement | null>(null);
+const cameraInputEl = ref<HTMLInputElement | null>(null);
 const e2eImportInputEl = ref<HTMLInputElement | null>(null);
 const e2eImportNetworkId = ref<number | null>(null);
 const dragOver = ref(false);
@@ -1873,7 +1887,7 @@ onBeforeUnmount(() => {
   closeEmojiStrip();
   closeEmojiPicker();
   closeColorPicker();
-  setFavoritesPickerOpen(false);
+  setUploadMenuOpen(false);
 });
 
 function insertUrlAtCaret(url: string): void {
@@ -1916,6 +1930,7 @@ onMounted(() => {
     onColorReset: onPickReset,
     onColorClose: closeColorPicker,
     onPickFile,
+    onPickCamera,
     onAddress: addressInComposer,
   });
 });
@@ -1950,6 +1965,13 @@ function onPickFile() {
   fileInputEl.value?.click();
 }
 
+function onPickCamera() {
+  cameraInputEl.value?.click();
+}
+
+// Serves both inputs — a captured photo arrives as a plain File, so the picked
+// and the shot path are the same from here on. `e.target` is whichever input
+// fired, which is also what gets cleared.
 function onFileSelected(e: Event): void {
   const input = e.target as HTMLInputElement;
   const file = input.files?.[0];

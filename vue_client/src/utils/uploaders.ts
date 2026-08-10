@@ -140,6 +140,23 @@ export const ACCEPTED_FILE_TYPES = [
   '.mp3',
 ].join(',');
 
+// What a phone camera can hand back, narrowed to what the server takes. Paired
+// with `capture` on its own hidden <input>, which is what makes a mobile browser
+// open the camera directly instead of the file browser (desktop browsers ignore
+// `capture` entirely, which is why the button offering it is touch-only).
+//
+// It has to be a SUBSET of ACCEPTED_FILE_TYPES or the recorder hands back
+// something the upload route then rejects: iOS records video as QuickTime `.mov`,
+// Android as `.mp4`, and both need their extension listed for the same
+// grey-out reason as above.
+export const CAMERA_CAPTURE_TYPES = [
+  'image/*',
+  'video/mp4',
+  'video/quicktime',
+  '.mp4',
+  '.mov',
+].join(',');
+
 // Deliberately LOOSER than the accepted set: the drop/paste gates exist to ignore
 // things that obviously aren't uploads, not to enforce policy. The server is the
 // gate, and its 415 names the problem ("webm files are not accepted — Lurker takes

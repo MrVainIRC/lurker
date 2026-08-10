@@ -58,51 +58,30 @@
         >
       </div>
       <div class="bar-tools">
-        <!-- No @mousedown.prevent here (unlike the palette/send buttons): this
-             opens the native iOS file picker, which dismisses the soft keyboard
-             no matter what. Preventing the tap-blur only delays that dismissal a
-             beat — keyboard stays up, then drops as the picker sheet animates in
-             — which reads as jank. Letting the tap blur gives one clean
-             dismissal instead. -->
+        <!-- One control for every way a file gets into a message. It used to open
+             the OS file dialog straight away, with starred uploads on a second
+             button beside it — two controls for one intent. It opens the attach
+             menu now, and the menu carries both.
+
+             @mousedown.prevent, which the direct-to-dialog version deliberately did
+             NOT have: this is an in-app panel, so the composer should keep focus and
+             the soft keyboard should stay up. The old reasoning (a native sheet
+             dismisses the keyboard regardless, so preventing the blur only delays
+             it into jank) still holds — it has moved onto the menu's own upload
+             buttons, which are what actually opens that sheet. -->
         <button
+          ref="uploadMenuBtnEl"
           type="button"
           class="tool-btn"
+          :class="{ on: overlay.uploadMenuOpen }"
           :disabled="!sendable"
-          title="upload file"
-          aria-label="upload file"
-          @click="onPickFile"
+          title="attach a file"
+          aria-label="attach a file"
+          :aria-expanded="overlay.uploadMenuOpen"
+          @mousedown.prevent
+          @click="onToggleUploadMenu"
         >
           <i class="fa-solid fa-paperclip"></i>
-        </button>
-        <!-- Starred uploads, straight into the line being typed. Sits next to the
-             paperclip because it is the same intent — "put a file in this message"
-             — just for one you have already uploaded and marked as worth keeping
-             at hand. @mousedown.prevent for the same reason as the palette below:
-             this is an in-app popover, so the composer keeps focus. -->
-        <!-- Self-revealing, like the DCC button: it appears once you have starred
-             something and is absent until then, rather than sitting in the bar
-             offering an empty panel. Starring is discovered in the uploads browser,
-             where the star is on every tile — this is the shortcut to a set you
-             have already built, not the place you learn the feature exists.
-
-             Also gated on there being a composer, the same as the browser's insert
-             action: the picker's ONLY job is putting a URL in the draft. `sendable`
-             does not cover that — a virtual buffer with hasInput:false has no
-             MessageInput mounted but still renders a bar. -->
-        <button
-          v-if="uploads.canInsert && uploads.favorites.length"
-          ref="favoritesBtnEl"
-          type="button"
-          class="tool-btn"
-          :class="{ on: overlay.favoritesOpen }"
-          :disabled="!sendable"
-          title="starred uploads"
-          aria-label="starred uploads"
-          :aria-expanded="overlay.favoritesOpen"
-          @mousedown.prevent
-          @click="onToggleFavorites"
-        >
-          <i class="fa-solid fa-star"></i>
         </button>
         <!-- @mousedown.prevent keeps the composer focused (and the iOS keyboard
              up): this opens the in-app colour picker overlay, not a native
@@ -159,13 +138,13 @@
       @reset="resetColor"
       @close="closeColorPicker"
     />
-    <!-- v-if, not v-show: the picker refetches on mount, so the DOM lifecycle IS
-         the "load on open" trigger. It also has to be handed its own toggle button
-         to exclude from outside-tap dismissal. -->
-    <UploadFavoritesPicker
-      v-if="overlay.favoritesOpen"
-      :ignore="[favoritesBtnEl]"
-      @close="setFavoritesPickerOpen(false)"
+    <!-- v-if, not v-show: the menu refetches favourites on mount, so the DOM
+         lifecycle IS the "load on open" trigger. It also has to be handed its own
+         toggle button to exclude from outside-tap dismissal. -->
+    <UploadMenu
+      v-if="overlay.uploadMenuOpen"
+      :ignore="[uploadMenuBtnEl]"
+      @close="setUploadMenuOpen(false)"
     />
   </div>
 </template>
@@ -189,7 +168,7 @@ import { formatTimestamp } from '../utils/timestamp.js';
 import { isPeerOffline, isPeerAway } from '../utils/peerPresence.js';
 import SuggestionStrip from './SuggestionStrip.vue';
 import MircColorPicker from './MircColorPicker.vue';
-import UploadFavoritesPicker from './UploadFavoritesPicker.vue';
+import UploadMenu from './UploadMenu.vue';
 import {
   useComposerOverlay,
   selectNick,
@@ -200,8 +179,7 @@ import {
   resetColor,
   closeColorPicker,
   setColorPickerOpen,
-  setFavoritesPickerOpen,
-  pickComposerFile,
+  setUploadMenuOpen,
   type NickStripItem,
 } from '../composables/useComposerOverlay.js';
 import type { EmojiMatch } from '../utils/emojiData.js';
@@ -473,11 +451,6 @@ function onJumpToUnread() {
   requestScrollToUnread();
 }
 
-function onPickFile() {
-  if (!sendable.value) return;
-  pickComposerFile();
-}
-
 // ⚠ The bar's two popovers are anchored to the SAME corner with the same z-index,
 // so opening one must close the other or they render stacked on top of each other.
 // The colour picker has no outside-tap dismissal of its own (only its own `close`
@@ -485,28 +458,19 @@ function onPickFile() {
 function onToggleColorPicker() {
   if (!sendable.value) return;
   const open = !overlay.colorPickerOpen;
-  if (open) setFavoritesPickerOpen(false);
+  if (open) setUploadMenuOpen(false);
   setColorPickerOpen(open);
 }
 
-// Passed to the picker as its `ignore` element: a tap on the toggle must not also
+// Passed to the menu as its `ignore` element: a tap on the toggle must not also
 // count as an outside-tap dismissal, or the two cancel out and it never closes.
-const favoritesBtnEl = ref<HTMLButtonElement | null>(null);
+const uploadMenuBtnEl = ref<HTMLButtonElement | null>(null);
 
-// The star button hides itself when the set is empty, so whether to render it has
-// to be known BEFORE anyone opens the picker — the picker's own load-on-open is
-// too late to decide whether to offer the picker at all. Guarded on favoritesLoaded
-// so a remount doesn't refetch: within a session the store keeps the list true as
-// you star and unstar, and opening the picker refetches anyway.
-onMounted(() => {
-  if (!uploads.favoritesLoaded) void uploads.loadFavorites();
-});
-
-function onToggleFavorites() {
+function onToggleUploadMenu() {
   if (!sendable.value) return;
-  const open = !overlay.favoritesOpen;
+  const open = !overlay.uploadMenuOpen;
   if (open) setColorPickerOpen(false);
-  setFavoritesPickerOpen(open);
+  setUploadMenuOpen(open);
 }
 </script>
 

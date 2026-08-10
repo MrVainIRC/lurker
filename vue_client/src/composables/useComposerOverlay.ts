@@ -29,10 +29,13 @@ export interface ComposerOverlayState {
   emojiActiveIndex: number;
   // mIRC colour picker.
   colorPickerOpen: boolean;
-  // Starred-uploads quick-access picker. Unlike the strips above it needs no
-  // select handler here — picking inserts a URL, and the uploads store already
-  // owns a bus to MessageInput for exactly that (onInsertUrl/requestInsert).
-  favoritesOpen: boolean;
+  // The attach menu behind the paperclip: starred uploads to insert, plus the
+  // ways to add a new file. Picking a starred one needs no select handler here —
+  // it inserts a URL, and the uploads store already owns a bus to MessageInput
+  // for exactly that (onInsertUrl/requestInsert). The file/camera actions route
+  // through onPickFile/onPickCamera below, because only MessageInput holds the
+  // hidden <input>s.
+  uploadMenuOpen: boolean;
 }
 
 const state = reactive<ComposerOverlayState>({
@@ -43,7 +46,7 @@ const state = reactive<ComposerOverlayState>({
   emojiItems: [],
   emojiActiveIndex: 0,
   colorPickerOpen: false,
-  favoritesOpen: false,
+  uploadMenuOpen: false,
 });
 
 type NickSelectHandler = (nick: string) => void;
@@ -59,6 +62,11 @@ let onColorApply: ColorApplyHandler = () => {};
 let onColorReset: VoidHandler = () => {};
 let onColorClose: VoidHandler = () => {};
 let onPickFile: VoidHandler = () => {};
+// Shoot something on the spot instead of picking a file. Its own handler rather
+// than a flag on onPickFile because it fronts a SEPARATE hidden <input> — the
+// `capture` attribute has to be baked into the element the browser opens, and
+// toggling it on the shared one would race a tap against the attribute write.
+let onPickCamera: VoidHandler = () => {};
 // Address a nick from outside the composer (the message action bar's Reply).
 // Same signature as a nick pick, but it prepends `nick: ` to the whole draft
 // rather than splicing at a token span, so it gets its own handler.
@@ -71,6 +79,7 @@ export interface ComposerOverlayHandlers {
   onColorReset?: VoidHandler;
   onColorClose?: VoidHandler;
   onPickFile?: VoidHandler;
+  onPickCamera?: VoidHandler;
   onAddress?: NickSelectHandler;
 }
 
@@ -81,6 +90,7 @@ export function setComposerOverlayHandlers(h: ComposerOverlayHandlers): void {
   if (h.onColorReset) onColorReset = h.onColorReset;
   if (h.onColorClose) onColorClose = h.onColorClose;
   if (h.onPickFile) onPickFile = h.onPickFile;
+  if (h.onPickCamera) onPickCamera = h.onPickCamera;
   if (h.onAddress) onAddress = h.onAddress;
 }
 
@@ -100,8 +110,8 @@ export function setColorPickerOpen(open: boolean): void {
   state.colorPickerOpen = open;
 }
 
-export function setFavoritesPickerOpen(open: boolean): void {
-  state.favoritesOpen = open;
+export function setUploadMenuOpen(open: boolean): void {
+  state.uploadMenuOpen = open;
 }
 
 // Emoji-strip keyboard navigation, driven from MessageInput's keydown.
@@ -170,6 +180,9 @@ export function closeColorPicker(): void {
 }
 export function pickComposerFile(): void {
   onPickFile();
+}
+export function pickComposerCamera(): void {
+  onPickCamera();
 }
 
 export function useComposerOverlay(): DeepReadonly<ComposerOverlayState> {
