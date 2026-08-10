@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
+import { ref } from 'vue';
 import { defineStore } from 'pinia';
 import { api, apiMultipart } from '../api.js';
 import { makeClientId } from '../utils/clientId.js';
@@ -9,9 +10,21 @@ import { makeClientId } from '../utils/clientId.js';
 // A tiny event bus pattern (Set of callbacks) keeps the modal independent of
 // the input component — MessageInput subscribes on mount, unsubs on unmount.
 const insertListeners = new Set<(url: string) => void>();
+// ⚠ Reactive mirror of the set's size, exposed as the `canInsert` getter. An
+// insert affordance offered with nobody subscribed does NOTHING — silently, with
+// no error anywhere — and that is not hypothetical: the mobile shell reaches the
+// uploads browser from the buffer LIST screen, where MessageInput isn't mounted
+// at all, and `hasInput` is false on virtual buffers that have no composer. A
+// plain Set can't be watched, so the count is tracked alongside it.
+const insertListenerCount = ref(0);
 export function onInsertUrl(cb: (url: string) => void) {
   insertListeners.add(cb);
-  return () => insertListeners.delete(cb);
+  insertListenerCount.value = insertListeners.size;
+  return () => {
+    const removed = insertListeners.delete(cb);
+    insertListenerCount.value = insertListeners.size;
+    return removed;
+  };
 }
 function emitInsert(url: string) {
   for (const cb of insertListeners) {
@@ -158,6 +171,12 @@ export const useUploadsStore = defineStore('uploads', {
     favoritesError: '',
   }),
   getters: {
+    // Is there a composer listening? Gates every "put this in my message"
+    // affordance — see the note on insertListenerCount for why an ungated one is
+    // a button that does nothing rather than a button that fails.
+    canInsert(): boolean {
+      return insertListenerCount.value > 0;
+    },
     // The starred view came back full, so there may be more the server didn't send.
     // Surfaced in the modal rather than swallowed — a list that quietly stops at 200
     // reads as "these are all my favourites", which would be a lie.

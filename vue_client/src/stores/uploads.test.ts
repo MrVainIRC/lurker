@@ -15,7 +15,7 @@ vi.mock('../api.js', () => ({
   apiMultipart: (url: string, fd: FormData, opts: MultipartOpts) => apiMultipart(url, fd, opts),
 }));
 
-const { useUploadsStore } = await import('./uploads.js');
+const { useUploadsStore, onInsertUrl } = await import('./uploads.js');
 type UploadCurrent = NonNullable<ReturnType<typeof useUploadsStore>['current']>;
 
 function current(over: Partial<UploadCurrent> = {}): UploadCurrent {
@@ -414,6 +414,22 @@ describe('uploads — favourites', () => {
     await uploads.upload(new Blob(['x']), 'brand-new.png');
 
     expect(uploads.recent).toEqual([]);
+  });
+
+  // Every "put this in my message" affordance hangs off this. An insert with
+  // nobody subscribed is not an error — emitInsert iterates an empty set and
+  // returns — so an ungated button is one that silently does nothing. Which is
+  // exactly what shipped on mobile: the uploads browser opens from the buffer-list
+  // screen, where MessageInput is not mounted.
+  it('knows whether a composer is actually listening', () => {
+    const uploads = useUploadsStore();
+    expect(uploads.canInsert).toBe(false);
+
+    const unsub = onInsertUrl(() => {});
+    expect(uploads.canInsert).toBe(true);
+
+    unsub();
+    expect(uploads.canInsert).toBe(false);
   });
 
   it('flags a starred view that came back full, rather than implying it is complete', async () => {

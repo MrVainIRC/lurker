@@ -145,9 +145,11 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: var(--space-3);
   z-index: var(--z-raised);
-  /* Wide enough for four 64px thumbs; narrow enough to leave the bar readable
-     behind it on a phone. */
-  max-width: min(320px, calc(100vw - 2 * var(--space-6)));
+  /* A DEFINITE width, not a max-width. Shrink-to-fit plus fixed grid tracks left
+     whatever didn't divide evenly as dead space down the right-hand edge; the
+     thumbs can only share the leftovers (see .grid) if there is a known width for
+     them to share. Narrow enough to leave the bar readable behind it on a phone. */
+  width: min(320px, calc(100vw - 2 * var(--space-6)));
 }
 .head {
   display: flex;
@@ -170,7 +172,6 @@ onBeforeUnmount(() => {
 }
 .note {
   margin: 0;
-  max-width: 32ch;
   color: var(--fg-muted);
 }
 .note.error {
@@ -178,13 +179,19 @@ onBeforeUnmount(() => {
 }
 .grid {
   display: grid;
-  /* auto-fill so a single starred file sits at thumb size on the left rather than
-     stretching across the panel — same reasoning as the uploads browser's grid. */
-  grid-template-columns: repeat(auto-fill, 64px);
+  /* minmax(_, 1fr), not a fixed track: whatever the panel's width doesn't divide
+     into whole columns gets shared back out to the thumbs instead of pooling as
+     dead space on the right. The floor sets how many fit — three, at this width —
+     and they grow from there. Recognising a gif at a glance is the entire job, so
+     the space is better spent on bigger squares than on more of them.
+
+     auto-fill, not auto-fit: one starred file should sit at thumb size on the
+     left, not stretch across the whole panel. */
+  grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
   gap: var(--space-2);
-  /* Roughly four rows before it scrolls. Past that the picker has stopped being
+  /* About three rows before it scrolls. Past that the picker has stopped being
      quick access and the uploads browser is the right tool. */
-  max-height: 296px;
+  max-height: min(320px, 45vh);
   overflow-y: auto;
 }
 .cell {
@@ -193,8 +200,11 @@ onBeforeUnmount(() => {
   touch-action: manipulation;
 }
 .art {
-  width: 64px;
-  height: 64px;
+  width: 100%;
+  /* Square via aspect-ratio rather than a fixed height, so the thumb follows the
+     column width the grid just handed it. Matches the server thumbnail's own
+     centre cover-crop geometry, same as the uploads browser's tiles. */
+  aspect-ratio: 1;
   object-fit: cover;
   background: var(--bg-soft);
   border: 1px solid var(--border);

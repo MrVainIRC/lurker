@@ -79,7 +79,18 @@
              — just for one you have already uploaded and marked as worth keeping
              at hand. @mousedown.prevent for the same reason as the palette below:
              this is an in-app popover, so the composer keeps focus. -->
+        <!-- Self-revealing, like the DCC button: it appears once you have starred
+             something and is absent until then, rather than sitting in the bar
+             offering an empty panel. Starring is discovered in the uploads browser,
+             where the star is on every tile — this is the shortcut to a set you
+             have already built, not the place you learn the feature exists.
+
+             Also gated on there being a composer, the same as the browser's insert
+             action: the picker's ONLY job is putting a URL in the draft. `sendable`
+             does not cover that — a virtual buffer with hasInput:false has no
+             MessageInput mounted but still renders a bar. -->
         <button
+          v-if="uploads.canInsert && uploads.favorites.length"
           ref="favoritesBtnEl"
           type="button"
           class="tool-btn"
@@ -481,6 +492,15 @@ function onToggleColorPicker() {
 // Passed to the picker as its `ignore` element: a tap on the toggle must not also
 // count as an outside-tap dismissal, or the two cancel out and it never closes.
 const favoritesBtnEl = ref<HTMLButtonElement | null>(null);
+
+// The star button hides itself when the set is empty, so whether to render it has
+// to be known BEFORE anyone opens the picker — the picker's own load-on-open is
+// too late to decide whether to offer the picker at all. Guarded on favoritesLoaded
+// so a remount doesn't refetch: within a session the store keeps the list true as
+// you star and unstar, and opening the picker refetches anyway.
+onMounted(() => {
+  if (!uploads.favoritesLoaded) void uploads.loadFavorites();
+});
 
 function onToggleFavorites() {
   if (!sendable.value) return;

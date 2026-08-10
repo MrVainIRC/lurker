@@ -140,9 +140,15 @@
             </button>
             <!-- Put it in the message being composed. The modal closes on the way
                  out — you asked for this file, so the browse is over; leaving it up
-                 over the composer you just typed into would be in the way. -->
+                 over the composer you just typed into would be in the way.
+
+                 ⚠ Gated on there BEING a composer. The mobile shell opens this
+                 browser from the buffer-list screen, which has no MessageInput
+                 mounted, so the insert would land nowhere and report nothing —
+                 a button that only works on desktop. Copy link is the mobile
+                 path, and it is right there. -->
             <button
-              v-if="!u.removed"
+              v-if="!u.removed && uploads.canInsert"
               class="act insert"
               @click="onInsert(u)"
               title="add to message"
