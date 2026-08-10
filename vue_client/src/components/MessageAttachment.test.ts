@@ -524,7 +524,7 @@ describe('MessageAttachment — growth the list can react to', () => {
   // existing IS the involuntary fetch the proxy is meant to prevent. It is also what had one
   // clip relayed per viewer, per view, forever — the byte cache stores images only — which
   // exhausted the control plane's socket memory on 2026-08-10.
-  // See lurker-dev/LINK_PREVIEWS_MEDIA_POLICY.md.
+  // The policy is stated for operators in docs/SELF_HOSTING.md.
   //
   // ⚠ `src` is set on the fixture DELIBERATELY, though the server no longer mints one. A
   // descriptor from before the change may still be in an open tab, and honouring it would mount
@@ -747,7 +747,7 @@ describe('MessageAttachments — arrangement', () => {
   // Video and audio crossed from "the file, on screen" to "a card about a file", and every rule
   // keyed on the old meaning had to cross with them. Neither failure was visible from the
   // component's own tests, because both live in MessageBody's arrangement rather than in the
-  // card. See LINK_PREVIEWS_MEDIA_POLICY.md.
+  // card.
   it('charges video cards to the CARD cap, not the generous media budget', () => {
     // A card costs real vertical space whatever kind produced it. Charged to the media budget
     // (20) and skipped by the card counter, a message of pasted clips rendered a full-width

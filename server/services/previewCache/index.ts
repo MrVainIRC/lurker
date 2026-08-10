@@ -22,7 +22,8 @@
 // covered only the cheap kind. That asymmetry is what exhausted the control
 // plane's socket memory on 2026-08-10. Video and audio are no longer relayed at
 // all (`proxyableContentType`), so "images only" is no longer a gap: it is the
-// whole set of things the proxy serves. See lurker-dev/LINK_PREVIEWS_MEDIA_POLICY.md.
+// whole set of things the proxy serves. See "Link previews & inline media" in
+// docs/SELF_HOSTING.md.
 
 import {
   expiredCached,

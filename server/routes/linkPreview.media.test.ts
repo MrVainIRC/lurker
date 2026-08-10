@@ -100,7 +100,8 @@ describe('serving bytes', () => {
   // nothing asks — but a token is a pure HMAC of the URL, so a descriptor minted before the
   // change (sitting in an open tab, or replayed by anyone who kept one) still verifies. The
   // route is what has to say no, and saying no here is what makes the relay actually gone
-  // rather than merely unadvertised. See lurker-dev/LINK_PREVIEWS_MEDIA_POLICY.md.
+  // rather than merely unadvertised. The policy is stated for operators under "Link previews
+  // & inline media" in docs/SELF_HOSTING.md.
   for (const [kind, contentType, path] of [
     ['video', 'video/mp4', '/clip.mp4'],
     ['video', 'video/quicktime', '/phone.mov'],

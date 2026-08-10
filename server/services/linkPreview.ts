@@ -744,7 +744,8 @@ export function toDescriptor(record: PreviewRecord): PreviewDescriptor {
   // the byte cache stores images only (`previewCache/index.ts`), so video never became cheap
   // on the second read the way an image does. On 2026-08-10 that relay exhausted the control
   // plane's kernel socket memory and capped EVERY connection on the box — chat included — at
-  // ~7 KB/s. See lurker-dev/LINK_PREVIEWS_MEDIA_POLICY.md.
+  // ~7 KB/s. The user-facing half of this policy is in docs/SELF_HOSTING.md, under "Link
+  // previews & inline media".
   //
   // ⚠ No migration and no RESOLVER_VERSION bump accompany this. The record is unchanged —
   // `imageUrl`, `mime` and `kind` all still mean what they meant — and descriptors are minted

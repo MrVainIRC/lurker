@@ -62,7 +62,7 @@
        relay exhausted the control plane's socket memory on 2026-08-10. Pressing the link is a
        deliberate act and goes straight to the origin, where a hidden IP was never buying the
        reader anything a click wouldn't reveal a second later.
-       See lurker-dev/LINK_PREVIEWS_MEDIA_POLICY.md.
+       The operator-facing statement of this is in docs/SELF_HOSTING.md.
        ⚠ Only the TITLE is a link, not the whole card. A full-card anchor would swallow the row
        click, which on touch is the only thing that opens the message-actions sheet — the same
        defect the wrapper note above is written about.

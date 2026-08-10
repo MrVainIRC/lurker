@@ -210,7 +210,7 @@ const visible = computed<LinkPreview[]>(() => {
  * even though they no longer render inline, because `previewableUrls` charges them to the same
  * toggle on the way in — moving them to the card toggle would start showing cards to people who
  * turned inline media off and stop showing them to people who turned it on, which is a product
- * decision and not this change's to make. See LINK_PREVIEWS_MEDIA_POLICY.md, open question 6. */
+ * decision and not this change's to make. */
 function isMedia(p: LinkPreview): boolean {
   return p.kind === 'image' || p.kind === 'video' || p.kind === 'audio';
 }
