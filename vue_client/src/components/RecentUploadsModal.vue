@@ -44,10 +44,22 @@
           {{ k.label }}
         </button>
       </div>
+      <!-- Its own group, not a sixth kind chip: starred composes WITH a kind
+           ("my starred gifs") rather than replacing it, and a chip sitting in the
+           All/Images/… row would imply the mutual exclusivity those have. -->
+      <button
+        class="chip starred"
+        :class="{ active: uploads.favoritesOnly }"
+        :aria-pressed="uploads.favoritesOnly"
+        title="Show only starred uploads"
+        @click="onToggleFavoritesFilter"
+      >
+        <i class="fa-solid fa-star"></i> Starred
+      </button>
     </div>
 
     <p v-if="uploads.listError" class="error">{{ uploads.listError }}</p>
-    <p v-if="deleteError" class="error">{{ deleteError }}</p>
+    <p v-if="actionError" class="error">{{ actionError }}</p>
 
     <div ref="listEl" class="grid-wrap" @scroll="onScroll">
       <ul v-if="recentRows.length" class="grid">
@@ -76,6 +88,26 @@
             </div>
           </a>
 
+          <!-- The star lives in its own corner, away from the action cluster,
+               because it is a STATE badge as much as a control: filled, it has to
+               be readable at a glance while scanning the unfiltered grid, so unlike
+               copy/delete it stays visible once set rather than hiding until hover.
+               Keeping it out of that cluster is also what keeps three finger-sized
+               buttons fitting across a 180px tile on touch. -->
+          <div v-if="!u.removed" class="star-slot" :class="{ starred: u.favorite }">
+            <button
+              class="act star"
+              :class="{ on: u.favorite }"
+              :disabled="starringId === u.id"
+              :title="u.favorite ? 'unstar' : 'star for quick access'"
+              :aria-label="u.favorite ? 'unstar' : 'star for quick access'"
+              :aria-pressed="!!u.favorite"
+              @click="onToggleStar(u)"
+            >
+              <i :class="u.favorite ? 'fa-solid fa-star' : 'fa-regular fa-star'"></i>
+            </button>
+          </div>
+
           <div class="name" :title="u.filename || u.url">{{ u.filename || '(pasted)' }}</div>
           <div class="sub" :title="metaLine(u)">
             {{ u.removed ? 'Removed by moderation' : metaLine(u) }}
@@ -100,6 +132,18 @@
                 :class="deletingId === u.id ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-trash'"
               ></i>
             </button>
+            <!-- Put it in the message being composed. The modal closes on the way
+                 out — you asked for this file, so the browse is over; leaving it up
+                 over the composer you just typed into would be in the way. -->
+            <button
+              v-if="!u.removed"
+              class="act insert"
+              @click="onInsert(u)"
+              title="add to message"
+              aria-label="add to message"
+            >
+              <i class="fa-solid fa-arrow-turn-down"></i>
+            </button>
             <!-- A removed upload's URL is dead, so there's nothing to copy. -->
             <button
               v-if="!u.removed"
@@ -121,6 +165,12 @@
       </p>
       <p v-else-if="uploads.loaded" class="empty">
         No uploads yet. Paste, drop, or pick a file in the input.
+      </p>
+      <!-- The starred view comes back whole rather than paged, so when it arrives
+           full there may be more the server didn't send. Say so — silence here
+           reads as "that's all of them". -->
+      <p v-if="uploads.favoritesTruncated" class="empty small">
+        Showing your {{ recentRows.length }} most recently starred uploads.
       </p>
       <p v-if="uploads.loading && uploads.loaded && recentRows.length" class="empty small">
         Loading more…
@@ -162,7 +212,7 @@ const KIND_CHIPS: Array<{ label: string; value: UploadKind | null }> = [
 // the grid still feels like it's responding to you.
 const SEARCH_DEBOUNCE_MS = 250;
 
-defineEmits<{
+const emit = defineEmits<{
   close: [];
 }>();
 const uploads = useUploadsStore();
@@ -174,19 +224,29 @@ const listEl = ref<HTMLDivElement | null>(null);
 const searchEl = ref<HTMLInputElement | null>(null);
 const clipboard = useCopyFeedback();
 const deletingId = ref<number | null>(null);
-const deleteError = ref('');
+const actionError = ref('');
+// Per-tile, unlike deletingId's single-flight: starring is cheap and non-destructive,
+// so two quick stars on different tiles should both go through. This only disables
+// the one button that's mid-request, to stop a double-click racing itself.
+const starringId = ref<number | null>(null);
 
 // Local, so typing is never gated on a round trip; pushed to the store (and thus the
 // server) on a debounce.
 const query = ref(uploads.query);
 let debounce: ReturnType<typeof setTimeout> | null = null;
 
-const isFiltered = computed(() => Boolean(uploads.query || uploads.kind));
+const isFiltered = computed(() => Boolean(uploads.query || uploads.kind || uploads.favoritesOnly));
 const filterDescription = computed(() => {
   const kindLabel = KIND_CHIPS.find((k) => k.value === uploads.kind)?.label.toLowerCase();
-  if (uploads.query && uploads.kind) return `“${uploads.query}” in ${kindLabel}`;
+  // Built as "<term> in <scope>" where the scope is whichever of starred/kind are on
+  // — an empty starred view has to say STARRED, or "nothing matches images" sends
+  // the user hunting for a search term they never typed.
+  const scope = [uploads.favoritesOnly ? 'starred' : null, uploads.kind ? kindLabel : null]
+    .filter(Boolean)
+    .join(' ');
+  if (uploads.query && scope) return `“${uploads.query}” in ${scope}`;
   if (uploads.query) return `“${uploads.query}”`;
-  return kindLabel ?? 'that filter';
+  return scope || 'that filter';
 });
 
 watch(query, (next) => {
@@ -210,7 +270,7 @@ watch(query, (next) => {
 onMounted(() => {
   // Reset the filters on open. A search left over from a previous session would look
   // like an empty uploads list — the worst possible first impression of the browser.
-  void uploads.setFilters({ query: '', kind: null }).catch(() => {
+  void uploads.setFilters({ query: '', kind: null, favoritesOnly: false }).catch(() => {
     /* surfaced via store.listError */
   });
   query.value = '';
@@ -237,6 +297,12 @@ function onEscape(event: KeyboardEvent) {
 function onKind(kind: UploadKind | null) {
   if (uploads.kind === kind) return;
   void uploads.setFilters({ kind }).catch(() => {
+    /* surfaced via store.listError */
+  });
+}
+
+function onToggleFavoritesFilter() {
+  void uploads.setFilters({ favoritesOnly: !uploads.favoritesOnly }).catch(() => {
     /* surfaced via store.listError */
   });
 }
@@ -311,6 +377,30 @@ function onCopy(u: UploadRow) {
   void clipboard.copy(u.url, u.id);
 }
 
+// Drop the URL into the draft and get out of the way. The store's insert bus does
+// the caret work (and refocuses the textarea), so the modal doesn't need to know
+// where the composer is.
+function onInsert(u: UploadRow) {
+  uploads.requestInsert(u.url);
+  emit('close');
+}
+
+async function onToggleStar(u: UploadRow) {
+  if (starringId.value === u.id) return;
+  starringId.value = u.id;
+  // Reuses actionError: it's the tile grid's one error line, and a failed star and a
+  // failed delete are never both pending — the star request is the only thing that
+  // could have written it while a delete is in flight, and vice versa.
+  actionError.value = '';
+  try {
+    await uploads.setFavorite(u.id, !u.favorite);
+  } catch (e: any) {
+    actionError.value = e.message || 'could not update star';
+  } finally {
+    starringId.value = null;
+  }
+}
+
 async function onDelete(u: UploadRow) {
   // One delete at a time: a second in-flight delete would fight over the single
   // deletingId ref (spinner/disabled state desync). All delete buttons are
@@ -318,12 +408,12 @@ async function onDelete(u: UploadRow) {
   if (deletingId.value !== null) return;
   if (!confirm(`Delete "${u.filename || u.url}"? The file is removed from storage.`)) return;
   deletingId.value = u.id;
-  deleteError.value = '';
+  actionError.value = '';
   try {
     await uploads.remove(u.id);
   } catch (e: any) {
     // The bytes weren't destroyed, so the row stays and the reason surfaces.
-    deleteError.value = e.message || 'delete failed';
+    actionError.value = e.message || 'delete failed';
   } finally {
     deletingId.value = null;
   }
@@ -421,6 +511,15 @@ function metaLine(u: UploadRow): string {
   color: var(--fg);
   border-color: var(--accent);
   background: var(--bg-soft);
+}
+/* Its own control, not part of the kinds group — the gap here is what says so. */
+.chip.starred {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.chip.starred.active i {
+  color: var(--warn);
 }
 
 .error {
@@ -520,6 +619,14 @@ function metaLine(u: UploadRow): string {
   display: flex;
   gap: var(--space-2);
 }
+/* Opposite corner from .actions so the star never competes with the three
+   controls over there, and so a filled one is always in the same place while the
+   eye scans the grid. */
+.star-slot {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+}
 /* A solid themed chip, NOT a scrim: --scrim is a dark translucent, so in the light
    theme a --fg icon on it would be dark-on-dark. It sits on arbitrary user imagery, so
    the button has to bring its own background either way. */
@@ -541,15 +648,27 @@ function metaLine(u: UploadRow): string {
 }
 
 @media (hover: hover) {
-  .actions {
-    gap: var(--space-1);
+  .actions,
+  .star-slot {
     opacity: 0;
     transition: opacity 0.12s ease;
+  }
+  .actions {
+    gap: var(--space-1);
   }
   /* focus-within, not just hover: hidden-until-hover is the ONLY way to reach copy and
      delete with a pointer, so they have to be reachable by keyboard too. */
   .tile:hover .actions,
-  .tile:focus-within .actions {
+  .tile:focus-within .actions,
+  .tile:hover .star-slot,
+  .tile:focus-within .star-slot {
+    opacity: 1;
+  }
+  /* ⚠ A STARRED tile keeps its star visible without hover. It is the one control
+     here that is also a state readout: hiding it would mean the only way to see
+     which of your uploads are starred is to hover each tile in turn, which defeats
+     the point of marking them. The empty outline still hides. */
+  .star-slot.starred {
     opacity: 1;
   }
   /* Compact, now that they only appear when you're already pointing at the tile — and
@@ -572,6 +691,14 @@ function metaLine(u: UploadRow): string {
 }
 .copy.copied {
   color: var(--good);
+}
+/* Gold once set, so a starred tile is identifiable by colour alone at grid scale —
+   the filled-vs-outline glyph difference is too fine to scan at 180px. */
+.star.on {
+  color: var(--warn);
+}
+.star.on:hover {
+  color: var(--warn);
 }
 
 .empty {

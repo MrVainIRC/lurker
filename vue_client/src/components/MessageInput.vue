@@ -213,6 +213,7 @@ import {
   setNickStrip,
   setEmojiStrip,
   setColorPickerOpen,
+  setFavoritesPickerOpen,
   moveEmojiActive,
   confirmEmojiActive,
   hasEmojiCandidates,
@@ -1872,6 +1873,7 @@ onBeforeUnmount(() => {
   closeEmojiStrip();
   closeEmojiPicker();
   closeColorPicker();
+  setFavoritesPickerOpen(false);
 });
 
 function insertUrlAtCaret(url: string): void {

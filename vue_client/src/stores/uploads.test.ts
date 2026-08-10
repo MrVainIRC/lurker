@@ -266,3 +266,148 @@ describe('uploads — browser filters', () => {
     expect(uploads.recent.map((u) => u.filename)).toEqual(['holiday-snap.png']);
   });
 });
+
+// Starred uploads. Two surfaces read this state — the browser's starred filter
+// (`recent`) and the composer's quick-access picker (`favorites`) — and the store's
+// real job is keeping both true after a star without refetching either.
+describe('uploads — favourites', () => {
+  const row = (id: number, filename: string, favorite = false) => ({
+    id,
+    url: `https://x.test/${filename}`,
+    filename,
+    mime: 'image/webp',
+    favorite,
+  });
+
+  it('stars over PUT and unstars over DELETE', async () => {
+    const uploads = useUploadsStore();
+    uploads.recent = [row(1, 'gif.webp')];
+
+    api.mockResolvedValueOnce({ ok: true, favorite: true });
+    await uploads.setFavorite(1, true);
+    expect(api.mock.calls.at(-1)).toEqual(['/api/uploads/1/favorite', { method: 'PUT' }]);
+    expect(uploads.recent[0].favorite).toBe(true);
+
+    api.mockResolvedValueOnce({ ok: true, favorite: false });
+    await uploads.setFavorite(1, false);
+    expect(api.mock.calls.at(-1)).toEqual(['/api/uploads/1/favorite', { method: 'DELETE' }]);
+    expect(uploads.recent[0].favorite).toBe(false);
+  });
+
+  // The picker must not need a refetch to be right, and "most recently starred
+  // first" is the order the server will hand back — so the local insert has to
+  // agree with it or the list reshuffles under the user on the next open.
+  it('puts a freshly starred upload at the front of the picker list', async () => {
+    const uploads = useUploadsStore();
+    uploads.favorites = [row(1, 'old-favorite.webp', true)];
+    uploads.recent = [row(2, 'new-favorite.webp')];
+
+    api.mockResolvedValueOnce({ ok: true, favorite: true });
+    await uploads.setFavorite(2, true);
+
+    expect(uploads.favorites.map((u) => u.id)).toEqual([2, 1]);
+    expect(uploads.favorites[0].favorite).toBe(true);
+  });
+
+  it('drops an unstarred upload out of the picker list', async () => {
+    const uploads = useUploadsStore();
+    uploads.favorites = [row(1, 'a.webp', true), row(2, 'b.webp', true)];
+
+    api.mockResolvedValueOnce({ ok: true, favorite: false });
+    await uploads.setFavorite(1, false);
+
+    expect(uploads.favorites.map((u) => u.id)).toEqual([2]);
+  });
+
+  // Unstarring from inside the starred-only view: the row no longer belongs to the
+  // list on screen, so leaving it there would show an unstarred tile in a view that
+  // says it only shows starred ones.
+  it('removes the row from a starred-only view when it is unstarred', async () => {
+    const uploads = useUploadsStore();
+    await uploads.setFilters({ favoritesOnly: true });
+    uploads.recent = [row(1, 'a.webp', true), row(2, 'b.webp', true)];
+
+    api.mockResolvedValueOnce({ ok: true, favorite: false });
+    await uploads.setFavorite(1, false);
+
+    expect(uploads.recent.map((u) => u.id)).toEqual([2]);
+  });
+
+  // Not optimistic on purpose: a star that only ever existed locally is worse than a
+  // beat of latency, because the whole point is that it's there on the next device.
+  it('leaves the row alone when the server refuses', async () => {
+    const uploads = useUploadsStore();
+    uploads.recent = [row(1, 'a.webp')];
+
+    api.mockRejectedValueOnce(new Error('nope'));
+    await expect(uploads.setFavorite(1, true)).rejects.toThrow('nope');
+
+    expect(uploads.recent[0].favorite).toBe(false);
+    expect(uploads.favorites).toEqual([]);
+  });
+
+  it('deleting an upload also takes it out of the picker', async () => {
+    const uploads = useUploadsStore();
+    uploads.recent = [row(1, 'a.webp', true)];
+    uploads.favorites = [row(1, 'a.webp', true)];
+
+    api.mockResolvedValueOnce({ ok: true });
+    await uploads.remove(1);
+
+    // The bytes are gone; a picker still offering to insert its URL would paste a 404.
+    expect(uploads.favorites).toEqual([]);
+    expect(uploads.recent).toEqual([]);
+  });
+
+  it('asks for the starred set as one page, with no cursor to follow', async () => {
+    const uploads = useUploadsStore();
+    api.mockResolvedValueOnce({ items: [row(1, 'a.webp', true)] });
+    await uploads.setFilters({ favoritesOnly: true });
+
+    const params = new URL(api.mock.calls.at(-1)![0], 'https://x.test').searchParams;
+    expect(params.get('favorites')).toBe('1');
+    // The server orders this view by when you starred, which an id cursor cannot
+    // page — so the store must not advertise more to load.
+    expect(uploads.hasMore).toBe(false);
+  });
+
+  it('loads the picker list without disturbing the browser list', async () => {
+    const uploads = useUploadsStore();
+    api.mockResolvedValueOnce({ items: [row(1, 'browsing.webp')] });
+    await uploads.setFilters({ query: 'browsing' });
+
+    api.mockResolvedValueOnce({ items: [row(2, 'starred.webp', true)] });
+    await uploads.loadFavorites();
+
+    const params = new URL(api.mock.calls.at(-1)![0], 'https://x.test').searchParams;
+    expect(params.get('favorites')).toBe('1');
+    expect(params.get('q')).toBeNull(); // the modal's search must not scope the picker
+    expect(uploads.favorites.map((u) => u.id)).toEqual([2]);
+    expect(uploads.recent.map((u) => u.id)).toEqual([1]);
+  });
+
+  // A fresh upload is never starred, so it must not flash into a starred-only view
+  // and then vanish on the next reload.
+  it('keeps a new upload out of a starred-only view', async () => {
+    const uploads = useUploadsStore();
+    await uploads.setFilters({ favoritesOnly: true });
+
+    apiMultipart.mockResolvedValue({ id: 30, url: 'https://x.test/n.webp', mime: 'image/webp' });
+    await uploads.upload(new Blob(['x']), 'brand-new.png');
+
+    expect(uploads.recent).toEqual([]);
+  });
+
+  it('flags a starred view that came back full, rather than implying it is complete', async () => {
+    const uploads = useUploadsStore();
+    api.mockResolvedValueOnce({
+      items: Array.from({ length: 200 }, (_, i) => row(i + 1, `f${i}.webp`, true)),
+    });
+    await uploads.setFilters({ favoritesOnly: true });
+    expect(uploads.favoritesTruncated).toBe(true);
+
+    api.mockResolvedValueOnce({ items: [row(1, 'only.webp', true)] });
+    await uploads.setFilters({ favoritesOnly: true });
+    expect(uploads.favoritesTruncated).toBe(false);
+  });
+});

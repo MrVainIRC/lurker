@@ -323,6 +323,12 @@ export const EXPORT_TABLES = Object.freeze({
       'thumbnail_url',
       'uploader_config_id',
       'created_at',
+      // Which uploads the user starred, and when. Portable: it's their own curation,
+      // not instance state. Safe to add to an existing contract precisely because it
+      // is NULLABLE — the importer binds NULL for a column an older archive doesn't
+      // carry, which here just means "wasn't starred" (compare synced_to_cp/removed
+      // below, which are NOT NULL and would fail that insert).
+      'favorited_at',
     ],
     skippedColumns: {
       synced_to_cp: 'operational: cell↔control-plane moderation-sync bookkeeping, not portable',

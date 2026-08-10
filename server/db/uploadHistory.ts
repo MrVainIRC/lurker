@@ -17,6 +17,9 @@ export interface UploadHistoryRow {
   thumbnail: Buffer | null;
   thumbnail_url: string | null;
   created_at: string;
+  // When the owner starred this upload, or null if they haven't. See the
+  // migration note in db/index.ts for why it's a timestamp and not a boolean.
+  favorited_at: string | null;
 }
 
 /**
@@ -44,6 +47,10 @@ export interface UploadListRow {
   // (never shipping the ref itself to the client).
   uploader_config_id: number | null;
   has_ref: number;
+  // Set when the owner starred it. The API ships the client a plain `favorite`
+  // boolean derived from this — the timestamp itself only drives server-side
+  // ordering.
+  favorited_at: string | null;
 }
 
 /** Fields passed to insertUpload. */
@@ -113,6 +120,13 @@ function likeTerm(term: string): string {
   return `%${term.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 }
 
+// The most favourites one request can return. Favourites are a CURATED set — the
+// point of starring is that only a handful of things are worth it — so the views
+// fetch the whole set in one go rather than paging it (see the ordering note in
+// listUploads). A user who somehow passes this is told they're seeing a slice
+// rather than shown a silently truncated list.
+export const FAVORITES_LIMIT = 200;
+
 export function listUploads(
   userId: number,
   {
@@ -120,6 +134,7 @@ export function listUploads(
     limit = 50,
     q = null,
     kind = null,
+    favorites = false,
   }: {
     before?: number | null;
     limit?: number;
@@ -127,6 +142,8 @@ export function listUploads(
     // named", so LIKE beats reaching for FTS5 at a few thousand rows per user.
     q?: string | null;
     kind?: UploadKind | null;
+    // Starred uploads only. Composes with q and kind.
+    favorites?: boolean;
   } = {},
 ): UploadListRow[] {
   const lim = Math.max(1, Math.min(200, Number(limit) || 50));
@@ -138,7 +155,18 @@ export function listUploads(
   const where = ['user_id = ?'];
   const params: (string | number)[] = [userId];
 
-  if (before) {
+  if (favorites) {
+    // A moderated-away upload is starred-but-gone: its bytes no longer exist, so
+    // it must not sit in a quick-access list offering to insert a dead URL. It
+    // still shows as a tombstone in the unfiltered browse, where that's the point.
+    where.push('favorited_at IS NOT NULL AND removed = 0');
+  }
+  // ⚠ Only for the id-ordered views. The favourites view sorts by favorited_at, and
+  // an `id < before` cursor against that ordering pages the WRONG rows — it would
+  // silently drop favourites whose id happens to be high but whose star is old.
+  // Favourites come back in one page instead (FAVORITES_LIMIT), so there is no
+  // cursor to honour.
+  if (before && !favorites) {
     where.push('id < ?');
     params.push(Number(before));
   }
@@ -153,21 +181,48 @@ export function listUploads(
     params.push(`${kind}/%`);
   }
 
+  // Recency of the STAR, not of the upload — starring a two-year-old gif today
+  // should put it at the front of your quick-access list, not at the bottom under
+  // everything you starred before it. `id DESC` breaks ties (two stars inside the
+  // same millisecond) so the order is total and paging-safe.
+  const orderBy = favorites ? 'favorited_at DESC, id DESC' : 'id DESC';
+
   // `has_thumbnail` lets the API decide whether to advertise a thumbnail_url
   // without ever shipping the (potentially large) blob in the list response.
   return db
     .prepare(
       `
     SELECT id, provider, url, filename, mime, byte_size, width, height, created_at,
-           thumbnail_url, removed, uploader_config_id,
+           thumbnail_url, removed, uploader_config_id, favorited_at,
            (thumbnail IS NOT NULL) AS has_thumbnail, (ref IS NOT NULL) AS has_ref
     FROM upload_history
     WHERE ${where.join(' AND ')}
-    ORDER BY id DESC
+    ORDER BY ${orderBy}
     LIMIT ?
   `,
     )
     .all(...params, lim) as UploadListRow[];
+}
+
+// Star / unstar, user-scoped so a caller can only touch their own uploads.
+// Idempotent in the sense that matters: SQLite counts a matched row as changed
+// even when the value is unchanged, so re-unstarring returns true rather than
+// looking like a missing row.
+//
+// Deliberately NOT gated on `removed`: a moderated upload that was starred before
+// the takedown must still be un-starrable. Keeping it OUT of the favourites views
+// is listUploads' job, not this one's.
+const favoriteStmt = db.prepare(
+  `UPDATE upload_history SET favorited_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE user_id = ? AND id = ?`,
+);
+const unfavoriteStmt = db.prepare(
+  'UPDATE upload_history SET favorited_at = NULL WHERE user_id = ? AND id = ?',
+);
+
+export function setUploadFavorite(userId: number, id: number, favorite: boolean): boolean {
+  const stmt = favorite ? favoriteStmt : unfavoriteStmt;
+  return stmt.run(userId, Number(id)).changes > 0;
 }
 
 export function getThumbnail(userId: number, id: number): { thumbnail: Buffer | null } | undefined {

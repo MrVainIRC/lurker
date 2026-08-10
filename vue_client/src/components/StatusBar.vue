@@ -74,6 +74,25 @@
         >
           <i class="fa-solid fa-paperclip"></i>
         </button>
+        <!-- Starred uploads, straight into the line being typed. Sits next to the
+             paperclip because it is the same intent — "put a file in this message"
+             — just for one you have already uploaded and marked as worth keeping
+             at hand. @mousedown.prevent for the same reason as the palette below:
+             this is an in-app popover, so the composer keeps focus. -->
+        <button
+          ref="favoritesBtnEl"
+          type="button"
+          class="tool-btn"
+          :class="{ on: overlay.favoritesOpen }"
+          :disabled="!sendable"
+          title="starred uploads"
+          aria-label="starred uploads"
+          :aria-expanded="overlay.favoritesOpen"
+          @mousedown.prevent
+          @click="onToggleFavorites"
+        >
+          <i class="fa-solid fa-star"></i>
+        </button>
         <!-- @mousedown.prevent keeps the composer focused (and the iOS keyboard
              up): this opens the in-app colour picker overlay, not a native
              sheet, so the keyboard should stay — same affordance as send. -->
@@ -129,6 +148,14 @@
       @reset="resetColor"
       @close="closeColorPicker"
     />
+    <!-- v-if, not v-show: the picker refetches on mount, so the DOM lifecycle IS
+         the "load on open" trigger. It also has to be handed its own toggle button
+         to exclude from outside-tap dismissal. -->
+    <UploadFavoritesPicker
+      v-if="overlay.favoritesOpen"
+      :ignore="[favoritesBtnEl]"
+      @close="setFavoritesPickerOpen(false)"
+    />
   </div>
 </template>
 
@@ -151,6 +178,7 @@ import { formatTimestamp } from '../utils/timestamp.js';
 import { isPeerOffline, isPeerAway } from '../utils/peerPresence.js';
 import SuggestionStrip from './SuggestionStrip.vue';
 import MircColorPicker from './MircColorPicker.vue';
+import UploadFavoritesPicker from './UploadFavoritesPicker.vue';
 import {
   useComposerOverlay,
   selectNick,
@@ -161,6 +189,7 @@ import {
   resetColor,
   closeColorPicker,
   setColorPickerOpen,
+  setFavoritesPickerOpen,
   pickComposerFile,
   type NickStripItem,
 } from '../composables/useComposerOverlay.js';
@@ -442,6 +471,15 @@ function onToggleColorPicker() {
   if (!sendable.value) return;
   setColorPickerOpen(!overlay.colorPickerOpen);
 }
+
+// Passed to the picker as its `ignore` element: a tap on the toggle must not also
+// count as an outside-tap dismissal, or the two cancel out and it never closes.
+const favoritesBtnEl = ref<HTMLButtonElement | null>(null);
+
+function onToggleFavorites() {
+  if (!sendable.value) return;
+  setFavoritesPickerOpen(!overlay.favoritesOpen);
+}
 </script>
 
 <style scoped>
@@ -584,6 +622,11 @@ function onToggleColorPicker() {
   line-height: 1.4;
 }
 .tool-btn:hover:not(:disabled) {
+  color: var(--fg);
+}
+/* An open popover's toggle stays lit, so the star doesn't read as a stray
+   permanently-highlighted control while its panel is up. */
+.tool-btn.on:not(:disabled) {
   color: var(--fg);
 }
 .tool-btn:disabled {

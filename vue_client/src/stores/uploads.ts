@@ -26,6 +26,15 @@ function emitInsert(url: string) {
 const FAILURE_VISIBLE_MS = 10_000;
 const PAGE_SIZE = 50;
 
+// Favourites are a CURATED set, so both views that show them fetch the whole thing
+// in one request instead of paging (the server orders them by when you starred,
+// which the id-keyset cursor can't page — see listUploads). FAVORITES_LIMIT mirrors
+// the server's ceiling; hitting it is disclosed in the UI rather than silently
+// truncating. The picker shows only the head of that list — enough to fill a couple
+// of rows above the composer without becoming a second uploads browser.
+const FAVORITES_LIMIT = 200;
+const FAVORITES_PICKER_LIMIT = 24;
+
 /** The kinds the uploads browser filters by. Mirrors UPLOAD_KINDS on the server, which
  *  derives each one from the mime prefix. */
 export type UploadKind = 'image' | 'video' | 'audio' | 'text';
@@ -34,17 +43,22 @@ function uploadsUrl({
   q,
   kind,
   before,
+  favorites,
+  limit = PAGE_SIZE,
 }: {
   q?: string;
   kind?: UploadKind | null;
   before?: number | null;
+  favorites?: boolean;
+  limit?: number;
 }): string {
   // URLSearchParams, not template concatenation: a filename search is arbitrary user
   // text and will contain `&`, `#`, `+` and spaces.
-  const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
+  const params = new URLSearchParams({ limit: String(limit) });
   if (before != null) params.set('before', String(before));
   if (q) params.set('q', q);
   if (kind) params.set('kind', kind);
+  if (favorites) params.set('favorites', '1');
   return `/api/uploads?${params}`;
 }
 
@@ -100,6 +114,9 @@ export interface UploadItem {
   // no delete affordance at all — there is no "remove the record but leave the
   // file up" path (design decision 8).
   can_delete?: boolean;
+  // Starred by the owner. Server-side state, so the same quick-access set is
+  // there on every device.
+  favorite?: boolean;
 }
 
 export const useUploadsStore = defineStore('uploads', {
@@ -123,11 +140,31 @@ export const useUploadsStore = defineStore('uploads', {
     // view once a filter is set.
     query: '',
     kind: null as UploadKind | null,
+    // The browser's "starred only" toggle. Orthogonal to `kind` — starred + images
+    // is a meaningful view — so it's its own flag rather than another kind value.
+    favoritesOnly: false,
     // Bumped on every filter change. A page that comes back from a superseded request
     // carries a stale generation and is dropped — otherwise a slow "scree" response
     // lands after the faster "screenshot" one and overwrites it.
     generation: 0,
+
+    // ─── The favourites picker's own list ──────────────────────────────────────
+    // Kept SEPARATE from `recent` on purpose: `recent` holds whatever the uploads
+    // browser is currently filtered to, and the composer's quick-access picker must
+    // not change contents because someone left a search term in a modal.
+    favorites: [] as UploadItem[],
+    favoritesLoaded: false,
+    favoritesLoading: false,
+    favoritesError: '',
   }),
+  getters: {
+    // The starred view came back full, so there may be more the server didn't send.
+    // Surfaced in the modal rather than swallowed — a list that quietly stops at 200
+    // reads as "these are all my favourites", which would be a lie.
+    favoritesTruncated(state): boolean {
+      return state.favoritesOnly && state.recent.length >= FAVORITES_LIMIT;
+    },
+  },
   actions: {
     async upload(file: File | Blob, filename: string | null = null) {
       if (this.current) return; // Single concurrent upload — keeps the status bar coherent.
@@ -248,15 +285,27 @@ export const useUploadsStore = defineStore('uploads', {
      * inserted upload appears if and only if a refetch would have shown it.
      */
     matchesFilters(row: UploadItem): boolean {
+      // A fresh upload is never starred, so this also correctly keeps one out of an
+      // active starred-only view rather than flashing it in until the next reload.
+      if (this.favoritesOnly && !row.favorite) return false;
       if (this.kind && !(row.mime || '').startsWith(`${this.kind}/`)) return false;
       if (!this.query) return true;
       return (row.filename || '').toLowerCase().includes(this.query.toLowerCase());
     },
 
     /** Apply the browser's filters and reload from the top (#547). */
-    async setFilters({ query, kind }: { query?: string; kind?: UploadKind | null }) {
+    async setFilters({
+      query,
+      kind,
+      favoritesOnly,
+    }: {
+      query?: string;
+      kind?: UploadKind | null;
+      favoritesOnly?: boolean;
+    }) {
       if (query !== undefined) this.query = query;
       if (kind !== undefined) this.kind = kind;
+      if (favoritesOnly !== undefined) this.favoritesOnly = favoritesOnly;
       // A filtered result set is a different list, not a continuation of this one: the
       // old cursor points into the unfiltered sequence and would page the wrong rows.
       this.cursor = null;
@@ -272,11 +321,21 @@ export const useUploadsStore = defineStore('uploads', {
       this.loading = true;
       this.listError = '';
       try {
-        const { items } = await api(uploadsUrl({ q: this.query, kind: this.kind }));
+        const { items } = await api(
+          uploadsUrl({
+            q: this.query,
+            kind: this.kind,
+            favorites: this.favoritesOnly,
+            limit: this.favoritesOnly ? FAVORITES_LIMIT : PAGE_SIZE,
+          }),
+        );
         if (gen !== this.generation) return; // superseded by a newer filter
         this.recent = items || [];
         this.cursor = this.recent.length ? this.recent[this.recent.length - 1].id : null;
-        this.hasMore = this.recent.length === PAGE_SIZE;
+        // The starred view arrives whole — there is no cursor that can page it (the
+        // server orders it by when you starred, not by id), so infinite scroll has
+        // nothing to ask for. The modal discloses it when the set hit the ceiling.
+        this.hasMore = this.favoritesOnly ? false : this.recent.length === PAGE_SIZE;
         this.loaded = true;
       } catch (e: any) {
         if (gen !== this.generation) return;
@@ -317,6 +376,57 @@ export const useUploadsStore = defineStore('uploads', {
     async remove(id: number) {
       await api(`/api/uploads/${id}`, { method: 'DELETE' });
       this.recent = this.recent.filter((u) => u.id !== id);
+      // The file is gone, so it cannot stay in the quick-access picker — otherwise
+      // the picker keeps offering to insert a URL that now 404s until a reload.
+      this.favorites = this.favorites.filter((u) => u.id !== id);
+    },
+
+    /**
+     * Load the composer picker's quick-access list. Refetched on every open rather
+     * than cached for the session: starring happens on other devices too, and the
+     * request is one small page of a curated set.
+     */
+    async loadFavorites() {
+      this.favoritesLoading = true;
+      this.favoritesError = '';
+      try {
+        const { items } = await api(uploadsUrl({ favorites: true, limit: FAVORITES_PICKER_LIMIT }));
+        this.favorites = items || [];
+        this.favoritesLoaded = true;
+      } catch (e: any) {
+        this.favoritesError = e.message || 'failed to load favorites';
+      } finally {
+        this.favoritesLoading = false;
+      }
+    },
+
+    /**
+     * Star or unstar an upload. Applied to the local lists only AFTER the server
+     * agrees — an optimistic star that failed would leave a quick-access entry the
+     * next device never sees, which is worse than a beat of latency on a click.
+     */
+    async setFavorite(id: number, favorite: boolean) {
+      await api(`/api/uploads/${id}/favorite`, { method: favorite ? 'PUT' : 'DELETE' });
+
+      const row = this.recent.find((u) => u.id === id);
+      if (row) row.favorite = favorite;
+
+      if (favorite) {
+        // Front of the picker, matching the server's "most recently starred first"
+        // ordering — so the list the user sees now is the one a refetch returns.
+        const known = row ?? this.favorites.find((u) => u.id === id);
+        if (known)
+          this.favorites = [
+            { ...known, favorite: true },
+            ...this.favorites.filter((u) => u.id !== id),
+          ];
+      } else {
+        this.favorites = this.favorites.filter((u) => u.id !== id);
+        // Unstarring from inside the starred-only view: the row no longer belongs to
+        // the list being displayed, so drop it instead of leaving an unstarred tile
+        // sitting in a view that claims to show only starred ones.
+        if (this.favoritesOnly) this.recent = this.recent.filter((u) => u.id !== id);
+      }
     },
 
     requestInsert(url: string) {

@@ -1214,6 +1214,16 @@ ensureColumn('upload_history', 'removed', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('upload_history', 'uploader_config_id', 'INTEGER');
 ensureColumn('upload_history', 'ref', 'TEXT');
 
+// Starred uploads — the user's own quick-access set (the reaction gif they post
+// weekly, the diagram they keep re-linking). A nullable TIMESTAMP rather than a
+// boolean for two reasons: it records WHEN you starred something, which is the
+// order the favourites views want (star a two-year-old upload today and it
+// belongs at the FRONT, not buried under things you starred long ago); and a
+// nullable column survives importing an archive written before it existed, where
+// a NOT NULL one would fail the insert (see the synced_to_cp note in
+// exportSchema.ts for the same trap).
+ensureColumn('upload_history', 'favorited_at', 'TEXT');
+
 // The offer's address/port, persisted so an unsolicited DCC SEND recorded as
 // pending_approval can be accepted later (the user clicks Accept seconds/minutes
 // after the bot offered). #270 phase 2.

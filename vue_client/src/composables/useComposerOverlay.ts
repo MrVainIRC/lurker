@@ -29,6 +29,10 @@ export interface ComposerOverlayState {
   emojiActiveIndex: number;
   // mIRC colour picker.
   colorPickerOpen: boolean;
+  // Starred-uploads quick-access picker. Unlike the strips above it needs no
+  // select handler here — picking inserts a URL, and the uploads store already
+  // owns a bus to MessageInput for exactly that (onInsertUrl/requestInsert).
+  favoritesOpen: boolean;
 }
 
 const state = reactive<ComposerOverlayState>({
@@ -39,6 +43,7 @@ const state = reactive<ComposerOverlayState>({
   emojiItems: [],
   emojiActiveIndex: 0,
   colorPickerOpen: false,
+  favoritesOpen: false,
 });
 
 type NickSelectHandler = (nick: string) => void;
@@ -93,6 +98,10 @@ export function setEmojiStrip(open: boolean, items: EmojiMatch[] = []): void {
 
 export function setColorPickerOpen(open: boolean): void {
   state.colorPickerOpen = open;
+}
+
+export function setFavoritesPickerOpen(open: boolean): void {
+  state.favoritesOpen = open;
 }
 
 // Emoji-strip keyboard navigation, driven from MessageInput's keydown.
