@@ -1074,8 +1074,10 @@ message — the server does the rest.
 list, not another page of history, and it behaves differently in two ways worth
 coding to. It is ordered by **when the upload was starred**, newest star first,
 not by upload id; and because that ordering is incompatible with the `before` id
-cursor, the server **ignores `before`** here and returns the whole set in one
-response (ceiling 200). Page it and you will get the same rows back. Moderated
+cursor, the server **ignores `before`** here. There is no way to page this view:
+ask for as much of it as you want with `limit` (default 50, ceiling 200) in a
+single request, and treat a full response as "there may be more" — a client that
+sends `before` gets the same rows back forever. Moderated
 (`removed`) uploads are excluded even when starred, since their bytes are gone —
 they still appear in an unfiltered `GET /` as tombstones, and can still be
 unstarred. `favorites` composes normally with `q` and `kind`.

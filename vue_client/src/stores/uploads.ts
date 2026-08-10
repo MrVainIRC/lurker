@@ -352,8 +352,18 @@ export const useUploadsStore = defineStore('uploads', {
       const gen = this.generation;
       this.loading = true;
       try {
+        // `favorites` rides along even though loadRecent forces hasMore=false for
+        // the starred view and this should never run there. Omitting it made the
+        // back-fill page the UNFILTERED history — so the one bug this could have
+        // is silently mixing unstarred rows into a starred list, guarded only by an
+        // invariant three functions away. Passing the flag costs nothing.
         const { items } = await api(
-          uploadsUrl({ q: this.query, kind: this.kind, before: this.cursor }),
+          uploadsUrl({
+            q: this.query,
+            kind: this.kind,
+            favorites: this.favoritesOnly,
+            before: this.cursor,
+          }),
         );
         // The filters changed while this page was in flight — these rows belong to a
         // list that no longer exists. Appending them would mix two result sets.

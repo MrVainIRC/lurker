@@ -94,11 +94,17 @@
                copy/delete it stays visible once set rather than hiding until hover.
                Keeping it out of that cluster is also what keeps three finger-sized
                buttons fitting across a 180px tile on touch. -->
-          <div v-if="!u.removed" class="star-slot" :class="{ starred: u.favorite }">
+          <!-- ⚠ `!u.removed || u.favorite`, not just `!u.removed`. A moderated
+               takedown does not clear the star (the server keeps it, so the state
+               survives if the row is ever restored), which means a tombstone can
+               arrive already starred — and hiding the button on every removed row
+               would leave that star set with no way in any UI to clear it. Nothing
+               new can be starred from a tombstone; an existing one can be undone. -->
+          <div v-if="!u.removed || u.favorite" class="star-slot" :class="{ starred: u.favorite }">
             <button
               class="act star"
               :class="{ on: u.favorite }"
-              :disabled="starringId === u.id"
+              :disabled="starring.has(u.id)"
               :title="u.favorite ? 'unstar' : 'star for quick access'"
               :aria-label="u.favorite ? 'unstar' : 'star for quick access'"
               :aria-pressed="!!u.favorite"
@@ -225,10 +231,12 @@ const searchEl = ref<HTMLInputElement | null>(null);
 const clipboard = useCopyFeedback();
 const deletingId = ref<number | null>(null);
 const actionError = ref('');
-// Per-tile, unlike deletingId's single-flight: starring is cheap and non-destructive,
-// so two quick stars on different tiles should both go through. This only disables
-// the one button that's mid-request, to stop a double-click racing itself.
-const starringId = ref<number | null>(null);
+// A SET, not a single id, unlike deletingId's single-flight: starring is cheap and
+// non-destructive, so stars on different tiles run concurrently — and a lone ref
+// would be overwritten by the second tile, re-enabling the first while its request
+// is still in flight and letting a third click fire a duplicate toggle off the
+// not-yet-updated `u.favorite`. Each tile guards only itself.
+const starring = ref(new Set<number>());
 
 // Local, so typing is never gated on a round trip; pushed to the store (and thus the
 // server) on a debounce.
@@ -386,8 +394,10 @@ function onInsert(u: UploadRow) {
 }
 
 async function onToggleStar(u: UploadRow) {
-  if (starringId.value === u.id) return;
-  starringId.value = u.id;
+  if (starring.value.has(u.id)) return;
+  // Reassign rather than mutate: a plain Set is not reactive, so the template's
+  // :disabled binding would not see an .add()/.delete() on it.
+  starring.value = new Set(starring.value).add(u.id);
   // Reuses actionError: it's the tile grid's one error line, and a failed star and a
   // failed delete are never both pending — the star request is the only thing that
   // could have written it while a delete is in flight, and vice versa.
@@ -397,7 +407,9 @@ async function onToggleStar(u: UploadRow) {
   } catch (e: any) {
     actionError.value = e.message || 'could not update star';
   } finally {
-    starringId.value = null;
+    const next = new Set(starring.value);
+    next.delete(u.id);
+    starring.value = next;
   }
 }
 

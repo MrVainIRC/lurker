@@ -44,7 +44,6 @@ import {
   getUploadForReap,
   deleteUpload,
   setUploadFavorite,
-  FAVORITES_LIMIT,
 } from '../db/uploadHistory.js';
 import { reportUploadSoon } from '../services/moderationReport.js';
 
@@ -512,16 +511,13 @@ router.get('/', (req: Request, res: Response) => {
   // An unknown kind is ignored rather than 400'd: it can only come from a client we
   // shipped, and silently showing everything beats erroring out of a browse.
   const kind = isUploadKind(req.query.kind) ? req.query.kind : null;
-  // Starred-only. The favourites view is not paged (see listUploads), so it asks
-  // for the whole curated set in one request regardless of what `limit` said.
+  // Starred-only. `limit` still applies exactly as it does everywhere else (the
+  // composer's picker asks for a couple of rows' worth) — what does NOT apply is
+  // `before`: listUploads orders this view by when the upload was starred, and an
+  // id cursor against that ordering pages the wrong rows, so it ignores one. A
+  // caller wanting the whole curated set asks for it with limit.
   const favorites = req.query.favorites === '1' || req.query.favorites === 'true';
-  const rows: UploadListRow[] = listUploads(req.user!.id, {
-    before,
-    limit: favorites ? Math.min(limit, FAVORITES_LIMIT) : limit,
-    q,
-    kind,
-    favorites,
-  });
+  const rows: UploadListRow[] = listUploads(req.user!.id, { before, limit, q, kind, favorites });
   const configDeletable = configDeletableCheck();
   res.json({
     items: rows.map((r) => {

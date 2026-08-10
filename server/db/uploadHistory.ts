@@ -120,13 +120,6 @@ function likeTerm(term: string): string {
   return `%${term.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 }
 
-// The most favourites one request can return. Favourites are a CURATED set — the
-// point of starring is that only a handful of things are worth it — so the views
-// fetch the whole set in one go rather than paging it (see the ordering note in
-// listUploads). A user who somehow passes this is told they're seeing a slice
-// rather than shown a silently truncated list.
-export const FAVORITES_LIMIT = 200;
-
 export function listUploads(
   userId: number,
   {
@@ -146,6 +139,10 @@ export function listUploads(
     favorites?: boolean;
   } = {},
 ): UploadListRow[] {
+  // The same ceiling for every view. It doubles as the bound on the favourites
+  // view, which is fetched whole rather than paged (see the `before` note below):
+  // a user with more than 200 stars gets the 200 most recently starred, and the
+  // caller is expected to say so rather than imply it has them all.
   const lim = Math.max(1, Math.min(200, Number(limit) || 50));
 
   // Composed rather than branched: before × q × kind is 8 combinations, and the

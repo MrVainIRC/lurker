@@ -371,6 +371,24 @@ describe('uploads — favourites', () => {
     expect(uploads.hasMore).toBe(false);
   });
 
+  // loadRecent forces hasMore=false for this view, so paging it should be
+  // unreachable — but if it ever is reached, the page it appends must still be
+  // starred rows. Without the flag the back-fill silently mixes unfiltered history
+  // into a list that says it only shows stars.
+  it('keeps the starred filter if a next page is ever requested', async () => {
+    const uploads = useUploadsStore();
+    api.mockResolvedValueOnce({ items: [row(7, 'a.webp', true)] });
+    await uploads.setFilters({ favoritesOnly: true });
+
+    uploads.hasMore = true; // the invariant this guards against losing
+    api.mockResolvedValueOnce({ items: [] });
+    await uploads.loadMore();
+
+    expect(new URL(api.mock.calls.at(-1)![0], 'https://x.test').searchParams.get('favorites')).toBe(
+      '1',
+    );
+  });
+
   it('loads the picker list without disturbing the browser list', async () => {
     const uploads = useUploadsStore();
     api.mockResolvedValueOnce({ items: [row(1, 'browsing.webp')] });

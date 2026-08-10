@@ -467,9 +467,15 @@ function onPickFile() {
   pickComposerFile();
 }
 
+// ⚠ The bar's two popovers are anchored to the SAME corner with the same z-index,
+// so opening one must close the other or they render stacked on top of each other.
+// The colour picker has no outside-tap dismissal of its own (only its own `close`
+// action), so nothing else would ever take it down.
 function onToggleColorPicker() {
   if (!sendable.value) return;
-  setColorPickerOpen(!overlay.colorPickerOpen);
+  const open = !overlay.colorPickerOpen;
+  if (open) setFavoritesPickerOpen(false);
+  setColorPickerOpen(open);
 }
 
 // Passed to the picker as its `ignore` element: a tap on the toggle must not also
@@ -478,7 +484,9 @@ const favoritesBtnEl = ref<HTMLButtonElement | null>(null);
 
 function onToggleFavorites() {
   if (!sendable.value) return;
-  setFavoritesPickerOpen(!overlay.favoritesOpen);
+  const open = !overlay.favoritesOpen;
+  if (open) setColorPickerOpen(false);
+  setFavoritesPickerOpen(open);
 }
 </script>
 
