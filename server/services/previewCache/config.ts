@@ -7,7 +7,7 @@
 // ⚠ ENV, not instance settings, and that is a deliberate deviation from #681.
 // That issue asks for `previews.cache.mode` in `instance_settings` with an admin
 // form beside the uploader config, which is the right long-term surface. Every
-// other operator-level knob this app has — LURKER_LINK_PREVIEWS,
+// other operator-level knob this app has — LURKER_PREVIEWS_URL,
 // LURKER_SECRET_KEY, DATABASE_PATH — is already an env var, so this matches what
 // a self-hoster is already doing. `resolveCacheConfig` is the seam the admin
 // surface slots into; nothing above this module knows where the values came from.

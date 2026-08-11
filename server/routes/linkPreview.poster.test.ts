@@ -16,7 +16,6 @@ import { setupTestDb, createTestApp, createAuthedAgent } from '../test-utils/tes
 import { startStubDecoder, type StubDecoder } from '../test-utils/stubDecoder.js';
 
 const ctx = setupTestDb('routes-link-preview-poster');
-process.env.LURKER_LINK_PREVIEWS = 'on';
 process.env.LURKER_PREVIEW_CACHE_MODE = 'local';
 process.env.LURKER_PREVIEW_CACHE_DIR = path.join(ctx.tmpDir, 'poster-cache');
 

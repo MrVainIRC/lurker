@@ -26,7 +26,6 @@ import { setupTestDb, createTestApp, createAuthedAgent } from '../test-utils/tes
 import { startStubDecoder, type StubDecoder } from '../test-utils/stubDecoder.js';
 
 const ctx = setupTestDb('routes-link-preview-media');
-process.env.LURKER_LINK_PREVIEWS = 'on';
 
 let app: Express;
 let agent: LurkerTestAgent;

@@ -113,7 +113,6 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => dropper.listen(0, '127.0.0.1', resolve));
   dropperBase = `http://127.0.0.1:${(dropper.address() as AddressInfo).port}`;
 
-  process.env.LURKER_LINK_PREVIEWS = 'on';
   process.env.LURKER_PREVIEW_CACHE_MODE = 'dropper';
   process.env.LURKER_PREVIEW_CACHE_DROPPER_URL = dropperBase;
   process.env.LURKER_PREVIEW_CACHE_DROPPER_API_KEY = API_KEY;

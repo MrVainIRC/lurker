@@ -55,8 +55,6 @@ function baseUrl(): URL | null {
   }
 }
 
-let warnedUnconfigured = false;
-
 export interface DecoderMeta {
   kind: PreviewKind;
   title: string | null;
@@ -180,17 +178,11 @@ function post(
  * Ask the decoder to resolve one URL. NEVER throws — every local failure is `down`.
  */
 export async function decoderResolve(url: string, wantPoster: boolean): Promise<DecoderResolve> {
+  // ⚠ Defensive: previewsEnabled() gates the whole feature on this same URL, so a caller
+  // reaching here without one is a bug rather than a supported state — `down` degrades it to
+  // transient-unavailable rather than throwing, but it should be unreachable in a running server.
   const base = baseUrl();
-  if (!base) {
-    if (!warnedUnconfigured) {
-      warnedUnconfigured = true;
-      console.warn(
-        '[lurker] link previews are enabled but LURKER_PREVIEWS_URL is not set — ' +
-          'previews will stay unavailable until the lurker-previews service is configured',
-      );
-    }
-    return { status: 'down' };
-  }
+  if (!base) return { status: 'down' };
   try {
     const res = await post(base, '/resolve', { url, wantPoster }, RESOLVE_TIMEOUT_MS);
     switch (res.status) {

@@ -155,7 +155,6 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => bucket.listen(0, '127.0.0.1', resolve));
   bucketBase = `http://127.0.0.1:${(bucket.address() as AddressInfo).port}`;
 
-  process.env.LURKER_LINK_PREVIEWS = 'on';
   process.env.LURKER_PREVIEW_CACHE_MODE = 's3';
   process.env.LURKER_PREVIEW_CACHE_S3_ENDPOINT = bucketBase;
   process.env.LURKER_PREVIEW_CACHE_S3_BUCKET = BUCKET_NAME;

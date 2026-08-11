@@ -28,10 +28,8 @@ let OK_TTL_MS: number;
 let FAIL_TTL_MS: number;
 let stub: StubDecoder;
 
-const SAVED_FLAG = process.env.LURKER_LINK_PREVIEWS;
-
 beforeAll(async () => {
-  process.env.LURKER_LINK_PREVIEWS = 'on';
+  // startStubDecoder sets LURKER_PREVIEWS_URL, which IS the feature gate — so previews are on.
   stub = await startStubDecoder();
   ({ getCachedPreview, putPreview, OK_TTL_MS, FAIL_TTL_MS } =
     await import('../db/linkPreviews.js'));
@@ -39,8 +37,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (SAVED_FLAG === undefined) delete process.env.LURKER_LINK_PREVIEWS;
-  else process.env.LURKER_LINK_PREVIEWS = SAVED_FLAG;
   await stub.close();
   ctx.cleanup();
 });
@@ -307,7 +303,7 @@ describe('resolvePreview: verdicts become records with lifetimes', () => {
     }
   });
 
-  it('goes dark when the feature is off, including for what it already cached', async () => {
+  it('goes dark with no decoder, including for what it already cached', async () => {
     // ⚠ The flag is checked BEFORE the cache read, not after. An operator who turns the feature
     // off has a table full of whatever it resolved while it was on, and "off" has to mean the
     // instance isn't participating — not that it keeps serving cards from a cache until the
@@ -316,8 +312,9 @@ describe('resolvePreview: verdicts become records with lifetimes', () => {
     putPreview(record({ url, title: 'Cached While Enabled' }));
     expect(getCachedPreview(url)?.title).toBe('Cached While Enabled');
 
-    const saved = process.env.LURKER_LINK_PREVIEWS;
-    delete process.env.LURKER_LINK_PREVIEWS;
+    // Off IS "no decoder URL" now.
+    const saved = process.env.LURKER_PREVIEWS_URL;
+    delete process.env.LURKER_PREVIEWS_URL;
     try {
       const off = await resolvePreview(url);
       expect(off.status).toBe('unavailable');
@@ -328,8 +325,8 @@ describe('resolvePreview: verdicts become records with lifetimes', () => {
       expect(ttl).toBeLessThan(60_000);
       expect(ttl).toBeGreaterThan(0);
     } finally {
-      if (saved === undefined) delete process.env.LURKER_LINK_PREVIEWS;
-      else process.env.LURKER_LINK_PREVIEWS = saved;
+      if (saved === undefined) delete process.env.LURKER_PREVIEWS_URL;
+      else process.env.LURKER_PREVIEWS_URL = saved;
     }
     // The row is left alone — turning the feature back on doesn't cost a refetch.
     expect(getCachedPreview(url)?.title).toBe('Cached While Enabled');
