@@ -175,6 +175,38 @@ function post(
 }
 
 /**
+ * An unreachable decoder degrades to transient-unavailable and self-heals, so it must neither
+ * throw nor spam — but a SILENT seam is undiagnosable, and that cost a self-hoster a debugging
+ * session: settings on, container up, and nothing rendering with nothing in any log to say the
+ * cell simply couldn't find the decoder. One throttled line names the cause and the usual fix
+ * (the two containers not sharing a Docker network is almost always it).
+ *
+ * ⚠ Only SYSCALL-level failures count — a `code` like ENOTFOUND/ECONNREFUSED/ETIMEDOUT means
+ * the seam itself is broken. A 502/503 is the decoder ANSWERING (reachable, just busy or
+ * refusing), and our own deadline/abort errors carry no `code`; none of those are "unreachable".
+ */
+let lastUnreachableWarnMs = 0;
+const UNREACHABLE_WARN_INTERVAL_MS = 60_000;
+function noteDecoderUnreachable(err: unknown): void {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  if (typeof code !== 'string') return;
+  const now = Date.now();
+  if (now - lastUnreachableWarnMs < UNREACHABLE_WARN_INTERVAL_MS) return;
+  lastUnreachableWarnMs = now;
+  console.warn(
+    `[lurker] link-preview decoder unreachable at ${process.env.LURKER_PREVIEWS_URL} (${code}) — ` +
+      'previews will stay blank until the cell can reach it. The lurker and lurker-previews ' +
+      'containers must share a Docker network.',
+  );
+}
+
+/** Any contact with the decoder clears the warn latch, so a later outage warns afresh rather
+ *  than staying quiet for the interval after one recovery. */
+function noteDecoderReached(): void {
+  lastUnreachableWarnMs = 0;
+}
+
+/**
  * Ask the decoder to resolve one URL. NEVER throws — every local failure is `down`.
  */
 export async function decoderResolve(url: string, wantPoster: boolean): Promise<DecoderResolve> {
@@ -185,6 +217,7 @@ export async function decoderResolve(url: string, wantPoster: boolean): Promise<
   if (!base) return { status: 'down' };
   try {
     const res = await post(base, '/resolve', { url, wantPoster }, RESOLVE_TIMEOUT_MS);
+    noteDecoderReached();
     switch (res.status) {
       case 200: {
         let parsed: unknown;
@@ -223,7 +256,8 @@ export async function decoderResolve(url: string, wantPoster: boolean): Promise<
       default:
         return { status: 'down' };
     }
-  } catch {
+  } catch (err) {
+    noteDecoderUnreachable(err);
     return { status: 'down' };
   }
 }
@@ -268,6 +302,7 @@ export function decoderFetch(
       (res) => {
         settled = true;
         clearTimeout(deadline);
+        noteDecoderReached();
         resolve({ status: res.statusCode || 0, headers: res.headers, stream: res });
       },
     );
@@ -287,7 +322,9 @@ export function decoderFetch(
       signal.removeEventListener('abort', onAbort);
     });
     req.on('error', (err) => {
-      if (!settled) reject(err);
+      if (settled) return;
+      noteDecoderUnreachable(err);
+      reject(err);
     });
     req.end(payload);
   });
