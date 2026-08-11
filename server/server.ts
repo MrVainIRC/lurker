@@ -26,6 +26,7 @@ import { backfillEncryptColumns } from './db/secretBackfill.js';
 import { assertPushCredentials } from './services/push/credentials.js';
 import { resolveSessionSecret } from './utils/sessionSecret.js';
 import { getEdition, isNodeMode } from './utils/edition.js';
+import { warnRetiredPreviewEnv } from './utils/previews.js';
 import { startOrchestratorClient, stopOrchestratorClient } from './services/orchestratorClient.js';
 import { startModerationReporter, stopModerationReporter } from './services/moderationReport.js';
 import {
@@ -110,6 +111,8 @@ if (isNodeMode() && !isIdentdEnabled() && !isOidentdFileEnabled()) {
     '[lurker] node edition is active but neither LURKER_IDENTD_ENABLED nor LURKER_OIDENTD_FILE is set — IRC networks cannot attribute individual users; they will appear with an unverified ~ident behind the cell IP',
   );
 }
+// Not gated on edition: a self-hoster upgrading from 2.1.1 is exactly who this is for.
+warnRetiredPreviewEnv();
 
 const app = buildApp(SESSION_SECRET);
 const server = http.createServer(app);

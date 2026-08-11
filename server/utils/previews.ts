@@ -31,3 +31,49 @@
 export function previewsEnabled(): boolean {
   return !!process.env.LURKER_PREVIEWS_URL?.trim();
 }
+
+// Variables that configured previews before the decoder split (2.1.2) and are now read by
+// NOTHING on this server. Each maps to what replaced it.
+const RETIRED_PREVIEW_ENV: Array<{ name: string; advice: string }> = [
+  {
+    name: 'LURKER_LINK_PREVIEWS',
+    advice:
+      'previews are enabled by pointing LURKER_PREVIEWS_URL at a lurker-previews decoder container',
+  },
+  {
+    name: 'LURKER_PREVIEW_USER_AGENT',
+    advice: 'this moved to the decoder — set it on the lurker-previews container instead',
+  },
+];
+
+/**
+ * Warn at startup about preview settings that used to do something and no longer do.
+ *
+ * ⚠ This exists because the 2.1.2 upgrade is otherwise SILENT for the operators it affects most.
+ * `LURKER_LINK_PREVIEWS=on` shipped in 2.1.0 and 2.1.1, and anyone who set it had working
+ * previews; after the decoder split nothing reads it, so previews simply stop and the log says
+ * nothing. Worse, the fix is not a rename they could guess — it is standing up a second
+ * container. Release notes only reach the people who read them; the server can tell the rest.
+ *
+ * Two distinct cases, because the severity genuinely differs: a retired variable set while
+ * previews are OFF means the feature they asked for is not running, and a retired variable set
+ * while previews are ON is just litter in their env file.
+ */
+export function warnRetiredPreviewEnv(warn: (message: string) => void = console.warn): void {
+  const stale = RETIRED_PREVIEW_ENV.filter(({ name }) => !!process.env[name]?.trim());
+  if (stale.length === 0) return;
+
+  if (previewsEnabled()) {
+    warn(
+      `[lurker] ignoring retired preview setting(s): ${stale.map((e) => e.name).join(', ')} — ` +
+        'these are no longer read and can be removed from your environment',
+    );
+    return;
+  }
+  for (const { name, advice } of stale) {
+    warn(
+      `[lurker] ${name} is set but is no longer read, and link previews are OFF — ${advice}. ` +
+        'See "Link previews & inline media" in docs/SELF_HOSTING.md',
+    );
+  }
+}
