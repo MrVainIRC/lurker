@@ -1222,6 +1222,31 @@ ensureColumn('upload_history', 'removed', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('upload_history', 'uploader_config_id', 'INTEGER');
 ensureColumn('upload_history', 'ref', 'TEXT');
 
+// Starred uploads — the user's own quick-access set (the reaction gif they post
+// weekly, the diagram they keep re-linking). A nullable TIMESTAMP rather than a
+// boolean for two reasons: it records WHEN you starred something, which is the
+// order the favourites views want (star a two-year-old upload today and it
+// belongs at the FRONT, not buried under things you starred long ago); and a
+// nullable column survives importing an archive written before it existed, where
+// a NOT NULL one would fail the insert (see the synced_to_cp note in
+// exportSchema.ts for the same trap).
+ensureColumn('upload_history', 'favorited_at', 'TEXT');
+
+// The favourites view orders by favorited_at, which idx_upload_history_user
+// (user_id, id DESC) cannot serve — SQLite falls back to walking EVERY row the
+// user has ever uploaded and sorting them in a temp b-tree, then applying LIMIT.
+// The id-ordered browse stops after a page of index entries; this one does not,
+// so its cost grows with total history, and the composer's attach menu fires it
+// on every tap of the paperclip.
+//
+// PARTIAL, on the same predicate the query uses: the index then holds one entry
+// per STARRED row rather than one per upload, which is the whole point — a
+// curated set is tiny next to the history it was curated from. `removed` is left
+// out deliberately; filtering a handful of tombstones out of an already-small
+// set is free, and including it would only bloat the index.
+db.exec(`CREATE INDEX IF NOT EXISTS idx_upload_history_favorites
+  ON upload_history(user_id, favorited_at DESC) WHERE favorited_at IS NOT NULL`);
+
 // The offer's address/port, persisted so an unsolicited DCC SEND recorded as
 // pending_approval can be accepted later (the user clicks Accept seconds/minutes
 // after the bot offered). #270 phase 2.
