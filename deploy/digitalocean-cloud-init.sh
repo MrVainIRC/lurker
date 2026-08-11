@@ -93,7 +93,16 @@ ENABLE_LINK_PREVIEWS=""
 
 set -euo pipefail
 
-REPO_RAW="https://raw.githubusercontent.com/amiantos/lurker/main"
+# The branch or tag every file below is fetched from. `main` is what an operator
+# wants, and what cloud-init gets when this is pasted unedited.
+#
+# ⚠ It is a knob because a change to THIS script cannot otherwise be tested
+# before it is merged: everything comes from raw.githubusercontent, so a file a
+# branch ADDS 404s here until it lands on main, and the deploy dies at the curl.
+# Point this at the branch to test one — `LURKER_REPO_REF=my-branch bash
+# digitalocean-cloud-init.sh` works too, for a re-run on a droplet by hand.
+REPO_REF="${LURKER_REPO_REF:-main}"
+REPO_RAW="https://raw.githubusercontent.com/amiantos/lurker/${REPO_REF}"
 INSTALL_DIR="/opt/lurker"
 DEPLOY_LOG="/var/log/lurker-deploy.log"
 
@@ -104,6 +113,11 @@ exec > >(tee -a "$DEPLOY_LOG") 2>&1
 log() { echo "[lurker-deploy $(date -u +%H:%M:%S)] $*"; }
 
 log "=== Lurker deploy started $(date -u +%FT%TZ) ==="
+# Say it once, up front: a deploy fetching from somewhere other than main is a
+# test of an unmerged change, and the log is the only place that fact survives.
+if [ "$REPO_REF" != "main" ]; then
+  log "⚠ Fetching from ref '${REPO_REF}', NOT main — this is a branch test."
+fi
 
 # Both settings are mandatory. Fail early and loudly — before installing
 # anything — rather than half-deploying; the log is the only place this
