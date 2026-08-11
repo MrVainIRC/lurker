@@ -273,6 +273,15 @@ services:
     # shared Docker network.
 ```
 
+⚠ **Both containers must be on the same Docker network.** Declaring
+`lurker-previews` as a service in the _same_ compose file does this for you — that
+is the whole reason the block above is one file. If you instead start the decoder
+on its own (a separate `docker run`, or a different compose project), the Lurker
+container can't resolve the name `lurker-previews`, every preview silently fails
+to resolve, and nothing renders even though the settings are on. The cell logs one
+throttled `link-preview decoder unreachable` line when this happens — check for it
+if previews stay blank.
+
 **Enabling the instance doesn't show anyone a preview yet.** The feature is
 double-gated: each user also has two toggles in **Settings → Chat** — **Link
 previews** and **Inline media** — both defaulting to off. Those toggles only
