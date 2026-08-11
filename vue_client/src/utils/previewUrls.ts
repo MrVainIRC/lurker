@@ -23,10 +23,14 @@ export const MAX_CARDS_PER_MESSAGE = 3;
  * Cap on MEDIA per message — deliberately generous.
  *
  * Media doesn't cost vertical space the way a card does: two or more images render as a mosaic
- * of at most four cells (`MOSAIC_CELLS`), so the tenth image costs exactly as much screen as the
- * fourth — it becomes part of a `+N` count rather than a row. And clicking any cell opens the
- * lightbox as a GALLERY over every image in the message, capped or not, so nothing is
- * unreachable.
+ * of fixed-size cells, two per row, so a tenth image costs half a row rather than a full-width
+ * picture's worth of screen. And clicking any cell opens the lightbox as a GALLERY over every
+ * image in the message.
+ *
+ * ⚠ This is now the ONLY bound on how tall one message's media can get. The mosaic used to cap
+ * itself at four cells and count the rest (`+N`), and lurker#773 dropped that to match
+ * lurker-ios; at this limit the worst case is ten rows of grid, which is a long message and not a
+ * runaway one. Lowering the number is the lever if that ever stops being true.
  *
  * A limit still exists, because a message carrying fifty image URLs is spam and each one is
  * an outbound fetch on the server's behalf. It's set high enough not to bind on anything a

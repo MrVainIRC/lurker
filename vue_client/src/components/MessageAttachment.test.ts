@@ -716,67 +716,74 @@ describe('MessageAttachments — arrangement', () => {
   it('takes the mosaic shape from the COUNT, never from the pictures', () => {
     // ⚠⚠ The property the whole grid rests on, and the reason it replaced a strip whose height
     // was derived from `thumbWidth`/`thumbHeight`. Two groups of the same size get the same
-    // layout class no matter what shape their images are, so no descriptor — and therefore no
+    // layout no matter what shape their images are, so no descriptor — and therefore no
     // late-arriving answer — can change a message's height. Asserted as the class binding
     // because the geometry itself is CSS and happy-dom applies no stylesheet.
     seed(img(1, 800, 600), img(2, 1200, 500));
     expect(
       mountFor('https://e.test/1.png https://e.test/2.png').find('.mosaic').classes(),
-    ).toContain('n2');
+    ).not.toContain('odd');
 
     resolved.clear();
     seed(img(1, 600, 900), img(2, 500, 1000));
     expect(
       mountFor('https://e.test/1.png https://e.test/2.png').find('.mosaic').classes(),
-    ).toContain('n2');
+    ).not.toContain('odd');
   });
 
-  it('gives three images the hero-and-two shape', () => {
+  it('leads an ODD count with the three-up block, at three and at nine alike', () => {
     // A 2x2 grid holding three items leaves a hole; stretching the third across the bottom makes
     // it the subject of the message. The full-height first cell is what gives an odd count a
-    // shape, and `.n3` is what selects it.
-    seed(img(1, 800, 600), img(2, 800, 600), img(3, 800, 600));
-    const mosaic = mountFor('https://e.test/1.png https://e.test/2.png https://e.test/3.png').find(
-      '.mosaic',
-    );
-    expect(mosaic.classes()).toContain('n3');
-    expect(mosaic.findAll('.tile').length).toBe(3);
-  });
-
-  it('caps the mosaic at four tiles and counts the rest onto the last one', () => {
-    // ⚠ The cap is what keeps `MAX_MEDIA_PER_MESSAGE` (20) affordable. The strip could carry the
-    // twelfth image for free because it scrolled; a grid cannot, so past four it counts instead
-    // of growing. Everything past the cap is still reachable — see the gallery suite.
-    const urls: string[] = [];
-    for (let n = 1; n <= 6; n++) {
-      urls.push(`https://e.test/${n}.png`);
-      seed(img(n, 800, 600));
-    }
-    const wrapper = mountFor(urls.join(' '));
-    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(4);
-    expect(wrapper.find('.more').text()).toBe('+2');
-    // `+2` is not a sentence, so the count is spelled out for a screen reader too.
-    expect(wrapper.find('.sr-only').text()).toBe('2 more images');
-  });
-
-  it('does not render the images it capped away a SECOND time, below the grid', () => {
-    // ⚠⚠ Regression, /code-review high. `stacked` subtracted `mosaic` — the four DRAWN tiles —
-    // so every image from the fifth on fell through and rendered again at full size underneath,
-    // while the `+2` badge above announced those same pictures as not shown. At
-    // MAX_MEDIA_PER_MESSAGE (20) that is a four-cell grid followed by sixteen photographs, which
-    // is the exact screenful the cap exists to prevent.
+    // shape, and `.odd` is what selects it — at any count, because whatever the three-up block
+    // doesn't take is even by construction and pairs up behind it.
     //
-    // ⚠ The test above this one could not catch it: it counts `.mosaic .tile`, which was
-    // correctly 4 the whole time. Counting what you capped is not counting what rendered — so
-    // this asserts the TOTAL number of images in the block.
+    // ⚠ The class used to be `n${count}` with the CSS keyed on `.n3`, which was correct only
+    // because nothing past the fourth image was ever drawn. At five that spelling silently
+    // degrades to a two-column grid with a hole in its last row.
+    for (const n of [3, 5, 9]) {
+      resolved.clear();
+      const urls: string[] = [];
+      for (let i = 1; i <= n; i++) {
+        urls.push(`https://e.test/${i}.png`);
+        seed(img(i, 800, 600));
+      }
+      const mosaic = mountFor(urls.join(' ')).find('.mosaic');
+      expect(mosaic.classes()).toContain('odd');
+      expect(mosaic.findAll('.tile').length).toBe(n);
+    }
+  });
+
+  it('tiles EVERY image, with no four-cell cap and no overflow count', () => {
+    // lurker#773. The grid used to draw four tiles and a `+N` badge over the last one; lurker-ios
+    // shows the lot, and the badge was advertising pictures as hidden from inside a layout whose
+    // whole point is that the message is on screen at once. What bounds the worst case is
+    // `MAX_MEDIA_PER_MESSAGE` (20), applied long before this component sees anything.
     const urls: string[] = [];
     for (let n = 1; n <= 6; n++) {
       urls.push(`https://e.test/${n}.png`);
       seed(img(n, 800, 600));
     }
     const wrapper = mountFor(urls.join(' '));
-    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(4);
-    expect(wrapper.findAll('img.inline-image')).toHaveLength(4);
+    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(6);
+    expect(wrapper.find('.more').exists()).toBe(false);
+  });
+
+  it('renders each image exactly ONCE — in the grid, never again below it', () => {
+    // ⚠⚠ Regression, /code-review high, from when the cap existed: `stacked` subtracted the four
+    // DRAWN tiles, so every image from the fifth on fell through and rendered a SECOND time at
+    // full size underneath, while the `+2` badge above announced those same pictures as hidden.
+    //
+    // ⚠ The test above this one could not catch it: it counts `.mosaic .tile`, which was correct
+    // the whole time. Counting what the grid took is not counting what RENDERED — so this counts
+    // every image in the block, and goes on doing so now that the two sets should agree.
+    const urls: string[] = [];
+    for (let n = 1; n <= 6; n++) {
+      urls.push(`https://e.test/${n}.png`);
+      seed(img(n, 800, 600));
+    }
+    const wrapper = mountFor(urls.join(' '));
+    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(6);
+    expect(wrapper.findAll('img.inline-image')).toHaveLength(6);
   });
 
   it('still stacks a LONE image, which the mosaic never stands in for', () => {
@@ -788,16 +795,9 @@ describe('MessageAttachments — arrangement', () => {
     expect(wrapper.findAll('img.inline-image')).toHaveLength(1);
   });
 
-  it('draws no overflow badge when everything fits', () => {
-    seed(img(1, 800, 600), img(2, 800, 600));
-    expect(mountFor('https://e.test/1.png https://e.test/2.png').find('.more').exists()).toBe(
-      false,
-    );
-  });
-
   it('caps CARDS against the server answer, not against the extension guess', () => {
     // ⚠ `previewableUrls` charges anything that LOOKS like media to the generous media budget
-    // (20), because a mosaic costs the same at 2 as at 12. But an image-looking URL that resolves
+    // (20), because half a grid row is not what a card costs. But an image-looking URL that resolves
     // as a page — an extensionless CDN link, a .png that redirects to an HTML login page —
     // becomes a CARD, and a card costs real vertical space. Applying the tight cap only to the
     // guess meant twenty such links rendered twenty stacked cards and took over the screen.
@@ -982,24 +982,35 @@ describe('MessageBody — atomic reveal', () => {
   });
 
   it('decides the mosaic SHAPE once, from the complete group', async () => {
-    // ⚠ TWO images arrive first, so that without the gate there IS a mosaic mid-flight — an `n2`,
-    // one row tall — which then becomes an `n4` two rows tall when the rest land. An earlier draft
-    // of the strip-era version of this test seeded ONE image and passed with the gate reverted,
-    // because one image is never a group either way; two is the smallest count that can be wrong.
+    // ⚠ TWO images arrive first, so that without the gate there IS a mosaic mid-flight — a single
+    // paired row — which then becomes a three-up block over a pair, three rows tall, when the rest
+    // land. An earlier draft of the strip-era version of this test seeded ONE image and passed
+    // with the gate reverted, because one image is never a group either way; two is the smallest
+    // count that can be wrong.
+    //
+    // ⚠ FIVE in total, not four, so the finished shape differs from the mid-flight one in the
+    // class as well as the tile count: parity is what the layout keys on now, and 2 and 4 are
+    // both even. A count that only changed the number of tiles would still catch this, but only
+    // by the assertion the cap-era version happened to have.
     resolved.set(img(1).url, img(1));
     resolved.set(img(2).url, img(2));
     seedSettings();
-    setInFlight(img(3).url, img(4).url);
+    setInFlight(img(3).url, img(4).url, img(5).url);
     const wrapper = mount(MessageBody, {
-      props: { text: `${TWO} https://e.test/3.png https://e.test/4.png`, segments: [] },
+      props: {
+        text: `${TWO} https://e.test/3.png https://e.test/4.png https://e.test/5.png`,
+        segments: [],
+      },
     });
     expect(wrapper.find('.mosaic').exists()).toBe(false);
 
     answer(img(3));
     answer(img(4));
+    answer(img(5));
     await nextTick();
 
-    expect(wrapper.find('.mosaic').classes()).toContain('n4');
+    expect(wrapper.find('.mosaic').classes()).toContain('odd');
+    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(5);
   });
 
   it('does not stall on a URL no answer is coming for', () => {
@@ -1282,11 +1293,12 @@ describe('MessageAttachments — the lightbox is a gallery over the whole messag
     expect(viewer.current.value?.kind).toBe('video');
   });
 
-  it('reaches the images the mosaic capped away', async () => {
-    // ⚠⚠ What makes the four-tile cap acceptable rather than a silent truncation. The gallery is
-    // built from EVERY image in the message, not from the drawn tiles, so the sixth is one arrow
-    // key from the fourth. Built the other way the `+2` badge would advertise images that could
-    // not be opened by any means.
+  it('arrows through the whole message from whichever tile was clicked', async () => {
+    // ⚠⚠ The gallery is built from EVERY image in the message, positioned on the one clicked. It
+    // used to be the guarantee that made the four-tile cap a crop rather than a truncation — the
+    // sixth image was one arrow key from the fourth even though nothing drew it. The cap is gone
+    // (lurker#773) and the guarantee is not: a TILE is itself a crop, and the arrow set is what
+    // says the middle of a photograph is not all there is of it.
     for (const n of [1, 2, 3, 4, 5, 6]) resolved.set(img(n).url, img(n));
     seedSettings();
     const wrapper = mount(MessageBody, {
@@ -1295,7 +1307,7 @@ describe('MessageAttachments — the lightbox is a gallery over the whole messag
         segments: [],
       },
     });
-    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(4);
+    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(6);
 
     await wrapper.findAll('.mosaic img')[3].trigger('click');
     const viewer = useMediaViewer();

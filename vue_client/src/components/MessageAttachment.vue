@@ -312,8 +312,8 @@ const props = defineProps<{
 // unless the reader is at the tail, so a scrolled-up reader is never moved by a late decode.
 // `activate` rather than opening the viewer here: what a click MEANS depends on the
 // arrangement, and the arrangement is the parent's business. A tap on one tile of a mosaic
-// should open the whole message's images as a gallery — including the ones the mosaic capped
-// away — and only the parent knows what those are.
+// should open the whole message's images as a gallery, positioned on the one that was tapped,
+// and only the parent knows what the rest of the set is.
 const emit = defineEmits<{ measured: []; activate: [] }>();
 
 const settings = useSettingsStore();
