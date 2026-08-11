@@ -446,6 +446,56 @@ describe('uploads — favourites', () => {
     expect(uploads.menuItems.map((u) => u.id)).toEqual([6]);
   });
 
+  // Two clicks leave two requests in flight, and the SLOWER one can land last. The
+  // panel would then show one mode's rows under the other mode's tab. Easy to hit
+  // on a phone: open the menu and immediately tap the other mode.
+  it('ignores a menu page that a newer mode switch has superseded', async () => {
+    const uploads = useUploadsStore();
+    let releaseStale: (v: unknown) => void = () => {};
+    const stale = new Promise((r) => {
+      releaseStale = r;
+    });
+
+    api.mockReturnValueOnce(stale.then(() => ({ items: [row(1, 'STALE-recent.webp')] })));
+    const first = uploads.loadMenu('recent');
+
+    api.mockResolvedValueOnce({ items: [row(2, 'FRESH-starred.webp', true)] });
+    await uploads.selectMenuMode('favorites');
+
+    // Now let the superseded request finish — after the newer one already landed.
+    releaseStale(null);
+    expect(await first).toBe(false); // it knows it lost
+
+    expect(uploads.menuMode).toBe('favorites');
+    expect(uploads.menuItems.map((u) => u.filename)).toEqual(['FRESH-starred.webp']);
+    // The stale request must not clear a spinner the live one owns, either.
+    expect(uploads.menuLoading).toBe(false);
+  });
+
+  // The same race, but through openMenu: its starred fetch comes back empty AFTER
+  // the user has already switched to recent. Falling back then would fire a load
+  // over a choice they made deliberately.
+  it('does not let the open-time fallback override a mode the user just picked', async () => {
+    const uploads = useUploadsStore();
+    let releaseOpen: (v: unknown) => void = () => {};
+    const open = new Promise((r) => {
+      releaseOpen = r;
+    });
+
+    api.mockReturnValueOnce(open.then(() => ({ items: [] }))); // starred: empty
+    const opening = uploads.openMenu();
+
+    api.mockResolvedValueOnce({ items: [row(3, 'user-picked.webp', true)] });
+    await uploads.selectMenuMode('favorites');
+
+    releaseOpen(null);
+    await opening;
+
+    expect(uploads.menuMode).toBe('favorites');
+    expect(uploads.menuItems.map((u) => u.id)).toEqual([3]);
+    expect(api).toHaveBeenCalledTimes(2); // no third, fallback request
+  });
+
   // An explicit switch is a choice, not a fallback — it outlives the panel closing,
   // and the next open must not drag the user back to starred.
   it('keeps an explicitly chosen mode across opens', async () => {

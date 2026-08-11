@@ -182,6 +182,10 @@ export const useUploadsStore = defineStore('uploads', {
     menuPreferredMode: 'favorites' as UploadMenuMode,
     menuLoading: false,
     menuError: '',
+    // Bumped on every menu load. A page from a superseded request carries a stale
+    // generation and is dropped — the menu's own copy of the guard `generation`
+    // provides for the browser's list.
+    menuGeneration: 0,
   }),
   getters: {
     // Is there a composer listening? Gates every "put this in my message"
@@ -428,14 +432,23 @@ export const useUploadsStore = defineStore('uploads', {
      * every open rather than cached for the session: uploads and stars both happen
      * on other devices, and this is one small page either way.
      */
-    async loadMenu(mode?: UploadMenuMode) {
-      this.menuMode = mode ?? this.menuMode;
+    async loadMenu(mode?: UploadMenuMode): Promise<boolean> {
+      const next = mode ?? this.menuMode;
+      this.menuMode = next;
+      // Same generation guard as loadRecent, and for the same reason: switching
+      // modes leaves two requests in flight, and the SLOWER one can land last. A
+      // stale 'recent' page committing after a 'starred' one would leave the panel
+      // showing everything under a tab that says starred — and its `finally` would
+      // clear a spinner the live request still owns. Opening the menu and
+      // immediately tapping the other mode is the easy way to hit it on a phone.
+      const gen = ++this.menuGeneration;
       this.menuLoading = true;
       this.menuError = '';
       try {
         const { items } = await api(
-          uploadsUrl({ favorites: this.menuMode === 'favorites', limit: UPLOAD_MENU_LIMIT }),
+          uploadsUrl({ favorites: next === 'favorites', limit: UPLOAD_MENU_LIMIT }),
         );
+        if (gen !== this.menuGeneration) return false;
         // ⚠ Moderated rows have to go. The favourites query already excludes them
         // server-side, but the unfiltered list returns them as tombstones — and a
         // tombstone in a menu whose only action is "insert this" would paste a URL
@@ -443,10 +456,13 @@ export const useUploadsStore = defineStore('uploads', {
         // vanished is the point there; here there is nothing to offer.
         this.menuItems = ((items || []) as UploadItem[]).filter((u) => !u.removed);
       } catch (e: any) {
+        if (gen !== this.menuGeneration) return false;
         this.menuError = e.message || 'failed to load uploads';
       } finally {
-        this.menuLoading = false;
+        // Only the request that is still the current one owns the spinner.
+        if (gen === this.menuGeneration) this.menuLoading = false;
       }
+      return gen === this.menuGeneration;
     },
 
     /** Switch lists because the user said so. The only thing that moves the
@@ -468,7 +484,11 @@ export const useUploadsStore = defineStore('uploads', {
      * re-decided on every open.
      */
     async openMenu() {
-      await this.loadMenu(this.menuPreferredMode);
+      // ⚠ Bail if our own load was superseded. Tapping a mode while the open's
+      // fetch is still in flight is the common way in, and without this the
+      // fallback below would read the WINNER's state and could fire a 'recent'
+      // load over the choice the user just made explicitly.
+      if (!(await this.loadMenu(this.menuPreferredMode))) return;
       if (this.menuMode === 'favorites' && !this.menuItems.length && !this.menuError) {
         await this.loadMenu('recent');
       }
