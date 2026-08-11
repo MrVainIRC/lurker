@@ -48,6 +48,7 @@ Everything Lurker persists lives in `./data/`:
 
 - `lurker.db` (and `-shm`, `-wal` files) — IRC history, settings, users, etc.
 - `session-secret.key` — the secret used to sign session cookies. Backing this up means existing browser sessions survive a restore.
+- `preview-cache/` — only if you enabled [preview image caching](#caching-preview-images-required-for-video-posters), and worth **excluding**: it's up to 2 GiB of re-fetchable bytes that would otherwise land in every backup. Restoring without it costs a re-fetch and nothing else.
 
 A `cp -r data/ data-backup-$(date +%F)/` (with the server stopped, to avoid copying mid-write WAL files) is sufficient. If you need a hot copy, use the SQLite `.backup` command:
 
