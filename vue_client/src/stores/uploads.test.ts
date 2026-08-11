@@ -496,6 +496,23 @@ describe('uploads — favourites', () => {
     expect(api).toHaveBeenCalledTimes(2); // no third, fallback request
   });
 
+  // menuMode names what menuItems HOLDS. A switch that fails is not a switch — the
+  // tab must not claim 'recent' over the starred thumbnails still on screen, not
+  // least because setFavorite branches on menuMode and would then maintain the
+  // wrong list.
+  it('leaves the mode alone when the switch fails', async () => {
+    const uploads = useUploadsStore();
+    api.mockResolvedValueOnce({ items: [row(1, 'starred.webp', true)] });
+    await uploads.loadMenu('favorites');
+
+    api.mockRejectedValueOnce(new Error('offline'));
+    await uploads.selectMenuMode('recent');
+
+    expect(uploads.menuMode).toBe('favorites');
+    expect(uploads.menuItems.map((u) => u.id)).toEqual([1]);
+    expect(uploads.menuError).toBe('offline');
+  });
+
   // An explicit switch is a choice, not a fallback — it outlives the panel closing,
   // and the next open must not drag the user back to starred.
   it('keeps an explicitly chosen mode across opens', async () => {

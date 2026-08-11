@@ -434,7 +434,6 @@ export const useUploadsStore = defineStore('uploads', {
      */
     async loadMenu(mode?: UploadMenuMode): Promise<boolean> {
       const next = mode ?? this.menuMode;
-      this.menuMode = next;
       // Same generation guard as loadRecent, and for the same reason: switching
       // modes leaves two requests in flight, and the SLOWER one can land last. A
       // stale 'recent' page committing after a 'starred' one would leave the panel
@@ -455,6 +454,13 @@ export const useUploadsStore = defineStore('uploads', {
         // whose bytes are gone. The browser shows them because seeing WHY a file
         // vanished is the point there; here there is nothing to offer.
         this.menuItems = ((items || []) as UploadItem[]).filter((u) => !u.removed);
+        // ⚠ The mode moves HERE, with the rows it describes — not when the request
+        // was issued. `menuMode` is what `menuItems` currently holds, and a failed
+        // switch must not leave the tab claiming 'recent' over the starred
+        // thumbnails still on screen (setFavorite branches on this too, so a stale
+        // pairing makes it maintain the wrong list). A switch that doesn't land
+        // isn't a switch.
+        this.menuMode = next;
       } catch (e: any) {
         if (gen !== this.menuGeneration) return false;
         this.menuError = e.message || 'failed to load uploads';

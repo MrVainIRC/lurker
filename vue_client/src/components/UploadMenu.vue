@@ -76,7 +76,10 @@
       <p v-else-if="emptyStarred" class="note">
         Nothing starred yet. Star an upload in the uploads browser to keep it here.
       </p>
-      <div class="grid">
+      <!-- Dimmed while a load is in flight. The active tab does NOT move until the
+           rows it names have arrived (see loadMenu), so without this a switch on a
+           slow link looks like the tap missed. -->
+      <div class="grid" :class="{ loading: uploads.menuLoading }" :aria-busy="uploads.menuLoading">
         <div
           v-for="u in uploads.menuItems"
           :key="u.id"
@@ -98,20 +101,26 @@
       </div>
     </template>
 
-    <!-- ⚠ NO @mousedown.prevent on these two, unlike everything else in this panel.
-         Both open a native OS sheet, which dismisses the soft keyboard no matter
-         what we do; preventing the tap-blur only delays that by a beat — keyboard
-         up, then dropping as the sheet animates in — which reads as jank. Letting
-         the tap blur gives one clean dismissal. (This is the reasoning that used to
-         live on the paperclip itself, which now opens this panel instead.) -->
+    <!-- ⚠ These two must let the tap BLUR the composer, unlike everything else in
+         this panel. Both open a native OS sheet, which dismisses the soft keyboard
+         no matter what we do; preventing the tap-blur only delays that by a beat —
+         keyboard up, then dropping as the sheet animates in — which reads as jank.
+         Letting the tap blur gives one clean dismissal. (This is the reasoning that
+         used to live on the paperclip itself, which now opens this panel instead.)
+
+         ⚠⚠ `@mousedown.stop` is what BUYS that, and omitting the `.prevent` is not
+         enough on its own: the panel root's `@mousedown.prevent.stop` also fires as
+         the event bubbles up through it, and a preventDefault during bubbling still
+         cancels the focus change. Without stopping here, the exception documented
+         above silently does nothing. -->
     <div class="actions">
-      <button type="button" class="action" @click="onUploadFile">
+      <button type="button" class="action" @mousedown.stop @click="onUploadFile">
         <i class="fa-solid fa-folder-open"></i> Upload file
       </button>
       <!-- Touch only. `capture` is ignored by desktop browsers, so the button
            would just be a second, worse "Upload file" there. `canHover` is the
            same signal the build's hover gating uses, so CSS and behaviour agree. -->
-      <button v-if="!canHover" type="button" class="action" @click="onOpenCamera">
+      <button v-if="!canHover" type="button" class="action" @mousedown.stop @click="onOpenCamera">
         <i class="fa-solid fa-camera"></i> Camera
       </button>
     </div>
@@ -309,6 +318,10 @@ onBeforeUnmount(() => {
      access and the uploads browser is the right tool. */
   max-height: min(320px, 45vh);
   overflow-y: auto;
+}
+.grid.loading {
+  opacity: 0.5;
+  transition: opacity 0.12s ease;
 }
 .cell {
   cursor: pointer;
