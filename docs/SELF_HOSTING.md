@@ -361,8 +361,13 @@ or a bucket for not re-fetching popular images:
 - **`dropper`** — the hosted-fleet mode; not for self-hosters.
 
 Misconfiguration is never fatal: a bad cache config logs one warning, caching
-turns off, and previews keep working. The full per-mode reference — every
-variable, the s3 caveats, and the reasoning — lives in
+turns off, and previews keep working.
+
+Every variable is carried as a commented block in `docker-compose.previews.yml`,
+on the `lurker` service — storing bytes needs credentials, and the container that
+parses hostile input is the last place to keep any, so the decoder hands bytes
+back and Lurker decides where they go. The full per-mode reference — every field,
+the s3 caveats, and the reasoning — lives in
 [`.env.example`](https://github.com/amiantos/lurker/blob/main/.env.example),
 which is worth reading in full before turning on `s3`.
 

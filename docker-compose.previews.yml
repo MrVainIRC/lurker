@@ -37,6 +37,83 @@ services:
       # Merges into the base file's environment list. The presence of this
       # variable IS the feature gate: drop this overlay and previews are off.
       - LURKER_PREVIEWS_URL=http://lurker-previews:8030
+      #
+      # ───── Optional: caching the preview image BYTES ─────────────────────
+      # Previews work without this. It changes only how often the same picture
+      # is re-fetched from the site hosting it: uncached, the metadata for a
+      # link is remembered but the bytes are not, so ten people scrolling past
+      # the same image is ten fetches from its origin (once per person per day
+      # — browsers hold their own copy). Misconfiguration is never fatal: a bad
+      # value logs one warning, caching turns off, previews keep working.
+      #
+      # ⚠ These belong on THIS service, not the decoder. Storing bytes needs
+      # credentials, and the container that parses hostile input is the last
+      # place to keep any — it hands bytes back, Lurker decides where they go.
+      #
+      # ⚠ Images only. Video and audio are read in ranges (one seek is many
+      # requests for one object), so caching them would trade the bandwidth
+      # this saves for memory it cannot bound.
+      #
+      #   off     stream through, store nothing. The default.
+      #   local   a directory beside the database. The sensible self-host
+      #           choice — it needs no extra volume, since it lives inside the
+      #           ./data mount the base compose file already has.
+      #   s3      a bucket you own, served from its public base URL.
+      #   dropper the hosted-fleet mode; not for self-hosters.
+      #
+      # - LURKER_PREVIEW_CACHE_MODE=local
+      # - LURKER_PREVIEW_CACHE_DIR=            # default: <data dir>/preview-cache
+      # - LURKER_PREVIEW_CACHE_MAX_BYTES=      # local only; default 2 GiB, digits only
+      #
+      # ───── mode=s3 ───────────────────────────────────────────────────────
+      # For an instance already behind a CDN: cached images are served from
+      # the bucket's public URL, so your server ships zero bytes for an image
+      # it has already fetched. All five of the first fields are REQUIRED —
+      # leave any one unset and caching stays off, naming the field.
+      #
+      # ⚠⚠ THE OBJECTS ARE PUBLIC. Anyone with the URL can read a cached image
+      # for as long as it is kept — the same property Slack's and Discord's
+      # image proxies have. Only allowlisted image types are stored (SVG is
+      # refused) and only your logged-in users can cause an image to be cached
+      # at all, but do not point this at a bucket holding anything else.
+      #
+      # ⚠ PUBLIC_BASE_URL must be https. A browser blocks an http:// image on
+      # an https page as mixed content — an http base URL is a cache that
+      # never renders.
+      #
+      # ⚠ Retention is YOURS. Set a lifecycle rule on the prefix (30 days is
+      # the recommendation — Lurker stops serving an object after 7 and drops
+      # its index row). Nothing here deletes objects for you.
+      #
+      # ⚠ Of the six hardening headers the proxy sends, only three survive on
+      # a stored object (Content-Type, Content-Disposition, Cache-Control).
+      # Add nosniff / CSP / CORP at your CDN edge if you want them here too.
+      #
+      # ⚠⚠ NEEDS AN UP-TO-DATE iOS APP. Cached images are served from the CDN
+      # URL rather than through this server, and Lurker for iOS only learned
+      # to follow an absolute image URL alongside this feature. Older builds
+      # show every cached preview as blank for the rest of the session. The
+      # web client is unaffected.
+      #
+      # ⚠ Switching modes (local <-> s3) leaves the old backend's bytes behind:
+      # the index rows are swept, but the server only knows where the CURRENT
+      # backend stores things and will not guess a path and delete what is
+      # there. Remove the old directory or bucket prefix by hand.
+      #
+      # - LURKER_PREVIEW_CACHE_MODE=s3
+      # - LURKER_PREVIEW_CACHE_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
+      # - LURKER_PREVIEW_CACHE_S3_BUCKET=
+      # - LURKER_PREVIEW_CACHE_S3_ACCESS_KEY_ID=
+      # - LURKER_PREVIEW_CACHE_S3_SECRET_ACCESS_KEY=
+      # - LURKER_PREVIEW_CACHE_S3_PUBLIC_BASE_URL=https://cdn.example.com
+      # - LURKER_PREVIEW_CACHE_S3_PREFIX=previews   # optional; sanitised to [A-Za-z0-9._-]/
+      # - LURKER_PREVIEW_CACHE_S3_REGION=           # default: auto (correct for R2)
+      # ⚠ LURKER_PREVIEW_CACHE_DIR is still used in s3 mode — it is where bytes
+      # are staged on their way to the bucket, so it stays inside ./data.
+      #
+      # Put the two secrets in a .env file beside this compose rather than
+      # inline, and the full reference — every field, every caveat, and the
+      # reasoning — is in .env.example, worth reading before turning on s3.
     networks:
       # ⚠ `priority` keeps Lurker's DEFAULT ROUTE on the default network even
       # though it is attached to two. That matters once you harden: the egress
