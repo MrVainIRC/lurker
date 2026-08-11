@@ -287,6 +287,19 @@ EOF
   # the decoder should check them, and keep checking them on every start.
   if [ "$ENABLE_LINK_PREVIEWS" = "true" ]; then
     echo "LURKER_PREVIEWS_ALLOW_PRIVATE=0" >> .env
+    # ⚠ Give the self-test something that is genuinely LISTENING. Its built-in
+    # probes are the metadata address and the bridge gateway, and a probe that
+    # nothing answers passes whether or not the rules are in force. This
+    # droplet's VPC address has sshd on it, and it is exactly the kind of
+    # neighbour we never want the decoder to reach — so it is the strongest
+    # probe available here. Skipped silently if the droplet has no VPC
+    # interface; the built-in probes still run.
+    local vpc_ip
+    vpc_ip=$(curl -fsS --max-time 5 \
+      http://169.254.169.254/metadata/v1/interfaces/private/0/ipv4/address 2>/dev/null || true)
+    if [ -n "$vpc_ip" ]; then
+      echo "LURKER_PREVIEWS_SELFTEST_TARGETS=${vpc_ip}:22" >> .env
+    fi
   fi
 
   compose pull

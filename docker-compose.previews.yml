@@ -28,8 +28,11 @@
 # On a Linux host you can have both. Put LURKER_PREVIEWS_ALLOW_PRIVATE=0 in a
 # .env file beside this one and run deploy/previews-egress.sh, which installs
 # the firewall rules that make the self-test pass — and a systemd unit that
-# re-applies them on every boot, so the property can't lapse silently. See
-# "Link previews & inline media" in docs/SELF_HOSTING.md.
+# re-applies them on every boot and whenever Docker restarts. ⚠ One gap it
+# cannot cover: a host firewall that rewrites the filter table later (a `ufw
+# allow …` reload) drops the host-protection rule, and the decoder only
+# re-tests itself when it starts — so re-run the script after changing ufw or
+# firewalld. See "Link previews & inline media" in docs/SELF_HOSTING.md.
 
 services:
   lurker:
@@ -59,7 +62,6 @@ services:
       #           choice — it needs no extra volume, since it lives inside the
       #           ./data mount the base compose file already has.
       #   s3      a bucket you own, served from its public base URL.
-      #   dropper the hosted-fleet mode; not for self-hosters.
       #
       # - LURKER_PREVIEW_CACHE_MODE=local
       # - LURKER_PREVIEW_CACHE_DIR=            # default: <data dir>/preview-cache
@@ -134,6 +136,16 @@ services:
       - previews
     environment:
       - LURKER_PREVIEWS_ALLOW_PRIVATE=${LURKER_PREVIEWS_ALLOW_PRIVATE:-1}
+      - LURKER_PREVIEWS_SELFTEST_TARGETS=${LURKER_PREVIEWS_SELFTEST_TARGETS:-}
+      # ⚠ Only read when ALLOW_PRIVATE=0, and then it matters a lot. The
+      # built-in probes are the cloud metadata address and this host's bridge
+      # gateway on :22/:80 — and a probe that nothing is LISTENING at passes
+      # whether or not your firewall exists. Name something private you know
+      # answers, most simply your Docker host's LAN address with sshd on it,
+      # and the self-test becomes a real test. (Verified: with the rules gone,
+      # a named listening target is what makes the decoder refuse to serve.)
+      # Set it in a .env file beside this compose:
+      #   LURKER_PREVIEWS_SELFTEST_TARGETS=192.168.1.10:22
       # Optional: what the decoder tells sites it is when it fetches a
       # preview. The default names Lurker and the traffic class (a social
       # preview fetch), so a site operator reading their logs can recognise
@@ -141,6 +153,14 @@ services:
       # - LURKER_PREVIEW_USER_AGENT=
       # Optional: a contact URL or mailto: appended to that User-Agent.
       # - USER_AGENT_CONTACT=https://lurker.example.com
+    # ⚠ The decoder only ever resolves names it found on the public internet,
+    # so it can use public resolvers — and if it does, the hardening script has
+    # no reason to allow it DNS to your LAN at all (see the port 53 note in
+    # deploy/previews-egress.sh). Uncomment to close that last gap; leave it
+    # alone to inherit whatever this host uses.
+    # dns:
+    #   - 1.1.1.1
+    #   - 9.9.9.9
     # This process runs memory-unsafe parsers (libvips, ffmpeg) on bytes
     # strangers chose — so it gets no filesystem, no capabilities, no way to
     # gain any, and hard resource ceilings.

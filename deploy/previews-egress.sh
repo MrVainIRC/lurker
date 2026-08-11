@@ -126,60 +126,71 @@ purge_older_generations() {
 }
 
 # `iptables -I` prepends, so the LAST thing inserted ends up FIRST in the
-# chain. The RETURN therefore has to be added after the DROPs it protects.
+# chain. Everything that must take precedence is therefore added AFTER the
+# DROPs it overrides.
 apply_rules() {
-  local ipt="$1" ip="$2" subnet="$3"
-  shift 3
-  local dest
+  local ipt="$1" ip="$2"
+  shift 2
+  local dest proto
   for dest in "$@"; do
     add "$ipt" DOCKER-USER -s "$ip" -d "$dest" -j DROP
   done
   add "$ipt" INPUT -s "$ip" -j DROP
-  # ⚠ Without this, the DROP on the decoder's own private range kills the
-  # replies to Lurker's requests — the bridge subnet is itself RFC1918, and
-  # with br_netfilter loaded, bridge traffic traverses DOCKER-USER too.
-  if [ -n "$subnet" ]; then
-    add "$ipt" DOCKER-USER -s "$ip" -d "$subnet" -j RETURN
-  fi
+
+  # ⚠⚠ Replies to Lurker, and ONLY replies. Lurker dials the decoder, so every
+  # legitimate packet back to it belongs to a connection something else opened;
+  # a blanket RETURN for the bridge subnet would also let a compromised decoder
+  # OPEN connections to Lurker's own :8015, which is the single most valuable
+  # thing on that bridge and the one this whole design exists to protect.
+  add "$ipt" DOCKER-USER -s "$ip" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+
+  # ⚠⚠ DNS, or the decoder resolves nothing and every preview fails while the
+  # self-test still passes — it probes IP literals, so it cannot see this. The
+  # container queries Docker's embedded resolver at 127.0.0.11 (inside its own
+  # netns, so no rule here touches it), but libnetwork forwards the upstream
+  # query FROM THE CONTAINER'S NAMESPACE — those packets carry the decoder's
+  # address, and on any host whose resolver is a LAN address (a home router at
+  # 192.168.1.1, a Pi-hole, systemd-resolved pointing at either) the DROPs
+  # above swallow them. Verified: ESERVFAIL, and every resolve answers 403.
+  #
+  # Port 53 to any address rather than to an enumerated resolver list: the
+  # upstream can come from the daemon's config, the host's resolv.conf, the
+  # systemd stub, or DHCP changing it next week, and an enumeration that goes
+  # stale fails exactly the same silent way. What it permits a compromised
+  # decoder is talking to DNS servers — not ssh, not an internal API, not the
+  # metadata service (that is :80). To close even that, give the decoder public
+  # resolvers of its own (`dns:` in the compose overlay) and delete these two.
+  for proto in udp tcp; do
+    add "$ipt" DOCKER-USER -s "$ip" -p "$proto" --dport 53 -j RETURN
+    # ⚠ ACCEPT, not RETURN: a RETURN in a BUILT-IN chain stops traversal and
+    # applies the chain POLICY, which on a ufw host is DROP — so a RETURN here
+    # would block the very thing it is written to allow. This matters whenever
+    # the resolver is the Docker host itself, which is the common case.
+    add "$ipt" INPUT -s "$ip" -p "$proto" --dport 53 -j ACCEPT
+  done
 }
 
 # ── Discovery ───────────────────────────────────────────────────────────────
 
-# Wait for the container: on boot this runs right after dockerd, which may
-# still be starting the containers Compose asked it to restart.
+# ⚠ Wait for the container to be RUNNING WITH AN ADDRESS, not merely to exist.
+# A container object survives a reboot, so `docker inspect` succeeds instantly
+# for one that is exited, created, or in restart backoff — and then the rules
+# get written for an empty address and the run dies. That matters most under
+# the systemd unit, where a `Type=oneshot` cannot carry `Restart=`: one unlucky
+# boot leaves the unit failed until a human notices.
 wait_for_container() {
-  local i
+  local i state
   for ((i = 0; i < WAIT_SECONDS; i++)); do
-    if docker inspect "$CONTAINER" >/dev/null 2>&1; then return 0; fi
+    state="$(docker inspect "$CONTAINER" -f '{{.State.Running}}|{{range $n, $c := .NetworkSettings.Networks}}{{$c.IPAddress}} {{end}}' 2>/dev/null || true)"
+    case "$state" in
+      'true|'*[0-9].[0-9]*) return 0 ;;
+    esac
     sleep 1
   done
-  die "no container named '$CONTAINER' after ${WAIT_SECONDS}s. Start the decoder first
-       (docker compose -f docker-compose.yml -f docker-compose.previews.yml up -d),
-       or set LURKER_PREVIEWS_CONTAINER if you named it something else."
-}
-
-# The network's first subnet of the given family ("4" or "6"), or nothing.
-#
-# ⚠ Deliberately no `| head -1`: under `set -o pipefail`, a `head` that exits
-# after the line it wanted makes the whole pipeline return SIGPIPE (141), and
-# `set -e` then kills this script before it has logged a single word. It is a
-# race, so it hides on a fast host and bites on a slow one.
-subnet_of() {
-  local out token
-  out="$(docker network inspect "$1" -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null || true)"
-  for token in $out; do
-    case "$token" in
-      *:*) if [ "$2" = "6" ]; then
-        echo "$token"
-        return 0
-      fi ;;
-      *) if [ "$2" != "6" ]; then
-        echo "$token"
-        return 0
-      fi ;;
-    esac
-  done
-  return 0
+  die "'$CONTAINER' is not running with a network address after ${WAIT_SECONDS}s.
+       Start the decoder first (docker compose -f docker-compose.yml -f
+       docker-compose.previews.yml up -d), raise LURKER_PREVIEWS_WAIT if this
+       host is slow, or set LURKER_PREVIEWS_CONTAINER if you renamed it."
 }
 
 # ⚠ Rules are scoped to the decoder's own ADDRESS, not to its bridge subnet.
@@ -189,7 +200,7 @@ subnet_of() {
 # recreated container needs a re-run; that failure is loud (the decoder refuses
 # to serve), which is the trade this whole subsystem is built to prefer.
 apply_all() {
-  local found=0 net ip ip6 subnet subnet6
+  local found=0 net ip ip6
   # ⚠ Pipe-separated, and each address is checked for SHAPE rather than for
   # emptiness: Docker 29 renders an address a container doesn't have as the
   # literal string "invalid IP" (Go's netip.Addr zero value), which is neither
@@ -198,10 +209,9 @@ apply_all() {
     [ -n "$net" ] || continue
     case "$ip" in *[!0-9.]* | '') ip='' ;; esac
     case "$ip6" in *[!0-9a-fA-F:]* | '') ip6='' ;; esac
-    subnet="$(subnet_of "$net" 4)"
     if [ -n "$ip" ]; then
-      log "containing ${CONTAINER} at ${ip} on ${net} (subnet ${subnet:-unknown})"
-      apply_rules iptables "$ip" "$subnet" "${PRIVATE_V4[@]}"
+      log "containing ${CONTAINER} at ${ip} on ${net}"
+      apply_rules iptables "$ip" "${PRIVATE_V4[@]}"
       found=1
     fi
     # IPv6 is off on a default Docker install, so this usually finds nothing —
@@ -211,9 +221,8 @@ apply_all() {
       command -v ip6tables >/dev/null 2>&1 ||
         die "$CONTAINER has an IPv6 address ($ip6) but ip6tables is missing — its egress
        cannot be contained on this host."
-      subnet6="$(subnet_of "$net" 6)"
       log "containing ${CONTAINER} at ${ip6} on ${net} (IPv6)"
-      apply_rules ip6tables "$ip6" "$subnet6" "${PRIVATE_V6[@]}"
+      apply_rules ip6tables "$ip6" "${PRIVATE_V6[@]}"
       found=1
     fi
   done < <(docker inspect "$CONTAINER" \
@@ -235,13 +244,16 @@ verify() {
   # boot, and the line from the previous start is still sitting in the log — on
   # a first run that line says REFUSING TO SERVE, which is exactly the answer
   # we would otherwise misreport as a failure of the rules we just installed.
-  # ⚠ Epoch seconds, not a formatted timestamp: `docker logs --since` reads a
-  # zoneless RFC3339 string as LOCAL time, so a UTC one silently selects a
-  # window in the future and matches nothing at all.
-  local since
-  since="$(date +%s)"
   log "restarting $CONTAINER so its boot self-test runs under these rules..."
   docker restart "$CONTAINER" >/dev/null
+  # ⚠ The container's own StartedAt, read AFTER the restart. Epoch seconds off
+  # the wall clock have one-second granularity and `--since` is inclusive, so a
+  # REFUSING line from the previous start emitted in the same second reads back
+  # as this start's verdict — the exact misreport this window exists to stop.
+  # (And never a zoneless timestamp: `docker logs --since` reads one as LOCAL
+  # time, so a UTC string selects a window in the future and matches nothing.)
+  local since
+  since="$(docker inspect "$CONTAINER" -f '{{.State.StartedAt}}')"
   local i logs
   for ((i = 0; i < 30; i++)); do
     sleep 1
@@ -266,6 +278,26 @@ verify() {
     esac
   done
   die "the decoder logged neither success nor refusal within 30s. Check: docker logs $CONTAINER"
+}
+
+# ⚠⚠ The one gap this script cannot close by itself, so it says so out loud.
+# A host firewall that rewrites the filter table takes the INPUT rule with it,
+# and unlike a reboot or a Docker restart there is nothing to hook: the decoder
+# only re-tests its containment when it starts, so it would keep serving with a
+# route to this host's sshd and nothing would look wrong. The DOCKER-USER rules
+# survive (ufw does not manage Docker's chains); it is host protection that
+# lapses.
+warn_about_firewall_reloads() {
+  local fw=''
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    fw='ufw'
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    fw='firewalld'
+  fi
+  [ -n "$fw" ] || return 0
+  log "⚠ $fw is active. Re-run this script after any $fw change (a reload rewrites"
+  log "  the filter table and drops the INPUT rule that keeps this host unreachable"
+  log "  from the decoder). Rebooting and restarting Docker are already handled."
 }
 
 # ── Boot persistence ────────────────────────────────────────────────────────
@@ -297,6 +329,11 @@ PartOf=docker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# ⚠ Comfortably past this script's own worst case — up to LURKER_PREVIEWS_WAIT
+# seconds waiting for the container plus 30 verifying. systemd's 90s default
+# would SIGTERM a slow boot mid-verify and leave the unit failed even though
+# the rules went in.
+TimeoutStartSec=300
 ExecStart=$self
 Environment=LURKER_PREVIEWS_CONTAINER=$CONTAINER
 
@@ -317,6 +354,7 @@ command -v iptables >/dev/null 2>&1 || die "iptables not found."
 wait_for_container
 apply_all
 verify
+warn_about_firewall_reloads
 if [ "${1:-}" = "--install" ]; then
   install_unit
 fi

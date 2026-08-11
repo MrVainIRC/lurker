@@ -24,7 +24,7 @@ Two features are off unless you switch them on in the script, next to the two re
 - **`ENABLE_IDENTD="true"`** — runs Lurker's built-in identd on port 113, so a multi-user instance can give each user a verified ident on IRC instead of a shared `~ident`.
 - **`ENABLE_LINK_PREVIEWS="true"`** — runs [`lurker-previews`](https://github.com/amiantos/lurker-previews), the second container that turns pasted links into preview cards, renders images inline, and gives videos a poster frame.
 
-Link previews are worth a word on what the script does for you, because it is the part that is fiddly by hand. All the fetching and media parsing happens in that second container, never in the one holding your database and sessions — and the script gives it the same treatment the hosted fleet gets: its own private bridge, firewall rules that let it reach the public internet and nothing private (not this droplet, not your VPC, not your other containers), and a systemd unit that re-applies them on every boot. The decoder's own boot self-test is left on, so if that containment ever lapses it refuses to serve rather than quietly parsing hostile bytes with a route to your infrastructure.
+Link previews are worth a word on what the script does for you, because it is the part that is fiddly by hand. All the fetching and media parsing happens in that second container, never in the one holding your database and sessions — and the script gives it the same treatment the hosted fleet gets: its own private bridge, firewall rules that let it reach the public internet and nothing private (not this droplet, not your VPC, not your other containers), and a systemd unit that re-applies them on every boot. The decoder's own boot self-test is left on, so it re-proves that containment every time it starts and refuses to serve rather than quietly parse hostile bytes with a route to your infrastructure — the one lapse it can't catch by itself is a firewall reload while it's running, which is why the note below the update command exists.
 
 Budget the RAM: the decoder is capped at 512 MB and ffmpeg will use it when it makes a poster. On the smallest 1 GB droplet it leans on swap; 2 GB is comfortable. And enabling it here only opens the door — each user still turns on **Link previews** and **Inline media** in **Settings → Chat**, both off by default.
 
@@ -45,7 +45,9 @@ If you enabled link previews, follow that with:
 sudo /opt/lurker/previews-egress.sh
 ```
 
-The firewall rules are scoped to the address Docker gave the decoder, and updating it can hand it a new one. Re-running is idempotent and takes seconds. You will not have to remember: a decoder whose rules no longer fit refuses to serve and says so in `docker logs lurker-previews`, previews go blank, and nothing else is affected.
+The firewall rules are scoped to the address Docker gave the decoder, and updating it can hand it a new one. Re-running is idempotent and takes seconds. You will not have to remember for updates: a decoder whose rules no longer fit refuses to serve and says so in `docker logs lurker-previews`, previews go blank, and nothing else is affected.
+
+⚠ Run it again after changing the firewall too — `ufw allow …` reloads the ruleset and drops the rule that keeps the droplet itself unreachable from the decoder. That one is _not_ self-announcing, because the decoder only re-checks its containment when it starts. Reboots and Docker restarts are already handled by the systemd unit the script installs.
 
 ## Going further
 

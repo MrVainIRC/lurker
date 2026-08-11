@@ -329,19 +329,51 @@ chmod +x previews-egress.sh
 sudo ./previews-egress.sh --install
 ```
 
-It adds `DOCKER-USER` rules dropping traffic from the decoder's address to
-`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` and
+Two things to set alongside it:
+
+- **Stop skipping the self-test.** The overlay reads
+  `LURKER_PREVIEWS_ALLOW_PRIVATE` from your `.env`, so `=0` there is enough. If
+  you wrote your own compose file from the block above, that hardcoded
+  `- LURKER_PREVIEWS_ALLOW_PRIVATE=1` wins over any `.env` — delete the line.
+- **Give the self-test a target that answers.** Its built-in probes are the
+  cloud metadata address and the bridge gateway's `:22`/`:80`; on a box with no
+  sshd and nothing on `:80` they all time out whether or not your rules exist,
+  and it passes vacuously. Name something private you know is listening —
+  usually your Docker host's LAN address — via
+  `LURKER_PREVIEWS_SELFTEST_TARGETS=192.168.1.10:22`.
+
+The script adds `DOCKER-USER` rules dropping traffic from the decoder's address
+to `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` and
 `100.64.0.0/10`, plus an `INPUT` rule for the host itself (⚠ container→host
 traffic never reaches `DOCKER-USER`, so forward rules alone leave your own sshd
-reachable from the container that parses hostile input). `--install` adds a
-systemd unit that re-applies them on boot and whenever Docker restarts. Then it
-restarts the decoder and reads back its verdict, so you know it worked.
+reachable from the container that parses hostile input). Replies to Lurker are
+allowed by connection state rather than by subnet, so the decoder can answer
+Lurker but cannot dial it. `--install` adds a systemd unit that re-applies
+everything on boot and whenever Docker restarts. Then it restarts the decoder
+and reads back its verdict, so you know it worked.
 
-Run it again after anything that recreates the decoder container — the rules are
-scoped to the address Docker gave it, and an update can hand it a new one. That's
-a loud failure, not a silent one: the self-test stops passing, the decoder
-refuses to serve, and previews report themselves unavailable while everything
-else carries on. (This is what the hosted fleet does per-cell, and why.)
+⚠ **DNS is deliberately allowed** — port 53 to any address. Without it, a host
+whose resolver is a LAN address (a home router, a Pi-hole, systemd-resolved
+pointing at either) resolves nothing, every preview fails, and the self-test
+still passes, because it probes IP literals and cannot see DNS at all. What it
+grants a compromised decoder is talking to DNS servers; not ssh, not an internal
+API, not the metadata service. To close even that, give the decoder public
+resolvers of its own with `dns:` in the overlay and delete the two port-53
+rules.
+
+Re-run the script after two things:
+
+- **Anything that recreates the decoder container.** The rules are scoped to the
+  address Docker gave it, and an update can hand it a new one. This failure is
+  loud: the self-test stops passing, the decoder refuses to serve, and previews
+  report themselves unavailable while everything else carries on.
+- **Any change to a host firewall that owns the filter table** (`ufw allow …`,
+  `firewall-cmd`). A reload rewrites `INPUT` and takes the host-protection rule
+  with it. ⚠ This one is _not_ loud — the decoder only re-tests its containment
+  when it starts — so it is the one case where you have to remember. The script
+  warns at the end when it sees ufw or firewalld running.
+
+(This is what the hosted fleet does per-cell, and why.)
 
 #### Caching preview images (optional)
 
@@ -358,7 +390,6 @@ or a bucket for not re-fetching popular images:
   ships zero bytes for an image it has already fetched. This one has real
   operational requirements — the objects are publicly readable, the base URL
   must be https, and **you** own eviction via a lifecycle rule on the bucket.
-- **`dropper`** — the hosted-fleet mode; not for self-hosters.
 
 Misconfiguration is never fatal: a bad cache config logs one warning, caching
 turns off, and previews keep working.
