@@ -291,8 +291,8 @@ straight to the origin, the one request the reader deliberately made.
 
 `LURKER_PREVIEWS_ALLOW_PRIVATE=1` turns off the decoder's boot self-test so it
 runs on an ordinary Docker network. The in-process SSRF guard is still active, so
-a malicious *URL* is refused either way — what you give up is protection against a
-malicious *process* (an RCE in the decoder reaching your LAN). For a trusted
+a malicious _URL_ is refused either way — what you give up is protection against a
+malicious _process_ (an RCE in the decoder reaching your LAN). For a trusted
 group that's a fair trade; to close it, drop the `ALLOW_PRIVATE` line and instead
 firewall the decoder so it can reach the internet but not private ranges. On a
 Linux host that's `DOCKER-USER` rules dropping traffic from the decoder's subnet
