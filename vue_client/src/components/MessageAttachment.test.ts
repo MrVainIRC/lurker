@@ -518,41 +518,146 @@ describe('MessageAttachment — the click must not be eaten', () => {
 });
 
 describe('MessageAttachment — growth the list can react to', () => {
-  it('asks the browser to seek, which is the only poster frame available', async () => {
-    // ⚠⚠ Without this a `<video>` paints nothing until it decodes, so an unplayed clip is a black
-    // rectangle with controls on it. There is no ffmpeg to make a real poster with, and no
-    // lightbox behind the player to recover from a bad guess — the inline element is the whole
-    // affordance. `#t=0.1` seeks on load, forcing a decode.
-    //
-    // ⚠ Asserted on the ELEMENT, not on the computed: a fragment appended to the wrong attribute
-    // (or dropped by a template refactor) is invisible to a type check and silent at runtime.
-    // ⚠ And the token path must survive intact ahead of the `#` — the proxy URL is an HMAC over
-    // the URL, so mangling it 404s every video rather than merely losing the poster.
+  // ⚠⚠ MOUNTS NO PLAYER AT ALL — the media-policy change, and the reason it is asserted as an
+  // ABSENCE. A `<video>` fetches before anyone asks (`preload="metadata"` at minimum, and the
+  // `#t=0.1` poster trick this replaces made it a range request for real frames), so the element
+  // existing IS the involuntary fetch the proxy is meant to prevent. It is also what had one
+  // clip relayed per viewer, per view, forever — the byte cache stores images only — which
+  // exhausted the control plane's socket memory on 2026-08-10.
+  // The policy is stated for operators in docs/SELF_HOSTING.md.
+  //
+  // ⚠ `src` is set on the fixture DELIBERATELY, though the server no longer mints one. A
+  // descriptor from before the change may still be in an open tab, and honouring it would mount
+  // a player against a token the route now 404s — a broken source instead of a card.
+  for (const [kind, url, glyph] of [
+    ['video', 'https://e.test/c.mp4', '▶'],
+    ['audio', 'https://e.test/s.mp3', '♪'],
+  ] as const) {
+    it(`renders ${kind} as a file card, never a player, even with a stale src`, () => {
+      seedSettings();
+      const p = preview({ url, kind, src: '/api/lp/media/x', mime: `${kind}/mp4` });
+      const wrapper = mount(MessageAttachment, { props: { preview: p } });
+      expect(wrapper.find('video').exists()).toBe(false);
+      expect(wrapper.find('audio').exists()).toBe(false);
+      expect(wrapper.find('.card-file').exists()).toBe(true);
+      expect(wrapper.find('.file-badge').text()).toBe(glyph);
+      // ⚠ The link points at the ORIGIN, not at the proxy. That is the whole hand-off: a
+      // deliberate click goes where the bytes actually live.
+      expect(wrapper.find('.card-file .card-title').attributes('href')).toBe(url);
+    });
+  }
+
+  it('names a media file by its filename, not by its hostname', () => {
+    // ⚠ These records have no title and no siteName — nothing was scraped, because the URL IS
+    // the content — so the shared `heading` falls through to the hostname. Three clips from one
+    // CDN would then present as three identical cards.
     seedSettings();
-    const video = preview({ url: 'https://e.test/c.mp4', kind: 'video', src: '/api/lp/media/v' });
-    const wrapper = mount(MessageAttachment, { props: { preview: video } });
-    expect(wrapper.find('video').attributes('src')).toBe('/api/lp/media/v#t=0.1');
+    const p = preview({
+      url: 'https://cdn.e.test/holiday%20clip.mp4',
+      kind: 'video',
+      mime: 'video/mp4',
+    });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    expect(wrapper.find('.card-file .card-title').text()).toBe('holiday clip.mp4');
+    expect(wrapper.find('.card-file .card-desc').text()).toBe('Video · MP4');
   });
 
-  it('leaves AUDIO alone, which has no frame to paint', () => {
-    // A seek buys nothing for a waveform-less transport bar, and it would spend the bandwidth
-    // anyway.
+  it('renders a stored poster as inline MEDIA — no card, badge, viewer on click', async () => {
+    // Media, not citation: a clip whose first frame we hold renders the way an image does.
+    // The frame is our own decode served from our own route, so showing it unasked fetches
+    // nothing from the origin — the policy's line is bytes of the CLIP, which still move only
+    // on the deliberate click this test performs.
     seedSettings();
-    const audio = preview({ url: 'https://e.test/s.mp3', kind: 'audio', src: '/api/lp/media/a' });
-    const wrapper = mount(MessageAttachment, { props: { preview: audio } });
-    expect(wrapper.find('audio').attributes('src')).toBe('/api/lp/media/a');
+    const p = preview({
+      url: 'https://cdn.e.test/holiday.mp4',
+      kind: 'video',
+      mime: 'video/mp4',
+      thumb: '/api/link-preview/poster/abc123',
+      thumbWidth: 640,
+      thumbHeight: 360,
+    });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    expect(wrapper.find('.card').exists()).toBe(false);
+    const img = wrapper.find('.media-reserve img.inline-image');
+    expect(img.attributes('src')).toBe('/api/link-preview/poster/abc123');
+    expect(img.attributes('role')).toBe('button');
+    expect(wrapper.find('.media-badge').text()).toBe('▶');
+    // The reserve span carries the poster's geometry, image-style: byte-independent box.
+    expect(wrapper.find('.media-reserve').attributes('style')).toContain('aspect-ratio');
+    // Still no player mounted and no clip bytes anywhere — the click asks the VIEWER to play.
+    expect(wrapper.find('video').exists()).toBe(false);
+    await img.trigger('click');
+    expect(wrapper.emitted('activate')).toHaveLength(1);
   });
 
-  it('tells the list when a video finally reports its size', async () => {
-    // ⚠ The server measures dimensions for IMAGES only, so a video has no width/height to
-    // reserve a box with: it lays out at the UA default 300x150 and jumps to full size when
-    // metadata arrives. `previewRevision` has already fired by then and the scroller's
-    // ResizeObserver watches its own box rather than its content, so nothing else notices.
+  it('audio cover art gets the same treatment, with its own glyph', () => {
     seedSettings();
-    const video = preview({ url: 'https://e.test/c.mp4', kind: 'video', src: '/api/lp/media/v' });
-    const wrapper = mount(MessageAttachment, { props: { preview: video } });
-    await wrapper.find('video').trigger('loadedmetadata');
-    expect(wrapper.emitted('measured')).toHaveLength(1);
+    const p = preview({
+      url: 'https://cdn.e.test/song.mp3',
+      kind: 'audio',
+      mime: 'audio/mpeg',
+      thumb: '/api/link-preview/poster/def456',
+      thumbWidth: 300,
+      thumbHeight: 300,
+    });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    expect(wrapper.find('.media-badge').text()).toBe('♪');
+    expect(wrapper.find('.card').exists()).toBe(false);
+  });
+
+  it('keeps the poster reachable as a plain link when the viewer is off', () => {
+    // ⚠ The body hides the URL text for inline-rendered media, so with the viewer switched
+    // off this anchor is the ONLY remaining path to the clip — an inert poster would be a
+    // picture of a play button that plays nothing, pointing at nothing.
+    seedSettings();
+    useSettingsStore().values['chat.image_modal.enabled'] = false;
+    const p = preview({
+      url: 'https://cdn.e.test/holiday.mp4',
+      kind: 'video',
+      mime: 'video/mp4',
+      thumb: '/api/link-preview/poster/abc123',
+      thumbWidth: 640,
+      thumbHeight: 360,
+    });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    const link = wrapper.find('a.media-link');
+    expect(link.attributes('href')).toBe('https://cdn.e.test/holiday.mp4');
+    expect(link.find('img').attributes('src')).toBe('/api/link-preview/poster/abc123');
+  });
+
+  it('keeps the posterless file card, whose title now plays in place', async () => {
+    // Cache off, decode failed, or a row from before posters existed: the compact card is
+    // the complete state everything degrades to — but a plain click still owes the same
+    // deliberate-act-in-place behaviour the poster gets.
+    seedSettings();
+    const p = preview({ url: 'https://e.test/c.mp4', kind: 'video', mime: 'video/mp4' });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    expect(wrapper.find('.media-reserve').exists()).toBe(false);
+    expect(wrapper.find('.file-badge').text()).toBe('▶');
+    const title = wrapper.find('.card-title');
+    expect(title.attributes('href')).toBe('https://e.test/c.mp4');
+    await title.trigger('click');
+    expect(wrapper.emitted('activate')).toHaveLength(1);
+  });
+
+  it('leaves modifier-clicks on the file card title to the browser', async () => {
+    // ⚠ preventDefault on a cmd-click would eat open-in-new-tab — the affordance keeping
+    // this element an <a> at all.
+    seedSettings();
+    const p = preview({ url: 'https://e.test/c.mp4', kind: 'video', mime: 'video/mp4' });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    await wrapper.find('.card-title').trigger('click', { metaKey: true });
+    expect(wrapper.emitted('activate')).toBeUndefined();
+  });
+
+  it('emits no measurement for a file card, which has nothing to load', () => {
+    // The player it replaces laid out at the UA default 300x150 and jumped when metadata
+    // arrived, which is what `measured` existed to report. A card's height is final at first
+    // paint, so there is no late growth for the scroller to chase.
+    seedSettings();
+    const p = preview({ url: 'https://e.test/c.mp4', kind: 'video', mime: 'video/mp4' });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    expect(wrapper.emitted('measured')).toBeUndefined();
   });
 
   it('tells the list when an image decodes, even though its box was reserved', async () => {
@@ -611,67 +716,74 @@ describe('MessageAttachments — arrangement', () => {
   it('takes the mosaic shape from the COUNT, never from the pictures', () => {
     // ⚠⚠ The property the whole grid rests on, and the reason it replaced a strip whose height
     // was derived from `thumbWidth`/`thumbHeight`. Two groups of the same size get the same
-    // layout class no matter what shape their images are, so no descriptor — and therefore no
+    // layout no matter what shape their images are, so no descriptor — and therefore no
     // late-arriving answer — can change a message's height. Asserted as the class binding
     // because the geometry itself is CSS and happy-dom applies no stylesheet.
     seed(img(1, 800, 600), img(2, 1200, 500));
     expect(
       mountFor('https://e.test/1.png https://e.test/2.png').find('.mosaic').classes(),
-    ).toContain('n2');
+    ).not.toContain('odd');
 
     resolved.clear();
     seed(img(1, 600, 900), img(2, 500, 1000));
     expect(
       mountFor('https://e.test/1.png https://e.test/2.png').find('.mosaic').classes(),
-    ).toContain('n2');
+    ).not.toContain('odd');
   });
 
-  it('gives three images the hero-and-two shape', () => {
+  it('leads an ODD count with the three-up block, at three and at nine alike', () => {
     // A 2x2 grid holding three items leaves a hole; stretching the third across the bottom makes
     // it the subject of the message. The full-height first cell is what gives an odd count a
-    // shape, and `.n3` is what selects it.
-    seed(img(1, 800, 600), img(2, 800, 600), img(3, 800, 600));
-    const mosaic = mountFor('https://e.test/1.png https://e.test/2.png https://e.test/3.png').find(
-      '.mosaic',
-    );
-    expect(mosaic.classes()).toContain('n3');
-    expect(mosaic.findAll('.tile').length).toBe(3);
-  });
-
-  it('caps the mosaic at four tiles and counts the rest onto the last one', () => {
-    // ⚠ The cap is what keeps `MAX_MEDIA_PER_MESSAGE` (20) affordable. The strip could carry the
-    // twelfth image for free because it scrolled; a grid cannot, so past four it counts instead
-    // of growing. Everything past the cap is still reachable — see the gallery suite.
-    const urls: string[] = [];
-    for (let n = 1; n <= 6; n++) {
-      urls.push(`https://e.test/${n}.png`);
-      seed(img(n, 800, 600));
-    }
-    const wrapper = mountFor(urls.join(' '));
-    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(4);
-    expect(wrapper.find('.more').text()).toBe('+2');
-    // `+2` is not a sentence, so the count is spelled out for a screen reader too.
-    expect(wrapper.find('.sr-only').text()).toBe('2 more images');
-  });
-
-  it('does not render the images it capped away a SECOND time, below the grid', () => {
-    // ⚠⚠ Regression, /code-review high. `stacked` subtracted `mosaic` — the four DRAWN tiles —
-    // so every image from the fifth on fell through and rendered again at full size underneath,
-    // while the `+2` badge above announced those same pictures as not shown. At
-    // MAX_MEDIA_PER_MESSAGE (20) that is a four-cell grid followed by sixteen photographs, which
-    // is the exact screenful the cap exists to prevent.
+    // shape, and `.odd` is what selects it — at any count, because whatever the three-up block
+    // doesn't take is even by construction and pairs up behind it.
     //
-    // ⚠ The test above this one could not catch it: it counts `.mosaic .tile`, which was
-    // correctly 4 the whole time. Counting what you capped is not counting what rendered — so
-    // this asserts the TOTAL number of images in the block.
+    // ⚠ The class used to be `n${count}` with the CSS keyed on `.n3`, which was correct only
+    // because nothing past the fourth image was ever drawn. At five that spelling silently
+    // degrades to a two-column grid with a hole in its last row.
+    for (const n of [3, 5, 9]) {
+      resolved.clear();
+      const urls: string[] = [];
+      for (let i = 1; i <= n; i++) {
+        urls.push(`https://e.test/${i}.png`);
+        seed(img(i, 800, 600));
+      }
+      const mosaic = mountFor(urls.join(' ')).find('.mosaic');
+      expect(mosaic.classes()).toContain('odd');
+      expect(mosaic.findAll('.tile').length).toBe(n);
+    }
+  });
+
+  it('tiles EVERY image, with no four-cell cap and no overflow count', () => {
+    // lurker#773. The grid used to draw four tiles and a `+N` badge over the last one; lurker-ios
+    // shows the lot, and the badge was advertising pictures as hidden from inside a layout whose
+    // whole point is that the message is on screen at once. What bounds the worst case is
+    // `MAX_MEDIA_PER_MESSAGE` (20), applied long before this component sees anything.
     const urls: string[] = [];
     for (let n = 1; n <= 6; n++) {
       urls.push(`https://e.test/${n}.png`);
       seed(img(n, 800, 600));
     }
     const wrapper = mountFor(urls.join(' '));
-    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(4);
-    expect(wrapper.findAll('img.inline-image')).toHaveLength(4);
+    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(6);
+    expect(wrapper.find('.more').exists()).toBe(false);
+  });
+
+  it('renders each image exactly ONCE — in the grid, never again below it', () => {
+    // ⚠⚠ Regression, /code-review high, from when the cap existed: `stacked` subtracted the four
+    // DRAWN tiles, so every image from the fifth on fell through and rendered a SECOND time at
+    // full size underneath, while the `+2` badge above announced those same pictures as hidden.
+    //
+    // ⚠ The test above this one could not catch it: it counts `.mosaic .tile`, which was correct
+    // the whole time. Counting what the grid took is not counting what RENDERED — so this counts
+    // every image in the block, and goes on doing so now that the two sets should agree.
+    const urls: string[] = [];
+    for (let n = 1; n <= 6; n++) {
+      urls.push(`https://e.test/${n}.png`);
+      seed(img(n, 800, 600));
+    }
+    const wrapper = mountFor(urls.join(' '));
+    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(6);
+    expect(wrapper.findAll('img.inline-image')).toHaveLength(6);
   });
 
   it('still stacks a LONE image, which the mosaic never stands in for', () => {
@@ -683,16 +795,9 @@ describe('MessageAttachments — arrangement', () => {
     expect(wrapper.findAll('img.inline-image')).toHaveLength(1);
   });
 
-  it('draws no overflow badge when everything fits', () => {
-    seed(img(1, 800, 600), img(2, 800, 600));
-    expect(mountFor('https://e.test/1.png https://e.test/2.png').find('.more').exists()).toBe(
-      false,
-    );
-  });
-
   it('caps CARDS against the server answer, not against the extension guess', () => {
     // ⚠ `previewableUrls` charges anything that LOOKS like media to the generous media budget
-    // (20), because a mosaic costs the same at 2 as at 12. But an image-looking URL that resolves
+    // (20), because half a grid row is not what a card costs. But an image-looking URL that resolves
     // as a page — an extensionless CDN link, a .png that redirects to an HTML login page —
     // becomes a CARD, and a card costs real vertical space. Applying the tight cap only to the
     // guess meant twenty such links rendered twenty stacked cards and took over the screen.
@@ -713,16 +818,85 @@ describe('MessageAttachments — arrangement', () => {
     expect(wrapper.find('.card').exists()).toBe(true);
   });
 
-  it('stacks a video at full width instead of cropping it into a cell', () => {
-    // ⚠ A player reduced to a mosaic cell loses its controls, which are the part that matters.
-    // Two images plus a video is a two-cell mosaic and a stacked player, not a three-cell grid.
+  it('stacks a video card at full width instead of cropping it into a cell', () => {
+    // ⚠ The mosaic is a grid of PICTURES and a file card is not one — cropped into a cell it
+    // would lose the filename, which is the whole of it. Two images plus a video is a two-cell
+    // mosaic and a stacked card, not a three-cell grid.
     seed(img(1, 800, 600), img(2, 800, 600));
-    const video = preview({ url: 'https://e.test/c.mp4', kind: 'video', src: '/api/lp/media/v' });
+    const video = preview({ url: 'https://e.test/c.mp4', kind: 'video', mime: 'video/mp4' });
     seed(video);
     const wrapper = mountFor(`https://e.test/1.png https://e.test/2.png ${video.url}`);
     expect(wrapper.findAll('.mosaic .tile')).toHaveLength(2);
-    expect(wrapper.find('.mosaic video').exists()).toBe(false);
-    expect(wrapper.find('video.inline-video').exists()).toBe(true);
+    expect(wrapper.find('.mosaic .card-file').exists()).toBe(false);
+    expect(wrapper.find('.card-file').exists()).toBe(true);
+  });
+
+  // ⚠⚠ Both of these are regressions the media-policy change introduced and a review caught.
+  // Video and audio crossed from "the file, on screen" to "a card about a file", and every rule
+  // keyed on the old meaning had to cross with them. Neither failure was visible from the
+  // component's own tests, because both live in MessageBody's arrangement rather than in the
+  // card.
+  it('charges video cards to the CARD cap, not the generous media budget', () => {
+    // A card costs real vertical space whatever kind produced it. Charged to the media budget
+    // (20) and skipped by the card counter, a message of pasted clips rendered a full-width
+    // card per link — the screenful MAX_CARDS_PER_MESSAGE exists to prevent, and which the
+    // same count of images (a 4-tile mosaic) or pages (3 cards) both avoid.
+    const clips = Array.from({ length: 8 }, (_, i) =>
+      preview({ url: `https://e.test/clip${i}.mp4`, kind: 'video', mime: 'video/mp4' }),
+    );
+    seed(...clips);
+    const wrapper = mountFor(clips.map((c) => c.url).join(' '));
+    expect(wrapper.findAll('.card-file').length).toBe(MAX_CARDS_PER_MESSAGE);
+  });
+
+  // ⚠ These two mount with real SEGMENTS. `mountFor` passes `segments: []` because the tests
+  // around it are about arrangement, and with no segments there is no body text for a URL to be
+  // kept in or dropped from — the assertion would pass vacuously either way.
+  function mountWithBody(url: string) {
+    seedSettings();
+    return mount(MessageBody, {
+      props: {
+        text: `look at this ${url}`,
+        segments: [{ text: 'look at this ' }, { text: url, url }],
+      },
+    });
+  }
+
+  it('keeps the address in the text for a POSTERLESS video, which is still a card', () => {
+    // ⚠ The URL is dropped from the body only when the thing itself is on screen. A card names
+    // a file — it is not the file — so removing the address leaves a reader with "look at this"
+    // and a filename, unable to read or copy where it points.
+    const video = preview({ url: 'https://e.test/a1b2c3.mp4', kind: 'video', mime: 'video/mp4' });
+    seed(video);
+    const wrapper = mountWithBody(video.url);
+    expect(wrapper.find('.card-file').exists()).toBe(true);
+    expect(wrapper.text()).toContain(video.url);
+  });
+
+  it('drops the address for a video whose poster is on screen, the image rule exactly', () => {
+    // With a stored frame the clip renders as MEDIA, and the address becomes a
+    // machine-readable duplicate of the thing the reader is looking at — same reasoning,
+    // same rule, same test shape as the image below.
+    const video = preview({
+      url: 'https://e.test/framed.mp4',
+      kind: 'video',
+      mime: 'video/mp4',
+      thumb: '/api/link-preview/poster/abc123',
+      thumbWidth: 640,
+      thumbHeight: 360,
+    });
+    seed(video);
+    const wrapper = mountWithBody(video.url);
+    expect(wrapper.find('.media-reserve').exists()).toBe(true);
+    expect(wrapper.text()).not.toContain(video.url);
+  });
+
+  it('still drops the address for an image, which IS on screen', () => {
+    // The other half of the same rule — asserted so a fix for the above can't quietly delete it.
+    seed(img(1, 800, 600));
+    const wrapper = mountWithBody('https://e.test/1.png');
+    expect(wrapper.find('img.inline-image').exists()).toBe(true);
+    expect(wrapper.text()).not.toContain('https://e.test/1.png');
   });
 
   it('renders nothing at all when both settings are off', () => {
@@ -808,24 +982,35 @@ describe('MessageBody — atomic reveal', () => {
   });
 
   it('decides the mosaic SHAPE once, from the complete group', async () => {
-    // ⚠ TWO images arrive first, so that without the gate there IS a mosaic mid-flight — an `n2`,
-    // one row tall — which then becomes an `n4` two rows tall when the rest land. An earlier draft
-    // of the strip-era version of this test seeded ONE image and passed with the gate reverted,
-    // because one image is never a group either way; two is the smallest count that can be wrong.
+    // ⚠ TWO images arrive first, so that without the gate there IS a mosaic mid-flight — a single
+    // paired row — which then becomes a three-up block over a pair, three rows tall, when the rest
+    // land. An earlier draft of the strip-era version of this test seeded ONE image and passed
+    // with the gate reverted, because one image is never a group either way; two is the smallest
+    // count that can be wrong.
+    //
+    // ⚠ FIVE in total, not four, so the finished shape differs from the mid-flight one in the
+    // class as well as the tile count: parity is what the layout keys on now, and 2 and 4 are
+    // both even. A count that only changed the number of tiles would still catch this, but only
+    // by the assertion the cap-era version happened to have.
     resolved.set(img(1).url, img(1));
     resolved.set(img(2).url, img(2));
     seedSettings();
-    setInFlight(img(3).url, img(4).url);
+    setInFlight(img(3).url, img(4).url, img(5).url);
     const wrapper = mount(MessageBody, {
-      props: { text: `${TWO} https://e.test/3.png https://e.test/4.png`, segments: [] },
+      props: {
+        text: `${TWO} https://e.test/3.png https://e.test/4.png https://e.test/5.png`,
+        segments: [],
+      },
     });
     expect(wrapper.find('.mosaic').exists()).toBe(false);
 
     answer(img(3));
     answer(img(4));
+    answer(img(5));
     await nextTick();
 
-    expect(wrapper.find('.mosaic').classes()).toContain('n4');
+    expect(wrapper.find('.mosaic').classes()).toContain('odd');
+    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(5);
   });
 
   it('does not stall on a URL no answer is coming for', () => {
@@ -1076,11 +1261,44 @@ describe('MessageAttachments — the lightbox is a gallery over the whole messag
     ]);
   });
 
-  it('reaches the images the mosaic capped away', async () => {
-    // ⚠⚠ What makes the four-tile cap acceptable rather than a silent truncation. The gallery is
-    // built from EVERY image in the message, not from the drawn tiles, so the sixth is one arrow
-    // key from the fourth. Built the other way the `+2` badge would advertise images that could
-    // not be opened by any means.
+  it('opens a clip’s poster on the ORIGIN url — a player, not a gallery entry', async () => {
+    // ⚠ The inverse of the proxy rule the image test above pins, and both are the media
+    // policy: an image renders unasked so its bytes must come through us; a clip plays only
+    // on this deliberate click, and the click goes straight to the origin because relaying
+    // deliberate playback is the relay the policy retired. A gallery of one — the arrow set
+    // is pictures, and a player inside a picture gallery is a mode switch.
+    const clip = preview({
+      url: 'https://cdn.e.test/holiday.mp4',
+      kind: 'video',
+      mime: 'video/mp4',
+      thumb: '/api/link-preview/poster/abc123',
+      thumbWidth: 640,
+      thumbHeight: 360,
+    });
+    resolved.set(clip.url, clip);
+    seedSettings();
+    const wrapper = mount(MessageBody, {
+      props: { text: clip.url, segments: [{ text: clip.url, url: clip.url }] },
+    });
+
+    await wrapper.find('.media-reserve img').trigger('click');
+
+    const viewer = useMediaViewer();
+    expect(viewer.isOpen.value).toBe(true);
+    expect(viewer.count.value).toBe(1);
+    expect(viewer.url.value).toBe('https://cdn.e.test/holiday.mp4');
+    expect(viewer.shareUrl.value).toBe('https://cdn.e.test/holiday.mp4');
+    // ⚠ The SERVER's kind rides along, so the viewer doesn't have to guess it from the URL
+    // extension — an extensionless clip would otherwise open as a broken <img>.
+    expect(viewer.current.value?.kind).toBe('video');
+  });
+
+  it('arrows through the whole message from whichever tile was clicked', async () => {
+    // ⚠⚠ The gallery is built from EVERY image in the message, positioned on the one clicked. It
+    // used to be the guarantee that made the four-tile cap a crop rather than a truncation — the
+    // sixth image was one arrow key from the fourth even though nothing drew it. The cap is gone
+    // (lurker#773) and the guarantee is not: a TILE is itself a crop, and the arrow set is what
+    // says the middle of a photograph is not all there is of it.
     for (const n of [1, 2, 3, 4, 5, 6]) resolved.set(img(n).url, img(n));
     seedSettings();
     const wrapper = mount(MessageBody, {
@@ -1089,7 +1307,7 @@ describe('MessageAttachments — the lightbox is a gallery over the whole messag
         segments: [],
       },
     });
-    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(4);
+    expect(wrapper.findAll('.mosaic .tile')).toHaveLength(6);
 
     await wrapper.findAll('.mosaic img')[3].trigger('click');
     const viewer = useMediaViewer();

@@ -27,11 +27,7 @@ import type { AddressInfo } from 'node:net';
 import type { Express } from 'express';
 import type { LurkerTestAgent } from '../test-utils/testApp.js';
 import { setupTestDb, createTestApp, createAuthedAgent } from '../test-utils/testApp.js';
-
-vi.mock('../utils/ipGuard.js', () => ({
-  isBlockedIpLiteral: (host: string) => host.replace(/^\[|\]$/g, '') !== '127.0.0.1',
-  isBlockedIpv4: (ip: string) => ip !== '127.0.0.1',
-}));
+import { startStubDecoder, type StubDecoder } from '../test-utils/stubDecoder.js';
 
 const ctx = setupTestDb('routes-link-preview-s3cache');
 
@@ -62,6 +58,7 @@ const BUCKET_NAME = 'previews-bucket';
 const PREFIX = 'previews';
 const CDN = 'https://cdn.example.com';
 
+let stub: StubDecoder;
 let app: Express;
 let agent: LurkerTestAgent;
 let mintProxyToken: typeof import('../services/mediaProxyToken.js').mintProxyToken;
@@ -90,6 +87,13 @@ function servePng(body = PNG): void {
 }
 
 beforeAll(async () => {
+  stub = await startStubDecoder();
+  // These suites resolve direct-image URLs cold, so the stub answers the way the real
+  // decoder answers direct media: the URL IS the content, echoed back as `imageUrl`.
+  stub.onResolve = (url) => ({
+    status: 'ok',
+    meta: { kind: 'image', imageUrl: url, mime: 'image/png' },
+  });
   // The stub bucket. Started BEFORE the cache config is read, because the config
   // is resolved once per process and has to point at a real port.
   bucket = http.createServer((req, res) => {
@@ -151,7 +155,6 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => bucket.listen(0, '127.0.0.1', resolve));
   bucketBase = `http://127.0.0.1:${(bucket.address() as AddressInfo).port}`;
 
-  process.env.LURKER_LINK_PREVIEWS = 'on';
   process.env.LURKER_PREVIEW_CACHE_MODE = 's3';
   process.env.LURKER_PREVIEW_CACHE_S3_ENDPOINT = bucketBase;
   process.env.LURKER_PREVIEW_CACHE_S3_BUCKET = BUCKET_NAME;
@@ -180,6 +183,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await stub.close();
   await new Promise<void>((resolve) => origin.close(() => resolve()));
   // ⚠ Sockets first. A stalled response from the test below is still open, and
   // `close()` alone waits for it — the suite would hang on teardown rather than on

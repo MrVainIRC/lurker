@@ -696,6 +696,11 @@ function migrate() {
       image_height INTEGER,
       embed_url TEXT,
       mime TEXT,
+      -- Byte-cache key of a stored poster frame (video/audio kinds only), set only
+      -- when the poster was actually stored — so descriptor minting can be a plain
+      -- column read rather than a cache-existence probe. NULL means "no poster",
+      -- which is a complete, renderable state.
+      poster_key TEXT,
       fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
       expires_at TEXT NOT NULL
     );
@@ -1002,6 +1007,9 @@ if (columnExists('channel_notify_settings', 'target')) {
   db.exec(`ALTER TABLE channel_notify_settings DROP COLUMN muted`);
 }
 
+// Poster frames for video/audio link previews arrived with the lurker-previews
+// decoder split; rows from before it simply have no poster until they re-resolve.
+ensureColumn('link_previews', 'poster_key', 'TEXT');
 ensureColumn('messages', 'extra', 'TEXT');
 // nick!user@host of the sender, captured at ingest so client-side hostmask
 // ignore filters can match incoming and persisted messages. NULL for system

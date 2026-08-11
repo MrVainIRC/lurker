@@ -14,11 +14,16 @@
 // an image request that would have succeeded with caching switched off. The guard
 // now lives in this module, where the promise is made.
 //
-// ⚠ IMAGES ONLY, deliberately. Video and audio are capped at MAX_MEDIA_PROXY_BYTES
-// (64 MB) against images' 8 MB, they are served with RANGE requests so a cached
-// copy would have to answer partial reads, and one seek in a video is many
-// requests for one object. Buffering 64 MB per miss would trade the bandwidth this
-// feature saves for memory it cannot bound.
+// ⚠ IMAGES ONLY, deliberately — and this scope is now enforced upstream rather than
+// merely observed here. Video and audio used to be proxied but never cached (they
+// are fetched with RANGE requests, so a cached copy would have to answer partial
+// reads, and one seek is many requests for one object), which meant the ONE
+// mechanism making this feature affordable — store once, then mint a CDN URL —
+// covered only the cheap kind. That asymmetry is what exhausted the control
+// plane's socket memory on 2026-08-10. Video and audio are no longer relayed at
+// all (`proxyableContentType`), so "images only" is no longer a gap: it is the
+// whole set of things the proxy serves. See "Link previews & inline media" in
+// docs/SELF_HOSTING.md.
 
 import {
   expiredCached,
@@ -27,7 +32,7 @@ import {
   recordCached,
   forget,
 } from '../../db/previewCache.js';
-import { kindForContentType, MAX_IMAGE_PROXY_BYTES } from '../linkPreview.js';
+import { kindForContentType, MAX_IMAGE_PROXY_BYTES } from '../previewShared.js';
 import { imageSignatureOf, SIGNATURE_BYTES } from '../../utils/imageSignature.js';
 import { cacheConfig, cacheEnabled, expired, MAX_AGE_MS } from './config.js';
 import { evictLocal, objectPath, openLocalWrite, readLocal, removeLocal } from './local.js';
@@ -40,7 +45,14 @@ export { objectPath };
 // `toDescriptor` needs `publicByteUrl`, and this module imports the resolver for
 // `kindForContentType` — so anything the resolver has to reach must sit BELOW that
 // import or the two modules form a cycle. Callers still see one surface.
-export { byteCacheKey, cacheConfig, cacheEnabled, resetCacheConfigForTests } from './config.js';
+export {
+  byteCacheKey,
+  posterCacheKey,
+  isPosterKey,
+  cacheConfig,
+  cacheEnabled,
+  resetCacheConfigForTests,
+} from './config.js';
 export { publicByteUrl } from './publicUrl.js';
 
 /**

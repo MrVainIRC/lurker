@@ -53,34 +53,97 @@
       @keydown.space.prevent="activate"
     />
   </span>
-  <!-- ⚠ `@loadedmetadata` matters more here than the image's `@load` does. The server measures
-       dimensions for images only, so a video has NO width/height to reserve a box with and lays
-       out at the UA default 300x150 until its metadata arrives — then jumps to full size. The
-       resolve-time `previewRevision` has already fired by then, and the scroller's ResizeObserver
-       watches its own box rather than its content, so without this nothing at all notices. -->
-  <!-- ⚠ Never tiled. A player cropped into a grid cell loses its controls, which are the part
-       that matters, so MessageAttachments stacks video and audio at full width and the mosaic
-       is images only. -->
-  <!-- ⚠ `videoSrc`, not `preview.src` — it carries a `#t=` fragment that stands in for the poster
-       frame we have no ffmpeg to generate. See the computed. -->
-  <video
-    v-else-if="preview.kind === 'video' && preview.src"
-    class="inline-video"
-    :src="videoSrc"
-    controls
-    preload="metadata"
-    @click.stop
-    @loadedmetadata="$emit('measured')"
-  />
-  <audio
-    v-else-if="preview.kind === 'audio' && preview.src"
-    class="inline-audio"
-    :src="preview.src"
-    controls
-    preload="metadata"
-    @click.stop
-    @loadedmetadata="$emit('measured')"
-  />
+  <!-- MEDIA, not a link card: a clip or track whose poster we hold renders the way an image
+       does — the frame inline, no chrome, a badge naming what it is — because a pasted media
+       URL is content, not a citation. The reserve span carries the geometry exactly like the
+       image branch above (the poster's dimensions ride thumbWidth/thumbHeight), so the box is
+       byte-independent and the atomic reveal holds.
+       ⚠ The poster is OUR OWN decode served from our own route (no origin fetch happens by
+       rendering it), which is what lets it appear unasked without touching the media policy —
+       the policy's line is bytes of the CLIP, and those still move only on a deliberate act.
+       ⚠ Two interaction shapes, one look: with the viewer on, the poster is a button and the
+       deliberate act is opening the overlay's native player (which fetches the ORIGIN
+       directly); with it off, the poster is a plain link to the origin — because the body
+       hides the URL text for inline-rendered media (MessageBody.rendersInline), this element
+       is the only remaining path to the clip and MUST navigate somewhere. -->
+  <span
+    v-else-if="isMediaFile && preview.thumb"
+    class="media-reserve"
+    :class="hasDimensions ? 'dim-reserve' : 'dim-reserve dim-fallback'"
+    :style="reserveStyle"
+  >
+    <img
+      v-if="viewerEnabled"
+      class="inline-image in-reserve"
+      :src="preview.thumb"
+      :width="preview.thumbWidth || undefined"
+      :height="preview.thumbHeight || undefined"
+      alt=""
+      loading="lazy"
+      decoding="async"
+      role="button"
+      tabindex="0"
+      :aria-label="`Play ${mediaName}`"
+      @load="$emit('measured')"
+      @click="onImageClick"
+      @keydown.enter.prevent="activate"
+      @keydown.space.prevent="activate"
+    />
+    <a
+      v-else
+      class="media-link"
+      :href="preview.url"
+      target="_blank"
+      rel="noreferrer noopener"
+      :aria-label="`Open ${mediaName}`"
+      @click.stop
+    >
+      <img
+        class="inline-image in-reserve"
+        :src="preview.thumb"
+        :width="preview.thumbWidth || undefined"
+        :height="preview.thumbHeight || undefined"
+        alt=""
+        loading="lazy"
+        decoding="async"
+        @load="$emit('measured')"
+      />
+    </a>
+    <span class="media-badge" aria-hidden="true">{{ preview.kind === 'video' ? '▶' : '♪' }}</span>
+  </span>
+  <!-- ⚠⚠ A FILE CARD, not a player, and the absence of a `src` is the whole point. An inline
+       `<video>` fetches before anyone asks — `preload="metadata"` at minimum, and the `#t=`
+       poster trick this replaces made it a range request for real frames — so the element
+       itself was the involuntary fetch. The server no longer mints `src` for these kinds
+       (`toDescriptor`), which also stops one clip being relayed per viewer, per view, forever:
+       the byte cache stores images only, so video never got cheap on the second read. That
+       relay exhausted the control plane's socket memory on 2026-08-10. Pressing the link is a
+       deliberate act and goes straight to the origin, where a hidden IP was never buying the
+       reader anything a click wouldn't reveal a second later.
+       The operator-facing statement of this is in docs/SELF_HOSTING.md.
+       ⚠ Only the TITLE is a link, not the whole card. A full-card anchor would swallow the row
+       click, which on touch is the only thing that opens the message-actions sheet — the same
+       defect the wrapper note above is written about.
+       ⚠ No `measured` emit: unlike an image or a player this box has no bytes coming, so its
+       height is final at first paint and there is no late growth for the scroller to chase. -->
+  <div v-else-if="isMediaFile" class="card card-file">
+    <span class="file-badge" aria-hidden="true">{{ preview.kind === 'video' ? '▶' : '♪' }}</span>
+    <div class="card-text">
+      <!-- ⚠ Still a real anchor — copy, middle-click and modifier-clicks keep their browser
+           meanings — but a plain click with the viewer on opens the overlay's player instead
+           of a tab: the posterless card is the only rendering these kinds have, so it owes
+           the same deliberate-act-in-place behaviour the poster gets. -->
+      <a
+        class="card-title"
+        :href="preview.url"
+        target="_blank"
+        rel="noreferrer noopener"
+        @click="onMediaTitleClick"
+        >{{ mediaName }}</a
+      >
+      <div class="card-desc">{{ mediaTypeLabel }}</div>
+    </div>
+  </div>
 
   <!-- A page, or a video page. Discord's panel treatment: the card sits on its own slightly
        raised background so it reads as a distinct object rather than as more chat text.
@@ -235,7 +298,8 @@ const props = defineProps<{
   tiled?: boolean;
 }>();
 
-// ⚠⚠ `measured` is emitted by IMAGE, VIDEO and AUDIO. The image `@load` emit was removed once,
+// ⚠⚠ `measured` is emitted by the IMAGE only, now that video and audio render as a static file
+// card with nothing to load — see the template. The image `@load` emit was removed once,
 // on the reasoning that "every rendered image now has its box before any bytes" and so `@load`
 // could no longer report growth — the cost cited was five idempotent scroll corrections for a
 // five-image message. The premise was false in Blink (see the template: pending 0x0), the
@@ -248,8 +312,8 @@ const props = defineProps<{
 // unless the reader is at the tail, so a scrolled-up reader is never moved by a late decode.
 // `activate` rather than opening the viewer here: what a click MEANS depends on the
 // arrangement, and the arrangement is the parent's business. A tap on one tile of a mosaic
-// should open the whole message's images as a gallery — including the ones the mosaic capped
-// away — and only the parent knows what those are.
+// should open the whole message's images as a gallery, positioned on the one that was tapped,
+// and only the parent knows what the rest of the set is.
 const emit = defineEmits<{ measured: []; activate: [] }>();
 
 const settings = useSettingsStore();
@@ -257,37 +321,6 @@ const playing = ref(false);
 const embedEl = useTemplateRef<HTMLIFrameElement>('embedEl');
 
 const isVideo = computed(() => props.preview.kind === 'video-embed' && !!props.preview.embedUrl);
-
-/**
- * The player's source, with a Media Fragment asking the browser to start at 0.1s.
- *
- * ⚠⚠ THIS IS THE POSTER FRAME, and it is a substitute for one. A `<video>` with no `poster`
- * paints nothing until it has decoded a frame, so an unplayed clip is a black rectangle with
- * controls on it — you cannot tell one video in a buffer from another. Discord does not have
- * this problem because it decodes the first frame SERVER-side: their media library (Lilliput,
- * open source) bundles libavcodec precisely to thumbnail MP4. We have no ffmpeg anywhere — see
- * `uploads.test.ts`, which asserts an empty `thumbnail_url` for exactly that reason — and adding
- * it would mean decoding arbitrary third-party video on the server, a far larger parser surface
- * than sharp reading 64 KB of image header.
- *
- * `#t=0.1` seeks on load, which forces a decode, which paints. It works only because the media
- * proxy does real Range plumbing (`routes/linkPreview.ts`) — a source that ignores byte ranges
- * cannot be seeked, so this would be inert against a naive proxy.
- *
- * ⚠ A fragment is never transmitted, so the HMAC token in the path and the request the server
- * sees are both untouched. This cannot invalidate a proxy URL.
- *
- * ⚠ It COSTS BANDWIDTH, per viewer rather than once per cell: `preload="metadata"` alone fetches
- * roughly the container header, and this makes the browser pull far enough in to decode. The
- * trade was taken deliberately — inline images already spend per-viewer bytes on exactly this
- * kind of at-a-glance legibility, and a video is the one attachment with no lightbox behind it
- * to recover from a bad guess.
- *
- * ⚠ 0.1s rather than 0: some encoders have no decodable frame exactly at zero, and a seek to 0
- * is frequently a no-op that paints nothing. The cost is that playback and replay both begin
- * 100ms in.
- */
-const videoSrc = computed(() => `${props.preview.src ?? ''}#t=0.1`);
 
 /**
  * What the card is called, and what its link says. Never empty.
@@ -325,6 +358,51 @@ const heading = computed(() => {
     // A URL that won't parse is still a string worth showing over an empty card.
     return p.url;
   }
+});
+
+/** A bare media FILE — a link that resolved to video or audio bytes rather than to a page.
+ *
+ * ⚠ Keyed on `kind` alone, deliberately, and not on `!preview.src`. A descriptor minted before
+ * the media-policy change may still be sitting in an open tab's memory with a `src` on it, and
+ * the point is that those stop being played inline too — the server would answer that token
+ * with a 404 now (`proxyableContentType` is images-only), so honouring it would render a player
+ * wired to a broken source. Descriptors are minted per request and never persisted, so this
+ * window closes at the next resolve either way. */
+const isMediaFile = computed(
+  () => props.preview.kind === 'video' || props.preview.kind === 'audio',
+);
+
+/**
+ * What to call the file.
+ *
+ * ⚠ The last path segment, not `heading`. These records have no title and no siteName — nothing
+ * was scraped, because the URL *is* the content — so `heading` falls all the way through to the
+ * hostname, and a card reading "cdn.lurker.chat" tells a reader nothing about which of three
+ * clips it is. The filename is the only distinguishing thing a bare media URL carries.
+ *
+ * ⚠ Decoded, and length-clamped. A percent-encoded name is unreadable, and an over-long one
+ * would push the card's layout around before `.card-title`'s clamp could catch it.
+ */
+const mediaName = computed(() => {
+  try {
+    const path = new URL(props.preview.url).pathname;
+    const last = path.slice(path.lastIndexOf('/') + 1);
+    const name = last ? decodeURIComponent(last) : '';
+    if (name) return name.length > 80 ? `${name.slice(0, 79)}…` : name;
+  } catch {
+    // Falls through to the heading, which is itself guaranteed non-empty.
+  }
+  return heading.value;
+});
+
+/** The second line: what kind of thing this is, from the server's measured content type.
+ *  ⚠ `mime` is the server's, read off the response rather than guessed from the extension, so
+ *  it is trustworthy in the one place a filename is not. Subtype only — "Video · MP4" reads,
+ *  "Video · video/mp4" is redundant twice over. */
+const mediaTypeLabel = computed(() => {
+  const noun = props.preview.kind === 'video' ? 'Video' : 'Audio';
+  const sub = props.preview.mime?.split('/')[1]?.split(';')[0]?.trim();
+  return sub ? `${noun} · ${sub.toUpperCase()}` : noun;
 });
 
 /**
@@ -537,6 +615,24 @@ function activate(): void {
   if (!viewerEnabled.value) return;
   emit('activate');
 }
+
+/**
+ * A plain click on a media file card's title plays the file in the viewer; everything else a
+ * link click can mean is left to the browser.
+ *
+ * ⚠ The modifier guard is the difference between "opens in the overlay" and "breaks
+ * cmd-click": `preventDefault` on a modified click would eat open-in-new-tab and
+ * shift-click-to-window, which are exactly the affordances keeping this an <a> is for.
+ * Propagation stops either way — a consumed OR navigating click must not also open the
+ * message-actions sheet under it.
+ */
+function onMediaTitleClick(e: MouseEvent): void {
+  e.stopPropagation();
+  if (!viewerEnabled.value) return;
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  e.preventDefault();
+  emit('activate');
+}
 </script>
 
 <style scoped>
@@ -602,42 +698,62 @@ function activate(): void {
 .inline-image[role='button'] {
   cursor: pointer;
 }
-.inline-video,
-.inline-audio {
-  max-width: 100%;
-  width: auto;
-  border-radius: var(--radius-md);
+/* The media FILE card — a video or audio link that is named rather than played.
+   ⚠ It reuses `.card` wholesale, so it sits on the same panel, at the same inset, with the same
+   mobile left rule as a page card. That is the point: these are the same KIND of object now —
+   something the reader may choose to open — and a second visual language for them would only
+   say "this one is special" about the case that is now the most ordinary.
+   ⚠ No fixed height and no reserved box, unlike the player this replaces. That whole apparatus
+   (a pinned 300px, so a `loadedmetadata` jump could not move a scrolled-up reader) existed
+   because the element's size arrived with its bytes. Nothing here is fetched, so the card's
+   height is known at first paint and R1 is satisfied by construction rather than by a pin. */
+.card-file {
+  align-items: center;
+}
+/* The wrapper that gives the badge somewhere to sit; geometry comes from `.dim-reserve`. */
+.media-reserve {
+  position: relative;
+}
+.media-link {
   display: block;
-}
-/* ⚠ A FIXED height, not a max. The server measures dimensions for images only, so a video has
-   no intrinsic ratio to reserve a box from: it lays out at the UA default 300x150 and jumps to
-   its real size when `loadedmetadata` fires. `@loadedmetadata` lets the list re-pin, but that is
-   only a mitigation — the re-pin can follow the bottom and cannot hold a scrolled-up reader
-   still, because by the time we hear about the growth it has already happened.
-   Pinning the height removes the jump instead of compensating for it: the box is correct before
-   a single byte arrives. Width still settles when the ratio is known, which costs nothing —
-   only vertical movement disturbs a scroll position.
-
-   ⚠⚠ 300px, half as much again as the 200px it replaced, and the reason is that THIS IS THE ONLY
-   PLACE A VIDEO IS EVER WATCHED. The media viewer is images-only — `openAt` filters on
-   `kind === 'image'`, because MediaViewerModal picks its element from the URL's extension and a
-   proxy path has none, so a video handed to it mounts MP4 bytes in an `<img>` and fails. Discord
-   is the same: its inline player has no lightbox behind it either. An image can afford to be a
-   thumbnail because a click opens the real thing; a video at thumbnail size is just small.
-
-   ⚠ The cost is on a narrow column, and it grows with this number. `max-width: 100%` clamps the
-   width while this height stays put, so a 16:9 clip on a phone letterboxes — ~49px of bar top
-   and bottom at 360px wide, where at 200px there was none. That is the thing to look at before
-   raising this again. Accepted rather than fixed, because every fix trades it for something
-   worse: `max-height` restores the 300x150 jump this rule exists to remove, and a fixed
-   `aspect-ratio` box (the mosaic's trick) would letterbox every phone-shot VERTICAL video down
-   its sides instead, which is the more common shape on IRC. Letting the width follow the real
-   ratio is what makes a portrait clip render as a portrait clip. */
-.inline-video {
-  height: 300px;
-}
-.inline-audio {
   width: 100%;
+  height: 100%;
+}
+/* `.play-badge`'s shape on an inline poster. `pointer-events: none` because the image (or the
+   anchor) under it owns the click — a badge that intercepts taps is a control nothing wired. */
+.media-badge {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-left: 3px;
+  pointer-events: none;
+}
+/* ⚠ Sized and centred like `.play-badge`, and for the same reason: it is the only thing on a
+   card with no picture that says at a glance what sort of file this is. It is NOT a control —
+   the title is the link — so it is `aria-hidden` and carries no focus ring; a badge that looked
+   pressable but wasn't is worse than one that plainly isn't. */
+.file-badge {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Optically centred: a triangle glyph's visual mass sits left of its box. Applied to both
+     glyphs so the two badges are the same object at different labels. */
+  padding-left: 3px;
 }
 
 /* A mosaic cell: fill it exactly, whatever shape the picture is.
