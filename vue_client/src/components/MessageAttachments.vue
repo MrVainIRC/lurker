@@ -5,8 +5,8 @@
 
 <template>
   <div class="attachments">
-    <!-- Two or more images become one MOSAIC: a grid whose cells are chosen by the COUNT, each
-         image cropped to fill its cell.
+    <!-- Two or more images become one MOSAIC: a two-column grid of fixed-size cells, each image
+         cropped to fill its cell.
 
          ⚠⚠ This replaced a horizontally-scrolling filmstrip, and the reason is the interaction
          rather than the look. A sideways scroller inside a vertically-scrolling list is a
@@ -16,24 +16,26 @@
          once, needs no scroll container, no ResizeObserver and no fade.
 
          It keeps the property the strip was built for: the group's height is a function of the
-         IMAGE COUNT alone, so a message has one of two possible attachment heights instead of
-         one per picture. That is what makes it byte-independent AND descriptor-independent —
-         nothing here reads a dimension. Cropping is what buys it, and cropping is recoverable
-         because any cell opens the whole set in the viewer. -->
-    <div v-if="mosaic.length > 1" class="mosaic" :class="`n${mosaic.length}`">
-      <div v-for="(item, i) in mosaic" :key="item.url" class="tile">
+         IMAGE COUNT alone — ceil(n / 2) rows of a fixed height — so no descriptor and no
+         late-arriving byte can change it. Nothing here reads a dimension. Cropping is what buys
+         that, and cropping is recoverable because any cell opens the whole set in the viewer.
+
+         The shape rule, for any count: EVEN → all pairs; ODD → the three-up block (one
+         full-height picture beside two stacked) first, then pairs. So 3 is hero-and-two, 4 is
+         2x2, 5 is the three-up plus a pair, 7 the three-up plus two pairs. One rule, no holes at
+         any count, and the odd block LEADS — a trailing full-width tile crops a landscape photo
+         hard and makes the last picture the subject of the message. It is one CSS declaration:
+         the first tile spans two rows when the count is odd, and auto-placement flows everything
+         after it into pairs around the tall cell. Ported from lurker-ios, whose
+         MessageAttachmentsView draws the same rule with stack views. -->
+    <div v-if="mosaic.length" class="mosaic" :class="{ odd: mosaic.length % 2 === 1 }">
+      <div v-for="item in mosaic" :key="item.url" class="tile">
         <MessageAttachment
           :preview="item"
           tiled
           @measured="$emit('measured')"
           @activate="openAt(item)"
         />
-        <!-- The overflow indicator. It sits on the LAST visible tile rather than adding a cell,
-             so the grid stays 2x2 whether a message carries four images or forty. -->
-        <template v-if="i === mosaic.length - 1 && overflow > 0">
-          <span class="more" aria-hidden="true">+{{ overflow }}</span>
-          <span class="sr-only">{{ overflow }} more image{{ overflow === 1 ? '' : 's' }}</span>
-        </template>
       </div>
     </div>
     <MessageAttachment
@@ -69,15 +71,6 @@ defineEmits<{ measured: [] }>();
 const viewer = useMediaViewer();
 
 /**
- * How many tiles the mosaic draws before it starts counting instead.
- *
- * Four is two full rows. A fifth would either add a row — and a message's height stops being a
- * small known set — or shrink every cell to fit, which is worse the more images there are.
- * Everything past the fourth is reachable through the viewer, which has always been a gallery.
- */
-const MOSAIC_CELLS = 4;
-
-/**
  * Every image in the message, in order.
  *
  * ⚠ IMAGES only, and video is the deliberate omission — but no longer for the reason this
@@ -93,40 +86,48 @@ const MOSAIC_CELLS = 4;
  */
 const images = computed(() => props.previews.filter((p) => p.kind === 'image'));
 
-/** The tiles actually drawn. A lone image is not a one-cell mosaic — see `stacked`. */
-const mosaic = computed(() => (images.value.length > 1 ? images.value.slice(0, MOSAIC_CELLS) : []));
-
-/** How many images the mosaic is standing in for. Zero unless the message is genuinely long. */
-const overflow = computed(() => Math.max(0, images.value.length - mosaic.value.length));
+/**
+ * The tiles, which are now EVERY image in the message. A lone image is not a one-cell mosaic —
+ * see `stacked`.
+ *
+ * ⚠⚠ There used to be a four-cell cap with a `+N` count on the last tile, and dropping it is
+ * lurker#773. The cap's stated reason was that a fifth image "either adds a row, and a message's
+ * height stops being a small known set, or shrinks every cell". Only the first half was ever
+ * true, and it was never the property that mattered: what keeps the block byte-independent is
+ * that its height is a function of the COUNT — ceil(n / 2) fixed rows — not that the count of
+ * possible heights is small. The real bound on a message taking over the screen is
+ * `MAX_MEDIA_PER_MESSAGE` (20), which is enforced before any of this. A badge was also a worse
+ * bargain than it looked: it advertises pictures as hidden while the whole point of the grid is
+ * that everything in the message is on screen at once.
+ */
+const mosaic = computed(() => (images.value.length > 1 ? images.value : []));
 
 /**
  * Everything the mosaic didn't take: cards, video, audio — and a lone image, which renders on its
  * own at its own size. That last case is the common one, and a one-cell mosaic would only crop it
  * for no reason.
  *
- * ⚠⚠ Excludes every image the mosaic STANDS IN FOR, not merely the four it draws. Subtracting
- * `mosaic` was the obvious spelling and it re-rendered the overflow: with six images the grid
- * showed four tiles and a `+2` badge, and then images five and six rendered AGAIN underneath at
- * full size — the badge announcing as hidden the very pictures sitting below it. At
- * `MAX_MEDIA_PER_MESSAGE` (20) that is a four-cell grid followed by sixteen stacked photographs,
- * which is precisely the screenful the cap exists to prevent.
+ * ⚠ Subtract the mosaic's own set, and let it be empty when there is no mosaic — otherwise a
+ * single image is spoken for by a grid that was never drawn and the message renders no picture
+ * at all. When the cap existed this had to subtract every image the mosaic STOOD IN FOR rather
+ * than the tiles it drew, or the overflow rendered a second time underneath at full size; with
+ * no cap the two sets are the same and the trap is gone with it.
  *
- * ⚠ The tests could not see it: they counted `.mosaic .tile`, which was correct at 4, and never
- * the total number of images in the block. Counting what you capped is not the same as counting
- * what rendered.
+ * ⚠ The tests could not see that one: they counted `.mosaic .tile`, which was correct the whole
+ * time, and never the total number of images in the block. Counting what you capped is not the
+ * same as counting what rendered — so the suite still asserts the total.
  */
 const stacked = computed(() => {
-  // Empty when there is no mosaic, so a lone image still stacks — that is the common case.
-  const spokenFor = new Set<LinkPreview>(mosaic.value.length ? images.value : []);
-  return props.previews.filter((p) => !spokenFor.has(p));
+  const inMosaic = new Set<LinkPreview>(mosaic.value);
+  return props.previews.filter((p) => !inMosaic.has(p));
 });
 
 /**
  * Open the viewer over EVERY image in the message, positioned on the one that was clicked.
  *
- * ⚠ The gallery is `images`, not `mosaic`, and that is what makes both the cap and the crop
- * safe: the fifth image of a message is not drawn, and the reader still reaches it by arrowing.
- * A lone image is a gallery of one, which the viewer has always handled.
+ * ⚠ The gallery is `images` — every picture in the message, mosaic or not — and that is what
+ * makes the crop safe: a tile shows the middle of a photograph, and clicking it shows the
+ * photograph. A lone image is a gallery of one, which the viewer has always handled.
  *
  * ⚠ The viewer gets `src` — OUR proxy path — never the origin URL. Handing it `preview.url` broke
  * the promise the setting makes in so many words ("the file is fetched and served by your Lurker
@@ -178,11 +179,22 @@ function openAt(item: LinkPreview): void {
 /* The top margin separates an attachment from the text above it. On a body whose every URL was
    hidden there is no text above it — MessageBody sets this class, and MessageList's `:has()`
    companion top-aligns the row's nick for the same reason.
-   ⚠ It lives HERE rather than beside that companion because a scoped rule in MessageList cannot
-   reach this element: MessageBody is a multi-root fragment, so MessageList's scope id never
-   propagates onto `.attachments`. The rule was written there first and did nothing at all. */
+
+   ⚠⚠ It does NOT follow that the gap goes to zero, and for two commits it did (lurker#773): an
+   image-only message sat flush against the top edge of its row, so a hovered, alt-striped or
+   highlighted row painted its background right up to the picture while every text row kept a
+   sliver of it. What it gets instead is `--space-4` — the SAME value as the bottom margin below,
+   because with no text in the row the picture is the whole of it and an even inset top and bottom
+   is what makes it sit inside the row rather than at the top of it. Half-leading (`--space-2`,
+   what a 1.55 line-height puts above a text row's first glyph) was tried first, on screen, and
+   reads as too little against 8px underneath. It REPLACES the separation margin rather than
+   adding to it — the text-then-image case already has its gap and would otherwise get 12px.
+
+   ⚠ It lives HERE rather than beside that `:has()` companion because a scoped rule in MessageList
+   cannot reach this element: MessageBody is a multi-root fragment, so MessageList's scope id
+   never propagates onto `.attachments`. The rule was written there first and did nothing at all. */
 .attachments.body-only {
-  margin-top: 0;
+  margin-top: var(--space-4);
 }
 /* A card wants the width it's given — its text has to wrap against something — but not the
    full width of a wide window, where it stops reading as part of the message and starts
@@ -203,9 +215,10 @@ function openAt(item: LinkPreview): void {
    whole grid is laid out correctly before a single byte of any picture arrives — the same
    byte-independence a lone image gets from its reserved box, reached without needing one.
 
-   ⚠ One row height, and every layout is a whole number of rows: 1 row for two images, 2 rows
-   for three or more. So a mosaic is 160px or 324px tall (2 × 160 plus the 4px gap) and never
-   anything else, which is the property the filmstrip's fixed height existed to provide. */
+   ⚠ One row height, and every layout is a whole number of rows: ceil(n / 2) of them, so a mosaic
+   is 160px, 324px, 488px … and never a value that depends on a picture. That — not the number of
+   distinct heights, which the four-cell cap kept at two — is the property the filmstrip's fixed
+   height existed to provide, and it survives an uncapped grid unchanged. */
 .mosaic {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -220,50 +233,32 @@ function openAt(item: LinkPreview): void {
      two independent dials, so anything claiming they agree is wrong. */
   max-width: 480px;
 }
-/* Three images: a full-height picture beside two stacked ones. Discord's arrangement, and it is
-   the one that gives an odd count a shape rather than a gap — a 2x2 grid with three items leaves
-   a hole, and stretching the third across the bottom makes it the subject of the message. */
-.mosaic.n3 > .tile:first-child {
+/* An odd count LEADS with the three-up block: a full-height picture beside two stacked ones.
+   Discord's arrangement for three, and it is the one that gives an odd count a shape rather than
+   a gap — a 2x2 grid with three items leaves a hole, and stretching the third across the bottom
+   makes it the subject of the message.
+
+   ⚠⚠ This one declaration is the whole of the "5, 7, 19 images" layout, and that is why the count
+   cap could go. Auto-placement does the rest: the tall cell occupies column 1 of the first two
+   rows, images 2 and 3 fill column 2 beside it, and every image after that finds the first free
+   row and pairs up. Whatever the three-up block doesn't take is even by construction, so no
+   count leaves a hole — which is exactly the rule lurker-ios draws with nested stack views.
+
+   ⚠ It keys off ODD, not off `n3`. The class used to be `n${count}` and the selector `.n3`, which
+   was correct only because nothing past four was ever drawn; at 5 that spelling silently
+   degrades to a 2x2 grid with a hole in it. */
+.mosaic.odd > .tile:first-child {
   grid-row: span 2;
 }
 
 /* The grid item. The image inside is a `display: contents` wrapper's child (see
    MessageAttachment), so it becomes this element's own child for layout — which is why the
-   clipping, the rounding and the overlay all live here rather than on the picture. */
+   clipping and the rounding live here rather than on the picture. */
 .tile {
-  position: relative;
   overflow: hidden;
   border-radius: var(--radius-md);
   /* A grid item's automatic minimum is its content, so a wide image would otherwise refuse to
      shrink and push the second column off the row. */
   min-width: 0;
-}
-
-/* The overflow count, drawn over the last tile.
-   ⚠ `inset: 0` rather than a corner badge: the whole cell is the target, and the cell is already
-   a button (the image carries the role). A small badge would read as a separate control sitting
-   on top of one, with no way to tell which a tap would hit. */
-.more {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: color-mix(in srgb, var(--bg) 60%, transparent);
-  color: var(--fg);
-  font-weight: 600;
-  /* The image beneath owns the click; this is a label, not a control. */
-  pointer-events: none;
-}
-
-/* The count again, for a screen reader, because `+6` is not a sentence. Clipped rather than
-   `display: none`, which would take it out of the accessibility tree along with the layout. */
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
 }
 </style>
