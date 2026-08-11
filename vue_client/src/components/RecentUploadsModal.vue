@@ -20,17 +20,38 @@
 <template>
   <AppModal word="uploads" title="uploads" size="xl" fill-height @close="$emit('close')">
     <div class="filters">
-      <div class="search">
-        <i class="fa-solid fa-magnifying-glass search-icon"></i>
-        <input
-          ref="searchEl"
-          v-model="query"
-          type="search"
-          class="search-input"
-          placeholder="Search filenames…"
-          aria-label="Search uploads by filename"
-          @keydown.esc="onEscape"
-        />
+      <!-- Search and the starred toggle share a line. The toggle used to sit after
+           the kind chips, where it had nowhere to go: those five fill the content
+           width on a phone, so it wrapped onto a row of its own even reduced to a
+           bare star. The search field is the one flexible thing in this bar, so the
+           toggle rides in the space that field gives up instead. -->
+      <div class="search-row">
+        <div class="search">
+          <i class="fa-solid fa-magnifying-glass search-icon"></i>
+          <input
+            ref="searchEl"
+            v-model="query"
+            type="search"
+            class="search-input"
+            placeholder="Search filenames…"
+            aria-label="Search uploads by filename"
+            @keydown.esc="onEscape"
+          />
+        </div>
+        <!-- Not a sixth kind chip: starred composes WITH a kind ("my starred
+             gifs") rather than replacing one, and sitting inside the All/Images/…
+             row would imply the mutual exclusivity those have. Beside the search
+             field it reads as what it is — another way to narrow the same list. -->
+        <button
+          class="chip starred"
+          :class="{ active: uploads.favoritesOnly }"
+          :aria-pressed="uploads.favoritesOnly"
+          title="Show only starred uploads"
+          aria-label="Show only starred uploads"
+          @click="onToggleFavoritesFilter"
+        >
+          <i class="fa-solid fa-star"></i><span class="label">Starred</span>
+        </button>
       </div>
       <div class="kinds" role="group" aria-label="Filter by type">
         <button
@@ -44,19 +65,6 @@
           {{ k.label }}
         </button>
       </div>
-      <!-- Its own group, not a sixth kind chip: starred composes WITH a kind
-           ("my starred gifs") rather than replacing it, and a chip sitting in the
-           All/Images/… row would imply the mutual exclusivity those have. -->
-      <button
-        class="chip starred"
-        :class="{ active: uploads.favoritesOnly }"
-        :aria-pressed="uploads.favoritesOnly"
-        title="Show only starred uploads"
-        aria-label="Show only starred uploads"
-        @click="onToggleFavoritesFilter"
-      >
-        <i class="fa-solid fa-star"></i><span class="label">Starred</span>
-      </button>
     </div>
 
     <p v-if="uploads.listError" class="error">{{ uploads.listError }}</p>
@@ -468,10 +476,21 @@ function metaLine(u: UploadRow): string {
   flex-wrap: wrap;
   margin-bottom: var(--space-6);
 }
+/* Search + starred toggle. This is the flexible item in `.filters`, so it takes
+   the leftover width and the kind chips wrap beneath it when the modal is narrow.
+   The 200px floor lives here now rather than on `.search`, which has to be free to
+   shrink so the toggle beside it always fits. */
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: 1;
+  min-width: 200px;
+}
 .search {
   position: relative;
   flex: 1;
-  min-width: 200px;
+  min-width: 0;
   /* One knob for both the glyph's inset and the text's. They have to move together —
      the caret's position is DERIVED from where the icon ends, so a hardcoded value in
      each would let them drift apart the next time either is nudged. */
@@ -531,11 +550,15 @@ function metaLine(u: UploadRow): string {
   border-color: var(--accent);
   background: var(--bg-soft);
 }
-/* Its own control, not part of the kinds group — the gap here is what says so. */
 .chip.starred {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  /* Never squeezed by the search field growing, and matched to the input's height
+     rather than left as a shorter chip floating beside a taller box — same vertical
+     padding, same border, so the two line up as one row of controls. */
+  flex: none;
+  padding-block: var(--space-4);
 }
 .chip.starred.active i {
   color: var(--warn);
