@@ -231,6 +231,11 @@ card (title, description, image — the way Slack or Discord do it); a link
 straight to an image renders inline; and a link to a **video or audio file**
 renders a poster frame that plays in place when clicked.
 
+⚠ That last one needs one more setting: **video posters require the byte cache**
+(`LURKER_PREVIEW_CACHE_MODE=local`). See
+[Caching preview images](#caching-preview-images-required-for-video-posters)
+below — without it, video links get a card with no frame on it.
+
 It's off by default because it makes your deployment fetch third-party URLs that
 appear in chat — a behavior an operator should choose, not inherit.
 
@@ -375,13 +380,30 @@ Re-run the script after two things:
 
 (This is what the hosted fleet does per-cell, and why.)
 
-#### Caching preview images (optional)
+#### Caching preview images (required for video posters)
 
-Without a cache this already works — the server just re-fetches an image when
-nobody's browser has it cached. `LURKER_PREVIEW_CACHE_MODE` trades a little disk
-or a bucket for not re-fetching popular images:
+For links and images this is a tuning knob: without a cache everything still
+works, the server just re-fetches an image when nobody's browser has it cached.
+**For video and audio it is the difference between a poster frame and a bare
+card**, so if you want the feature described at the top of this section, turn it
+on.
 
-- **`off`** (default) — fetch through, store nothing.
+Why a video needs it when an image doesn't: a poster is the one preview image
+with **no origin URL**. The decoder produces those bytes from the video itself,
+so they exist nowhere else on the internet — if your instance has nowhere to put
+them, there is nothing to serve later. The server is consistent about that
+rather than half-working: with the cache off it doesn't ask the decoder for a
+poster at all, won't record one against the link, and its poster route answers 404. The card renders without a frame and nothing logs, because a posterless
+card is a supported state.
+
+⚠ **Turning it on doesn't backfill.** A video someone pasted while the cache was
+off is remembered as posterless for a week (the success TTL); it grows a frame
+once that entry expires and someone posts the link again.
+
+`LURKER_PREVIEW_CACHE_MODE` trades a little disk or a bucket for this, and for
+not re-fetching popular images:
+
+- **`off`** (default) — fetch through, store nothing. No video posters.
 - **`local`** — the sensible self-host choice. Cached bytes live in a directory
   next to the database (2 GiB cap by default, least-recently-used eviction).
   It's a cache, not data: safe to delete while the server is stopped.
@@ -390,6 +412,9 @@ or a bucket for not re-fetching popular images:
   ships zero bytes for an image it has already fetched. This one has real
   operational requirements — the objects are publicly readable, the base URL
   must be https, and **you** own eviction via a lifecycle rule on the bucket.
+
+Posters work under `local` or `s3` — the gate is "a cache exists", not `local`
+specifically.
 
 Misconfiguration is never fatal: a bad cache config logs one warning, caching
 turns off, and previews keep working.

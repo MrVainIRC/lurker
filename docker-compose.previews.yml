@@ -41,31 +41,50 @@ services:
       # variable IS the feature gate: drop this overlay and previews are off.
       - LURKER_PREVIEWS_URL=http://lurker-previews:8030
       #
-      # ───── Optional: caching the preview image BYTES ─────────────────────
-      # Previews work without this. It changes only how often the same picture
-      # is re-fetched from the site hosting it: uncached, the metadata for a
-      # link is remembered but the bytes are not, so ten people scrolling past
-      # the same image is ten fetches from its origin (once per person per day
-      # — browsers hold their own copy). Misconfiguration is never fatal: a bad
+      # ───── Caching the preview image BYTES ───────────────────────────────
+      # Optional for links and images; ⚠⚠ REQUIRED FOR VIDEO POSTERS. With the
+      # cache off, a video link renders as a card with no frame on it and
+      # nothing logs, because a posterless card is a supported state. The
+      # reason is structural rather than a policy: a poster is the one preview
+      # image with NO ORIGIN URL — the decoder makes those bytes and they exist
+      # nowhere else — so if nothing can store them there is nothing to serve.
+      # The server acts on that in three places: it doesn't ask the decoder for
+      # a poster, it won't put a poster key on the row, and the poster route
+      # answers 404. Uncomment the mode below and posters work.
+      #
+      # ⚠ Turning it on doesn't backfill. A video someone pasted while the
+      # cache was off is remembered as posterless for OK_TTL (7 days); it grows
+      # a frame when that row expires and the link is seen again.
+      #
+      # For links and images this is only about how often the same picture is
+      # re-fetched from the site hosting it: uncached, the metadata is
+      # remembered but the bytes are not, so ten people scrolling past the same
+      # image is ten fetches from its origin (once per person per day — the
+      # browsers hold their own copies). Misconfiguration is never fatal: a bad
       # value logs one warning, caching turns off, previews keep working.
       #
       # ⚠ These belong on THIS service, not the decoder. Storing bytes needs
       # credentials, and the container that parses hostile input is the last
       # place to keep any — it hands bytes back, Lurker decides where they go.
       #
-      # ⚠ Images only. Video and audio are read in ranges (one seek is many
-      # requests for one object), so caching them would trade the bandwidth
-      # this saves for memory it cannot bound.
+      # ⚠ Cached CONTENT is images only: video and audio are never stored (they
+      # are read in ranges, so one seek is many requests for one object, and
+      # caching them would trade the bandwidth this saves for memory it cannot
+      # bound). A poster is a still, which is why it can be kept at all.
       #
-      #   off     stream through, store nothing. The default.
+      #   off     stream through, store nothing. The default — and no posters.
       #   local   a directory beside the database. The sensible self-host
       #           choice — it needs no extra volume, since it lives inside the
       #           ./data mount the base compose file already has.
-      #   s3      a bucket you own, served from its public base URL.
+      #   s3      a bucket you own, served from its public base URL. Posters
+      #           work under this one too; the gate is "not off", not "local".
       #
-      # - LURKER_PREVIEW_CACHE_MODE=local
-      # - LURKER_PREVIEW_CACHE_DIR=            # default: <data dir>/preview-cache
-      # - LURKER_PREVIEW_CACHE_MAX_BYTES=      # local only; default 2 GiB, digits only
+      # Set these in a .env file beside this compose — they are declared at the
+      # bottom of this list, so a value there reaches the container:
+      #
+      #   LURKER_PREVIEW_CACHE_MODE=local
+      #   LURKER_PREVIEW_CACHE_DIR=          # default: <data dir>/preview-cache
+      #   LURKER_PREVIEW_CACHE_MAX_BYTES=    # local only; default 2 GiB, digits only
       #
       # ───── mode=s3 ───────────────────────────────────────────────────────
       # For an instance already behind a CDN: cached images are served from
@@ -102,20 +121,38 @@ services:
       # backend stores things and will not guess a path and delete what is
       # there. Remove the old directory or bucket prefix by hand.
       #
-      # - LURKER_PREVIEW_CACHE_MODE=s3
-      # - LURKER_PREVIEW_CACHE_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
-      # - LURKER_PREVIEW_CACHE_S3_BUCKET=
-      # - LURKER_PREVIEW_CACHE_S3_ACCESS_KEY_ID=
-      # - LURKER_PREVIEW_CACHE_S3_SECRET_ACCESS_KEY=
-      # - LURKER_PREVIEW_CACHE_S3_PUBLIC_BASE_URL=https://cdn.example.com
-      # - LURKER_PREVIEW_CACHE_S3_PREFIX=previews   # optional; sanitised to [A-Za-z0-9._-]/
-      # - LURKER_PREVIEW_CACHE_S3_REGION=           # default: auto (correct for R2)
+      # In that same .env file:
+      #
+      #   LURKER_PREVIEW_CACHE_MODE=s3
+      #   LURKER_PREVIEW_CACHE_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
+      #   LURKER_PREVIEW_CACHE_S3_BUCKET=
+      #   LURKER_PREVIEW_CACHE_S3_ACCESS_KEY_ID=
+      #   LURKER_PREVIEW_CACHE_S3_SECRET_ACCESS_KEY=
+      #   LURKER_PREVIEW_CACHE_S3_PUBLIC_BASE_URL=https://cdn.example.com
+      #   LURKER_PREVIEW_CACHE_S3_PREFIX=previews  # optional; sanitised to [A-Za-z0-9._-]/
+      #   LURKER_PREVIEW_CACHE_S3_REGION=          # default: auto (correct for R2)
       # ⚠ LURKER_PREVIEW_CACHE_DIR is still used in s3 mode — it is where bytes
       # are staged on their way to the bucket, so it stays inside ./data.
       #
-      # Put the two secrets in a .env file beside this compose rather than
-      # inline, and the full reference — every field, every caveat, and the
-      # reasoning — is in .env.example, worth reading before turning on s3.
+      # The full reference — every field, every caveat, and the reasoning — is
+      # in .env.example, worth reading before turning on s3.
+      #
+      # ⚠ The plumbing for all of the above. Compose passes a variable to the
+      # container only if the service NAMES it, so documenting these as
+      # commented-out lines would have made "put it in .env" quietly do
+      # nothing. Empty is exactly equivalent to unset — the server trims and
+      # falls back for every one of them — so declaring them costs nothing and
+      # the default stays "no cache".
+      - LURKER_PREVIEW_CACHE_MODE=${LURKER_PREVIEW_CACHE_MODE:-}
+      - LURKER_PREVIEW_CACHE_DIR=${LURKER_PREVIEW_CACHE_DIR:-}
+      - LURKER_PREVIEW_CACHE_MAX_BYTES=${LURKER_PREVIEW_CACHE_MAX_BYTES:-}
+      - LURKER_PREVIEW_CACHE_S3_ENDPOINT=${LURKER_PREVIEW_CACHE_S3_ENDPOINT:-}
+      - LURKER_PREVIEW_CACHE_S3_BUCKET=${LURKER_PREVIEW_CACHE_S3_BUCKET:-}
+      - LURKER_PREVIEW_CACHE_S3_ACCESS_KEY_ID=${LURKER_PREVIEW_CACHE_S3_ACCESS_KEY_ID:-}
+      - LURKER_PREVIEW_CACHE_S3_SECRET_ACCESS_KEY=${LURKER_PREVIEW_CACHE_S3_SECRET_ACCESS_KEY:-}
+      - LURKER_PREVIEW_CACHE_S3_PUBLIC_BASE_URL=${LURKER_PREVIEW_CACHE_S3_PUBLIC_BASE_URL:-}
+      - LURKER_PREVIEW_CACHE_S3_PREFIX=${LURKER_PREVIEW_CACHE_S3_PREFIX:-}
+      - LURKER_PREVIEW_CACHE_S3_REGION=${LURKER_PREVIEW_CACHE_S3_REGION:-}
     networks:
       # ⚠ `priority` keeps Lurker's DEFAULT ROUTE on the default network even
       # though it is attached to two. That matters once you harden: the egress

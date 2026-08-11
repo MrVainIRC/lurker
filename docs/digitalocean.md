@@ -26,6 +26,8 @@ Two features are off unless you switch them on in the script, next to the two re
 
 Link previews are worth a word on what the script does for you, because it is the part that is fiddly by hand. All the fetching and media parsing happens in that second container, never in the one holding your database and sessions — and the script gives it the same treatment the hosted fleet gets: its own private bridge, firewall rules that let it reach the public internet and nothing private (not this droplet, not your VPC, not your other containers), and a systemd unit that re-applies them on every boot. The decoder's own boot self-test is left on, so it re-proves that containment every time it starts and refuses to serve rather than quietly parse hostile bytes with a route to your infrastructure — the one lapse it can't catch by itself is a firewall reload while it's running, which is why the note below the update command exists.
 
+The deploy also turns on the preview byte cache (`local`, a 2 GiB least-recently-used directory inside `data/`). That is not a tuning choice: **video posters require a cache**, because a poster is the one preview image with no origin URL — the decoder makes those bytes out of the video itself, so with nowhere to store them the server never asks for one and video links render as bare cards. It's a cache and not data; deleting it while the server is stopped costs nothing but a re-fetch.
+
 Budget the RAM: the decoder is capped at 512 MB and ffmpeg will use it when it makes a poster. On the smallest 1 GB droplet it leans on swap; 2 GB is comfortable. And enabling it here only opens the door — each user still turns on **Link previews** and **Inline media** in **Settings → Chat**, both off by default.
 
 ## Updating

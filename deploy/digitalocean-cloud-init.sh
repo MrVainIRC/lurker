@@ -287,6 +287,14 @@ EOF
   # the decoder should check them, and keep checking them on every start.
   if [ "$ENABLE_LINK_PREVIEWS" = "true" ]; then
     echo "LURKER_PREVIEWS_ALLOW_PRIVATE=0" >> .env
+    # ⚠ The byte cache is not a tuning knob here — VIDEO POSTERS REQUIRE IT.
+    # A poster is the one preview image with no origin URL (the decoder makes
+    # it out of the video), so with nowhere to store it the server doesn't ask
+    # for one and video links render as bare cards. Since this deploy advertises
+    # poster frames, it turns the cache on: a 2 GiB LRU directory inside the
+    # ./data volume, which is a cache and not data — safe to delete with the
+    # server stopped.
+    echo "LURKER_PREVIEW_CACHE_MODE=local" >> .env
     # ⚠ Give the self-test something that is genuinely LISTENING. Its built-in
     # probes are the metadata address and the bridge gateway, and a probe that
     # nothing answers passes whether or not the rules are in force. This
