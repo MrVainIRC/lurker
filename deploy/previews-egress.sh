@@ -55,6 +55,12 @@ WAIT_SECONDS="${LURKER_PREVIEWS_WAIT:-60}"
 PRIVATE_V4=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10)
 PRIVATE_V6=(fc00::/7 fe80::/10 ::1/128)
 
+# Set by apply_all / verify, read by the run section at the bottom. Declared
+# here because `set -u` makes an unset read fatal, and they are the two pieces
+# of state that cross function boundaries.
+APPLIED_ADDRESSES=''
+VERIFY_REASON=''
+
 log() { echo "[previews-egress] $*"; }
 die() {
   echo "[previews-egress] ERROR: $*" >&2
@@ -172,6 +178,29 @@ apply_rules() {
 
 # ── Discovery ───────────────────────────────────────────────────────────────
 
+# One template, two readers, so the two can never disagree about what an
+# address is.
+NETWORKS_TEMPLATE='{{range $net, $c := .NetworkSettings.Networks}}{{$net}}|{{$c.IPAddress}}|{{$c.GlobalIPv6Address}}{{"\n"}}{{end}}'
+
+# ⚠ Shape, not emptiness: Docker 29 renders an address a container does not
+# have as the literal string "invalid IP" (Go's netip.Addr zero value).
+shaped_v4() { case "$1" in *[!0-9.]* | '') echo '' ;; *) echo "$1" ;; esac; }
+shaped_v6() { case "$1" in *[!0-9a-fA-F:]* | '') echo '' ;; *) echo "$1" ;; esac; }
+
+# Every address Docker currently gives the container, in the same format
+# apply_all records — so "did it move?" is a string comparison.
+container_addresses() {
+  local net ip ip6 out=''
+  while IFS='|' read -r net ip ip6; do
+    [ -n "$net" ] || continue
+    ip="$(shaped_v4 "$ip")"
+    ip6="$(shaped_v6 "$ip6")"
+    if [ -n "$ip" ]; then out="${out} ${ip}"; fi
+    if [ -n "$ip6" ]; then out="${out} ${ip6}"; fi
+  done < <(docker inspect "$CONTAINER" -f "$NETWORKS_TEMPLATE" 2>/dev/null || true)
+  echo "$out"
+}
+
 # ⚠ Wait for the container to be RUNNING WITH AN ADDRESS, not merely to exist.
 # A container object survives a reboot, so `docker inspect` succeeds instantly
 # for one that is exited, created, or in restart backoff — and then the rules
@@ -179,12 +208,13 @@ apply_rules() {
 # the systemd unit, where a `Type=oneshot` cannot carry `Restart=`: one unlucky
 # boot leaves the unit failed until a human notices.
 wait_for_container() {
-  local i state
+  local i running
   for ((i = 0; i < WAIT_SECONDS; i++)); do
-    state="$(docker inspect "$CONTAINER" -f '{{.State.Running}}|{{range $n, $c := .NetworkSettings.Networks}}{{$c.IPAddress}} {{end}}' 2>/dev/null || true)"
-    case "$state" in
-      'true|'*[0-9].[0-9]*) return 0 ;;
-    esac
+    running="$(docker inspect "$CONTAINER" -f '{{.State.Running}}' 2>/dev/null || true)"
+    # Any address of either family counts: a host running IPv6-only Docker
+    # networking is unusual but perfectly containable, and testing for a dotted
+    # quad would strand it here.
+    if [ "$running" = 'true' ] && [ -n "$(container_addresses)" ]; then return 0; fi
     sleep 1
   done
   die "'$CONTAINER' is not running with a network address after ${WAIT_SECONDS}s.
@@ -201,17 +231,17 @@ wait_for_container() {
 # to serve), which is the trade this whole subsystem is built to prefer.
 apply_all() {
   local found=0 net ip ip6
-  # ⚠ Pipe-separated, and each address is checked for SHAPE rather than for
-  # emptiness: Docker 29 renders an address a container doesn't have as the
-  # literal string "invalid IP" (Go's netip.Addr zero value), which is neither
-  # empty nor one field.
+  # Recorded so a later verdict can ask whether the decoder is still where
+  # these rules say it is.
+  APPLIED_ADDRESSES=''
   while IFS='|' read -r net ip ip6; do
     [ -n "$net" ] || continue
-    case "$ip" in *[!0-9.]* | '') ip='' ;; esac
-    case "$ip6" in *[!0-9a-fA-F:]* | '') ip6='' ;; esac
+    ip="$(shaped_v4 "$ip")"
+    ip6="$(shaped_v6 "$ip6")"
     if [ -n "$ip" ]; then
       log "containing ${CONTAINER} at ${ip} on ${net}"
       apply_rules iptables "$ip" "${PRIVATE_V4[@]}"
+      APPLIED_ADDRESSES="${APPLIED_ADDRESSES} ${ip}"
       found=1
     fi
     # IPv6 is off on a default Docker install, so this usually finds nothing —
@@ -223,10 +253,10 @@ apply_all() {
        cannot be contained on this host."
       log "containing ${CONTAINER} at ${ip6} on ${net} (IPv6)"
       apply_rules ip6tables "$ip6" "${PRIVATE_V6[@]}"
+      APPLIED_ADDRESSES="${APPLIED_ADDRESSES} ${ip6}"
       found=1
     fi
-  done < <(docker inspect "$CONTAINER" \
-    -f '{{range $net, $c := .NetworkSettings.Networks}}{{$net}}|{{$c.IPAddress}}|{{$c.GlobalIPv6Address}}{{"\n"}}{{end}}')
+  done < <(docker inspect "$CONTAINER" -f "$NETWORKS_TEMPLATE")
   [ "$found" -eq 1 ] || die "$CONTAINER has no network addresses — is it running?"
   # Only now that this generation is in force does the previous one go.
   purge_older_generations iptables
@@ -271,13 +301,16 @@ verify() {
         ;;
       *'REFUSING TO SERVE'*)
         echo "$logs" >&2
-        die "the decoder can still reach a private address (named above). The rules did not
-       take — check for a firewall that rewrites the filter table (ufw, firewalld,
-       nftables) and apply these AFTER it, then re-run."
+        VERIFY_REASON="the decoder can still reach a private address (named above). The rules
+       did not take — check for a firewall that rewrites the filter table (ufw,
+       firewalld, nftables) and apply these AFTER it, then re-run."
+        return 1
         ;;
     esac
   done
-  die "the decoder logged neither success nor refusal within 30s. Check: docker logs $CONTAINER"
+  VERIFY_REASON="the decoder logged neither success nor refusal within 30s.
+       Check: docker logs $CONTAINER"
+  return 1
 }
 
 # ⚠⚠ The one gap this script cannot close by itself, so it says so out loud.
@@ -341,8 +374,15 @@ Environment=LURKER_PREVIEWS_CONTAINER=$CONTAINER
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable "$UNIT" >/dev/null
-  log "installed. Undo with: systemctl disable --now $UNIT"
+  # ⚠⚠ `enable` alone would leave the unit INACTIVE until the first reboot, and
+  # systemd propagates a `PartOf=` restart as a try-restart — a no-op on an
+  # inactive unit. So the Docker-restart half of the promise (unattended
+  # upgrades bouncing docker.service, say) would quietly not hold for the whole
+  # window between install and next boot, which is exactly when an operator
+  # believes it does. `--now` starts it, which costs one redundant pass over
+  # rules that are already correct.
+  systemctl enable --now "$UNIT" >/dev/null
+  log "installed and active. Undo with: systemctl disable --now $UNIT"
 }
 
 # ── Run ─────────────────────────────────────────────────────────────────────
@@ -352,8 +392,25 @@ command -v docker >/dev/null 2>&1 || die "docker not found."
 command -v iptables >/dev/null 2>&1 || die "iptables not found."
 
 wait_for_container
-apply_all
-verify
+
+# ⚠ Verifying means RESTARTING the decoder, and a restart releases its endpoint
+# — on a busy host Docker can hand the container back a different address, and
+# then the rules we just wrote name a container that no longer exists at that
+# address. The symptom is a REFUSING verdict that looks exactly like a firewall
+# problem, so the script would blame the host for its own race (and under the
+# systemd unit, a `Type=oneshot` has no Restart= to save it). Re-derive and try
+# once more before believing the rules are at fault.
+attempt=1
+while true; do
+  apply_all
+  verify && break
+  if [ "$attempt" -ge 2 ] || [ "$(container_addresses)" = "$APPLIED_ADDRESSES" ]; then
+    die "$VERIFY_REASON"
+  fi
+  log "the decoder came back on a different address — re-applying for where it is now."
+  attempt=$((attempt + 1))
+done
+
 warn_about_firewall_reloads
 if [ "${1:-}" = "--install" ]; then
   install_unit
