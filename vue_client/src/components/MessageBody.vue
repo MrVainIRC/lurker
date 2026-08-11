@@ -230,7 +230,7 @@ function isMedia(p: LinkPreview): boolean {
  *     unreadable and uncopyable — and this file's own rule is that a card never takes its
  *     link away. */
 function rendersInline(p: LinkPreview): boolean {
-  return p.kind === 'image';
+  return p.kind === 'image' || ((p.kind === 'video' || p.kind === 'audio') && !!p.thumb);
 }
 
 /**
@@ -243,9 +243,12 @@ function rendersInline(p: LinkPreview): boolean {
  * to click, and a card can legitimately be titled with nothing but a filename or a hostname. So
  * a card never takes its link away.
  *
- * ⚠ `rendersInline`, not `isMedia`. Video and audio were on the left of this line while they
- * were players; as cards they belong on the right, and leaving them behind meant a message
- * reading "look at this" with a card saying `a1b2c3.mp4` and the address gone from the text.
+ * ⚠ `rendersInline`, not `isMedia` — and for video/audio the line moved WITH the rendering,
+ * twice. As players they hid their URL; as cards they kept it (a card saying `a1b2c3.mp4`
+ * with the address gone from the text was the defect); with a stored POSTER they render
+ * inline again — media, not citation — and the address is a machine-readable duplicate of
+ * the thing on screen, exactly the image rule. Posterless they are still cards, still on
+ * the right of the line: nothing is ever hidden without something rendered in its place.
  *
  * Drawn from `visible` rather than from `urls`, so a URL that failed to resolve, was capped, or
  * is switched off keeps its text. Nothing is ever hidden without something rendered in its place.

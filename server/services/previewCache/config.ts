@@ -7,7 +7,7 @@
 // ⚠ ENV, not instance settings, and that is a deliberate deviation from #681.
 // That issue asks for `previews.cache.mode` in `instance_settings` with an admin
 // form beside the uploader config, which is the right long-term surface. Every
-// other operator-level knob this app has — LURKER_LINK_PREVIEWS,
+// other operator-level knob this app has — LURKER_PREVIEWS_URL,
 // LURKER_SECRET_KEY, DATABASE_PATH — is already an env var, so this matches what
 // a self-hoster is already doing. `resolveCacheConfig` is the seam the admin
 // surface slots into; nothing above this module knows where the values came from.
@@ -325,6 +325,31 @@ export function expired(createdAt: string): boolean {
  * ⚠ Canonicalised the way `urlHash` does — fragment stripped — so `#a` and `#b` of
  * one image share an object rather than being fetched and stored twice.
  */
+/**
+ * Cache key for a STORED POSTER FRAME — bytes this instance decoded itself, which
+ * therefore have NO origin URL to fall back to. Kept alongside `byteCacheKey` so the
+ * two key spaces visibly cannot collide (distinct version prefixes), and derived from
+ * the MEDIA's URL so a re-resolve of the same clip lands on the same object.
+ */
+/** The shape `posterCacheKey` mints. Exported so the descriptor mint, the token verifier and
+ *  any future caller share ONE definition of "is this a poster key" rather than each carrying
+ *  a copy of the regex that has to agree with this function by hand. */
+export function isPosterKey(value: string): boolean {
+  return /^[a-f0-9]{64}$/.test(value);
+}
+
+export function posterCacheKey(url: string): string {
+  let key: string;
+  try {
+    const canonical = new URL(url);
+    canonical.hash = '';
+    key = canonical.toString();
+  } catch {
+    key = url.replace(/#[\s\S]*$/, '');
+  }
+  return crypto.createHash('sha256').update(`poster-v1|${key}`).digest('hex');
+}
+
 export function byteCacheKey(url: string): string {
   let key: string;
   try {

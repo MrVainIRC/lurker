@@ -137,6 +137,17 @@ const stacked = computed(() => {
  * person can actually open.
  */
 function openAt(item: LinkPreview): void {
+  // ⚠ Video and audio open on the ORIGIN url — the exact inverse of the image rule below, and
+  // both spellings are the media policy. An image renders unasked, so its bytes must come
+  // through us; a clip plays only on this deliberate click, and the click goes straight to the
+  // origin because relaying deliberate playback is the relay the policy retired. A gallery of
+  // one: the arrow-through set is pictures, and a player in a picture gallery is a mode switch.
+  if (item.kind === 'video' || item.kind === 'audio') {
+    // ⚠ Pass the SERVER's kind: the viewer would otherwise guess it from the URL extension
+    // and open an extensionless clip as a broken <img>. The origin url, per the media policy.
+    viewer.open(item.url, item.kind);
+    return;
+  }
   const gallery = images.value;
   const at = gallery.indexOf(item);
   if (at === -1) return;

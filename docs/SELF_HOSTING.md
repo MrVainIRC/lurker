@@ -226,43 +226,80 @@ See [Uploaded images are broken for other people](#uploaded-images-are-broken-fo
 
 ### Link previews & inline media
 
-Off by default. When enabled, a link pasted into chat can unfurl into a preview card
-(title, description, image — the way Slack or Discord do it), and a link that points
-straight at an image can render inline. It's off by default because it makes
-your server fetch third-party URLs that appear in chat, which is a behavior an
-operator should choose, not inherit.
+Off by default. When enabled, a link pasted into chat can unfurl into a preview
+card (title, description, image — the way Slack or Discord do it); a link
+straight to an image renders inline; and a link to a **video or audio file**
+renders a poster frame that plays in place when clicked.
 
-A link to a **video or audio file** gets a card naming the file and its type, not an
-inline player. Your server never relays those bytes — the card links straight to the
-origin — though it does still make one request to the host when the link is first
-posted, reading only the response headers to find out what the URL is and then
-dropping the connection. That classifying request is the same one every link costs;
-what's gone is the transfer of the file itself.
+It's off by default because it makes your deployment fetch third-party URLs that
+appear in chat — a behavior an operator should choose, not inherit.
 
-The proxy below exists to stop a card that renders _by itself_ from reporting your
-users to a stranger's server. It was never meant to anonymize a download somebody
-deliberately started — and relaying whole videos through your instance costs
-bandwidth and memory for a privacy gain that ends the moment the reader clicks
-anyway.
+#### You run a second container: `lurker-previews`
 
-Turn it on for the instance:
+All of the fetching and media parsing happens in a separate service,
+[`lurker-previews`](https://github.com/amiantos/lurker-previews), not in the main
+server. That split is the point: the main process holds your users' sessions and
+your database, and it never dials a stranger's URL or runs an image/video decoder
+(`sharp`, `ffmpeg`) on bytes someone pasted. The decoder does that, in a box built
+to be thrown away if it's ever compromised.
+
+**Setting `LURKER_PREVIEWS_URL` to point at a running decoder is the entire enable
+switch** — there's no separate on/off flag. Add the service alongside Lurker:
 
 ```yaml
-environment:
-  - LURKER_LINK_PREVIEWS=on
+services:
+  lurker:
+    environment:
+      - LURKER_PREVIEWS_URL=http://lurker-previews:8030
+      # ...your other settings
+
+  lurker-previews:
+    image: ghcr.io/amiantos/lurker-previews:latest
+    restart: unless-stopped
+    # The decoder is meant to reach the public internet but nothing on your
+    # private network. It proves that at boot and REFUSES TO START if it can
+    # reach a private address — which, on a plain Docker network, it can (the
+    # host is one hop away). For a home/VPS self-host, tell it to skip that
+    # check: the in-process SSRF guard still refuses private URLs, so this is the
+    # same protection the feature had before it was split out. See "Hardening"
+    # below to enforce it at the network layer instead.
+    environment:
+      - LURKER_PREVIEWS_ALLOW_PRIVATE=1
+      # Optional: what the decoder tells sites it is when it fetches a preview.
+      # The default names Lurker and the traffic class (a social-preview fetch),
+      # so an operator reading their logs can recognise and block it on purpose.
+      # - LURKER_PREVIEW_USER_AGENT=
+    # No ports published — only the Lurker container talks to it, over the
+    # shared Docker network.
 ```
 
-**Enabling the instance flag doesn't show anyone a preview yet.** The feature is
+**Enabling the instance doesn't show anyone a preview yet.** The feature is
 double-gated: each user also has two toggles in **Settings → Chat** — **Link
-previews** and **Inline media** — and both default to off. Those toggles only
-_appear_ once the instance flag is on, so if a user says they can't find the
-setting, this env var is the reason.
+previews** and **Inline media** — both defaulting to off. Those toggles only
+_appear_ once a decoder is configured, so if a user can't find the setting,
+`LURKER_PREVIEWS_URL` is the reason.
 
-The server fetches previews itself (the URL never leaves your instance to a
-third-party unfurler), identifies itself honestly in its User-Agent (see
-[Outbound contact info](#outbound-contact-info-user-agent)), and proxies preview
-**images** to your users so their browsers never touch the third-party host when a
-card draws itself. Video and audio are named rather than relayed — see above.
+The decoder identifies itself honestly in its User-Agent, guards every fetch
+against SSRF (loopback, RFC-1918, link-local including cloud metadata, CGNAT and
+IPv4-in-IPv6 all refused, with DNS pinned so the answer can't change between the
+check and the connection), and proxies preview **images** back through your
+Lurker server so users' browsers never touch the third-party host. A video or
+audio clip is never relayed — only its poster frame is — so pressing play goes
+straight to the origin, the one request the reader deliberately made.
+
+#### Hardening: enforce the egress limit at the network layer
+
+`LURKER_PREVIEWS_ALLOW_PRIVATE=1` turns off the decoder's boot self-test so it
+runs on an ordinary Docker network. The in-process SSRF guard is still active, so
+a malicious _URL_ is refused either way — what you give up is protection against a
+malicious _process_ (an RCE in the decoder reaching your LAN). For a trusted
+group that's a fair trade; to close it, drop the `ALLOW_PRIVATE` line and instead
+firewall the decoder so it can reach the internet but not private ranges. On a
+Linux host that's `DOCKER-USER` rules dropping traffic from the decoder's subnet
+to `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` and
+`100.64.0.0/10`, plus an `INPUT` rule for the host itself. With those in place the
+self-test passes and the container refuses to serve if they ever lapse. (This is
+exactly what the hosted fleet does per-cell.)
 
 #### Caching preview images (optional)
 

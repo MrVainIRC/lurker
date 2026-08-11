@@ -562,6 +562,94 @@ describe('MessageAttachment — growth the list can react to', () => {
     expect(wrapper.find('.card-file .card-desc').text()).toBe('Video · MP4');
   });
 
+  it('renders a stored poster as inline MEDIA — no card, badge, viewer on click', async () => {
+    // Media, not citation: a clip whose first frame we hold renders the way an image does.
+    // The frame is our own decode served from our own route, so showing it unasked fetches
+    // nothing from the origin — the policy's line is bytes of the CLIP, which still move only
+    // on the deliberate click this test performs.
+    seedSettings();
+    const p = preview({
+      url: 'https://cdn.e.test/holiday.mp4',
+      kind: 'video',
+      mime: 'video/mp4',
+      thumb: '/api/link-preview/poster/abc123',
+      thumbWidth: 640,
+      thumbHeight: 360,
+    });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    expect(wrapper.find('.card').exists()).toBe(false);
+    const img = wrapper.find('.media-reserve img.inline-image');
+    expect(img.attributes('src')).toBe('/api/link-preview/poster/abc123');
+    expect(img.attributes('role')).toBe('button');
+    expect(wrapper.find('.media-badge').text()).toBe('▶');
+    // The reserve span carries the poster's geometry, image-style: byte-independent box.
+    expect(wrapper.find('.media-reserve').attributes('style')).toContain('aspect-ratio');
+    // Still no player mounted and no clip bytes anywhere — the click asks the VIEWER to play.
+    expect(wrapper.find('video').exists()).toBe(false);
+    await img.trigger('click');
+    expect(wrapper.emitted('activate')).toHaveLength(1);
+  });
+
+  it('audio cover art gets the same treatment, with its own glyph', () => {
+    seedSettings();
+    const p = preview({
+      url: 'https://cdn.e.test/song.mp3',
+      kind: 'audio',
+      mime: 'audio/mpeg',
+      thumb: '/api/link-preview/poster/def456',
+      thumbWidth: 300,
+      thumbHeight: 300,
+    });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    expect(wrapper.find('.media-badge').text()).toBe('♪');
+    expect(wrapper.find('.card').exists()).toBe(false);
+  });
+
+  it('keeps the poster reachable as a plain link when the viewer is off', () => {
+    // ⚠ The body hides the URL text for inline-rendered media, so with the viewer switched
+    // off this anchor is the ONLY remaining path to the clip — an inert poster would be a
+    // picture of a play button that plays nothing, pointing at nothing.
+    seedSettings();
+    useSettingsStore().values['chat.image_modal.enabled'] = false;
+    const p = preview({
+      url: 'https://cdn.e.test/holiday.mp4',
+      kind: 'video',
+      mime: 'video/mp4',
+      thumb: '/api/link-preview/poster/abc123',
+      thumbWidth: 640,
+      thumbHeight: 360,
+    });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    const link = wrapper.find('a.media-link');
+    expect(link.attributes('href')).toBe('https://cdn.e.test/holiday.mp4');
+    expect(link.find('img').attributes('src')).toBe('/api/link-preview/poster/abc123');
+  });
+
+  it('keeps the posterless file card, whose title now plays in place', async () => {
+    // Cache off, decode failed, or a row from before posters existed: the compact card is
+    // the complete state everything degrades to — but a plain click still owes the same
+    // deliberate-act-in-place behaviour the poster gets.
+    seedSettings();
+    const p = preview({ url: 'https://e.test/c.mp4', kind: 'video', mime: 'video/mp4' });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    expect(wrapper.find('.media-reserve').exists()).toBe(false);
+    expect(wrapper.find('.file-badge').text()).toBe('▶');
+    const title = wrapper.find('.card-title');
+    expect(title.attributes('href')).toBe('https://e.test/c.mp4');
+    await title.trigger('click');
+    expect(wrapper.emitted('activate')).toHaveLength(1);
+  });
+
+  it('leaves modifier-clicks on the file card title to the browser', async () => {
+    // ⚠ preventDefault on a cmd-click would eat open-in-new-tab — the affordance keeping
+    // this element an <a> at all.
+    seedSettings();
+    const p = preview({ url: 'https://e.test/c.mp4', kind: 'video', mime: 'video/mp4' });
+    const wrapper = mount(MessageAttachment, { props: { preview: p } });
+    await wrapper.find('.card-title').trigger('click', { metaKey: true });
+    expect(wrapper.emitted('activate')).toBeUndefined();
+  });
+
   it('emits no measurement for a file card, which has nothing to load', () => {
     // The player it replaces laid out at the UA default 300x150 and jumped when metadata
     // arrived, which is what `measured` existed to report. A card's height is final at first
@@ -774,7 +862,7 @@ describe('MessageAttachments — arrangement', () => {
     });
   }
 
-  it('keeps the address in the text for a video, the way it does for any other card', () => {
+  it('keeps the address in the text for a POSTERLESS video, which is still a card', () => {
     // ⚠ The URL is dropped from the body only when the thing itself is on screen. A card names
     // a file — it is not the file — so removing the address leaves a reader with "look at this"
     // and a filename, unable to read or copy where it points.
@@ -783,6 +871,24 @@ describe('MessageAttachments — arrangement', () => {
     const wrapper = mountWithBody(video.url);
     expect(wrapper.find('.card-file').exists()).toBe(true);
     expect(wrapper.text()).toContain(video.url);
+  });
+
+  it('drops the address for a video whose poster is on screen, the image rule exactly', () => {
+    // With a stored frame the clip renders as MEDIA, and the address becomes a
+    // machine-readable duplicate of the thing the reader is looking at — same reasoning,
+    // same rule, same test shape as the image below.
+    const video = preview({
+      url: 'https://e.test/framed.mp4',
+      kind: 'video',
+      mime: 'video/mp4',
+      thumb: '/api/link-preview/poster/abc123',
+      thumbWidth: 640,
+      thumbHeight: 360,
+    });
+    seed(video);
+    const wrapper = mountWithBody(video.url);
+    expect(wrapper.find('.media-reserve').exists()).toBe(true);
+    expect(wrapper.text()).not.toContain(video.url);
   });
 
   it('still drops the address for an image, which IS on screen', () => {
@@ -1142,6 +1248,38 @@ describe('MessageAttachments — the lightbox is a gallery over the whole messag
       'https://e.test/2.png',
       'https://e.test/3.png',
     ]);
+  });
+
+  it('opens a clip’s poster on the ORIGIN url — a player, not a gallery entry', async () => {
+    // ⚠ The inverse of the proxy rule the image test above pins, and both are the media
+    // policy: an image renders unasked so its bytes must come through us; a clip plays only
+    // on this deliberate click, and the click goes straight to the origin because relaying
+    // deliberate playback is the relay the policy retired. A gallery of one — the arrow set
+    // is pictures, and a player inside a picture gallery is a mode switch.
+    const clip = preview({
+      url: 'https://cdn.e.test/holiday.mp4',
+      kind: 'video',
+      mime: 'video/mp4',
+      thumb: '/api/link-preview/poster/abc123',
+      thumbWidth: 640,
+      thumbHeight: 360,
+    });
+    resolved.set(clip.url, clip);
+    seedSettings();
+    const wrapper = mount(MessageBody, {
+      props: { text: clip.url, segments: [{ text: clip.url, url: clip.url }] },
+    });
+
+    await wrapper.find('.media-reserve img').trigger('click');
+
+    const viewer = useMediaViewer();
+    expect(viewer.isOpen.value).toBe(true);
+    expect(viewer.count.value).toBe(1);
+    expect(viewer.url.value).toBe('https://cdn.e.test/holiday.mp4');
+    expect(viewer.shareUrl.value).toBe('https://cdn.e.test/holiday.mp4');
+    // ⚠ The SERVER's kind rides along, so the viewer doesn't have to guess it from the URL
+    // extension — an extensionless clip would otherwise open as a broken <img>.
+    expect(viewer.current.value?.kind).toBe('video');
   });
 
   it('reaches the images the mosaic capped away', async () => {

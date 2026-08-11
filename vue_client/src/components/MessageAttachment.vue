@@ -53,6 +53,64 @@
       @keydown.space.prevent="activate"
     />
   </span>
+  <!-- MEDIA, not a link card: a clip or track whose poster we hold renders the way an image
+       does — the frame inline, no chrome, a badge naming what it is — because a pasted media
+       URL is content, not a citation. The reserve span carries the geometry exactly like the
+       image branch above (the poster's dimensions ride thumbWidth/thumbHeight), so the box is
+       byte-independent and the atomic reveal holds.
+       ⚠ The poster is OUR OWN decode served from our own route (no origin fetch happens by
+       rendering it), which is what lets it appear unasked without touching the media policy —
+       the policy's line is bytes of the CLIP, and those still move only on a deliberate act.
+       ⚠ Two interaction shapes, one look: with the viewer on, the poster is a button and the
+       deliberate act is opening the overlay's native player (which fetches the ORIGIN
+       directly); with it off, the poster is a plain link to the origin — because the body
+       hides the URL text for inline-rendered media (MessageBody.rendersInline), this element
+       is the only remaining path to the clip and MUST navigate somewhere. -->
+  <span
+    v-else-if="isMediaFile && preview.thumb"
+    class="media-reserve"
+    :class="hasDimensions ? 'dim-reserve' : 'dim-reserve dim-fallback'"
+    :style="reserveStyle"
+  >
+    <img
+      v-if="viewerEnabled"
+      class="inline-image in-reserve"
+      :src="preview.thumb"
+      :width="preview.thumbWidth || undefined"
+      :height="preview.thumbHeight || undefined"
+      alt=""
+      loading="lazy"
+      decoding="async"
+      role="button"
+      tabindex="0"
+      :aria-label="`Play ${mediaName}`"
+      @load="$emit('measured')"
+      @click="onImageClick"
+      @keydown.enter.prevent="activate"
+      @keydown.space.prevent="activate"
+    />
+    <a
+      v-else
+      class="media-link"
+      :href="preview.url"
+      target="_blank"
+      rel="noreferrer noopener"
+      :aria-label="`Open ${mediaName}`"
+      @click.stop
+    >
+      <img
+        class="inline-image in-reserve"
+        :src="preview.thumb"
+        :width="preview.thumbWidth || undefined"
+        :height="preview.thumbHeight || undefined"
+        alt=""
+        loading="lazy"
+        decoding="async"
+        @load="$emit('measured')"
+      />
+    </a>
+    <span class="media-badge" aria-hidden="true">{{ preview.kind === 'video' ? '▶' : '♪' }}</span>
+  </span>
   <!-- ⚠⚠ A FILE CARD, not a player, and the absence of a `src` is the whole point. An inline
        `<video>` fetches before anyone asks — `preload="metadata"` at minimum, and the `#t=`
        poster trick this replaces made it a range request for real frames — so the element
@@ -71,12 +129,16 @@
   <div v-else-if="isMediaFile" class="card card-file">
     <span class="file-badge" aria-hidden="true">{{ preview.kind === 'video' ? '▶' : '♪' }}</span>
     <div class="card-text">
+      <!-- ⚠ Still a real anchor — copy, middle-click and modifier-clicks keep their browser
+           meanings — but a plain click with the viewer on opens the overlay's player instead
+           of a tab: the posterless card is the only rendering these kinds have, so it owes
+           the same deliberate-act-in-place behaviour the poster gets. -->
       <a
         class="card-title"
         :href="preview.url"
         target="_blank"
         rel="noreferrer noopener"
-        @click.stop
+        @click="onMediaTitleClick"
         >{{ mediaName }}</a
       >
       <div class="card-desc">{{ mediaTypeLabel }}</div>
@@ -553,6 +615,24 @@ function activate(): void {
   if (!viewerEnabled.value) return;
   emit('activate');
 }
+
+/**
+ * A plain click on a media file card's title plays the file in the viewer; everything else a
+ * link click can mean is left to the browser.
+ *
+ * ⚠ The modifier guard is the difference between "opens in the overlay" and "breaks
+ * cmd-click": `preventDefault` on a modified click would eat open-in-new-tab and
+ * shift-click-to-window, which are exactly the affordances keeping this an <a> is for.
+ * Propagation stops either way — a consumed OR navigating click must not also open the
+ * message-actions sheet under it.
+ */
+function onMediaTitleClick(e: MouseEvent): void {
+  e.stopPropagation();
+  if (!viewerEnabled.value) return;
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  e.preventDefault();
+  emit('activate');
+}
 </script>
 
 <style scoped>
@@ -629,6 +709,33 @@ function activate(): void {
    height is known at first paint and R1 is satisfied by construction rather than by a pin. */
 .card-file {
   align-items: center;
+}
+/* The wrapper that gives the badge somewhere to sit; geometry comes from `.dim-reserve`. */
+.media-reserve {
+  position: relative;
+}
+.media-link {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* `.play-badge`'s shape on an inline poster. `pointer-events: none` because the image (or the
+   anchor) under it owns the click — a badge that intercepts taps is a control nothing wired. */
+.media-badge {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-left: 3px;
+  pointer-events: none;
 }
 /* ⚠ Sized and centred like `.play-badge`, and for the same reason: it is the only thing on a
    card with no picture that says at a glance what sort of file this is. It is NOT a control —

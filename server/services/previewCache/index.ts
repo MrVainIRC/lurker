@@ -32,7 +32,7 @@ import {
   recordCached,
   forget,
 } from '../../db/previewCache.js';
-import { kindForContentType, MAX_IMAGE_PROXY_BYTES } from '../linkPreview.js';
+import { kindForContentType, MAX_IMAGE_PROXY_BYTES } from '../previewShared.js';
 import { imageSignatureOf, SIGNATURE_BYTES } from '../../utils/imageSignature.js';
 import { cacheConfig, cacheEnabled, expired, MAX_AGE_MS } from './config.js';
 import { evictLocal, objectPath, openLocalWrite, readLocal, removeLocal } from './local.js';
@@ -45,7 +45,14 @@ export { objectPath };
 // `toDescriptor` needs `publicByteUrl`, and this module imports the resolver for
 // `kindForContentType` — so anything the resolver has to reach must sit BELOW that
 // import or the two modules form a cycle. Callers still see one surface.
-export { byteCacheKey, cacheConfig, cacheEnabled, resetCacheConfigForTests } from './config.js';
+export {
+  byteCacheKey,
+  posterCacheKey,
+  isPosterKey,
+  cacheConfig,
+  cacheEnabled,
+  resetCacheConfigForTests,
+} from './config.js';
 export { publicByteUrl } from './publicUrl.js';
 
 /**
