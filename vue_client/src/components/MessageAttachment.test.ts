@@ -1277,6 +1277,9 @@ describe('MessageAttachments — the lightbox is a gallery over the whole messag
     expect(viewer.count.value).toBe(1);
     expect(viewer.url.value).toBe('https://cdn.e.test/holiday.mp4');
     expect(viewer.shareUrl.value).toBe('https://cdn.e.test/holiday.mp4');
+    // ⚠ The SERVER's kind rides along, so the viewer doesn't have to guess it from the URL
+    // extension — an extensionless clip would otherwise open as a broken <img>.
+    expect(viewer.current.value?.kind).toBe('video');
   });
 
   it('reaches the images the mosaic capped away', async () => {

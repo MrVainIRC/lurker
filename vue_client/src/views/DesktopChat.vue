@@ -274,6 +274,7 @@
       v-if="viewer.isOpen && viewer.url !== null"
       :url="viewer.url"
       :share-url="viewer.shareUrl"
+      :kind="viewer.current?.kind ?? null"
       :filename="viewer.current?.filename ?? null"
       :index="viewer.index"
       :count="viewer.count"

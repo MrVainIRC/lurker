@@ -33,7 +33,7 @@ import {
 import { resolvePreview, toDescriptor, MAX_URLS_PER_REQUEST } from '../services/linkPreview.js';
 import { proxyableContentType, MAX_IMAGE_PROXY_BYTES } from '../services/previewShared.js';
 import { decoderFetch } from '../services/previewClient.js';
-import { verifyProxyToken } from '../services/mediaProxyToken.js';
+import { verifyProxyToken, verifyPosterToken } from '../services/mediaProxyToken.js';
 import { previewsEnabled } from '../utils/previews.js';
 import { SlotPool } from '../utils/slotPool.js';
 
@@ -290,7 +290,15 @@ router.get('/media/:token', async (req: Request, res: Response) => {
       res.status(413).end();
       return;
     }
-    const contentType = String(upstream.headers['content-type'] || '');
+    // ⚠⚠ Parameters stripped and lowercased BEFORE the allowlist. `kindForContentType` refuses
+    // SVG by an exact `=== 'image/svg+xml'` match, so a raw `image/svg+xml; charset=utf-8` from a
+    // non-conformant or compromised decoder would miss it, hit `startsWith('image/')`, and be
+    // relayed inline under our origin. The origin-side fetch normalizes its own copy; this is
+    // the enforcement point on data we treat as untrusted, so it normalizes independently.
+    const contentType = String(upstream.headers['content-type'] || '')
+      .split(';')[0]
+      .trim()
+      .toLowerCase();
     if (
       (upstream.status !== 200 && upstream.status !== 206) ||
       !proxyableContentType(contentType)
@@ -327,8 +335,21 @@ router.get('/media/:token', async (req: Request, res: Response) => {
     const writer = wantCache
       ? await beginStore(cacheKey, Number.isFinite(declared) ? declared : cap)
       : null;
-    // Registered only once there is something to decide; settled on every exit
-    // below. Only a test waits on it — see `trackPendingStore`.
+    // ⚠⚠ `beginStore` is the one await between the released-check above and the stream
+    // handlers below, and it can take real time (a temp-file open on `local`, the opening
+    // POST to `dropper`). A client that aborts DURING it fires `res`'s `close` → `release()`
+    // → `upstream.stream.destroy()`, whose own `close` then fires on a later tick — before the
+    // `stream.on('close')` handler that would abort the writer exists. Without this the writer
+    // is neither aborted nor committed: a leaked fd + orphaned `.tmp` on `local`, a dangling
+    // upload on `dropper`, and `trackPendingStore`'s count never settles. So re-check, and if
+    // we lost the race, undo the store we just opened and settle its decision here.
+    if (writer && released) {
+      void writer.abort();
+      return;
+    }
+    // Registered only once there is something to decide, and AFTER the race check above so it
+    // is never left dangling. Settled on every exit below. Only a test waits on it — see
+    // `trackPendingStore`.
     const settleDecision = writer ? trackPendingStore() : null;
 
     // ⚠ The cap enforced on bytes actually seen, EVEN THOUGH the decoder enforces the same
@@ -399,7 +420,7 @@ router.get('/media/:token', async (req: Request, res: Response) => {
   }
 });
 
-router.get('/poster/:key', async (req: Request, res: Response) => {
+router.get('/poster/:token', async (req: Request, res: Response) => {
   if (!previewsEnabled()) {
     res.status(404).end();
     return;
@@ -413,12 +434,15 @@ router.get('/poster/:key', async (req: Request, res: Response) => {
     return;
   }
 
-  // The key is minted into descriptors by `toDescriptor` and is a pure hash — anything
-  // else never had a poster stored under it, and answering 404 without a cache probe
-  // keeps this from being a free existence oracle over arbitrary strings.
-  const key = String(req.params.key);
-  if (!/^[a-f0-9]{64}$/.test(key)) {
-    res.status(404).end();
+  // ⚠⚠ A SIGNED token, verified to a poster key — NOT a raw key. `posterCacheKey` and
+  // `byteCacheKey` are unsalted hashes sharing one cache index, so accepting a bare key here
+  // let any authenticated user read whatever the instance had proxied under `byteCacheKey(url)`
+  // — the cross-user oracle the media route's HMAC prevents. The signature is what proves this
+  // instance minted the key into a descriptor, exactly as `/media` proves it approved a URL.
+  // A bad token is a 403, the same answer `/media` gives a forged one.
+  const key = verifyPosterToken(String(req.params.token));
+  if (!key) {
+    res.status(403).end();
     return;
   }
 

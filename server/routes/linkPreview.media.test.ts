@@ -115,6 +115,32 @@ describe('serving bytes', () => {
     expect(res.text ?? '').not.toContain('alert');
   });
 
+  it('refuses SVG whose content-type carries a charset parameter', async () => {
+    // ⚠⚠ Regression guard. `kindForContentType` refuses SVG by an EXACT `=== 'image/svg+xml'`
+    // match, so a relay handing back `image/svg+xml; charset=utf-8` (parameters intact) slips
+    // past it into `startsWith('image/')` and is served inline under our origin. The route now
+    // strips parameters before the allowlist; a param-less test could never have caught this.
+    stub.onFetch = (_url, res) => {
+      res.writeHead(200, { 'content-type': 'image/svg+xml; charset=utf-8' });
+      res.end('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+    };
+    const res = await agent.get(`/api/link-preview/media/${tokenFor('/param.svg')}`);
+    expect(res.status).toBe(404);
+    expect(res.text ?? '').not.toContain('alert');
+  });
+
+  it('serves an image whose content-type is uppercase or parameterised', async () => {
+    // The other side of normalising: `IMAGE/PNG` and `image/png; name=x` are the same allowed
+    // kind, and a bare equality check would 404 them. (The pre-normalisation code did.)
+    stub.onFetch = (_url, res) => {
+      res.writeHead(200, { 'content-type': 'IMAGE/PNG; name=shot.png' });
+      res.end(PNG);
+    };
+    const res = await agent.get(`/api/link-preview/media/${tokenFor('/shouty.png')}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toBe('image/png');
+  });
+
   // ⚠⚠ THE MEDIA-POLICY CONTRACT, asserted at the enforcement point rather than only at the
   // mint. `toDescriptor` no longer hands out a `src` for these kinds, so in normal operation
   // nothing asks — but a token is a pure HMAC of the URL, so a descriptor minted before the

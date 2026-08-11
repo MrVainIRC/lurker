@@ -143,7 +143,9 @@ function openAt(item: LinkPreview): void {
   // origin because relaying deliberate playback is the relay the policy retired. A gallery of
   // one: the arrow-through set is pictures, and a player in a picture gallery is a mode switch.
   if (item.kind === 'video' || item.kind === 'audio') {
-    viewer.open(item.url);
+    // ⚠ Pass the SERVER's kind: the viewer would otherwise guess it from the URL extension
+    // and open an extensionless clip as a broken <img>. The origin url, per the media policy.
+    viewer.open(item.url, item.kind);
     return;
   }
   const gallery = images.value;

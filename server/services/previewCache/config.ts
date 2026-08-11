@@ -331,6 +331,13 @@ export function expired(createdAt: string): boolean {
  * two key spaces visibly cannot collide (distinct version prefixes), and derived from
  * the MEDIA's URL so a re-resolve of the same clip lands on the same object.
  */
+/** The shape `posterCacheKey` mints. Exported so the descriptor mint, the token verifier and
+ *  any future caller share ONE definition of "is this a poster key" rather than each carrying
+ *  a copy of the regex that has to agree with this function by hand. */
+export function isPosterKey(value: string): boolean {
+  return /^[a-f0-9]{64}$/.test(value);
+}
+
 export function posterCacheKey(url: string): string {
   let key: string;
   try {

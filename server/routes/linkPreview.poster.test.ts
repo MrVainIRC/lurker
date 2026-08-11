@@ -71,7 +71,8 @@ describe('a video card with a poster', () => {
     expect(stub.resolveAsks[0]?.wantPoster).toBe(true);
     // A thumb, never a src — the poster is card decoration; the clip is still not relayed.
     expect(preview.src).toBeUndefined();
-    expect(String(preview.thumb)).toMatch(/^\/api\/link-preview\/poster\/[a-f0-9]{64}$/);
+    // A signed token, not a bare key — the payload.sig shape the media route uses.
+    expect(String(preview.thumb)).toMatch(/^\/api\/link-preview\/poster\/.+\..+$/);
     // The box the client reserves is the POSTER's shape.
     expect(preview.thumbWidth).toBe(32);
     expect(preview.thumbHeight).toBe(18);
@@ -102,15 +103,47 @@ describe('a video card with a poster', () => {
     expect(preview.thumbWidth).toBeUndefined();
   });
 
-  it('404s a poster key that was never stored, and one that is not a key at all', async () => {
-    const missing = await agent.get(`/api/link-preview/poster/${'e'.repeat(64)}`);
-    expect(missing.status).toBe(404);
-    // Not key-shaped: answered without a cache probe, so the route is not an existence
-    // oracle over arbitrary strings.
-    const notAKey = await agent.get('/api/link-preview/poster/not-a-key');
-    expect(notAKey.status).toBe(404);
-    const wrongCase = await agent.get(`/api/link-preview/poster/${'E'.repeat(64)}`);
-    expect(wrongCase.status).toBe(404);
+  it('403s an unsigned or forged token, however well-formed', async () => {
+    // The route serves nothing whose key it did not sign. A bare key, a bad key, an empty
+    // token — all 403, the same answer the media route gives a forged token.
+    for (const bad of ['not-a-token', 'e'.repeat(64), 'payload.badsig', 'poster:abc']) {
+      const res = await agent.get(`/api/link-preview/poster/${encodeURIComponent(bad)}`);
+      expect(`${bad} → ${res.status}`).toBe(`${bad} → 403`);
+    }
+  });
+
+  it('404s a VALIDLY SIGNED token whose poster was never stored', async () => {
+    // The honest miss: we signed this key (so 403 would be wrong), but nothing is cached
+    // under it — evicted, cache cleared, or a token minted for a poster that never landed.
+    const { mintPosterToken } = await import('../services/mediaProxyToken.js');
+    const { posterCacheKey } = await import('../services/previewCache/index.js');
+    const token = mintPosterToken(posterCacheKey('https://cdn.example.com/never-stored.mp4'));
+    const res = await agent.get(`/api/link-preview/poster/${token}`);
+    expect(res.status).toBe(404);
+  });
+
+  it('⚠⚠ refuses to serve a byte-cache object addressed by its computable key', async () => {
+    // THE oracle. `byteCacheKey` is an unsalted hash any authenticated user can compute, and
+    // it shares the cache index the poster route reads. First prove an image IS cached under
+    // that key by proxying it through the (token-gated) media route...
+    const url = 'https://cdn.example.com/someone-elses.png';
+    const { mintProxyToken } = await import('../services/mediaProxyToken.js');
+    stub.onFetch = (_u, res) => {
+      res.writeHead(200, {
+        'content-type': 'image/jpeg',
+        'content-length': String(jpeg.length),
+        'x-lurker-origin-framed': '1',
+      });
+      res.end(jpeg);
+    };
+    await agent.get(`/api/link-preview/media/${mintProxyToken(url)}`).expect(200);
+    stub.onFetch = null;
+    // ...then try to read it back through the poster route with the key alone. Pre-fix this
+    // returned the bytes; the token requirement makes it a 403.
+    const { byteCacheKey } = await import('../services/previewCache/index.js');
+    const key = byteCacheKey(url);
+    const res = await agent.get(`/api/link-preview/poster/${key}`);
+    expect(res.status).toBe(403);
   });
 
   it('keeps audio symmetrical: cover art becomes the thumb, bytes stay unrelayed', async () => {

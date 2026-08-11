@@ -40,14 +40,14 @@ import {
   FAIL_TTL_MS,
   type PreviewRecord,
 } from '../db/linkPreviews.js';
-import { mintProxyToken } from './mediaProxyToken.js';
+import { mintProxyToken, mintPosterToken } from './mediaProxyToken.js';
 import { isEmbeddableOrigin } from './linkEmbed.js';
 import { decoderResolve, type DecoderMeta, type DecoderPoster } from './previewClient.js';
 // ⚠ `publicByteUrl` from `previewCache/publicUrl.js` for the historical cycle reason
 // (see that file); `store`/`cacheEnabled`/`posterCacheKey` from the index is fine now
 // that `kindForContentType` lives in previewShared.ts rather than here.
 import { publicByteUrl } from './previewCache/publicUrl.js';
-import { store, cacheEnabled, posterCacheKey } from './previewCache/index.js';
+import { store, cacheEnabled, posterCacheKey, isPosterKey } from './previewCache/index.js';
 
 /**
  * Longest URL we'll carry, checked here before anything is hashed, stored or echoed —
@@ -347,11 +347,6 @@ export interface PreviewDescriptor {
   expiresAt: string;
 }
 
-/** The shape `posterCacheKey` mints — and the ONLY shape toDescriptor will put in a
- *  path. The row is data (it survived a DB round trip and, historically, whatever
- *  wrote it), so the same posture as embedUrl below: vet on the way OUT. */
-const POSTER_KEY_RE = /^[a-f0-9]{64}$/;
-
 export function toDescriptor(record: PreviewRecord): PreviewDescriptor {
   const d: PreviewDescriptor = {
     url: record.url,
@@ -420,7 +415,7 @@ export function toDescriptor(record: PreviewRecord): PreviewDescriptor {
     // fields exist to prevent, caused by the fields themselves.
     if (record.imageWidth) d.thumbWidth = record.imageWidth;
     if (record.imageHeight) d.thumbHeight = record.imageHeight;
-  } else if (!relaysBytes && record.posterKey && POSTER_KEY_RE.test(record.posterKey)) {
+  } else if (!relaysBytes && record.posterKey && isPosterKey(record.posterKey)) {
     // The poster: a first frame this instance decoded and stored itself, served from a
     // dedicated route because — unlike every other preview image — it has NO origin URL for
     // the proxy path to fall back to. The route answers from the byte cache and 404s on a
@@ -428,7 +423,10 @@ export function toDescriptor(record: PreviewRecord): PreviewDescriptor {
     //
     // ⚠ Still `thumb`, same slot page cards use: decoration on a card, never the content —
     // the media policy's line between a poster and the clip it advertises.
-    d.thumb = `/api/link-preview/poster/${record.posterKey}`;
+    // ⚠ A SIGNED token, not the bare key. The key is an unsalted hash a client can compute
+    // for any URL; the token is the capability that keeps the poster route from serving the
+    // shared byte cache to anyone who asks — see mintPosterToken.
+    d.thumb = `/api/link-preview/poster/${mintPosterToken(record.posterKey)}`;
     // For these rows the stored dimensions ARE the poster's — see PreviewRecord.posterKey.
     if (record.imageWidth) d.thumbWidth = record.imageWidth;
     if (record.imageHeight) d.thumbHeight = record.imageHeight;

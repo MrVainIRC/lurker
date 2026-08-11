@@ -15,6 +15,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { setupTestDb } from '../test-utils/testApp.js';
 import { startStubDecoder, type StubDecoder } from '../test-utils/stubDecoder.js';
+import { verifyPosterToken } from './mediaProxyToken.js';
 import type { PreviewRecord } from '../db/linkPreviews.js';
 
 const ctx = setupTestDb('link-preview-service');
@@ -123,7 +124,14 @@ describe('toDescriptor', () => {
         imageHeight: 360,
       }),
     );
-    expect(d.thumb).toBe(`/api/link-preview/poster/${A_POSTER_KEY}`);
+    // ⚠ A SIGNED token, not the bare key — the whole of the poster route's security, since the
+    // key is an unsalted hash a client can compute. The path carries a token that round-trips
+    // back to exactly this poster key and to no other.
+    expect(d.thumb).toMatch(/^\/api\/link-preview\/poster\/.+\..+$/);
+    const token = d.thumb!.slice('/api/link-preview/poster/'.length);
+    expect(verifyPosterToken(token)).toBe(A_POSTER_KEY);
+    // ...and the bare key never appears in the descriptor, or the signature bought nothing.
+    expect(JSON.stringify(d)).not.toContain(A_POSTER_KEY);
     // For these rows the stored dimensions describe the POSTER — the box the client reserves.
     expect(d.thumbWidth).toBe(640);
     expect(d.thumbHeight).toBe(360);

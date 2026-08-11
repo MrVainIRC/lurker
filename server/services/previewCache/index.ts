@@ -48,6 +48,7 @@ export { objectPath };
 export {
   byteCacheKey,
   posterCacheKey,
+  isPosterKey,
   cacheConfig,
   cacheEnabled,
   resetCacheConfigForTests,

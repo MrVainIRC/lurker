@@ -44,10 +44,6 @@ const FETCH_HEADERS_TIMEOUT_MS = 25_000;
 const agent = new http.Agent({ keepAlive: true, maxSockets: 64 });
 const tlsAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
 
-export function decoderConfigured(): boolean {
-  return !!process.env.LURKER_PREVIEWS_URL?.trim();
-}
-
 /** Read per call, not at module load, so tests (and a restartless reconfigure) see it. */
 function baseUrl(): URL | null {
   const raw = process.env.LURKER_PREVIEWS_URL?.trim();
