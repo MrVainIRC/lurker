@@ -183,10 +183,12 @@ function openAt(item: LinkPreview): void {
    ⚠⚠ It does NOT follow that the gap goes to zero, and for two commits it did (lurker#773): an
    image-only message sat flush against the top edge of its row, so a hovered, alt-striped or
    highlighted row painted its background right up to the picture while every text row kept a
-   sliver of it. Text never looks flush because a 1.55 line-height puts ~4px of half-leading
-   above the first glyph; an image has no leading, so it is given the same 4px explicitly. It
-   REPLACES the separation margin rather than adding to it — the text-then-image case already has
-   its gap and would otherwise get 8px.
+   sliver of it. What it gets instead is `--space-4` — the SAME value as the bottom margin below,
+   because with no text in the row the picture is the whole of it and an even inset top and bottom
+   is what makes it sit inside the row rather than at the top of it. Half-leading (`--space-2`,
+   what a 1.55 line-height puts above a text row's first glyph) was tried first and reads as too
+   little against 8px underneath. It REPLACES the separation margin rather than adding to it — the
+   text-then-image case already has its gap and would otherwise get 12px.
 
    ⚠ Spelled as padding because a margin here has nothing below it to collapse against and would
    collapse straight out of `.body`, taking the nick/body separator (`.body::before`) 4px down
@@ -197,7 +199,7 @@ function openAt(item: LinkPreview): void {
    never propagates onto `.attachments`. The rule was written there first and did nothing at all. */
 .attachments.body-only {
   margin-top: 0;
-  padding-top: var(--space-2);
+  padding-top: var(--space-4);
 }
 /* A card wants the width it's given — its text has to wrap against something — but not the
    full width of a wide window, where it stops reading as part of the message and starts
