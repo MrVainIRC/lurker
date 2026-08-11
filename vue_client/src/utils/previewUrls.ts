@@ -27,10 +27,16 @@ export const MAX_CARDS_PER_MESSAGE = 3;
  * picture's worth of screen. And clicking any cell opens the lightbox as a GALLERY over every
  * image in the message.
  *
- * ⚠ This is now the ONLY bound on how tall one message's media can get. The mosaic used to cap
- * itself at four cells and count the rest (`+N`), and lurker#773 dropped that to match
- * lurker-ios; at this limit the worst case is ten rows of grid, which is a long message and not a
- * runaway one. Lowering the number is the lever if that ever stops being true.
+ * ⚠ This is now most of the bound on how tall one message's media can get, and lowering it is the
+ * lever if a message ever reads as runaway. The mosaic used to cap ITSELF at four cells and count
+ * the rest (`+N`); lurker#773 dropped that to match lurker-ios, so the ceiling here is what stands
+ * between a paste and a screenful.
+ *
+ * ⚠⚠ It is not the whole ceiling, and reading it as one undercounts. An extensionless host is
+ * charged to the CARD budget below (see `mediaKindForUrl`, which cannot judge it) and can still
+ * come back `kind: 'image'` — imgur and twimg, the common case on IRC — at which point MessageBody
+ * renders it as a tile and never applies the card cap to it. So the real bound on TILES is
+ * `MAX_MEDIA_PER_MESSAGE + MAX_CARDS_PER_MESSAGE`: 23 pictures, twelve grid rows.
  *
  * A limit still exists, because a message carrying fifty image URLs is spam and each one is
  * an outbound fetch on the server's behalf. It's set high enough not to bind on anything a

@@ -186,20 +186,15 @@ function openAt(item: LinkPreview): void {
    sliver of it. What it gets instead is `--space-4` — the SAME value as the bottom margin below,
    because with no text in the row the picture is the whole of it and an even inset top and bottom
    is what makes it sit inside the row rather than at the top of it. Half-leading (`--space-2`,
-   what a 1.55 line-height puts above a text row's first glyph) was tried first and reads as too
-   little against 8px underneath. It REPLACES the separation margin rather than adding to it — the
-   text-then-image case already has its gap and would otherwise get 12px.
-
-   ⚠ Spelled as padding because a margin here has nothing below it to collapse against and would
-   collapse straight out of `.body`, taking the nick/body separator (`.body::before`) 4px down
-   with it — a visible notch in a rule that is continuous on every other row.
+   what a 1.55 line-height puts above a text row's first glyph) was tried first, on screen, and
+   reads as too little against 8px underneath. It REPLACES the separation margin rather than
+   adding to it — the text-then-image case already has its gap and would otherwise get 12px.
 
    ⚠ It lives HERE rather than beside that `:has()` companion because a scoped rule in MessageList
    cannot reach this element: MessageBody is a multi-root fragment, so MessageList's scope id
    never propagates onto `.attachments`. The rule was written there first and did nothing at all. */
 .attachments.body-only {
-  margin-top: 0;
-  padding-top: var(--space-4);
+  margin-top: var(--space-4);
 }
 /* A card wants the width it's given — its text has to wrap against something — but not the
    full width of a wide window, where it stops reading as part of the message and starts
