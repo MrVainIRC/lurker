@@ -1,0 +1,91 @@
+# Copyright (c) 2026 Brad Root
+# SPDX-License-Identifier: MPL-2.0
+#
+# Link previews & inline media — the `lurker-previews` decoder.
+#
+# Layer it on top of the base compose file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.previews.yml up -d
+#
+# (Add -f docker-compose.caddy.yml as well if you front Lurker with Caddy —
+# the overlays touch different things and can be combined in any order.)
+#
+# Everything that dials a URL someone pasted in chat, and everything that
+# parses the bytes it gets back, runs in the SECOND container — never in the
+# one holding your database, your uploads and your users' sessions. Pointing
+# Lurker at the decoder is the entire enable switch; there is no separate
+# on/off flag. Each user then opts in for themselves under Settings → Chat
+# (Link previews and Inline media, both off by default).
+#
+# ⚠ EGRESS, and it is the reason this file has a hardening story at all. The
+# decoder is meant to reach the public internet and NOTHING private, and it
+# proves that at boot — on an ordinary Docker network it can reach your host,
+# so it would refuse to serve. This file therefore ships
+# LURKER_PREVIEWS_ALLOW_PRIVATE=1, which skips that self-test. The decoder's
+# in-process SSRF guard is unaffected, so a malicious *link* is refused either
+# way; what you give up is containment of a malicious *process*.
+#
+# On a Linux host you can have both. Put LURKER_PREVIEWS_ALLOW_PRIVATE=0 in a
+# .env file beside this one and run deploy/previews-egress.sh, which installs
+# the firewall rules that make the self-test pass — and a systemd unit that
+# re-applies them on every boot, so the property can't lapse silently. See
+# "Link previews & inline media" in docs/SELF_HOSTING.md.
+
+services:
+  lurker:
+    environment:
+      # Merges into the base file's environment list. The presence of this
+      # variable IS the feature gate: drop this overlay and previews are off.
+      - LURKER_PREVIEWS_URL=http://lurker-previews:8030
+    networks:
+      # ⚠ `priority` keeps Lurker's DEFAULT ROUTE on the default network even
+      # though it is attached to two. That matters once you harden: the egress
+      # rules are scoped to addresses on the previews bridge, and Lurker's own
+      # outbound traffic — IRC, uploads, push — must not leave from there.
+      default:
+        priority: 100
+      previews: {}
+
+  lurker-previews:
+    image: ghcr.io/amiantos/lurker-previews:latest
+    container_name: lurker-previews
+    restart: unless-stopped
+    # Deliberately on its own bridge, and NOT on the default network: the
+    # egress rules key off this subnet, and only Lurker needs to reach it.
+    # No ports are published — nothing on your host or LAN talks to it.
+    networks:
+      - previews
+    environment:
+      - LURKER_PREVIEWS_ALLOW_PRIVATE=${LURKER_PREVIEWS_ALLOW_PRIVATE:-1}
+      # Optional: what the decoder tells sites it is when it fetches a
+      # preview. The default names Lurker and the traffic class (a social
+      # preview fetch), so a site operator reading their logs can recognise
+      # it and block it on purpose.
+      # - LURKER_PREVIEW_USER_AGENT=
+      # Optional: a contact URL or mailto: appended to that User-Agent.
+      # - USER_AGENT_CONTACT=https://lurker.example.com
+    # This process runs memory-unsafe parsers (libvips, ffmpeg) on bytes
+    # strangers chose — so it gets no filesystem, no capabilities, no way to
+    # gain any, and hard resource ceilings.
+    read_only: true
+    # ⚠ ffmpeg's scratch space, and it is RAM: a tmpfs counts against the
+    # memory limit below, which is what bounds it.
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    # ⚠ Counts THREADS, not processes: node's pool plus one capped ffmpeg
+    # decode fits in 128. Meaningfully lower starves thread creation, and the
+    # first symptom is silently posterless cards — a missing poster is a
+    # supported state, so nothing logs.
+    pids_limit: 128
+    logging:
+      options:
+        max-size: 20m
+        max-file: '3'
+
+networks:
+  previews:

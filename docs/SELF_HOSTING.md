@@ -244,7 +244,21 @@ your database, and it never dials a stranger's URL or runs an image/video decode
 to be thrown away if it's ever compromised.
 
 **Setting `LURKER_PREVIEWS_URL` to point at a running decoder is the entire enable
-switch** — there's no separate on/off flag. Add the service alongside Lurker:
+switch** — there's no separate on/off flag.
+
+If you run the stock `docker-compose.yml`, there's a ready-made overlay that adds
+the decoder and sets that variable for you:
+
+```bash
+curl -O https://raw.githubusercontent.com/amiantos/lurker/main/docker-compose.previews.yml
+docker compose -f docker-compose.yml -f docker-compose.previews.yml up -d
+```
+
+(Add `-f docker-compose.caddy.yml` too if you front Lurker with Caddy.) On a
+DigitalOcean droplet, [`ENABLE_LINK_PREVIEWS="true"`](digitalocean.md) in the
+deploy script does all of this — including the hardening below — unattended.
+
+If you keep your own compose file, the service is this:
 
 ```yaml
 services:
@@ -302,13 +316,32 @@ straight to the origin, the one request the reader deliberately made.
 runs on an ordinary Docker network. The in-process SSRF guard is still active, so
 a malicious _URL_ is refused either way — what you give up is protection against a
 malicious _process_ (an RCE in the decoder reaching your LAN). For a trusted
-group that's a fair trade; to close it, drop the `ALLOW_PRIVATE` line and instead
-firewall the decoder so it can reach the internet but not private ranges. On a
-Linux host that's `DOCKER-USER` rules dropping traffic from the decoder's subnet
-to `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` and
-`100.64.0.0/10`, plus an `INPUT` rule for the host itself. With those in place the
-self-test passes and the container refuses to serve if they ever lapse. (This is
-exactly what the hosted fleet does per-cell.)
+group that's a fair trade; to close it, firewall the decoder so it can reach the
+internet but not private ranges, and let the self-test run.
+
+On a Linux host, [`deploy/previews-egress.sh`](https://github.com/amiantos/lurker/blob/main/deploy/previews-egress.sh)
+does that for you:
+
+```bash
+# with LURKER_PREVIEWS_ALLOW_PRIVATE=0 in a .env beside your compose file
+curl -O https://raw.githubusercontent.com/amiantos/lurker/main/deploy/previews-egress.sh
+chmod +x previews-egress.sh
+sudo ./previews-egress.sh --install
+```
+
+It adds `DOCKER-USER` rules dropping traffic from the decoder's address to
+`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` and
+`100.64.0.0/10`, plus an `INPUT` rule for the host itself (⚠ container→host
+traffic never reaches `DOCKER-USER`, so forward rules alone leave your own sshd
+reachable from the container that parses hostile input). `--install` adds a
+systemd unit that re-applies them on boot and whenever Docker restarts. Then it
+restarts the decoder and reads back its verdict, so you know it worked.
+
+Run it again after anything that recreates the decoder container — the rules are
+scoped to the address Docker gave it, and an update can hand it a new one. That's
+a loud failure, not a silent one: the self-test stops passing, the decoder
+refuses to serve, and previews report themselves unavailable while everything
+else carries on. (This is what the hosted fleet does per-cell, and why.)
 
 #### Caching preview images (optional)
 
