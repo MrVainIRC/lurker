@@ -70,3 +70,79 @@ describe('highlight-count path', () => {
     expect(detail).toMatch(/USING INDEX idx_messages_matched_buf/);
   });
 });
+
+// The searchMessages driving-filter shapes (SEARCH_FILTER_INDEX_PLAN in
+// lurker-dev). searchMessages picks which predicate drives each filter-only
+// search — these pin the planner's side of that contract. Two of them guard
+// regressions that LOOK like simplifications: dropping idx_messages_net
+// ("redundant with net_nick's prefix" — it isn't: no id-ordering through the
+// nick column, so on:-only degrades to gather-and-sort), and removing the
+// unary `+` on the buffer term (the planner then drives from:+in: through the
+// buffer index, whose worst case walks a big buffer row-by-row for a nick
+// that never spoke there).
+describe('search filter paths', () => {
+  const ROW_FILTERS = `m.type IN ('message','action','notice')
+    AND m.from_ignored = 0 AND m.mirrored = 0`;
+
+  it('from:-only drives the nick index', () => {
+    const detail = plan(
+      `SELECT m.* FROM messages m JOIN networks n ON n.id = m.network_id
+       WHERE n.user_id = 1 AND m.network_id IN (1, 2) AND ${ROW_FILTERS}
+         AND m.nick = 'alice' COLLATE NOCASE
+       ORDER BY m.id DESC LIMIT 51`,
+    );
+    expect(detail).toMatch(/USING INDEX idx_messages_net_nick/);
+  });
+
+  it('the before cursor rides the nick index range, ordered, no scan', () => {
+    const detail = plan(
+      `SELECT m.* FROM messages m JOIN networks n ON n.id = m.network_id
+       WHERE n.user_id = 1 AND m.network_id = 1 AND ${ROW_FILTERS}
+         AND m.nick = 'alice' COLLATE NOCASE AND m.id < 100
+       ORDER BY m.id DESC LIMIT 51`,
+    );
+    expect(detail).toMatch(/USING INDEX idx_messages_net_nick \(network_id=\? AND nick=\? AND id<\?\)/);
+    expect(detail).not.toMatch(/TEMP B-TREE/);
+  });
+
+  it('from:+in: still drives the nick index (the +buffer demotion)', () => {
+    const detail = plan(
+      `SELECT m.* FROM messages m JOIN networks n ON n.id = m.network_id
+       WHERE n.user_id = 1 AND m.network_id IN (1) AND ${ROW_FILTERS}
+         AND m.nick = 'alice' COLLATE NOCASE AND +m.buffer_id IN (7)
+       ORDER BY m.id DESC LIMIT 51`,
+    );
+    expect(detail).toMatch(/USING INDEX idx_messages_net_nick/);
+  });
+
+  it('in:+on: drives the buffer index (no network predicate emitted)', () => {
+    const detail = plan(
+      `SELECT m.* FROM messages m JOIN networks n ON n.id = m.network_id
+       WHERE n.user_id = 1 AND ${ROW_FILTERS} AND m.buffer_id IN (7)
+       ORDER BY m.id DESC LIMIT 51`,
+    );
+    expect(detail).toMatch(/USING INDEX idx_messages_buf_unread/);
+  });
+
+  it('on:-only drives the network index, ordered, no sort', () => {
+    const detail = plan(
+      `SELECT m.* FROM messages m JOIN networks n ON n.id = m.network_id
+       WHERE n.user_id = 1 AND m.network_id = 1 AND ${ROW_FILTERS}
+       ORDER BY m.id DESC LIMIT 51`,
+    );
+    expect(detail).toMatch(/USING INDEX idx_messages_net\b/);
+    expect(detail).not.toMatch(/TEMP B-TREE/);
+  });
+
+  it('free text keeps FTS driving and streams in rowid order, no sort', () => {
+    const detail = plan(
+      `SELECT m.* FROM messages m JOIN networks n ON n.id = m.network_id
+       JOIN messages_fts ON messages_fts.rowid = m.id
+       WHERE n.user_id = 1 AND messages_fts MATCH '"hello"' AND ${ROW_FILTERS}
+         AND m.nick = 'alice' COLLATE NOCASE
+       ORDER BY messages_fts.rowid DESC LIMIT 51`,
+    );
+    expect(detail).toMatch(/SCAN messages_fts/);
+    expect(detail).not.toMatch(/TEMP B-TREE/);
+  });
+});

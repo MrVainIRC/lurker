@@ -983,6 +983,7 @@ export function searchMessages(
     where.push('m.matched_rule_id IS NOT NULL');
   }
 
+  const hasText = !!text;
   if (text) {
     const match = toFtsMatch(text);
     if (!match) return [];
@@ -992,33 +993,77 @@ export function searchMessages(
     where.push('messages_fts MATCH ?');
     params.push(match);
   }
-  if (networkId) {
-    where.push('m.network_id = ?');
-    params.push(networkId);
-  }
+
+  // `in:` resolves through the registry once per candidate network — folds
+  // are per-network (#707), so ONE folded string can't probe several
+  // networks: a Libera '#chat[dev]' is stored under its rfc1459 fold
+  // '#chat{dev}', which a legacy fold of the query would silently miss.
+  // The scoped case is the one-network instance of the same loop, so both
+  // shapes share one mechanism. An empty id list matches nothing.
+  let bufferIds: number[] | undefined;
   if (target) {
-    // `in:` resolves through the registry once per candidate network — folds
-    // are per-network (#707), so ONE folded string can't probe several
-    // networks: a Libera '#chat[dev]' is stored under its rfc1459 fold
-    // '#chat{dev}', which a legacy fold of the query would silently miss.
-    // The scoped case is the one-network instance of the same loop, so both
-    // shapes share one mechanism. An empty id list matches nothing.
     const nets = networkId
       ? [{ id: networkId }]
       : (userNetworkIdsStmt.all(userId) as { id: number }[]);
-    const ids: number[] = [];
+    bufferIds = [];
     for (const net of nets) {
       const found = resolveBuffer(userId, net.id, target);
-      if (found) ids.push(found.id);
+      if (found) bufferIds.push(found.id);
     }
-    if (ids.length === 0) where.push('0');
+  }
+  const nickFiltered = nickList.length > 0 || !!nick;
+
+  // Which predicate DRIVES a filter-only search is decided here, not left to
+  // the planner: this schema never runs ANALYZE (plans stay deterministic
+  // across installs), and a stats-less planner picks plausible indexes with
+  // scan-shaped worst cases. Fixed priority — text > from: > in: > on: —
+  // most selective in the worst case first. With free text the FTS join
+  // above drives and the structured filters stay plain per-row checks.
+  if (hasText) {
+    if (networkId) {
+      where.push('m.network_id = ?');
+      params.push(networkId);
+    }
+  } else if (nickFiltered) {
+    // Nick drives, via idx_messages_net_nick. The index needs a network_id
+    // equality/IN prefix, and the access-control join alone can't provide one
+    // — so the caller's own network ids are pushed in as a predicate. This IS
+    // redundant with the join (and must stay derived from it, never from
+    // client input); it exists purely so the planner can seek.
+    const netIds = networkId
+      ? [networkId]
+      : (userNetworkIdsStmt.all(userId) as { id: number }[]).map((n) => n.id);
+    if (netIds.length === 0) return [];
+    where.push(`m.network_id IN (${netIds.map(() => '?').join(', ')})`);
+    params.push(...netIds);
+  } else if (bufferIds === undefined && networkId) {
+    // on:-only — idx_messages_net drives. When buffer ids are present instead,
+    // NO network predicate is emitted at all: the ids above were already
+    // resolved per-network, and leaving `m.network_id = ?` in tempts the
+    // planner away from the buffer index into idx_messages_net, which for a
+    // quiet buffer on a busy network walks the whole network's history.
+    where.push('m.network_id = ?');
+    params.push(networkId);
+  }
+
+  if (bufferIds !== undefined) {
+    if (bufferIds.length === 0) where.push('0');
     else {
-      where.push(`m.buffer_id IN (${ids.map(() => '?').join(', ')})`);
-      params.push(...ids);
+      // The unary `+` (only when nick drives) hides the buffer term from index
+      // selection while keeping it as a row filter — without it the planner
+      // drives from:+in: through idx_messages_buf_unread, whose worst case (a
+      // nick that never spoke in a big buffer) walks the buffer's entire
+      // history with a table fetch per row. Nick-driven, the wrong-buffer
+      // rejects are index-only via the buffer_id payload column.
+      const col = !hasText && nickFiltered ? '+m.buffer_id' : 'm.buffer_id';
+      where.push(`${col} IN (${bufferIds.map(() => '?').join(', ')})`);
+      params.push(...bufferIds);
     }
   }
   // `nicks` OR-matches several senders (a friend's alts); `nick` is the single
-  // case. COLLATE NOCASE binds to the column so the IN comparison is case-fold.
+  // case. COLLATE NOCASE binds to the column so the IN comparison is case-fold
+  // — and matches the collation on idx_messages_net_nick's nick column, which
+  // an index without it would be invisible to.
   if (nickList.length > 0) {
     where.push(`m.nick COLLATE NOCASE IN (${nickList.map(() => '?').join(', ')})`);
     params.push(...nickList);
@@ -1031,10 +1076,15 @@ export function searchMessages(
     params.push(before);
   }
 
+  // With free text the ORDER BY targets the FTS table's rowid — the same value
+  // as m.id (the join equates them), but FTS5 can stream matches in rowid
+  // order natively, so the query stops at the LIMIT instead of materializing
+  // and sorting every message that ever contained the term (measured 2126ms →
+  // 1.6ms for a common word on a 2M-row database).
   const sql = `SELECT m.*, n.name AS network_name, ${BOOKMARKED_COL('m')}
                FROM ${from}
                WHERE ${where.join(' AND ')}
-               ORDER BY m.id DESC
+               ORDER BY ${hasText ? 'messages_fts.rowid' : 'm.id'} DESC
                LIMIT ?`;
   params.push(limit);
 
