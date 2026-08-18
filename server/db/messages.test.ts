@@ -686,6 +686,86 @@ describe('searchMessages', () => {
     // ...and so does a structured-only filter (no FTS join).
     expect(searchMessages(user.id, { target: '#a' }).map((m) => m.nick)).toEqual(['alice']);
   });
+
+  // The driving-filter construction (SEARCH_FILTER_INDEX_PLAN in lurker-dev)
+  // adds planner-steering predicates — a pushed-down network-id IN list, a
+  // `+`-demoted buffer term — that are supposed to be semantically invisible.
+  // These tests pin the semantics; messagesEqp.test.ts pins the plans.
+  it('a filter-only nick search never crosses the tenant boundary', () => {
+    // Two users, same nick speaking on each of their networks. The pushed-down
+    // network-id list must be the CALLER'S networks, so each user sees only
+    // their own copy.
+    const userA = createUser('search-tenant-a');
+    const userB = createUser('search-tenant-b');
+    const netA = createNetwork(userA.id, {
+      name: 'n',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'search-tenant-a',
+    });
+    const netB = createNetwork(userB.id, {
+      name: 'n',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'search-tenant-b',
+    });
+    chat(netA!.id, '#a', 'shadow', 'message on network A');
+    chat(netB!.id, '#b', 'shadow', 'message on network B');
+
+    expect(searchMessages(userA.id, { nick: 'shadow' }).map((m) => m.text)).toEqual([
+      'message on network A',
+    ]);
+    expect(searchMessages(userB.id, { nick: 'shadow' }).map((m) => m.text)).toEqual([
+      'message on network B',
+    ]);
+  });
+
+  it('from:+in: honors the buffer filter (the + demotion demotes, not drops)', () => {
+    const user = createUser('search-nick-buf');
+    const net = createNetwork(user.id, {
+      name: 'n',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'search-nick-buf',
+    });
+    chat(net!.id, '#x', 'alice', 'said in x');
+    chat(net!.id, '#y', 'alice', 'said in y');
+    chat(net!.id, '#x', 'bob', 'also in x');
+
+    expect(searchMessages(user.id, { nick: 'alice', target: '#x' }).map((m) => m.text)).toEqual([
+      'said in x',
+    ]);
+    expect(
+      searchMessages(user.id, { nick: 'alice', target: '#x', networkId: net!.id }).map(
+        (m) => m.text,
+      ),
+    ).toEqual(['said in x']);
+  });
+
+  it('filter-only searches order newest-first and paginate via before', () => {
+    const user = createUser('search-filter-page');
+    const net = createNetwork(user.id, {
+      name: 'n',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'search-filter-page',
+    });
+    for (let i = 1; i <= 5; i += 1) chat(net!.id, '#a', 'alice', `note ${i}`);
+    chat(net!.id, '#a', 'bob', 'interleaved');
+
+    const firstPage = searchMessages(user.id, { nick: 'alice', limit: 2 });
+    expect(firstPage.map((m) => m.text)).toEqual(['note 5', 'note 4']);
+    const secondPage = searchMessages(user.id, {
+      nick: 'alice',
+      limit: 2,
+      before: firstPage[firstPage.length - 1].id,
+    });
+    expect(secondPage.map((m) => m.text)).toEqual(['note 3', 'note 2']);
+  });
 });
 
 describe('searchMessages matched (highlights)', () => {

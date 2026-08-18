@@ -38,6 +38,13 @@ export const useSearchStore = defineStore('search', {
     // True once a search has actually been dispatched, so the modal can tell
     // "no matches" apart from "haven't searched yet".
     searched: false,
+    // Effective payload of the last dispatched fresh search. The modal's
+    // typing debounce fires on ANY input change, including ones that parse to
+    // the same query (a trailing space, an incomplete `from:` token still in
+    // free text) — without this, each of those cleared the results and
+    // refetched identical rows. History is immutable, so serving the standing
+    // results for an identical effective query is always correct.
+    lastKey: null as string | null,
     // Persist the modal's scroll position and keyboard cursor across
     // open/close. Tapping a result jumps to a buffer and closes the modal;
     // reopening should put the user back exactly where they were so a series
@@ -75,18 +82,35 @@ export const useSearchStore = defineStore('search', {
       return payload;
     },
     runSearch() {
+      const payload = this.buildPayload(null);
+      // Same effective query as the search already on screen — keep it. The
+      // `searched` guard covers the scoped modal's fresh slate (it patches
+      // searched:false), and an errored dispatch clears itself below so a
+      // retype retries instead of being swallowed.
+      const key = payload
+        ? JSON.stringify([
+            payload.query ?? '',
+            payload.nicks ?? [],
+            payload.target ?? '',
+            payload.networkId ?? null,
+          ])
+        : null;
+      if (payload && this.searched && !this.error && key === this.lastKey) return;
+      this.lastKey = key;
       this.token += 1;
       this.results = [];
       this.hasMore = false;
       this.nextBefore = null;
       this.error = '';
       this.scrollTop = 0;
-      const payload = this.buildPayload(null);
       if (!payload) {
         this.loading = false;
         this.searched = false;
         return;
       }
+      // buildPayload stamped the pre-bump token; the dispatch carries the new
+      // one so applyResult's supersession check lines up.
+      payload.token = this.token;
       this.loading = true;
       this.searched = true;
       if (!socketSend(payload)) {
@@ -129,6 +153,7 @@ export const useSearchStore = defineStore('search', {
       this.loading = false;
       this.error = '';
       this.searched = false;
+      this.lastKey = null;
       this.scrollTop = 0;
     },
   },
