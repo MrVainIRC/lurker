@@ -126,6 +126,23 @@ describe('runSearch over REST', () => {
     expect(store.hasMore).toBe(false);
   });
 
+  it('a successful loadMore retry clears the previous pagination error', async () => {
+    const store = useSearchStore();
+    api.mockResolvedValueOnce({ items: [{ id: 9 }], nextBefore: 9 });
+    store.setQuery('flaky page');
+    await store.runSearch();
+
+    api.mockRejectedValueOnce(new Error('offline'));
+    await store.loadMore();
+    expect(store.error).toBe('offline');
+    expect(store.hasMore).toBe(true); // cursor survives the failure — retry is possible
+
+    api.mockResolvedValueOnce({ items: [{ id: 8 }], nextBefore: null });
+    await store.loadMore();
+    expect(store.error).toBe('');
+    expect(store.results.map((r) => r.id)).toEqual([9, 8]);
+  });
+
   it('reset clears the dedupe key', async () => {
     const store = useSearchStore();
     store.setQuery('hello');

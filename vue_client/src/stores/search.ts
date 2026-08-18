@@ -137,6 +137,9 @@ export const useSearchStore = defineStore('search', {
       if (!url) return;
       const token = this.token;
       this.loading = true;
+      // Clear any stale failure so a successful retry doesn't render fresh
+      // rows under an old error banner (same pattern as the highlights store).
+      this.error = '';
       try {
         const { items, nextBefore } = await api(url);
         if (token !== this.token) return; // Query changed while paging.
