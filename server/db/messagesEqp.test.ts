@@ -101,7 +101,9 @@ describe('search filter paths', () => {
          AND m.nick = 'alice' COLLATE NOCASE AND m.id < 100
        ORDER BY m.id DESC LIMIT 51`,
     );
-    expect(detail).toMatch(/USING INDEX idx_messages_net_nick \(network_id=\? AND nick=\? AND id<\?\)/);
+    expect(detail).toMatch(
+      /USING INDEX idx_messages_net_nick \(network_id=\? AND nick=\? AND id<\?\)/,
+    );
     expect(detail).not.toMatch(/TEMP B-TREE/);
   });
 
