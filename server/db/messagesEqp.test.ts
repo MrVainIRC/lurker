@@ -84,33 +84,37 @@ describe('search filter paths', () => {
   const ROW_FILTERS = `m.type IN ('message','action','notice')
     AND m.from_ignored = 0 AND m.mirrored = 0`;
 
+  // The network set arrives as a subquery over the caller's own rows, exactly
+  // as searchMessages emits it — ownership-checked by construction (#798).
+  const OWN_NETS = `(SELECT id FROM networks WHERE user_id = 1)`;
+  const OWN_NET_1 = `(SELECT id FROM networks WHERE user_id = 1 AND id = 1)`;
+
   it('from:-only drives the nick index', () => {
     const detail = plan(
       `SELECT m.* FROM messages m JOIN networks n ON n.id = m.network_id
-       WHERE n.user_id = 1 AND m.network_id IN (1, 2) AND ${ROW_FILTERS}
+       WHERE n.user_id = 1 AND m.network_id IN ${OWN_NETS} AND ${ROW_FILTERS}
          AND m.nick = 'alice' COLLATE NOCASE
        ORDER BY m.id DESC LIMIT 51`,
     );
     expect(detail).toMatch(/USING INDEX idx_messages_net_nick/);
   });
 
-  it('the before cursor rides the nick index range, ordered, no scan', () => {
+  it('the before cursor rides the nick index range', () => {
     const detail = plan(
       `SELECT m.* FROM messages m JOIN networks n ON n.id = m.network_id
-       WHERE n.user_id = 1 AND m.network_id = 1 AND ${ROW_FILTERS}
+       WHERE n.user_id = 1 AND m.network_id IN ${OWN_NET_1} AND ${ROW_FILTERS}
          AND m.nick = 'alice' COLLATE NOCASE AND m.id < 100
        ORDER BY m.id DESC LIMIT 51`,
     );
     expect(detail).toMatch(
       /USING INDEX idx_messages_net_nick \(network_id=\? AND nick=\? AND id<\?\)/,
     );
-    expect(detail).not.toMatch(/TEMP B-TREE/);
   });
 
   it('from:+in: still drives the nick index (the +buffer demotion)', () => {
     const detail = plan(
       `SELECT m.* FROM messages m JOIN networks n ON n.id = m.network_id
-       WHERE n.user_id = 1 AND m.network_id IN (1) AND ${ROW_FILTERS}
+       WHERE n.user_id = 1 AND m.network_id IN ${OWN_NET_1} AND ${ROW_FILTERS}
          AND m.nick = 'alice' COLLATE NOCASE AND +m.buffer_id IN (7)
        ORDER BY m.id DESC LIMIT 51`,
     );

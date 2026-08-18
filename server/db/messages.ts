@@ -1026,16 +1026,21 @@ export function searchMessages(
     }
   } else if (nickFiltered) {
     // Nick drives, via idx_messages_net_nick. The index needs a network_id
-    // equality/IN prefix, and the access-control join alone can't provide one
-    // — so the caller's own network ids are pushed in as a predicate. This IS
-    // redundant with the join (and must stay derived from it, never from
-    // client input); it exists purely so the planner can seek.
-    const netIds = networkId
-      ? [networkId]
-      : (userNetworkIdsStmt.all(userId) as { id: number }[]).map((n) => n.id);
-    if (netIds.length === 0) return [];
-    where.push(`m.network_id IN (${netIds.map(() => '?').join(', ')})`);
-    params.push(...netIds);
+    // IN prefix, and the access-control join alone can't provide one — so the
+    // caller's network set is pushed in as a subquery over their own rows.
+    // The planner materializes it once (LIST SUBQUERY) and still seeks
+    // (network_id=? AND nick=?). A subquery rather than an expanded id list
+    // (PR #798 review): the set is derived inside SQL, so a request-supplied
+    // networkId is ownership-checked by construction and no untrusted value
+    // can reach the predicate. Still redundant with the join by design — this
+    // exists purely so the planner can seek.
+    if (networkId) {
+      where.push('m.network_id IN (SELECT id FROM networks WHERE user_id = ? AND id = ?)');
+      params.push(userId, networkId);
+    } else {
+      where.push('m.network_id IN (SELECT id FROM networks WHERE user_id = ?)');
+      params.push(userId);
+    }
   } else if (bufferIds === undefined && networkId) {
     // on:-only — idx_messages_net drives. When buffer ids are present instead,
     // NO network predicate is emitted at all: the ids above were already
