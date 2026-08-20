@@ -148,3 +148,51 @@ export function parseRelayMessage(
   }
   return null;
 }
+
+/**
+ * How many envelopes deep a chain of marked bots is followed. Bridges chain in
+ * the wild — two hops is the deepest real one seen — and the cap is a backstop,
+ * not a limit anyone should hit.
+ */
+const MAX_RELAY_DEPTH = 4;
+
+/**
+ * Parse an envelope, then keep parsing while the speaker it reveals is *itself*
+ * a marked relay bot (#801).
+ *
+ * Bridges chain: a bot bridging network A relays network B's bridge bot, which
+ * is itself bridging Matrix — `[IRC-nERDs] <~|> <alice[m]/OFTC> hi`. Unwrapping
+ * once attributes the line to `|`, an intermediate robot rather than a speaker.
+ *
+ * Each further hop is gated on a mark, and deliberately so: `<nick> ...` inside
+ * a relayed line is *also* how people quote each other on IRC, and the two are
+ * structurally identical — nothing in `[efnet] <+raah> <ultros> heretic!` says
+ * whether `ultros` is a bridge or someone raah is quoting. Only the user knows,
+ * and a mark is them saying so. Auto-unwrapping would put words in the quoted
+ * person's mouth.
+ *
+ * `relayPattern` answers for a revealed nick: null/undefined when it carries no
+ * mark, otherwise its custom template (`''` for the built-in formats) — i.e.
+ * exactly what the relay-bot store already holds. The innermost speaker wins,
+ * as does the innermost `[source]` tag actually present, so a chain that names
+ * the platform only on an outer hop keeps that name.
+ */
+export function parseRelayChain(
+  body: string | null | undefined,
+  pattern: string | null | undefined,
+  relayPattern: (nick: string) => string | null | undefined,
+): RelayParse | null {
+  let parsed = parseRelayMessage(body, pattern);
+  if (!parsed) return null;
+  for (let depth = 1; depth < MAX_RELAY_DEPTH; depth++) {
+    const innerPattern = relayPattern(parsed.nick);
+    if (innerPattern == null) break;
+    // A hop that doesn't parse ends the chain where it stands: the marked bot
+    // said something in its own voice (a join notice, a `/relay`-less line), and
+    // that's still correctly attributed to it.
+    const next = parseRelayMessage(parsed.text, innerPattern);
+    if (!next) break;
+    parsed = { source: next.source ?? parsed.source, nick: next.nick, text: next.text };
+  }
+  return parsed;
+}

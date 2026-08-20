@@ -362,7 +362,7 @@ import { consolidateRows } from '../utils/consolidate.js';
 import { historyCountBy } from '../lib/historyPaging.js';
 import type { ConsolidationGroup, NickEntry, RenameEntry } from '../../../shared/consolidate.js';
 import { collapseDisplay } from '../utils/collapseDisplay.js';
-import { parseRelayMessage } from '../../../shared/parseRelay.js';
+import { parseRelayChain } from '../../../shared/parseRelay.js';
 import { asEventMode, eventModeKey, isNoiseType } from '../../../shared/eventFilter.js';
 import NickRef from './NickRef.vue';
 import LinkedText from './LinkedText.vue';
@@ -876,6 +876,16 @@ function openRelayNickMenu(
     },
     { divider: true },
     {
+      // Chained bridges (#801). This name is only *shown* because a bot said
+      // it, so when it turns out to be another bridge there's nowhere else to
+      // mark it from — it's in no member list, and its profile is the outer
+      // bot's. Marking here makes the next hop unwrap and the real speaker
+      // appear. Same wording as the profile modal's toggle.
+      label: 'Mark relay bot',
+      icon: 'fa-solid fa-satellite-dish',
+      onClick: () => relayBots.setRelay(networkId, nick, true),
+    },
+    {
       label: 'View Profile…',
       icon: 'fa-solid fa-id-card',
       onClick: () => whois.openViewer(networkId, bot),
@@ -1194,7 +1204,15 @@ const renderRows = computed((): RenderRow[] => {
       networkId &&
       relayBots.isRelay(networkId, m.nick)
     ) {
-      const parsed = parseRelayMessage(m.text ?? '', relayBots.patternFor(networkId, m.nick));
+      // Chained bridges (#801): keep unwrapping while the speaker a hop reveals
+      // is itself a marked bot, so a relay of a relay lands on the person who
+      // spoke rather than on the bridge in between.
+      const parsed = parseRelayChain(
+        m.text ?? '',
+        relayBots.patternFor(networkId, m.nick),
+        (inner) =>
+          relayBots.isRelay(networkId, inner) ? relayBots.patternFor(networkId, inner) : null,
+      );
       if (parsed) {
         mDisplay = {
           ...m,
