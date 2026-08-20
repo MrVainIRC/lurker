@@ -252,6 +252,17 @@ describe('parseRelayChain — chained bridges (#801)', () => {
     });
   });
 
+  it('prefers the innermost [source] when every hop carries one', () => {
+    // Both tags present, so this is the case that actually pins the direction
+    // of the coalesce — the tests either side of it have a tag on one hop only,
+    // and pass whichever way it's written.
+    expect(parseRelayChain('[A] <bridge> [B] <alice> hi', '', marks({ bridge: '' }))).toEqual({
+      source: 'B',
+      nick: 'alice',
+      text: 'hi',
+    });
+  });
+
   it('strips a membership prefix on an inner hop too', () => {
     const line = '<+DOMF> <+Nelluk> many ghosts living and dead abound';
     expect(parseRelayChain(line, '', marks({ DOMF: '' }))).toEqual({
