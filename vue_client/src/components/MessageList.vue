@@ -865,6 +865,7 @@ function openRelayNickMenu(
   y: number,
   triggerEl: Element | null = null,
 ): void {
+  const marked = relayBots.isRelay(networkId, nick);
   const items: ContextMenuItem[] = [
     { label: `Reply to ${nick}`, icon: 'fa-solid fa-reply', onClick: () => addressNick(nick) },
     {
@@ -880,10 +881,18 @@ function openRelayNickMenu(
       // it, so when it turns out to be another bridge there's nowhere else to
       // mark it from — it's in no member list, and its profile is the outer
       // bot's. Marking here makes the next hop unwrap and the real speaker
-      // appear. Same wording as the profile modal's toggle.
-      label: 'Mark relay bot',
+      // appear; unmarking is how a mark landed on a quoted human comes off.
+      //
+      // A toggle, not a "mark" button, and reading live state rather than
+      // assuming: this row CAN belong to an already-marked bot — a marked hop
+      // that says something in its own voice ends the chain on itself. Marking
+      // it again would re-upsert with an empty pattern, which the server takes
+      // as a write and fans out, silently dropping a custom template the user
+      // set with `/relay add <nick> <pattern>`. Same wording and shape as the
+      // profile modal's toggle, which is the other way to reach this.
+      label: marked ? 'Unmark relay bot' : 'Mark relay bot',
       icon: 'fa-solid fa-satellite-dish',
-      onClick: () => relayBots.setRelay(networkId, nick, true),
+      onClick: () => relayBots.setRelay(networkId, nick, !marked),
     },
     {
       label: 'View Profile…',

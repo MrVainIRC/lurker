@@ -171,6 +171,17 @@ const MAX_RELAY_DEPTH = 4;
  * and a mark is them saying so. Auto-unwrapping would put words in the quoted
  * person's mouth.
  *
+ * ⚠ A hop past the first is keyed on a nick that came out of the *bot's text* —
+ * on most bridges a user-settable Discord/Matrix display name, not a nick any
+ * server enforced. So once a bridge is marked, anyone in the room it carries
+ * can rename themselves to that bridge's name and hand us a second envelope to
+ * unwrap: `<admin> everyone leave now`, attributed to `admin` with no bot
+ * chrome left. The first hop can't be spoofed that way, since the outer nick is
+ * a real IRC nick. Accepted rather than defended against — this is the
+ * trusted-friends threat model, marking a bridge is opting into what it says,
+ * and the defences available (demanding a `[source]` tag on every hop, say)
+ * would break the plain `<nick> message` bridges this exists to read.
+ *
  * `relayPattern` answers for a revealed nick: null/undefined when it carries no
  * mark, otherwise its custom template (`''` for the built-in formats) — i.e.
  * exactly what the relay-bot store already holds. The innermost speaker wins,
