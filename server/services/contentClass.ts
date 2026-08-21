@@ -25,6 +25,11 @@
 
 import { fileTypeFromFile } from 'file-type';
 import fs from 'node:fs';
+import {
+  PLAIN_TEXT,
+  TEXT_DIALECT_BY_MIME,
+  dialectFromFilename,
+} from '../../shared/textDialects.js';
 import { isFileUtf8 } from '../utils/utf8.js';
 import type { ContentClass } from './uploadProviders/types.js';
 
@@ -127,65 +132,15 @@ export const ACCEPTED_SUMMARY = 'images, text, and audio/video (mp4, mov, m4v, m
 const TEXTISH_SNIFF = new Set(['application/xml', 'text/xml']);
 
 /**
- * The text dialects: signature-less UTF-8 we are willing to NAME, rather than
- * flattening to `.txt` (#788).
+ * The text dialect table moved to shared/ — the CLIENT's paste/drop gate needs the
+ * extension half for the same portability reason this file needs it, and a second
+ * hand-written copy of the rule is how the two drift. The security note about what
+ * may be added to it lives with the table.
  *
- * These bytes have always been accepted — a `.md` is UTF-8 with no signature, which
- * is exactly what the text branch below takes — so this widens nothing about what
- * may be uploaded. All it changes is the label: a README came back as `README.txt`,
- * and a `.json` lost the one thing that told an editor how to read it.
- *
- * ⚠ This is the ONE deliberate relaxation of "the ext is NEVER the client's claim".
- * That rule exists so a user's `.html` cannot become the served extension, and it is
- * preserved by the shape of this map, not by the source of the answer: the extension
- * can only ever be one of these three values, whatever the caller says. Adding an
- * entry here is therefore a real security decision — the type must be inert when
- * served from an uploads domain, which is the same bar SVG fails (see below).
- *
- * Neither markdown nor JSON renders as anything active in a browser: they display or
- * download, and the pinned Content-Type never comes from the caller.
+ * ⚠ Consulted here for exactly two things, and the ORDER matters — see the call site:
+ * the mime table decides whether the SVG probe runs, and the filename table then picks
+ * the label, filename FIRST.
  */
-interface TextDialect {
-  mime: string;
-  ext: string;
-}
-
-const PLAIN_TEXT: TextDialect = { mime: 'text/plain', ext: 'txt' };
-
-const TEXT_DIALECT_BY_MIME = new Map<string, TextDialect>([
-  ['text/plain', PLAIN_TEXT],
-  ['text/markdown', { mime: 'text/markdown', ext: 'md' }],
-  ['application/json', { mime: 'application/json', ext: 'json' }],
-]);
-
-/**
- * The same three, keyed by filename extension — a SECOND signal, needed because the
- * first is not portable.
- *
- * macOS and Linux register a MIME for `.md` and browsers send `text/markdown`.
- * Windows registers none, so the same file arrives as `text/plain` or
- * `application/octet-stream` and would flatten back to `.txt` — the feature would
- * simply not work there, silently, on the platform least likely to be tested.
- *
- * ⚠ It is consulted BEFORE the claim, not as a last resort — see the note at the
- * call site.
- *
- * ⚠ But only to pick a label among the dialects, and only AFTER the SVG decision has
- * been made from the claimed MIME alone. Letting a filename reach that decision would
- * mean an `x.txt` name could suppress the SVG check for bytes that really are SVG.
- */
-const TEXT_DIALECT_BY_EXT = new Map<string, TextDialect>([
-  ['txt', PLAIN_TEXT],
-  ['md', { mime: 'text/markdown', ext: 'md' }],
-  ['markdown', { mime: 'text/markdown', ext: 'md' }],
-  ['json', { mime: 'application/json', ext: 'json' }],
-]);
-
-function dialectFromFilename(filename: string): TextDialect | undefined {
-  const dot = filename.lastIndexOf('.');
-  if (dot < 0) return undefined;
-  return TEXT_DIALECT_BY_EXT.get(filename.slice(dot + 1).toLowerCase());
-}
 
 /**
  * The Content-Type to STORE for an upload, which is not always its classified mime.

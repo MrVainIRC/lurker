@@ -1939,9 +1939,15 @@ function blobFromClipboardItem(item: DataTransferItem): File | null {
   // Same gate as drop, from the same definition — pasting a video file from Finder
   // used to silently do nothing. `kind === 'file'` keeps pasted rich text from being
   // hijacked into an upload; the server has the final say on the type.
-  if (!item || item.kind !== 'file' || !isUploadableType(item.type)) return null;
+  //
+  // ⚠ The file is taken BEFORE the type gate, because the gate needs its name: a
+  // platform with no registered mime for `.md` reports an empty type, and the
+  // extension is then the only thing distinguishing a README from a stray binary
+  // (#788). `kind` is still checked first, so rich text never reaches getAsFile().
+  if (!item || item.kind !== 'file') return null;
   const file = item.getAsFile();
-  return file || null;
+  if (!file || !isUploadableType(file.type, file.name)) return null;
+  return file;
 }
 
 function onPaste(e: ClipboardEvent): void {
@@ -2029,7 +2035,7 @@ function onDrop(e: DragEvent): void {
   dragOver.value = false;
   if (!sendable.value) return;
   const file = e.dataTransfer?.files?.[0];
-  if (!file || !isUploadableType(file.type)) return;
+  if (!file || !isUploadableType(file.type, file.name)) return;
   uploads.upload(file, file.name).catch(() => {});
 }
 

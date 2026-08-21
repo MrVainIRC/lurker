@@ -68,6 +68,36 @@ describe('isUploadableType', () => {
     expect(isUploadableType('text/x-python')).toBe(true);
   });
 
+  // ⚠ The gap Copilot caught on #808. The picker path does NOT share this gate
+  // (onFileSelected uploads directly), so a dragged `.md` on a platform that registers
+  // no mime for it was silently ignored while PICKING the same file worked — and the
+  // server's filename fallback, which exists for exactly that platform, never got to
+  // see the file at all.
+  it('accepts a dialect by extension when the platform reports no mime', () => {
+    for (const mime of ['', 'application/octet-stream']) {
+      expect(isUploadableType(mime, 'README.md')).toBe(true);
+      expect(isUploadableType(mime, 'notes.MARKDOWN')).toBe(true);
+      expect(isUploadableType(mime, 'data.json')).toBe(true);
+      expect(isUploadableType(mime, 'log.txt')).toBe(true);
+    }
+  });
+
+  // Bounded to the dialect extensions, NOT "let every unknown type through": a stray
+  // drag should still do nothing rather than start an upload that 415s.
+  it('still ignores an unknown type that is not a dialect', () => {
+    for (const name of ['installer.dmg', 'archive.tar.gz', 'no-extension', 'x.exe']) {
+      expect(isUploadableType('', name)).toBe(false);
+      expect(isUploadableType('application/octet-stream', name)).toBe(false);
+    }
+  });
+
+  // The extension is consulted ONLY when the mime says nothing. A type we already
+  // refuse is not rescued by naming the file `.md`.
+  it('does not let an extension override a mime we refuse', () => {
+    expect(isUploadableType('application/pdf', 'notes.md')).toBe(false);
+    expect(isUploadableType('application/zip', 'data.json')).toBe(false);
+  });
+
   it('offers the dialects in the file picker, by mime AND by extension', () => {
     // Both are needed: macOS greys out anything the attribute doesn't match, with no
     // "All Files" escape, and platforms disagree about what they call a `.md`.

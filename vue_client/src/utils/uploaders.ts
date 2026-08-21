@@ -1,6 +1,8 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
+import { hasTextDialectExtension } from '../../../shared/textDialects.js';
+
 // Shared shapes for the uploader-management UI (#514). The server projects these
 // from each driver's own `configSchema`, so the client renders a form for a
 // driver it has never heard of — adding a driver is a server-only change.
@@ -167,8 +169,8 @@ export const CAMERA_CAPTURE_TYPES = [
 // gate, and its 415 names the problem ("webm files are not accepted — Lurker takes
 // …"), which is far more useful than a drop that silently does nothing — the bug
 // this replaces.
-export function isUploadableType(mime: string): boolean {
-  return (
+export function isUploadableType(mime: string, filename = ''): boolean {
+  if (
     mime.startsWith('image/') ||
     mime.startsWith('audio/') ||
     mime.startsWith('video/') ||
@@ -178,7 +180,22 @@ export function isUploadableType(mime: string): boolean {
     // files JSON outside `text/` (#788).
     mime.startsWith('text/') ||
     mime === 'application/json'
-  );
+  ) {
+    return true;
+  }
+
+  // ⚠ The filename is the ONLY signal left when the platform has no mime for the
+  // extension. Windows registers none for `.md`, so a dragged README arrives as `''`
+  // or `application/octet-stream` — and without this the file is silently ignored
+  // right here, one layer ABOVE the server's filename fallback, which never gets to
+  // see it. The picker path doesn't share this gate, so the bug looked like "drag and
+  // drop is broken on Windows only" while picking the same file worked.
+  //
+  // Bounded to the dialect extensions rather than "let every unknown type through":
+  // a stray `.dmg` drag should still do nothing, not start an upload that 415s. Same
+  // shared table the server labels from, so the two can't drift.
+  if (!mime || mime === 'application/octet-stream') return hasTextDialectExtension(filename);
+  return false;
 }
 
 /** A Font Awesome icon for an upload with no thumbnail, from its MIME. The recent-
