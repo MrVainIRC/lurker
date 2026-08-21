@@ -119,7 +119,12 @@ export function missingRequired(
 export const ACCEPTED_FILE_TYPES = [
   'image/*',
   'text/plain',
+  'text/markdown',
+  'application/json',
   '.txt',
+  '.md',
+  '.markdown',
+  '.json',
   'video/mp4',
   'video/quicktime',
   'video/x-m4v',
@@ -167,7 +172,12 @@ export function isUploadableType(mime: string): boolean {
     mime.startsWith('image/') ||
     mime.startsWith('audio/') ||
     mime.startsWith('video/') ||
-    mime === 'text/plain'
+    // Any text/* dialect, not just text/plain: the server takes signature-less UTF-8
+    // whatever the browser called it, and this gate's job is only to ignore things
+    // that obviously aren't uploads. `application/json` needs naming because IANA
+    // files JSON outside `text/` (#788).
+    mime.startsWith('text/') ||
+    mime === 'application/json'
   );
 }
 
@@ -179,7 +189,9 @@ export function iconForMime(mime: string | null | undefined): string {
   if (m.startsWith('video/')) return 'fa-file-video';
   if (m.startsWith('audio/')) return 'fa-file-audio';
   if (m.startsWith('image/')) return 'fa-file-image';
-  if (m.startsWith('text/')) return 'fa-file-lines';
+  // JSON is a text file IANA files under `application/` (#788) — without this it
+  // falls to the generic page glyph the rest of this function exists to avoid.
+  if (m.startsWith('text/') || m === 'application/json') return 'fa-file-lines';
   return 'fa-file';
 }
 

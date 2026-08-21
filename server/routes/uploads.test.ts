@@ -167,6 +167,48 @@ describe('POST /api/uploads', () => {
     expect(row.thumbnail_url).toBeUndefined();
   });
 
+  // #788, end to end. These bytes always went through — a `.md` is signature-less
+  // UTF-8, exactly what the text branch takes — but came back as `.txt`, and the
+  // recorded mime lost the one thing telling an editor how to read the file.
+  it('keeps a markdown or JSON upload under its own name and mime', async () => {
+    const cases: [string, string, string, string][] = [
+      ['README.md', 'text/markdown', 'md', 'text/markdown'],
+      ['data.json', 'application/json', 'json', 'application/json'],
+      // The Windows gap: no registered mime for `.md`, so the claim arrives as plain
+      // text and the filename is the only signal left.
+      ['notes.md', 'text/plain', 'md', 'text/markdown'],
+    ];
+    for (const [filename, contentType, ext, mime] of cases) {
+      const res = await agent
+        .post('/api/uploads')
+        .attach('image', Buffer.from('# notes — ünïcodé\n'), { filename, contentType });
+      expect({ filename, status: res.status }).toEqual({ filename, status: 200 });
+      expect(res.body.url).toMatch(new RegExp(`\\.${ext}$`));
+
+      const list = await agent.get('/api/uploads');
+      const row = list.body.items.find((r: { id: number }) => r.id === res.body.id);
+      expect({ filename, mime: row.mime }).toEqual({ filename, mime });
+      // …and it is findable under the filter it belongs to, which for JSON only works
+      // because the kind clause names the mime explicitly (shared/uploadKinds.ts).
+      const filtered = await agent.get('/api/uploads?kind=text');
+      expect(filtered.body.items.map((r: { id: number }) => r.id)).toContain(res.body.id);
+    }
+  });
+
+  // The relaxation is bounded by the dialect table, not by the caller. An `.html` that
+  // decodes as UTF-8 is still text, and must never name the key we serve.
+  it('will not let an unlisted extension become the served one', async () => {
+    const res = await agent
+      .post('/api/uploads')
+      .attach('image', Buffer.from('<b>not markup to us</b>'), {
+        filename: 'evil.html',
+        contentType: 'text/html',
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.url).toMatch(/\.txt$/);
+    expect(res.body.url).not.toContain('html');
+  });
+
   it('preserves an animated GIF (no re-encode)', async () => {
     // sharp().gif() above produces a single-frame GIF, which the pipeline
     // re-encodes as JPEG. The 'animated bypass' branch is exercised when

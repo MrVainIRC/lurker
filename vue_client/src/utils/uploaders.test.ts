@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { describe, it, expect } from 'vitest';
-import { hasUploaderChoice, iconForMime, isUploadableType } from './uploaders.js';
+import {
+  ACCEPTED_FILE_TYPES,
+  hasUploaderChoice,
+  iconForMime,
+  isUploadableType,
+} from './uploaders.js';
 
 describe('hasUploaderChoice', () => {
   // The bug this exists to prevent: on app.lurker.chat there is exactly ONE
@@ -32,6 +37,15 @@ describe('iconForMime', () => {
     expect(iconForMime('image/png')).toBe('fa-file-image');
     expect(iconForMime(null)).toBe('fa-file');
   });
+
+  // #788. JSON is a text file IANA files under `application/`, so a prefix test drops
+  // it onto the generic page glyph this function exists to get away from.
+  it('gives the text glyph to every dialect the uploader can produce', () => {
+    expect(iconForMime('text/markdown')).toBe('fa-file-lines');
+    expect(iconForMime('application/json')).toBe('fa-file-lines');
+    // Not a blanket application/ pass — that would put the glyph on a PDF.
+    expect(iconForMime('application/pdf')).toBe('fa-file');
+  });
 });
 
 describe('isUploadableType', () => {
@@ -43,5 +57,22 @@ describe('isUploadableType', () => {
     expect(isUploadableType('image/png')).toBe(true);
     expect(isUploadableType('text/plain')).toBe(true);
     expect(isUploadableType('application/pdf')).toBe(false);
+  });
+
+  // A dropped `.md` used to be silently ignored here — no upload, no error, nothing
+  // (#788). The picker greying it out was the other half of the same gap.
+  it('accepts the text dialects a file drop can carry', () => {
+    expect(isUploadableType('text/markdown')).toBe(true);
+    expect(isUploadableType('application/json')).toBe(true);
+    // Any text/* — the server takes signature-less UTF-8 whatever it was called.
+    expect(isUploadableType('text/x-python')).toBe(true);
+  });
+
+  it('offers the dialects in the file picker, by mime AND by extension', () => {
+    // Both are needed: macOS greys out anything the attribute doesn't match, with no
+    // "All Files" escape, and platforms disagree about what they call a `.md`.
+    for (const token of ['text/markdown', 'application/json', '.md', '.json']) {
+      expect(ACCEPTED_FILE_TYPES.split(',')).toContain(token);
+    }
   });
 });

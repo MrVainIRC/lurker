@@ -271,7 +271,10 @@ router.post('/', uploadToDisk, async (req: Request, res: Response, next: NextFun
     // the EXIF scrub lives. See services/contentClass.ts.
     let classified: Classification;
     try {
-      classified = await classifyUpload(req.file.path, req.file.mimetype);
+      // The filename rides along only so a `.md`/`.json` keeps its name on platforms
+      // that register no MIME for it (#788). It cannot widen the accepted set, and it
+      // is not where the served extension comes from — see contentClass.ts.
+      classified = await classifyUpload(req.file.path, req.file.mimetype, req.file.originalname);
     } catch (err) {
       if (err instanceof UnsupportedTypeError) {
         res.status(415).json({ error: err.message });

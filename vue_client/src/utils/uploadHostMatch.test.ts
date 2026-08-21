@@ -61,6 +61,10 @@ describe('mediaKindForUrl', () => {
     ['https://x.test/a.mp3', 'audio'],
     ['https://x.test/a.m4a', 'audio'],
     ['https://x.test/a.txt', 'text'],
+    // The dialects the uploader can now mint (#788) open in the in-app reader too.
+    ['https://x.test/a.md', 'text'],
+    ['https://x.test/a.markdown', 'text'],
+    ['https://x.test/a.json', 'text'],
     // VIDEO, deliberately, even though the ones we serve are audio-only voice memos:
     // 3gp can carry a picture, and <video> on audio-only content still plays where
     // <audio> on a real clip would silently drop the video. See uploadHostMatch.ts.

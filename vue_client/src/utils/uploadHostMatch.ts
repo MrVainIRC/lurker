@@ -31,7 +31,12 @@ const EXTENSIONS: Record<MediaKind, readonly string[]> = {
   image: ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.avif', '.bmp'],
   video: ['.mp4', '.mov', '.m4v', '.webm', '.3gp', '.3g2'],
   audio: ['.mp3', '.m4a', '.ogg', '.oga', '.wav', '.flac'],
-  text: ['.txt'],
+  // The text dialects the uploader can now produce (#788), so a `.md` or `.json`
+  // opens in the in-app reader instead of ejecting to a new tab. Worth more than it
+  // looks: the viewer fetches the bytes and decodes them with `Response.text()`,
+  // which is UTF-8 by definition — so it reads correctly even from a host that
+  // serves the file with no charset.
+  text: ['.txt', '.md', '.markdown', '.json'],
 };
 
 export function mediaKindForUrl(rawUrl: string): MediaKind | null {
