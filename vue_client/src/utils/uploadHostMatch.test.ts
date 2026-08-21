@@ -61,10 +61,6 @@ describe('mediaKindForUrl', () => {
     ['https://x.test/a.mp3', 'audio'],
     ['https://x.test/a.m4a', 'audio'],
     ['https://x.test/a.txt', 'text'],
-    // The dialects the uploader can now mint (#788) open in the in-app reader too.
-    ['https://x.test/a.md', 'text'],
-    ['https://x.test/a.markdown', 'text'],
-    ['https://x.test/a.json', 'text'],
     // VIDEO, deliberately, even though the ones we serve are audio-only voice memos:
     // 3gp can carry a picture, and <video> on audio-only content still plays where
     // <audio> on a real clip would silently drop the video. See uploadHostMatch.ts.
@@ -98,6 +94,21 @@ describe('mediaKindForUrl', () => {
     'https://x.test/',
     'not-a-url',
   ])('leaves %s unclassified', (url) => {
+    expect(mediaKindForUrl(url)).toBeNull();
+  });
+
+  // ⚠ Regression guard, NOT an oversight. The uploader mints `.md` and `.json`
+  // (#788) and it is tempting to list them here so our own upload opens in-app —
+  // but this table judges arbitrary chat links, and those extensions are
+  // overwhelmingly PAGE urls. Listing them swallows the click on a GitHub blob and
+  // lands the user on "could not read this file" instead of GitHub, and makes
+  // previewUrls count the same link as media so it loses its preview card. See the
+  // note in uploadHostMatch.ts before changing this.
+  it.each([
+    'https://github.com/o/r/blob/main/README.md',
+    'https://x.test/docs/guide.markdown',
+    'https://api.x.test/v1/users.json',
+  ])('leaves %s alone rather than swallowing the click', (url) => {
     expect(mediaKindForUrl(url)).toBeNull();
   });
 
