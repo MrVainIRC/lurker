@@ -83,6 +83,16 @@ Write a free-form note. Pass an empty string to delete. Notes are capped at
 4096 chars. Writes fan out to any open browser tabs so the UI reflects the
 change immediately.
 
+### `set_relay_bot` _(read-write)_
+
+Mark or unmark a nick as a relay/bridge bot (#277). When marked, messages from
+that bot are re-attributed to the speaker embedded in its envelope — `[Discord]
+<alice> hi` is shown as from `alice`. Pass `marked: false` to clear the mark.
+An optional `pattern` overrides the built-in envelope formats with a template
+using `{source}`, `{nick}` and `{message}`; it must contain `{nick}` and
+`{message}`. Returns the stored `{ networkId, nick, marked, pattern }`, echoing
+the canonical stored casing, and syncs the change to the user's open tabs.
+
 ### `send_message` _(read-write)_
 
 Send a PRIVMSG to a channel or peer. Returns
@@ -94,6 +104,12 @@ branch on the value instead of catching.
 
 Send a CTCP ACTION (`/me ...`). Same shape and error semantics as
 `send_message`.
+
+### `send_notice` _(read-write)_
+
+Send a NOTICE to a channel or peer. Same shape and error semantics as
+`send_message`, with NOTICE conventions — no auto-reply is expected, and bots
+conventionally use it for output that should not trigger further bots.
 
 ### `send_raw` _(read-write)_
 
