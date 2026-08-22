@@ -3383,6 +3383,29 @@ export class IrcConnection {
     return this.joinedFoldedCache.has(foldTargetFor(this.network.id, name));
   }
 
+  /** The live ChannelState for `name`, resolved the same fold-aware way
+   *  isChannelJoined resolves membership (#707). Callers that need the
+   *  channel's CONTENTS (topic, members) rather than a yes/no must come
+   *  through here rather than the idiomatic-looking
+   *  `channels.get(name.toLowerCase())`, which has both of that probe's
+   *  failure modes: it misses a fold-variant spelling of a channel we are in
+   *  (`#foo{bar}` asked, joined as `#foo[bar]`), and it over-folds Unicode
+   *  (`#Ärger` resolving to its distinct rfc1459 twin `#ärger`). Folding both
+   *  sides is the comparison that's right everywhere, so this agrees with
+   *  isChannelJoined by construction — same fold, same set — which a raw-probe
+   *  fast path would silently break in exactly the over-folding case.
+   *
+   *  Deliberately a scan, not an index: it walks the JOINED channels (a
+   *  handful) and backs one-shot lookups, not the per-buffer loops
+   *  isChannelJoined's cached index exists for. */
+  channelState(name: string): ChannelState | undefined {
+    const folded = foldTargetFor(this.network.id, name);
+    for (const ch of this.channels.values()) {
+      if (foldTargetFor(this.network.id, ch.name) === folded) return ch;
+    }
+    return undefined;
+  }
+
   upsertChannel(name: string): ChannelState {
     const key = name.toLowerCase();
     let ch = this.channels.get(key);

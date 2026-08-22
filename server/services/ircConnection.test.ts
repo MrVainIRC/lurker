@@ -3050,6 +3050,28 @@ describe('CASEMAPPING capture + refold (#707)', () => {
     expect(conn.isChannelJoined('#Ärger')).toBe(false);
     expect(conn.isChannelJoined('#elsewhere')).toBe(false);
   });
+
+  it('channelState resolves the live channel under the declared mapping', () => {
+    // The contents counterpart to isChannelJoined: consumers that need the
+    // topic or member list (the MCP get_topic / list_members verbs) must
+    // resolve a fold-variant spelling to the SAME ChannelState, or they
+    // report an empty channel for one we are demonstrably in.
+    const { conn } = connFor('casemap-state');
+    const ch = conn.upsertChannel('#foo[bar]');
+    ch.topic = 'the topic';
+    raw005(conn, 'CASEMAPPING=rfc1459');
+
+    // Exact wire spelling: the fast raw-probe path.
+    expect(conn.channelState('#foo[bar]')).toBe(ch);
+    // Fold variants: only the folded scan finds these.
+    expect(conn.channelState('#foo{bar}')).toBe(ch);
+    expect(conn.channelState('#FOO[BAR]')).toBe(ch);
+    // Agrees with isChannelJoined in both directions, including the
+    // over-folding Unicode case it exists to reject.
+    conn.upsertChannel('#ärger');
+    expect(conn.channelState('#Ärger')).toBeUndefined();
+    expect(conn.channelState('#elsewhere')).toBeUndefined();
+  });
 });
 
 // #716 QA follow-up: a DM opened fresh from the nicklist showed its peer
