@@ -94,7 +94,9 @@ watch(queryInput, (val) => {
   autoFillFetched = 0; // New filter — let auto-fill work again.
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
-    store.loadInitial();
+    // skipIfSameFilter: this watcher fires on no-op input changes too (a
+    // trailing space, a half-typed filter token) — don't blank + refetch.
+    store.loadInitial(true);
   }, 200);
 });
 onBeforeUnmount(() => {

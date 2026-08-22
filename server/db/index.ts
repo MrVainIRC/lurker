@@ -2125,6 +2125,43 @@ if (schemaVersion < 16 && tableExists('channels')) {
   }
 }
 
+// The search-filter indexes: filter-only searches (from:/in:/on: with no free
+// text — searchMessages in db/messages.ts) must satisfy `ORDER BY id DESC
+// LIMIT n` from the messages table, and before these existed a from: search
+// was a full rowid-desc scan whose stopping point depended on how recently the
+// nick spoke (a typo'd nick scanned the whole table, every time).
+//
+// idx_messages_net serves on:-only; idx_messages_net_nick serves every
+// nick-filtered shape ((network_id, nick) equality prefix, `id DESC` for the
+// ORDER BY and the `before` cursor, the rest payload-only so wrong-buffer /
+// non-chat / ignored / mirrored rows are rejected in-index — same recipe as
+// idx_messages_buf_unread above). COLLATE NOCASE on the indexed column is
+// load-bearing: searchMessages compares `nick COLLATE NOCASE`, and an index
+// without the matching collation is invisible to that predicate.
+//
+// These two are a PAIR and idx_messages_net must be created first: with only
+// the nick index present the planner uses its bare network_id prefix for
+// on:-only queries, which has no id-ordering (nick sits between network_id and
+// id), so it gathers and sorts the network's entire history — measurably worse
+// than the full scan it replaced. messagesEqp.test.ts pins both plans.
+//
+// One-shot and non-resumable like the buf_unread build; a sort per index
+// (~2.5s + ~14s measured on a 2M-row database on NVMe), run once.
+if (
+  (!indexExists('idx_messages_net') || !indexExists('idx_messages_net_nick')) &&
+  db.prepare(`SELECT 1 FROM messages LIMIT 1 OFFSET ?`).get(INDEX_BUILD_WARN_ROWS)
+) {
+  console.warn(
+    `[db] building the search-filter indexes — one-time, blocks startup, not resumable. ` +
+      `Do not kill the process.`,
+  );
+}
+db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_net
+         ON messages(network_id, id DESC, type, from_ignored, mirrored)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_net_nick
+         ON messages(network_id, nick COLLATE NOCASE, id DESC,
+                     buffer_id, type, from_ignored, mirrored)`);
+
 // --- v18: satellite tables onto buffer_id (#695) -----------------------------
 //
 // The six per-buffer view-state tables (read pointers, input history, pins,

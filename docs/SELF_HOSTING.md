@@ -48,6 +48,7 @@ Everything Lurker persists lives in `./data/`:
 
 - `lurker.db` (and `-shm`, `-wal` files) — IRC history, settings, users, etc.
 - `session-secret.key` — the secret used to sign session cookies. Backing this up means existing browser sessions survive a restore.
+- `preview-cache/` — only if you enabled [preview image caching](#caching-preview-images-required-for-video-posters), and worth **excluding**: it's up to 2 GiB of re-fetchable bytes that would otherwise land in every backup. Restoring without it costs a re-fetch and nothing else.
 
 A `cp -r data/ data-backup-$(date +%F)/` (with the server stopped, to avoid copying mid-write WAL files) is sufficient. If you need a hot copy, use the SQLite `.backup` command:
 
@@ -231,6 +232,11 @@ card (title, description, image — the way Slack or Discord do it); a link
 straight to an image renders inline; and a link to a **video or audio file**
 renders a poster frame that plays in place when clicked.
 
+⚠ That last one needs one more setting: **video posters require the byte cache**
+(`LURKER_PREVIEW_CACHE_MODE=local`). See
+[Caching preview images](#caching-preview-images-required-for-video-posters)
+below — without it, video links get a card with no frame on it.
+
 It's off by default because it makes your deployment fetch third-party URLs that
 appear in chat — a behavior an operator should choose, not inherit.
 
@@ -244,7 +250,21 @@ your database, and it never dials a stranger's URL or runs an image/video decode
 to be thrown away if it's ever compromised.
 
 **Setting `LURKER_PREVIEWS_URL` to point at a running decoder is the entire enable
-switch** — there's no separate on/off flag. Add the service alongside Lurker:
+switch** — there's no separate on/off flag.
+
+If you run the stock `docker-compose.yml`, there's a ready-made overlay that adds
+the decoder and sets that variable for you:
+
+```bash
+curl -O https://raw.githubusercontent.com/amiantos/lurker/main/docker-compose.previews.yml
+docker compose -f docker-compose.yml -f docker-compose.previews.yml up -d
+```
+
+(Add `-f docker-compose.caddy.yml` too if you front Lurker with Caddy.) On a
+DigitalOcean droplet, [`ENABLE_LINK_PREVIEWS="true"`](digitalocean.md) in the
+deploy script does all of this — including the hardening below — unattended.
+
+If you keep your own compose file, the service is this:
 
 ```yaml
 services:
@@ -302,21 +322,89 @@ straight to the origin, the one request the reader deliberately made.
 runs on an ordinary Docker network. The in-process SSRF guard is still active, so
 a malicious _URL_ is refused either way — what you give up is protection against a
 malicious _process_ (an RCE in the decoder reaching your LAN). For a trusted
-group that's a fair trade; to close it, drop the `ALLOW_PRIVATE` line and instead
-firewall the decoder so it can reach the internet but not private ranges. On a
-Linux host that's `DOCKER-USER` rules dropping traffic from the decoder's subnet
+group that's a fair trade; to close it, firewall the decoder so it can reach the
+internet but not private ranges, and let the self-test run.
+
+On a Linux host, [`deploy/previews-egress.sh`](https://github.com/amiantos/lurker/blob/main/deploy/previews-egress.sh)
+does that for you:
+
+```bash
+# with LURKER_PREVIEWS_ALLOW_PRIVATE=0 in a .env beside your compose file
+curl -O https://raw.githubusercontent.com/amiantos/lurker/main/deploy/previews-egress.sh
+chmod +x previews-egress.sh
+sudo ./previews-egress.sh --install
+```
+
+Two things to set alongside it:
+
+- **Stop skipping the self-test.** The overlay reads
+  `LURKER_PREVIEWS_ALLOW_PRIVATE` from your `.env`, so `=0` there is enough. If
+  you wrote your own compose file from the block above, that hardcoded
+  `- LURKER_PREVIEWS_ALLOW_PRIVATE=1` wins over any `.env` — delete the line.
+- **Give the self-test a target that answers.** Its built-in probes are the
+  cloud metadata address and the bridge gateway's `:22`/`:80`; on a box with no
+  sshd and nothing on `:80` they all time out whether or not your rules exist,
+  and it passes vacuously. Name something private you know is listening —
+  usually your Docker host's LAN address — via
+  `LURKER_PREVIEWS_SELFTEST_TARGETS=192.168.1.10:22`.
+
+The script adds `DOCKER-USER` rules dropping traffic from the decoder's address
 to `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` and
-`100.64.0.0/10`, plus an `INPUT` rule for the host itself. With those in place the
-self-test passes and the container refuses to serve if they ever lapse. (This is
-exactly what the hosted fleet does per-cell.)
+`100.64.0.0/10`, plus an `INPUT` rule for the host itself (⚠ container→host
+traffic never reaches `DOCKER-USER`, so forward rules alone leave your own sshd
+reachable from the container that parses hostile input). Replies to Lurker are
+allowed by connection state rather than by subnet, so the decoder can answer
+Lurker but cannot dial it. `--install` adds a systemd unit that re-applies
+everything on boot and whenever Docker restarts. Then it restarts the decoder
+and reads back its verdict, so you know it worked.
 
-#### Caching preview images (optional)
+⚠ **DNS is deliberately allowed** — port 53 to any address. Without it, a host
+whose resolver is a LAN address (a home router, a Pi-hole, systemd-resolved
+pointing at either) resolves nothing, every preview fails, and the self-test
+still passes, because it probes IP literals and cannot see DNS at all. What it
+grants a compromised decoder is talking to DNS servers; not ssh, not an internal
+API, not the metadata service. To close even that, give the decoder public
+resolvers of its own with `dns:` in the overlay and delete the two port-53
+rules.
 
-Without a cache this already works — the server just re-fetches an image when
-nobody's browser has it cached. `LURKER_PREVIEW_CACHE_MODE` trades a little disk
-or a bucket for not re-fetching popular images:
+Re-run the script after two things:
 
-- **`off`** (default) — fetch through, store nothing.
+- **Anything that recreates the decoder container.** The rules are scoped to the
+  address Docker gave it, and an update can hand it a new one. This failure is
+  loud: the self-test stops passing, the decoder refuses to serve, and previews
+  report themselves unavailable while everything else carries on.
+- **Any change to a host firewall that owns the filter table** (`ufw allow …`,
+  `firewall-cmd`). A reload rewrites `INPUT` and takes the host-protection rule
+  with it. ⚠ This one is _not_ loud — the decoder only re-tests its containment
+  when it starts — so it is the one case where you have to remember. The script
+  warns at the end when it sees ufw or firewalld running.
+
+(This is what the hosted fleet does per-cell, and why.)
+
+#### Caching preview images (required for video posters)
+
+For links and images this is a tuning knob: without a cache everything still
+works, the server just re-fetches an image when nobody's browser has it cached.
+**For video and audio it is the difference between a poster frame and a bare
+card**, so if you want the feature described at the top of this section, turn it
+on.
+
+Why a video needs it when an image doesn't: a poster is the one preview image
+with **no origin URL**. The decoder produces those bytes from the video itself,
+so they exist nowhere else on the internet — if your instance has nowhere to put
+them, there is nothing to serve later. The server is consistent about that
+rather than half-working: with the cache off it doesn't ask the decoder for a
+poster at all, won't record one against the link, and its poster route answers 404. The card renders without a frame and nothing logs, because a posterless
+card is a supported state.
+
+⚠ **Turning it on doesn't backfill.** A video someone pasted while the cache was
+off is remembered as posterless for a week (the success TTL); it grows a frame
+once that entry expires and someone posts the link again.
+
+`LURKER_PREVIEW_CACHE_MODE` trades a little disk or a bucket for this, and for
+not re-fetching popular images:
+
+- **`off`** (default) — fetch through, store nothing. No video posters.
 - **`local`** — the sensible self-host choice. Cached bytes live in a directory
   next to the database (2 GiB cap by default, least-recently-used eviction).
   It's a cache, not data: safe to delete while the server is stopped.
@@ -325,11 +413,18 @@ or a bucket for not re-fetching popular images:
   ships zero bytes for an image it has already fetched. This one has real
   operational requirements — the objects are publicly readable, the base URL
   must be https, and **you** own eviction via a lifecycle rule on the bucket.
-- **`dropper`** — the hosted-fleet mode; not for self-hosters.
+
+Posters work under `local` or `s3` — the gate is "a cache exists", not `local`
+specifically.
 
 Misconfiguration is never fatal: a bad cache config logs one warning, caching
-turns off, and previews keep working. The full per-mode reference — every
-variable, the s3 caveats, and the reasoning — lives in
+turns off, and previews keep working.
+
+Every variable is carried as a commented block in `docker-compose.previews.yml`,
+on the `lurker` service — storing bytes needs credentials, and the container that
+parses hostile input is the last place to keep any, so the decoder hands bytes
+back and Lurker decides where they go. The full per-mode reference — every field,
+the s3 caveats, and the reasoning — lives in
 [`.env.example`](https://github.com/amiantos/lurker/blob/main/.env.example),
 which is worth reading in full before turning on `s3`.
 

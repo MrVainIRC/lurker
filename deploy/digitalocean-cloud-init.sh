@@ -63,11 +63,46 @@ ADMIN_EMAIL=""
 # signal to switch.
 ENABLE_IDENTD=""
 
+# ─── Optional: link previews & inline media ─────────────────────────────────
+#
+# Set to "true" to also run `lurker-previews`, the decoder that makes pasted
+# links unfurl into cards, images render inline, and videos show a poster
+# frame. It is a SECOND container by design: it does all the fetching and all
+# the media parsing, so the container holding your database and your users'
+# sessions never dials a URL a stranger chose.
+#
+# Off by default because it makes your droplet fetch third-party URLs that
+# appear in chat — your bandwidth and your IP's reputation, so it should be a
+# decision. Turning it on here only enables it for the INSTANCE; each user
+# still opts in under Settings → Chat, where both switches also default to off.
+#
+# This script gives the decoder the full hosted-fleet treatment rather than the
+# relaxed self-host one: a private bridge of its own, iptables rules that let it
+# reach the public internet and nothing private (not the VPC, not your other
+# containers, not this droplet), a systemd unit that re-applies them on every
+# boot, and the decoder's own boot self-test left ON — so if the containment
+# ever lapses it refuses to serve instead of quietly parsing hostile bytes with
+# a route to your infrastructure.
+#
+# ⚠ Budget RAM for it: the decoder is capped at 512 MB and ffmpeg uses that
+# ceiling when it decodes a poster. On the smallest (1 GB) droplet it will lean
+# on swap; 2 GB is the comfortable size once this is on.
+ENABLE_LINK_PREVIEWS=""
+
 # ─── No edits needed below this line ────────────────────────────────────────
 
 set -euo pipefail
 
-REPO_RAW="https://raw.githubusercontent.com/amiantos/lurker/main"
+# The branch or tag every file below is fetched from. `main` is what an operator
+# wants, and what cloud-init gets when this is pasted unedited.
+#
+# ⚠ It is a knob because a change to THIS script cannot otherwise be tested
+# before it is merged: everything comes from raw.githubusercontent, so a file a
+# branch ADDS 404s here until it lands on main, and the deploy dies at the curl.
+# Point this at the branch to test one — `LURKER_REPO_REF=my-branch bash
+# digitalocean-cloud-init.sh` works too, for a re-run on a droplet by hand.
+REPO_REF="${LURKER_REPO_REF:-main}"
+REPO_RAW="https://raw.githubusercontent.com/amiantos/lurker/${REPO_REF}"
 INSTALL_DIR="/opt/lurker"
 DEPLOY_LOG="/var/log/lurker-deploy.log"
 
@@ -78,6 +113,11 @@ exec > >(tee -a "$DEPLOY_LOG") 2>&1
 log() { echo "[lurker-deploy $(date -u +%H:%M:%S)] $*"; }
 
 log "=== Lurker deploy started $(date -u +%FT%TZ) ==="
+# Say it once, up front: a deploy fetching from somewhere other than main is a
+# test of an unmerged change, and the log is the only place that fact survives.
+if [ "$REPO_REF" != "main" ]; then
+  log "⚠ Fetching from ref '${REPO_REF}', NOT main — this is a branch test."
+fi
 
 # Both settings are mandatory. Fail early and loudly — before installing
 # anything — rather than half-deploying; the log is the only place this
@@ -215,6 +255,18 @@ deploy() {
 
   local compose_files="docker-compose.yml:docker-compose.caddy.yml"
 
+  # The link-preview decoder: its own overlay (a second container on a private
+  # bridge) plus the script that contains its egress. Both are fetched here so
+  # that later `docker compose pull` + `up -d` updates keep the service, and so
+  # the egress script is on disk for the systemd unit to re-run at boot.
+  if [ "$ENABLE_LINK_PREVIEWS" = "true" ]; then
+    log "Link previews enabled — fetching the decoder overlay and egress script."
+    curl -fsSL -o docker-compose.previews.yml "$REPO_RAW/docker-compose.previews.yml"
+    curl -fsSL -o previews-egress.sh "$REPO_RAW/deploy/previews-egress.sh"
+    chmod +x previews-egress.sh
+    compose_files="${compose_files}:docker-compose.previews.yml"
+  fi
+
   # identd overlay, layered AFTER Caddy (which resets the lurker ports), so it
   # re-publishes :113 and turns on the built-in identd while the web port stays
   # internal to Caddy. Generated locally so `pull` + `up -d` updates keep it.
@@ -243,9 +295,58 @@ ADMIN_EMAIL=${ADMIN_EMAIL}
 COMPOSE_FILE=${compose_files}
 EOF
 
+  # ⚠ 0, not unset: the overlay defaults this to 1 (skip the self-test), which
+  # is the right default for a self-host on a plain Docker network but the
+  # wrong one here — this droplet gets real egress rules a few steps below, so
+  # the decoder should check them, and keep checking them on every start.
+  if [ "$ENABLE_LINK_PREVIEWS" = "true" ]; then
+    echo "LURKER_PREVIEWS_ALLOW_PRIVATE=0" >> .env
+    # ⚠ The byte cache is not a tuning knob here — VIDEO POSTERS REQUIRE IT.
+    # A poster is the one preview image with no origin URL (the decoder makes
+    # it out of the video), so with nowhere to store it the server doesn't ask
+    # for one and video links render as bare cards. Since this deploy advertises
+    # poster frames, it turns the cache on: a 2 GiB LRU directory inside the
+    # ./data volume, which is a cache and not data — safe to delete with the
+    # server stopped.
+    echo "LURKER_PREVIEW_CACHE_MODE=local" >> .env
+    # ⚠ Give the self-test something that is genuinely LISTENING. Its built-in
+    # probes are the metadata address and the bridge gateway, and a probe that
+    # nothing answers passes whether or not the rules are in force. This
+    # droplet's VPC address has sshd on it, and it is exactly the kind of
+    # neighbour we never want the decoder to reach — so it is the strongest
+    # probe available here. Skipped silently if the droplet has no VPC
+    # interface; the built-in probes still run.
+    local vpc_ip
+    vpc_ip=$(curl -fsS --max-time 5 \
+      http://169.254.169.254/metadata/v1/interfaces/private/0/ipv4/address 2>/dev/null || true)
+    if [ -n "$vpc_ip" ]; then
+      echo "LURKER_PREVIEWS_SELFTEST_TARGETS=${vpc_ip}:22" >> .env
+    fi
+  fi
+
   compose pull
   compose up -d
   compose ps
+}
+
+# The decoder's containment: iptables rules scoped to its address so it can
+# reach the public internet and nothing private, plus a systemd unit that
+# re-applies them on boot and whenever Docker restarts. The script verifies its
+# own work by restarting the decoder and reading the verdict its boot self-test
+# logs — so a failure here is a loud one, in the deploy log, rather than a
+# preview service that works while quietly holding a route to this droplet.
+contain_previews() {
+  [ "$ENABLE_LINK_PREVIEWS" = "true" ] || return 0
+  log "Containing the link-preview decoder's egress..."
+  if "$INSTALL_DIR/previews-egress.sh" --install; then
+    log "Link previews are ready — the decoder is contained and serving."
+  else
+    # Not fatal to the deploy: Lurker itself is up and everything else works.
+    # Previews will report themselves unavailable until this is sorted.
+    log "WARNING: the decoder is NOT contained and is refusing to serve, so"
+    log "previews will stay blank. Lurker is otherwise fine. Re-run it with:"
+    log "  ${INSTALL_DIR}/previews-egress.sh --install"
+  fi
 }
 
 # ── Run ─────────────────────────────────────────────────────────────────────
@@ -257,6 +358,11 @@ wait_for_docker
 ensure_swap
 deploy
 configure_firewall
+# ⚠ AFTER configure_firewall, never before: `ufw --force enable` rewrites the
+# filter table wholesale, which would take the decoder's rules with it. The
+# decoder is up by now and refusing to serve (its self-test found this droplet
+# reachable, correctly); the script below fixes that and restarts it.
+contain_previews
 
 PUBLIC_IP=$(curl -fsS --max-time 5 \
   http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address \
@@ -271,4 +377,9 @@ log "admin account, opt in per device from Lurker's settings."
 if [ "$ENABLE_IDENTD" = "true" ]; then
   log "Built-in identd is running on :113 — connect to a network and check that"
   log "your ident shows up verified (no leading ~) via /whois on yourself."
+fi
+if [ "$ENABLE_LINK_PREVIEWS" = "true" ]; then
+  log "Link previews are enabled for the instance, which is only half the gate:"
+  log "each user turns on Link previews and Inline media in Settings → Chat."
+  log "Decoder health: docker logs lurker-previews"
 fi

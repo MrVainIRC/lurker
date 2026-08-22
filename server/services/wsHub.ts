@@ -3637,6 +3637,12 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         break;
       }
       case 'search': {
+        // DEPRECATED (#676): superseded by GET /api/search, which calls the
+        // same verb — see docs/MIGRATION_SEARCH_REST.md. Kept for third-party
+        // clients; removal is tracked separately and will be a protocol
+        // version bump. Don't add features here — new search capability lands
+        // in the verb, and this shim just keeps forwarding.
+        //
         // Delegates to the search_messages verb. The boundary check above
         // already validated networkId ownership when a network filter was
         // present; searchMessages itself self-scopes the global case to the

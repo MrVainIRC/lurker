@@ -253,6 +253,42 @@ describe('uploads — browser filters', () => {
     expect(uploads.recent.map((u) => u.filename)).toEqual(['shot.png']);
   });
 
+  // ⚠ The optimistic filter and the server's WHERE clause are now ONE definition
+  // (shared/uploadKinds.ts). They used to be two hand-written copies, and the client's
+  // was a mime PREFIX test — so a `.json`, whose mime IANA files under `application/`,
+  // was excluded here while the server's clause returned it (#788). The row would fail
+  // to appear, then arrive on the next reload, which reads as a bug in the uploader.
+  it('inserts a .json under the text filter, matching what a refetch would return', async () => {
+    const uploads = useUploadsStore();
+    await uploads.setFilters({ query: '', kind: 'text' });
+
+    apiMultipart.mockResolvedValue({
+      id: 20,
+      url: 'https://x.test/d.json',
+      mime: 'application/json',
+    });
+    await uploads.upload(new Blob(['{}']), 'data.json');
+    expect(uploads.recent.map((u) => u.filename)).toEqual(['data.json']);
+
+    apiMultipart.mockResolvedValue({ id: 21, url: 'https://x.test/r.md', mime: 'text/markdown' });
+    await uploads.upload(new Blob(['# hi']), 'README.md');
+    expect(uploads.recent.map((u) => u.filename)).toEqual(['README.md', 'data.json']);
+  });
+
+  // The shared rule must not have widened `text` into "anything non-media".
+  it('still excludes a non-text application/ mime from the text filter', async () => {
+    const uploads = useUploadsStore();
+    await uploads.setFilters({ query: '', kind: 'text' });
+
+    apiMultipart.mockResolvedValue({
+      id: 22,
+      url: 'https://x.test/d.pdf',
+      mime: 'application/pdf',
+    });
+    await uploads.upload(new Blob(['x']), 'doc.pdf');
+    expect(uploads.recent).toEqual([]);
+  });
+
   it('respects the search term when optimistically inserting', async () => {
     const uploads = useUploadsStore();
     await uploads.setFilters({ query: 'holiday' });

@@ -105,11 +105,11 @@ onMounted(() => {
     store.$patch({
       query: queryInput.value,
       results: [],
-      hasMore: false,
       nextBefore: null,
       loading: false,
       error: '',
       searched: false,
+      lastUrl: null,
       scrollTop: 0,
     });
   }
