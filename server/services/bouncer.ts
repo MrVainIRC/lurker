@@ -1735,6 +1735,14 @@ class BouncerSession {
       this.numeric('412', ':No text to send');
       return;
     }
+    // Upstream in reconnect backoff: ircManager refuses the write rather than
+    // persisting a message that never reaches IRC (#809). Say so here, or the
+    // line vanishes with no feedback at all — and skip registerEcho below, whose
+    // keys would otherwise sit in the pending list until they time out.
+    if (conn.state !== 'connected') {
+      this.notice(`Upstream '${this.network?.name}' is ${conn.state} — message not sent.`);
+      return;
+    }
     for (const target of targets) {
       const isAction = text.startsWith('\u0001ACTION ') || text.startsWith('\u0001ACTION\u0001');
       if (text.startsWith('\u0001') && !isAction) {

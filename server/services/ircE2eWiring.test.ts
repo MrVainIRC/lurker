@@ -71,6 +71,7 @@ describe('outbound encrypt (ircManager.send)', () => {
       client: { user: { nick: 'alice' } },
       supportsMultiline: () => false,
       echoActive: () => false,
+      state: 'connected', // the writable gate (#809) refuses anything else
       noteSentCiphertext: () => {},
       flushE2eRekeys: () => {},
     } as unknown as IrcConnection;
@@ -110,6 +111,7 @@ describe('outbound encrypt (ircManager.send)', () => {
       client: { user: { nick: 'alice' } },
       supportsMultiline: () => false,
       echoActive: () => false,
+      state: 'connected', // the writable gate (#809) refuses anything else
       noteSentCiphertext: () => {},
       flushE2eRekeys: () => {},
     } as unknown as IrcConnection;
@@ -312,6 +314,7 @@ describe('egress refuses cleartext actions/notices on an E2E channel (#2)', () =
       publish,
       publishEphemeral,
       echoActive: () => false,
+      state: 'connected', // the writable gate (#809) refuses anything else
       client: { user: { nick: 'alice' } },
     } as unknown as IrcConnection;
     return { conn, action, notice, publishEphemeral };

@@ -152,6 +152,24 @@ class IrcManager extends EventEmitter {
     return this.byUser.get(userId)?.get(networkId) || null;
   }
 
+  // Resolve a connection we may actually WRITE to. `getConnection() !== null` is
+  // a different question: since the auto-reconnect overhaul a dropped network
+  // keeps its IrcConnection in the map for the whole outage while the retry
+  // controller backs off, so the object outlives the socket. irc-framework's
+  // Connection.write() then returns false and DROPS the line, which is invisible
+  // from here — so anything that reports success (or worse, persists a self row)
+  // off a non-null connection is lying about a message that never left the
+  // process (#809).
+  //
+  // Reads of already-materialised state (topic, membership) deliberately do NOT
+  // go through here: last-known state is stale, not a lie, and refusing it
+  // mid-reconnect would be strictly less useful. See verbs/liveConn.ts, which
+  // delegates here so the writable test has one definition.
+  writableConnection(userId: number, networkId: number): IrcConnection | null {
+    const conn = this.getConnection(userId, networkId);
+    return conn && conn.state === 'connected' ? conn : null;
+  }
+
   listConnections(userId: number): IrcConnection[] {
     return Array.from(this.connectionsForUser(userId).values());
   }
@@ -477,7 +495,14 @@ class IrcManager extends EventEmitter {
   // peers saw N. Splitting on our side and publishing per chunk keeps the
   // local view symmetric with what was actually transmitted.
   send(userId: number, networkId: number, target: string, text: string): boolean {
-    const conn = this.getConnection(userId, networkId);
+    // writableConnection, not getConnection: a network in reconnect backoff still
+    // has a connection object, and every line written to it is silently dropped.
+    // Reporting success there persisted a self row and fanned it out to every
+    // device as sent, forever, for a message that never reached IRC (#809).
+    // Returning false gives the composer its existing not-connected affordance —
+    // a toast, with the typed text kept. Gated ahead of the E2E branch below so a
+    // doomed send can't advance the ratchet or burn a rekey either.
+    const conn = this.writableConnection(userId, networkId);
     if (!conn) return false;
 
     // RPE2E: on an encryption-enabled channel, transmit ciphertext chunks on the
@@ -600,7 +625,8 @@ class IrcManager extends EventEmitter {
   }
 
   action(userId: number, networkId: number, target: string, text: string): boolean {
-    const conn = this.getConnection(userId, networkId);
+    // Same phantom-send gate as send() — see the comment there (#809).
+    const conn = this.writableConnection(userId, networkId);
     if (!conn) return false;
     if (this.refuseCleartextOnE2eChannel(conn, userId, networkId, target, 'action')) return true;
     // Same echo-adoption gating as send() — see the comment there.
@@ -628,7 +654,8 @@ class IrcManager extends EventEmitter {
   // send/action. splitSay applies because NOTICE shares PRIVMSG's length
   // budget.
   notice(userId: number, networkId: number, target: string, text: string): boolean {
-    const conn = this.getConnection(userId, networkId);
+    // Same phantom-send gate as send() — see the comment there (#809).
+    const conn = this.writableConnection(userId, networkId);
     if (!conn) return false;
     if (this.refuseCleartextOnE2eChannel(conn, userId, networkId, target, 'notice')) return true;
     const adoptEcho = conn.echoActive();
