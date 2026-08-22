@@ -21,9 +21,13 @@ export function useNetworkActions() {
   const notify = useNotifyLadder();
   const networks = useNetworksStore();
 
-  function toggleConnection(networkId: number): void {
-    const state = networks.states[networkId]?.state;
-    const p = canDisconnect(state) ? networks.disconnect(networkId) : networks.reconnect(networkId);
+  // ⚠ Takes the decision rather than re-deriving it. buildItems snapshots the state when the
+  // menu OPENS; re-reading it at click time lets the two disagree while the menu sits there —
+  // and it is reachable: right-click during a backoff (item reads "Disconnect"), the reconnect
+  // gate then refuses (paused account, host dropped from the allowlist) and stopReconnecting
+  // settles the state to 'disconnected', so the click on "Disconnect" would fire a RECONNECT.
+  function toggleConnection(networkId: number, offerDisconnect: boolean): void {
+    const p = offerDisconnect ? networks.disconnect(networkId) : networks.reconnect(networkId);
     p.catch((err) => console.error('[useNetworkActions] toggle connection failed', err));
   }
 
@@ -58,7 +62,7 @@ export function useNetworkActions() {
       {
         label: offerDisconnect ? 'Disconnect' : 'Reconnect',
         icon: offerDisconnect ? 'fa-solid fa-plug-circle-xmark' : 'fa-solid fa-plug',
-        onClick: () => toggleConnection(net.id),
+        onClick: () => toggleConnection(net.id, offerDisconnect),
       },
       // Network-wide notification ladder (issue #359): Highlights only (default)
       // / Nothing / Muted — a -network-scoped NONOTIFY(+NOUNREAD) rule covering

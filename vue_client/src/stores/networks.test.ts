@@ -22,8 +22,13 @@ describe('canDisconnect — which action a network state needs', () => {
     expect(canDisconnect('reconnecting')).toBe(true);
   });
 
-  it('offers Disconnect during a connect, which can hang on a handshake', () => {
-    expect(canDisconnect('connecting')).toBe(true);
+  // ⚠⚠ Not 'connecting', though it is equally "Lurker is working on it". setState('connecting')
+  // fires the moment the socket opens — tens of milliseconds after the POST, well inside a
+  // double-click — so a user who clicks Reconnect and impatiently clicks again would hit a
+  // button that had already relabelled itself Disconnect and tear down the connection they just
+  // asked for. Offering Reconnect there re-fires restartNetwork, which is harmless.
+  it('offers Reconnect during a connect, so an impatient double-click is idempotent', () => {
+    expect(canDisconnect('connecting')).toBe(false);
   });
 
   it('offers Reconnect once the network is actually down', () => {

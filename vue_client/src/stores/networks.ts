@@ -69,13 +69,18 @@ export interface ActiveBuffer {
  * network stuck against a dead server therefore had NO reachable stop, which is #785. Turning
  * off `autoconnect` doesn't stop it either — that flag is about boot, not about retries.
  *
- * `connecting` is included for the same reason: a connect that hangs on a TLS handshake is
- * something the user may well want to call off.
+ * ⚠⚠ `connecting` is deliberately NOT included, though it is equally "Lurker is working on it".
+ * `setState('connecting')` fires the moment irc-framework opens the socket — tens of milliseconds
+ * after the POST, well inside a double-click. So a user who clicks Reconnect on a down network and
+ * impatiently clicks again would hit a button that had already relabelled itself Disconnect, and
+ * tear down the connection they just asked for. Before this predicate existed the second click
+ * re-fired restartNetwork harmlessly, and it still does. A hung TLS handshake is real but
+ * transient and self-resolving; the unbounded retry ladder is the stuck state #785 is about.
  *
  * An absent state means we've never heard about this network, which reads as Connect.
  */
 export function canDisconnect(state: string | null | undefined): boolean {
-  return state === 'connected' || state === 'connecting' || state === 'reconnecting';
+  return state === 'connected' || state === 'reconnecting';
 }
 
 export const useNetworksStore = defineStore('networks', {

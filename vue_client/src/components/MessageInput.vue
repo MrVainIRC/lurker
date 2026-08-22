@@ -3431,7 +3431,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // an auto-disconnect.
       const reason = argLine || undefined;
       networks.disconnect(networkId, reason).catch((err) => {
-        localInfo(networkId, target, `/${cmd} failed: ${err.message || 'could not disconnect'}`);
+        localInfo(networkId, target, `/${verb} failed: ${err.message || 'could not disconnect'}`);
       });
       return true;
     }
