@@ -15,12 +15,16 @@ registerVerb({
   description:
     'Send a raw IRC protocol line on a network, exactly as typed — the escape hatch for any ' +
     'IRC command without a dedicated verb (e.g. "MODE #chan +o nick", "KICK #chan bob :spam", ' +
-    '"TOPIC #chan :new topic", "WHOIS bob", "INVITE bob #chan", "OPER user pass"). The line is ' +
-    'sent verbatim with no parsing; do NOT include a trailing CRLF. Powerful and unguarded — it ' +
-    'runs as you, so it can do anything your IRC session can. Server replies (WHOIS, LIST, etc.) ' +
-    'arrive asynchronously; read them afterward with recent_messages on the relevant buffer ' +
-    '(often the server buffer). Returns { ok: false, error: "not-connected" } when the network ' +
-    'is offline.',
+    '"INVITE bob #chan", "OPER user pass"). The line is sent verbatim with no parsing; do NOT ' +
+    'include a trailing CRLF. Powerful and unguarded — it runs as you, so it can do anything ' +
+    'your IRC session can. Do NOT use it for PRIVMSG: send_message applies end-to-end ' +
+    'encryption on channels that have it enabled, and a raw PRIVMSG bypasses that and ' +
+    'transmits cleartext. Prefer the dedicated verb wherever one exists (send_message, ' +
+    'send_notice, send_action, join_channel, part_channel, set_nick, set_topic, whois). ' +
+    "Server replies (WHOIS, LIST, …) arrive asynchronously in the network's server buffer, " +
+    'whose target is the literal ":server:<networkId>" — that buffer is not listed by ' +
+    'list_buffers, so read it by passing the returned `serverBuffer` string to ' +
+    'recent_messages. Returns { ok: false, error: "not-connected" } when the network is offline.',
   scope: 'read-write',
   input: {
     type: 'object',
@@ -43,6 +47,6 @@ registerVerb({
     const conn = ircManager.getConnection(ctx.userId, networkId);
     if (!conn) return { ok: false, error: 'not-connected' };
     conn.raw(line);
-    return { ok: true };
+    return { ok: true, serverBuffer: conn.serverTarget() };
   },
 });

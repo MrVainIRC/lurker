@@ -3,6 +3,7 @@
 
 import { registerVerb } from '../verbRegistry.js';
 import ircManager from '../ircManager.js';
+import { channelArg } from './args.js';
 
 interface VerbContext {
   userId: number;
@@ -27,11 +28,13 @@ registerVerb({
   },
   handler(ctx: VerbContext, input: Record<string, unknown>) {
     const networkId = Number(input.networkId);
-    const channel = typeof input.channel === 'string' ? input.channel.trim() : '';
-    if (!channel) return { ok: false, error: 'empty-channel' };
+    const channel = channelArg(input.channel);
+    if ('error' in channel) return { ok: false, error: channel.error };
     const conn = ircManager.getConnection(ctx.userId, networkId);
     if (!conn) return { ok: false, error: 'not-connected' };
-    const ch = conn.channels.get(channel.toLowerCase());
+    // Fold-aware (#707): a raw channels-map probe reports not-in-channel for a
+    // fold-variant spelling of a channel we're actually in.
+    const ch = conn.channelState(channel.value);
     if (!ch) return { ok: false, error: 'not-in-channel' };
     return { ok: true, channel: ch.name, topic: ch.topic ?? null };
   },

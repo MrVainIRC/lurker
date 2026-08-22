@@ -3,6 +3,7 @@
 
 import { registerVerb } from '../verbRegistry.js';
 import ircManager from '../ircManager.js';
+import { singleToken } from './args.js';
 
 interface VerbContext {
   userId: number;
@@ -27,12 +28,14 @@ registerVerb({
   },
   handler(ctx: VerbContext, input: Record<string, unknown>) {
     const networkId = Number(input.networkId);
-    const nick = typeof input.nick === 'string' ? input.nick.trim() : '';
-    if (!nick) return { ok: false, error: 'empty-nick' };
-    if (/[\s\r\n]/.test(nick)) return { ok: false, error: 'nick-must-be-single-token' };
+    const nick = singleToken(input.nick, {
+      empty: 'empty-nick',
+      malformed: 'nick-must-be-single-token',
+    });
+    if ('error' in nick) return { ok: false, error: nick.error };
     const conn = ircManager.getConnection(ctx.userId, networkId);
     if (!conn) return { ok: false, error: 'not-connected' };
-    conn.raw(`NICK ${nick}`);
+    conn.raw(`NICK ${nick.value}`);
     return { ok: true };
   },
 });

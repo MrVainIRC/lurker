@@ -26,10 +26,10 @@ MCP-aware client at your Lurker, and what tools are available.
 
 ## Scopes
 
-| scope        | what it grants                                                                                                        |
-| ------------ | --------------------------------------------------------------------------------------------------------------------- |
-| `read`       | All read verbs. The token can list networks, browse buffers, fetch backlog, search history, and read your nick notes. |
-| `read-write` | Everything `read` does, plus sending messages, sending CTCP actions, and writing nick notes.                          |
+| scope        | what it grants                                                                                                                                                                                                                                                                                                            |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `read`       | All read verbs. The token can list networks, browse buffers, fetch backlog, search history, and read your nick notes.                                                                                                                                                                                                     |
+| `read-write` | Everything `read` does, plus every write verb: sending messages, notices and CTCP actions, writing nick notes, joining and parting channels, changing your nick, away state and channel topics, connecting and disconnecting networks, and `send_raw` — arbitrary IRC commands (`MODE`, `KICK`, `OPER`, …) issued as you. |
 
 Scopes are coarse on purpose. Per-verb scopes are not implemented because
 the threat model assumes the operator is the only person holding tokens for
@@ -45,8 +45,8 @@ deliberately out of scope.
 
 ## Tools (MCP verbs)
 
-All eight tools come back through `tools/list` with full JSON Schemas for
-their inputs. A read-only token only sees the five read tools.
+All twenty-one tools come back through `tools/list` with full JSON Schemas
+for their inputs. A read-only token only sees the seven read tools.
 
 ### `list_networks` _(read)_
 
@@ -99,10 +99,17 @@ Send a CTCP ACTION (`/me ...`). Same shape and error semantics as
 
 Send a raw IRC protocol line verbatim on a network — the escape hatch for any
 command without a dedicated verb: `MODE #chan +o nick`, `KICK #chan bob :spam`,
-`TOPIC #chan :new topic`, `WHOIS bob`, `INVITE bob #chan`, and so on. No
-parsing, no trailing CRLF. **Powerful and unguarded — it runs as you.** Server
-replies (WHOIS, LIST, …) arrive asynchronously; read them with `recent_messages`
-on the relevant buffer. Same `not-connected` semantics as `send_message`.
+`INVITE bob #chan`, `OPER user pass`, and so on. No parsing, no trailing CRLF.
+**Powerful and unguarded — it runs as you.** Prefer a dedicated verb wherever
+one exists. In particular **do not send `PRIVMSG` this way**: `send_message`
+applies end-to-end encryption on channels that have it enabled, and a raw
+`PRIVMSG` bypasses that and puts cleartext on the wire.
+
+Server replies (WHOIS, LIST, …) arrive asynchronously in the network's server
+buffer, whose target is the literal `:server:<networkId>`. That buffer is
+deliberately absent from `list_buffers`, so the result carries a `serverBuffer`
+field with the exact string to hand to `recent_messages`. Same `not-connected`
+semantics as `send_message`.
 
 ### `join_channel` _(read-write)_
 
@@ -126,30 +133,31 @@ to go away; omit it to come back. Returns `{ ok: true, away }`.
 ### `list_members` _(read)_
 
 List the members currently in a joined channel, with their prefix modes
-(`o`/`h`/`v`/…) and away state. Returns `not-in-channel` if you aren't in it.
+(`o`/`h`/`v`/…) and away state. Sorted by nick and capped at `limit` (default
+200, max 1000) so a large channel can't flood the caller's context; `count` is
+always the true total and `truncated` flags a short page. Returns
+`not-in-channel` if you aren't in it.
 
 ### `whois` _(read-write)_
 
 Send a WHOIS for a nick. The reply arrives asynchronously as numeric lines in
-the network **server buffer** — read it afterward with `recent_messages`.
+the network's server buffer (`:server:<networkId>`, which `list_buffers` does
+not list) — read it afterward by passing the returned `serverBuffer` string to
+`recent_messages`.
 
 ### `connect_network` / `disconnect_network` _(read-write)_
 
 Connect (optionally `force` a fresh reconnect) or disconnect a configured
 network. Connection is asynchronous — watch the server buffer for registration.
+`connect_network` returns `locked-down` when the instance admin does not allow
+that network's host, rather than tearing the connection down and failing.
 
 ### `get_topic` _(read)_ / `set_topic` _(read-write)_
 
-Read or change a joined channel's topic. `set_topic` needs the usual channel
-privileges (+o or a -t channel); the server may reject it.
-
-### `send_dcc_file` _(read-write)_
-
-Offer a file to a peer over DCC SEND. **Sandboxed to your fserve archive**
-(`LURKER_FSERVE_DIR`): `path` is resolved relative to that root and rejected if
-it escapes (symlinks included), so an agent can't exfiltrate arbitrary server
-files. Requires DCC enabled and an fserve root configured. Returns
-`{ ok: true, transferId }` on success.
+Read or change a joined channel's topic. `set_topic` requires an explicit
+`topic`, and an empty string **clears** the topic — it always writes, so use
+`get_topic` to read. It needs the usual channel privileges (+o or a -t
+channel); the server may reject it.
 
 ## Wire format
 

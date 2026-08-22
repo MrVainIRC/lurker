@@ -3,6 +3,7 @@
 
 import { registerVerb } from '../verbRegistry.js';
 import ircManager from '../ircManager.js';
+import { channelArg } from './args.js';
 
 interface VerbContext {
   userId: number;
@@ -28,11 +29,11 @@ registerVerb({
   },
   handler(ctx: VerbContext, input: Record<string, unknown>) {
     const networkId = Number(input.networkId);
-    const channel = typeof input.channel === 'string' ? input.channel.trim() : '';
+    const channel = channelArg(input.channel);
+    if ('error' in channel) return { ok: false, error: channel.error };
     const reason =
       typeof input.reason === 'string' && input.reason.trim() ? input.reason.trim() : undefined;
-    if (!channel) return { ok: false, error: 'empty-channel' };
-    const ok = ircManager.partChannel(ctx.userId, networkId, channel, reason);
+    const ok = ircManager.partChannel(ctx.userId, networkId, channel.value, reason);
     return ok ? { ok: true } : { ok: false, error: 'not-connected' };
   },
 });
