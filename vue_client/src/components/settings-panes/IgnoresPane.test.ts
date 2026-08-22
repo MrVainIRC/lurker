@@ -120,6 +120,31 @@ describe('IgnoresPane — the ALL chip and the NOHIGHLIGHT-only rule (#775)', ()
     expect(sentRule()?.levels).toEqual(['JOINS']);
   });
 
+  // ⚠⚠ toggleLevel used to snap back to ALL when the last granular chip was cleared, which is
+  // half of why the empty state was unreachable. The "selectable and clearable" case above never
+  // clears the LAST chip, so it goes on passing with the snap-back re-added — this is the one
+  // that pins its removal.
+  it('does not snap back to ALL when the last granular chip is cleared', async () => {
+    await setMask(wrapper, 'bob');
+    await chip(wrapper, 'JOINS').trigger('click');
+    await chip(wrapper, 'JOINS').trigger('click');
+    expect(chip(wrapper, 'ALL').attributes('aria-pressed')).toBe('false');
+    await submit(wrapper);
+    expect(sentRule()).toBeNull();
+  });
+
+  // ⚠⚠ The footgun this change newly made reachable. A modifier-only rule with no who/where/what
+  // matches everyone and, being non-hiding, is unbounded — it kills every highlight on every
+  // network while the list shows it as nothing but `*  NOHIGHLIGHT`. The pane already refuses
+  // the ALL-shaped version of the same mistake.
+  it('refuses an unscoped highlight-suppression rule', async () => {
+    await noHighlightBox(wrapper).setValue(true);
+    await chip(wrapper, 'ALL').trigger('click');
+    await submit(wrapper);
+    expect(sentRule()).toBeNull();
+    expect(wrapper.find('p.error.inline').text()).toContain('silence every highlight');
+  });
+
   it('combines hide levels with the modifier — the pairing the fix must not lose', async () => {
     await setMask(wrapper, 'bob');
     await chip(wrapper, 'JOINS').trigger('click');

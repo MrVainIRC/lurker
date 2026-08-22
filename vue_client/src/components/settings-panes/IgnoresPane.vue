@@ -16,8 +16,6 @@
       <code>/ignore</code> command.
     </p>
 
-    <p v-if="formError" class="error inline">{{ formError }}</p>
-
     <p v-if="!ignoreGroups.length" class="muted small">
       No ignores yet. Add one below, right-click a nick in the member list, or type
       <code>/ignore &lt;nick&gt;</code> in any buffer.
@@ -176,6 +174,14 @@
           enter a new duration to reset it.
         </p>
       </div>
+
+      <!-- ⚠ Next to the button, not at the top of the pane. It used to render above the section
+           description and above the whole rule list, so for anyone with a few ignores the
+           explanation for a refused submit was off-screen and the click read as doing nothing.
+           Every one of these errors comes from buildRule, so the form is where they belong —
+           and the empty-levels one below is far likelier to be hit than the regex/duration
+           ones this markup was written for. -->
+      <p v-if="formError" class="error inline">{{ formError }}</p>
 
       <div class="actions">
         <button v-if="editing" class="link" @click="cancelEdit">cancel</button>
@@ -383,6 +389,21 @@ function buildRule(): IgnoreRule | null {
     formError.value = 'that would hide everything — add a mask, channel, or text pattern.';
     return null;
   }
+  // ⚠⚠ The same footgun, in the shape this change newly made reachable. A modifier-only rule
+  // with no who/where/what compiles to matchesNick = () => true with hides:false, and
+  // evaluateIgnores' no-applies branch is unbounded for a non-hiding rule — so it silently kills
+  // every highlight on every network, and the list shows it as nothing but `*  NOHIGHLIGHT`.
+  // Two clicks away from the default form, which is exactly why it needs saying out loud.
+  if (unscoped && !useAll.value && form.levels.length === 0) {
+    formError.value = 'that would silence every highlight — add a mask, channel, or text pattern.';
+    return null;
+  }
+  // ⚠⚠ The same footgun, in the shape this change newly made reachable. A modifier-only rule
+  // with no who/where/what compiles to matchesNick = () => true with hides:false, and
+  // evaluateIgnores' no-applies branch is unbounded for a non-hiding rule — so it silently kills
+  // every highlight on every network, and the list shows it as nothing but `*  NOHIGHLIGHT`.
+  // Two clicks away from the default form, which is exactly why it needs saying out loud.
+
   let expiresAt: string | null = null;
   const dur = form.expiry.trim();
   if (dur) {
