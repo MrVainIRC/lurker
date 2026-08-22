@@ -86,8 +86,9 @@ change immediately.
 ### `set_relay_bot` _(read-write)_
 
 Mark or unmark a nick as a relay/bridge bot (#277). When marked, messages from
-that bot are re-attributed to the speaker embedded in its envelope — `[Discord]
-<alice> hi` is shown as from `alice`. Pass `marked: false` to clear the mark.
+that bot are re-attributed to the speaker embedded in its envelope, so
+`[Discord] <alice> hi` is shown as from `alice`.
+Pass `marked: false` to clear the mark.
 An optional `pattern` overrides the built-in envelope formats with a template
 using `{source}`, `{nick}` and `{message}`; it must contain `{nick}` and
 `{message}`. Returns the stored `{ networkId, nick, marked, pattern }`, echoing
