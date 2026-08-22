@@ -132,7 +132,7 @@
             class="chip"
             :class="{ active: useAll }"
             :aria-pressed="useAll"
-            @click="selectAllLevels"
+            @click="toggleAllLevels"
           >
             ALL
           </button>
@@ -298,9 +298,19 @@ function selectNetworkScope() {
   if (!scopeNetworkId.value) scopeNetworkId.value = networkOptions.value[0].id;
 }
 
-function selectAllLevels() {
-  useAll.value = true;
-  form.levels = [];
+// ⚠⚠ A toggle, not a select. ALL used to be switch-on-only, and with the granular
+// chips snapping back to it whenever the last one was cleared, "no hide levels"
+// was a state the GUI could not express at all — which is exactly a NOHIGHLIGHT-only
+// rule, the one that suppresses a nick's highlights without hiding anything. They
+// could be written with `/ignore bob NOHIGHLIGHT` and then not edited here, because
+// opening one re-selected ALL and saving changed what the rule meant (#775).
+//
+// An empty selection is now a legitimate state to be IN. Whether it is a legitimate
+// state to SUBMIT is buildRule's question, and it answers with an error rather than
+// by quietly reinstating ALL.
+function toggleAllLevels() {
+  useAll.value = !useAll.value;
+  if (useAll.value) form.levels = [];
 }
 
 function toggleLevel(lvl: string) {
@@ -308,9 +318,6 @@ function toggleLevel(lvl: string) {
   const i = form.levels.indexOf(lvl);
   if (i >= 0) form.levels.splice(i, 1);
   else form.levels.push(lvl);
-  // Never leave the rule with no hide levels (unless NOHIGHLIGHT-only) — fall
-  // back to ALL so an empty selection isn't an inert rule.
-  if (form.levels.length === 0 && !form.noHighlight) useAll.value = true;
 }
 
 function parseChannels(s: string): string[] | null {
@@ -321,10 +328,14 @@ function parseChannels(s: string): string[] | null {
   return list.length ? list : null;
 }
 
+// ⚠ No `|| ['ALL']` fallback. It was what turned an empty selection back into
+// "hide everything" on the way to the server — silently, and in the one case
+// (NOHIGHLIGHT-only) where empty is what the user meant. buildRule rejects a
+// genuinely empty rule instead, where the user can see it happen.
 function buildLevels(): string[] {
   const out: string[] = useAll.value ? ['ALL'] : [...form.levels];
   if (form.noHighlight) out.push('NOHIGHLIGHT');
-  return out.length ? out : ['ALL'];
+  return out;
 }
 
 function buildRule(): IgnoreRule | null {
@@ -350,6 +361,15 @@ function buildRule(): IgnoreRule | null {
     }
   }
   const levels = buildLevels();
+  // An empty selection is now reachable (ALL is a toggle), so it has to be
+  // answered here — visibly — instead of buildLevels quietly turning it back into
+  // "hide everything". Tick the modifier and it IS a valid rule: hide nothing,
+  // suppress this nick's highlights. That is the rule #775 was about.
+  if (levels.length === 0) {
+    formError.value =
+      'pick at least one event type, or tick “Suppress highlights only” — as written this rule would do nothing.';
+    return null;
+  }
   // Guard the footgun rules a GUI shouldn't make easy. A rule with no who/where/
   // what matches the whole feed: as a hide rule with ALL it hides everything; as
   // an exception it whitelists everyone, neutralizing real ignores. Broad-but-
@@ -400,8 +420,16 @@ function startEdit(entry: IgnoreEntryWithNetwork) {
   form.isExcept = entry.isExcept;
   form.expiry = '';
   const lv = entry.levels || [];
-  useAll.value = lv.includes('ALL') || lv.every((l) => l === 'NOHIGHLIGHT');
-  form.levels = useAll.value ? [] : lv.filter((l) => l !== 'ALL' && l !== 'NOHIGHLIGHT');
+  // ⚠⚠ Read the HIDE levels, and only them. The old test also lit ALL when every
+  // level was NOHIGHLIGHT — `[].every()` and `['NOHIGHLIGHT'].every()` are both
+  // true — so opening a NOHIGHLIGHT-only rule showed ALL selected, and saving
+  // wrote back ['ALL','NOHIGHLIGHT']: the edit turned "don't highlight me for bob"
+  // into "hide bob entirely". That is the "they get the ALL option added by
+  // default" half of #775, and it silently rewrote rules people had already made
+  // with /ignore.
+  const hideLevels = lv.filter((l) => l !== 'NOHIGHLIGHT');
+  useAll.value = hideLevels.includes('ALL');
+  form.levels = useAll.value ? [] : hideLevels;
   form.noHighlight = lv.includes('NOHIGHLIGHT');
   if (entry.networkId == null) {
     scopeMode.value = 'global';
