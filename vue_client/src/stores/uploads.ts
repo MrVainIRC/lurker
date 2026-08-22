@@ -3,6 +3,7 @@
 
 import { ref } from 'vue';
 import { defineStore } from 'pinia';
+import { mimeMatchesKind, type UploadKind } from '../../../shared/uploadKinds.js';
 import { api, apiMultipart } from '../api.js';
 import { makeClientId } from '../utils/clientId.js';
 
@@ -50,9 +51,9 @@ const FAVORITES_LIMIT = 200;
 // either mode: it is a function of the panel, not of what is in it.
 const UPLOAD_MENU_LIMIT = 24;
 
-/** The kinds the uploads browser filters by. Mirrors UPLOAD_KINDS on the server, which
- *  derives each one from the mime prefix. */
-export type UploadKind = 'image' | 'video' | 'audio' | 'text';
+// Re-exported so components keep importing the type from the store they already use.
+// The definition — and the mime→kind rule both sides filter by — lives in shared/.
+export type { UploadKind };
 
 /** Which list the composer's attach menu is showing: the curated starred set, or
  *  the tail of everything uploaded. */
@@ -316,15 +317,18 @@ export const useUploadsStore = defineStore('uploads', {
     },
 
     /**
-     * Would the active filters have returned this row? Mirrors the server's WHERE
-     * clause — substring on filename, mime prefix on kind — so an optimistically
-     * inserted upload appears if and only if a refetch would have shown it.
+     * Would the active filters have returned this row? Shares one definition with the
+     * server's WHERE clause (shared/uploadKinds.ts) — substring on filename,
+     * mimeMatchesKind on kind — so an optimistically inserted upload appears if and
+     * only if a refetch would have shown it. This used to hand-copy the rule as a
+     * mime PREFIX test, which silently disagreed the moment a kind covered a mime
+     * from outside its prefix (`application/json` under text, #788).
      */
     matchesFilters(row: UploadItem): boolean {
       // A fresh upload is never starred, so this also correctly keeps one out of an
       // active starred-only view rather than flashing it in until the next reload.
       if (this.favoritesOnly && !row.favorite) return false;
-      if (this.kind && !(row.mime || '').startsWith(`${this.kind}/`)) return false;
+      if (this.kind && !mimeMatchesKind(row.mime, this.kind)) return false;
       if (!this.query) return true;
       return (row.filename || '').toLowerCase().includes(this.query.toLowerCase());
     },

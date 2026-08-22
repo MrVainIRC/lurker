@@ -1,6 +1,12 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
+import {
+  UPLOAD_KINDS,
+  extraMimesForKind,
+  isUploadKind,
+  type UploadKind,
+} from '../../shared/uploadKinds.js';
 import db from './index.js';
 
 /** A row from the `upload_history` table. */
@@ -98,16 +104,10 @@ export function insertUpload(userId: number, row: InsertUploadFields): number {
   return Number(info.lastInsertRowid);
 }
 
-// The kinds the uploads browser filters by (#547), and the mime prefix each one
-// means. Derived from `mime` rather than stored: the mime is already the magic-byte
-// truth (contentClass.ts sniffs it), so a separate column would be a second source
-// of it that could disagree.
-export const UPLOAD_KINDS = ['image', 'video', 'audio', 'text'] as const;
-export type UploadKind = (typeof UPLOAD_KINDS)[number];
-
-export function isUploadKind(value: unknown): value is UploadKind {
-  return typeof value === 'string' && (UPLOAD_KINDS as readonly string[]).includes(value);
-}
+// Re-exported so callers that already speak to this module don't need to know the
+// definition moved to shared/ (it is shared with the client, which builds the same
+// filter for its optimistic inserts).
+export { UPLOAD_KINDS, isUploadKind, type UploadKind };
 
 /**
  * Escape a user's search term for a SQL LIKE pattern.
@@ -172,10 +172,15 @@ export function listUploads(
     params.push(likeTerm(q));
   }
   if (kind) {
-    where.push('mime LIKE ?');
-    // No ESCAPE needed: `kind` is validated against UPLOAD_KINDS, so it can't carry
-    // a wildcard. The trailing % is ours and deliberate.
-    params.push(`${kind}/%`);
+    // A prefix match on `<kind>/`, OR'd with the exact mimes that kind covers from
+    // outside its prefix — today that is `application/json` under text (#788). No
+    // ESCAPE needed: `kind` is validated against UPLOAD_KINDS, so it can't carry a
+    // wildcard, and the extras are literals from our own table. The trailing % is
+    // ours and deliberate.
+    const extras = extraMimesForKind(kind);
+    const clauses = ['mime LIKE ?', ...extras.map(() => 'mime = ?')];
+    where.push(`(${clauses.join(' OR ')})`);
+    params.push(`${kind}/%`, ...extras);
   }
 
   // Recency of the STAR, not of the upload — starring a two-year-old gif today
