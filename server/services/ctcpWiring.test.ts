@@ -17,6 +17,7 @@ import { createUser } from '../db/users.js';
 import { createNetwork } from '../db/networks.js';
 import { APP_NAME, APP_VERSION } from '../utils/userAgent.js';
 import settingsService from './settingsService.js';
+import ircManager from './ircManager.js';
 
 // The default ctcp.version template (`${name} ${version}`) expands to this.
 const DEFAULT_VERSION_REPLY = `${APP_NAME} ${APP_VERSION}`;
@@ -422,5 +423,42 @@ describe('inbound CTCP request — msgbuffer routing (ctcp.msgbuffer)', () => {
     expect(ctcpLines()).toHaveLength(0); // no ephemeral ctcp line in system mode
     expect(publishEphemeral).not.toHaveBeenCalled();
     logNet.mockRestore();
+  });
+});
+
+// #809. ircManager.ctcpRequest resolved through getConnection(), which during a
+// reconnect backoff still hands back the IrcConnection the retry controller is
+// holding — so the line went to a socket that discards it while the call reported
+// success. The damage here is worse than a silent drop: sendCtcpRequest ALSO
+// surfaces "→ CTCP PING to bob" into the issuing buffer, so the user watched a
+// request they could see go out wait forever for a reply that could never arrive,
+// while wsHub's "this network isn't connected" warning had no way to fire.
+describe('outbound CTCP needs a writable connection', () => {
+  // The spy lands on the ircManager singleton, which every other describe in this
+  // file shares; nothing restores mocks globally.
+  afterEach(() => vi.restoreAllMocks());
+
+  function stub(state: string) {
+    const sendCtcpRequest =
+      vi.fn<(issuing: string, target: string, t: string, a: string) => void>();
+    vi.spyOn(ircManager, 'getConnection').mockReturnValue({
+      state,
+      sendCtcpRequest,
+    } as unknown as IrcConnection);
+    return sendCtcpRequest;
+  }
+
+  it('refuses, and writes nothing, while the network is reconnecting', () => {
+    const sendCtcpRequest = stub('reconnecting');
+    expect(ircManager.ctcpRequest(1, 1, '#chan', 'bob', 'PING', '')).toBe(false);
+    // ⚠ Both halves. Returning false is what lets wsHub say so; not calling
+    // through is what keeps the "→ CTCP PING to bob" echo off the screen.
+    expect(sendCtcpRequest).not.toHaveBeenCalled();
+  });
+
+  it('still sends on a connected network', () => {
+    const sendCtcpRequest = stub('connected');
+    expect(ircManager.ctcpRequest(1, 1, '#chan', 'bob', 'PING', '')).toBe(true);
+    expect(sendCtcpRequest).toHaveBeenCalledWith('#chan', 'bob', 'PING', '');
   });
 });
