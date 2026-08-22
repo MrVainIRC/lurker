@@ -652,6 +652,26 @@ describe('MessageInput command dispatch', () => {
     expect(socketSend).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'raw' }));
   });
 
+  it('reports a failed /disconnect in the buffer rather than swallowing it', async () => {
+    // The one branch the happy-path cases can't reach. It matters here more than for most
+    // commands: the whole point of #785 is a user trying to stop a network that won't stop, so
+    // "nothing happened" is precisely the wrong feedback if the call fails.
+    seedStores('#zebra');
+    const networks = useNetworksStore();
+    vi.spyOn(networks, 'disconnect').mockRejectedValue(new Error('network is paused'));
+    const buffers = useBuffersStore();
+    const pushMessage = vi.spyOn(buffers, 'pushMessage');
+    const { el } = await mountComposer();
+
+    await type(el, '/disconnect');
+    await enter(el);
+    await flush();
+
+    expect(pushMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ text: '/disconnect failed: network is paused' }),
+    );
+  });
+
   it('/part <#chan> [reason] retargets the named channel', async () => {
     seedStores('#zebra');
     const { el } = await mountComposer();
