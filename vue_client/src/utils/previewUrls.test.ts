@@ -319,9 +319,30 @@ describe('hideableUrls — when the address stops being worth showing', () => {
   it('is not blocked by punctuation the address trim discarded', () => {
     expect([...hideableUrls(`look at this ${A}.`, all(A))]).toEqual([A]);
     expect([...hideableUrls(`look at this ${A}!`, all(A))]).toEqual([A]);
-    expect([...hideableUrls(`look at this (${A})`, all(A))]).toEqual([A]);
+    expect([...hideableUrls(`look at this ${A}?`, all(A))]).toEqual([A]);
+    expect([...hideableUrls(`look at this ${A}...`, all(A))]).toEqual([A]);
     // ...and prose still wins over punctuation, which is the rule the fix must not soften.
     expect([...hideableUrls(`I read ${A}. this morning`, all(A))]).toEqual([]);
+  });
+
+  // ⚠⚠ A closing delimiter has a PARTNER sitting before the address, so it is not the URL's to
+  // take. The first cut of #774 absorbed everything trimTrailingPunctuation discarded, which
+  // made these hideable — and rendered `look at this (…)` as a line holding a lone `(` above the
+  // picture, the same orphan the fix exists to remove, moved to the other end. Not hiding them
+  // is the conservative answer: the address stays on screen next to its preview, which is
+  // merely redundant rather than broken.
+  it('will not absorb a delimiter whose partner is in the prose', () => {
+    expect([...hideableUrls(`look at this (${A})`, all(A))]).toEqual([]);
+    expect([...hideableUrls(`look at this [${A}]`, all(A))]).toEqual([]);
+    expect([...hideableUrls(`he said "check ${A}"`, all(A))]).toEqual([]);
+  });
+
+  // ⚠ Measured on the VISIBLE text, not on the regex match, which stops at a run boundary. Bold
+  // or colour wrapped around just the address is a common bot output shape, and it used to
+  // decide the verdict: the identical plain-text message hid.
+  it('sees punctuation across a formatting boundary', () => {
+    expect([...hideableUrls(`look at this \u0002${A}\u0002.`, all(A))]).toEqual([A]);
+    expect([...hideableUrls(`look at this \u001f${A}\u000f.`, all(A))]).toEqual([A]);
   });
 
   it('hides nothing when there are no candidates', () => {
@@ -370,16 +391,30 @@ describe('segmentsWithoutUrls — closing the gap', () => {
     expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([]);
   });
 
-  it('takes an unbalanced closing bracket, and keeps a balanced one', () => {
-    // ⚠ Asked of trimTrailingPunctuation rather than a character class, because its bracket rule
-    // is balance-sensitive: the `)` closing `(see …)` is punctuation, the one closing `Foo_(bar)`
-    // is part of the address and was never split off in the first place.
+  it('leaves a closing delimiter alone, because its partner is not the URL to take', () => {
+    // ⚠⚠ The deletion must remove exactly what the SPAN counted, no more. It counted no `)`
+    // (hideableUrls won't hide a wrapped URL at all now), so neither does this — and the
+    // assertion is here rather than only on the verdict because the first cut of the fix did
+    // strip it, leaving `(` alone on a line above the picture. If a caller ever hides one
+    // anyway, the bracket survives rather than being half-deleted.
     const wrapped = [{ text: '(' }, { text: A, url: A }, { text: ')' }];
-    expect(segmentsWithoutUrls(wrapped, new Set([A]))).toEqual([{ text: '(' }]);
+    expect(segmentsWithoutUrls(wrapped, new Set([A]))).toEqual([{ text: '(' }, { text: ')' }]);
+  });
 
-    const BAL = 'https://e.test/Foo_(bar)';
-    const balanced = [{ text: BAL, url: BAL }, { text: ' tail' }];
-    expect(segmentsWithoutUrls(balanced, new Set([BAL]))).toEqual([{ text: 'tail' }]);
+  it('follows a punctuation run across a formatting boundary', () => {
+    // The span crosses runs, so the deletion has to as well or it leaves the tail behind.
+    const segs = [{ text: A, url: A }, { text: '.', bold: true }, { text: '.' }];
+    expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([]);
+  });
+
+  it('stops absorbing once a segment survives', () => {
+    // ⚠ A positive control for the rule above: carrying on past a segment that kept text would
+    // eat punctuation belonging to whatever came after.
+    const segs = [{ text: A, url: A }, { text: '. done' }, { text: '. and more' }];
+    expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([
+      { text: 'done' },
+      { text: '. and more' },
+    ]);
   });
 
   it('does not eat text that merely follows a hidden URL', () => {

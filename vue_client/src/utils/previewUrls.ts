@@ -143,21 +143,41 @@ interface UrlSpan {
   /** Offset of the match in the VISIBLE body — formatting codes removed, spoiler text kept. */
   start: number;
   /**
-   * Offset of the END OF THE MATCH — **not** of `url`.
+   * Offset of the end of the address PLUS any sentence punctuation that reads as belonging to it.
    *
-   * ⚠⚠ Untrimmed deliberately. Measuring to the end of the trimmed address leaves the
+   * ⚠⚠ Not simply `start + url.length`. Measuring to the end of the trimmed address leaves the
    * punctuation `trimTrailingPunctuation` just discarded sitting between the span and the end of
    * the message, so `look at this https://e.test/a.png.` failed the "nothing but whitespace after
    * it" test and kept its address — while the same URL at the FRONT hid, the leading check being
    * vacuously true at offset zero. Identical punctuation, opposite verdicts, decided by nothing
-   * but which end the URL sat at. (#774, fixed first on iOS as `PreviewText.UrlSpan.end`.)
+   * but which end the URL sat at. (#774.)
    *
-   * ⚠⚠ Whatever DELETES the URL has to agree with this or the fix just moves the damage: the
-   * rule counted the punctuation as part of the address, so leaving it behind orphans it. See
-   * `segmentsWithoutUrls`.
+   * ⚠⚠ And not the whole untrimmed match either, which is where the first version of this fix
+   * went wrong. The trimmer also discards a CLOSING DELIMITER whose partner sits before the URL,
+   * so absorbing everything it dropped made `look at this (https://e.test/a.png)` hideable and
+   * rendered it as a line holding a lone `(` above the picture — the same orphan this fix exists
+   * to remove, moved to the other end. Sentence punctuation has no partner; a bracket or a quote
+   * does. So the span crosses `.,;:!?` and stops at anything paired, which leaves a wrapped URL
+   * simply not hideable rather than half-deleted.
+   *
+   * ⚠⚠ Whatever DELETES the URL has to agree with this or the fix just moves the damage again:
+   * the rule counts this punctuation as part of the address, so leaving it behind orphans it.
+   * See `segmentsWithoutUrls`.
    */
   end: number;
 }
+
+/**
+ * The punctuation a URL may absorb — see `UrlSpan.end` and `withoutAbsorbedPunctuation`.
+ *
+ * ⚠⚠ Narrower than `trimTrailingPunctuation`'s class, deliberately, and the two characters left
+ * out are the whole point: `'` and `"` are paired, as are the brackets it handles by balance. A
+ * closing delimiter has a partner sitting BEFORE the address, so absorbing it deletes half of a
+ * pair and strands the other half — `he said "check <url>"` became `he said "check`. Sentence
+ * punctuation has no partner, so taking it with the address is safe and reads correctly: a
+ * message ending `…shot.png.` reads as ending with the picture.
+ */
+const ABSORBABLE_PUNCTUATION = '.,;:!?';
 
 /**
  * Every resolvable URL in `text`, with where it sits in what the reader actually sees.
@@ -180,8 +200,20 @@ function urlSpans(text: string): { visible: string; spans: UrlSpan[] } {
       if (isBracketedUrl(run.text, match.index, raw)) continue;
       const url = trimTrailingPunctuation(raw);
       if (!url) continue;
-      spans.push({ url, start: base + match.index, end: base + match.index + raw.length });
+      spans.push({ url, start: base + match.index, end: base + match.index + url.length });
     }
+  }
+  // Extend each span across the sentence punctuation that follows it — see UrlSpan.end.
+  //
+  // ⚠ Measured on `visible` rather than on the match, and that is what makes it survive a
+  // formatting code between the address and its full stop. `raw` stops at the run boundary, so
+  // `look at this \x02https://e.test/a.png\x02.` (a common bot output shape) put the `.` in a
+  // different run entirely and the address stayed on screen while the identical plain text hid.
+  // Adjacency in `visible` is adjacency ON SCREEN, which is the domain the rule is about.
+  for (const span of spans) {
+    let end = span.end;
+    while (end < visible.length && ABSORBABLE_PUNCTUATION.includes(visible[end])) end++;
+    span.end = end;
   }
   return { visible, spans };
 }
@@ -253,31 +285,29 @@ function isTrimmableText(seg: RenderSegment): boolean {
 }
 
 /**
- * `seg` with the punctuation that belonged to the URL just dropped taken off its front.
+ * `seg` with the punctuation the URL just dropped had absorbed taken off its front.
  *
- * ⚠⚠ The punctuation goes WITH the address, and this is the half of #774 that makes the span fix
- * a fix rather than a relocation of the damage. `UrlSpan.end` measures the UNTRIMMED match, so the
- * hiding rule counted a trailing `.` or an unbalanced `)` as part of the URL when it decided the
- * URL sat against an edge — while the linkifier, which trims, left exactly those characters at the
- * head of the following text segment. Dropping only the anchor orphans them: `look at this
- * https://e.test/a.png.` rendered as `look at this .`, and a message that was ONLY
+ * ⚠⚠ This is the half of #774 that makes the span fix a fix rather than a relocation of the
+ * damage. `UrlSpan.end` counts trailing sentence punctuation as part of the address when it
+ * decides the URL sits against an edge — while the linkifier, which trims, leaves exactly those
+ * characters at the head of the following text segment. Dropping only the anchor orphans them:
+ * `look at this https://e.test/a.png.` rendered as `look at this .`, and a message that was ONLY
  * `https://e.test/shot.png.` collapsed to a body of one full stop — which is not empty, so the
  * end-trim (whitespace only) left it and a line holding a lone `.` was painted above the picture.
  *
- * How much to take is asked of `trimTrailingPunctuation` itself rather than re-derived from a
- * character class: it is the function that decided where the address ended, and its bracket rule
- * is balance-sensitive (`…/Foo_(bar)` keeps its `)`, `(see …com)` does not), so a hand-rolled
- * class would disagree with it on exactly the inputs that matter.
+ * ⚠ Exactly `ABSORBABLE_PUNCTUATION`, no more. It is tempting to ask `trimTrailingPunctuation`
+ * how much it discarded, since that is the function that decided where the address ended — but it
+ * discards paired delimiters too, and this side must delete precisely what the span counted or
+ * the two disagree and orphan something again. (It is also O(n²) on brackets, and asking it once
+ * per candidate character made a line of a hundred `)` cost ~0.5ms per render.)
  *
  * ⚠ A decorated segment is left alone. Punctuation on a mIRC background run is painted ink, and
  * the same reasoning that stops the whitespace trim from eating a colour block applies here.
  */
-function withoutOrphanedPunctuation(seg: RenderSegment, url: string): RenderSegment {
+function withoutAbsorbedPunctuation(seg: RenderSegment): RenderSegment {
   if (!isTrimmableText(seg)) return seg;
   let n = 0;
-  while (n < seg.text.length && trimTrailingPunctuation(url + seg.text.slice(0, n + 1)) === url) {
-    n++;
-  }
+  while (n < seg.text.length && ABSORBABLE_PUNCTUATION.includes(seg.text[n])) n++;
   return n === 0 ? seg : { ...seg, text: seg.text.slice(n) };
 }
 
@@ -299,17 +329,21 @@ export function segmentsWithoutUrls(
   if (!hidden.size) return segments;
   const kept: RenderSegment[] = [];
   let dropped = 0;
-  // The URL just dropped, whose trailing punctuation the NEXT segment holds — see
-  // withoutOrphanedPunctuation.
-  let orphaned: string | null = null;
+  // Whether the segment we are about to keep holds punctuation the URL just dropped had absorbed
+  // — see withoutAbsorbedPunctuation.
+  let absorbing: boolean = false;
   for (const seg of segments) {
     if (seg.url && hidden.has(seg.url)) {
       dropped++;
-      orphaned = seg.url;
+      absorbing = true;
       continue;
     }
-    kept.push(orphaned ? withoutOrphanedPunctuation(seg, orphaned) : seg);
-    orphaned = null;
+    const stripped: RenderSegment = absorbing ? withoutAbsorbedPunctuation(seg) : seg;
+    kept.push(stripped);
+    // ⚠ Keep absorbing while a segment is consumed WHOLE. The span is measured on the visible
+    // text and crosses formatting boundaries, so a run of punctuation can be split across two
+    // segments (`\x02.\x02.`); stopping at the first would leave the tail behind.
+    absorbing = absorbing && stripped.text === '';
   }
   if (!dropped) return segments;
 
