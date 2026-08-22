@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { registerVerb } from '../verbRegistry.js';
-import ircManager from '../ircManager.js';
+import { e2eManager } from '../e2e/manager.js';
+import { contextKey, isChannelContext } from '../e2e/context.js';
+import { writableConnection } from './liveConn.js';
 
 /** Authenticated caller context passed to every verb handler. */
 interface VerbContext {
@@ -44,8 +46,21 @@ registerVerb({
     if (!line) return { ok: false, error: 'empty-line' };
     // Guard against embedded CRLF (command injection into extra IRC lines).
     if (/[\r\n]/.test(line)) return { ok: false, error: 'line-must-be-single-line' };
-    const conn = ircManager.getConnection(ctx.userId, networkId);
+    const conn = writableConnection(ctx.userId, networkId);
     if (!conn) return { ok: false, error: 'not-connected' };
+    // A prose "don't PRIVMSG with this" in the description is not an
+    // enforcement mechanism for a confidentiality property. ircManager.send
+    // encrypts on an E2E channel and refuses to fall through on failure; this
+    // path has neither, and the sender gets no local echo either, so a leak
+    // would be silent at both ends. Refuse and name the verb that does it right.
+    const [rawCommand = '', rawTarget = ''] = line.split(/\s+/, 2);
+    if (
+      rawCommand.toUpperCase() === 'PRIVMSG' &&
+      isChannelContext(rawTarget) &&
+      e2eManager.isChannelEnabled(ctx.userId, networkId, contextKey(rawTarget, ''))
+    ) {
+      return { ok: false, error: 'e2e-channel-use-send-message' };
+    }
     conn.raw(line);
     return { ok: true, serverBuffer: conn.serverTarget() };
   },

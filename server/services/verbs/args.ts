@@ -28,3 +28,19 @@ export function singleToken(
 export function channelArg(value: unknown): { value: string } | { error: string } {
   return singleToken(value, { empty: 'empty-channel', malformed: 'channel-must-be-single-token' });
 }
+
+/** A free-text IRC parameter that may contain spaces but must stay one line
+ *  (a part/quit reason, an away message). Unlike the values that flow through
+ *  IrcConnection.raw(), these reach irc-framework's own `client.join/part/quit/
+ *  raw`, which serialise and write the line verbatim — so an embedded CRLF here
+ *  really does inject a second IRC command rather than being stripped. */
+export function singleLine(
+  value: unknown,
+  { malformed }: { malformed: string },
+): { value: string | undefined } | { error: string } {
+  if (value == null) return { value: undefined };
+  const s = typeof value === 'string' ? value : '';
+  if (/[\r\n\0]/.test(s)) return { error: malformed };
+  const trimmed = s.trim();
+  return { value: trimmed ? trimmed : undefined };
+}

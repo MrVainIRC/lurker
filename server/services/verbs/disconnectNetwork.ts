@@ -3,6 +3,7 @@
 
 import { registerVerb } from '../verbRegistry.js';
 import ircManager from '../ircManager.js';
+import { singleLine } from './args.js';
 
 interface VerbContext {
   userId: number;
@@ -27,9 +28,10 @@ registerVerb({
   },
   handler(ctx: VerbContext, input: Record<string, unknown>) {
     const networkId = Number(input.networkId);
-    const reason =
-      typeof input.reason === 'string' && input.reason.trim() ? input.reason.trim() : undefined;
-    ircManager.stopNetwork(ctx.userId, networkId, reason);
+    // Reaches irc-framework's client.quit(), which writes the line verbatim.
+    const parsed = singleLine(input.reason, { malformed: 'reason-must-be-single-line' });
+    if ('error' in parsed) return { ok: false, error: parsed.error };
+    ircManager.stopNetwork(ctx.userId, networkId, parsed.value);
     return { ok: true };
   },
 });

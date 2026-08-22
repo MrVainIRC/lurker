@@ -3,7 +3,8 @@
 
 import { registerVerb } from '../verbRegistry.js';
 import ircManager from '../ircManager.js';
-import { channelArg } from './args.js';
+import { channelArg, singleToken } from './args.js';
+import { writableConnection } from './liveConn.js';
 
 interface VerbContext {
   userId: number;
@@ -31,7 +32,20 @@ registerVerb({
     const networkId = Number(input.networkId);
     const channel = channelArg(input.channel);
     if ('error' in channel) return { ok: false, error: channel.error };
-    const key = typeof input.key === 'string' && input.key.trim() ? input.key.trim() : undefined;
+    // A channel key is one IRC parameter, and unlike the values that go through
+    // IrcConnection.raw() it reaches irc-framework's client.join(), which
+    // serialises and writes the line verbatim — no CR/LF stripping. So an
+    // unchecked key really can inject a second command.
+    let key: string | undefined;
+    if (input.key != null && String(input.key) !== '') {
+      const parsed = singleToken(input.key, {
+        empty: 'empty-key',
+        malformed: 'key-must-be-single-token',
+      });
+      if ('error' in parsed) return { ok: false, error: parsed.error };
+      key = parsed.value;
+    }
+    if (!writableConnection(ctx.userId, networkId)) return { ok: false, error: 'not-connected' };
     const ok = ircManager.joinChannel(ctx.userId, networkId, channel.value, key);
     return ok ? { ok: true } : { ok: false, error: 'not-connected' };
   },

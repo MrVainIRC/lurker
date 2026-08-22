@@ -3,6 +3,7 @@
 
 import { registerVerb } from '../verbRegistry.js';
 import ircManager from '../ircManager.js';
+import { singleLine } from './args.js';
 
 interface VerbContext {
   userId: number;
@@ -28,7 +29,12 @@ registerVerb({
     additionalProperties: false,
   },
   handler(ctx: VerbContext, input: Record<string, unknown>) {
-    const message = typeof input.message === 'string' ? input.message.trim() : '';
+    // applyAwayState issues `client.raw('AWAY :' + message)` — client.raw, not
+    // IrcConnection.raw, so nothing strips CR/LF on the way out. This verb is
+    // user-wide, so an injected line would go to EVERY connected network at once.
+    const parsed = singleLine(input.message, { malformed: 'message-must-be-single-line' });
+    if ('error' in parsed) return { ok: false, error: parsed.error };
+    const message = parsed.value ?? '';
     if (message) ircManager.setAwayAll(ctx.userId, message, { autoSet: false });
     else ircManager.clearAwayAll(ctx.userId, { autoSet: false });
     return { ok: true, away: !!message };

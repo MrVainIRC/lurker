@@ -90,9 +90,11 @@ that bot are re-attributed to the speaker embedded in its envelope, so
 `[Discord] <alice> hi` is shown as from `alice`.
 Pass `marked: false` to clear the mark.
 An optional `pattern` overrides the built-in envelope formats with a template
-using `{source}`, `{nick}` and `{message}`; it must contain `{nick}` and
-`{message}`. Returns the stored `{ networkId, nick, marked, pattern }`, echoing
-the canonical stored casing, and syncs the change to the user's open tabs.
+using `{source}`, `{nick}` and `{message}`. A template missing `{nick}` or
+`{message}` does not fail the call — it is stored and then silently ignored at
+render time, so the verb returns `marked: true` for a pattern that does
+nothing. Returns the stored `{ networkId, nick, marked, pattern }`, echoing the
+canonical stored casing, and syncs the change to the user's open tabs.
 
 ### `send_message` _(read-write)_
 
@@ -118,15 +120,19 @@ Send a raw IRC protocol line verbatim on a network — the escape hatch for any
 command without a dedicated verb: `MODE #chan +o nick`, `KICK #chan bob :spam`,
 `INVITE bob #chan`, `OPER user pass`, and so on. No parsing, no trailing CRLF.
 **Powerful and unguarded — it runs as you.** Prefer a dedicated verb wherever
-one exists. In particular **do not send `PRIVMSG` this way**: `send_message`
-applies end-to-end encryption on channels that have it enabled, and a raw
-`PRIVMSG` bypasses that and puts cleartext on the wire.
+one exists. A `PRIVMSG` to a channel with end-to-end encryption enabled is
+**rejected** (`e2e-channel-use-send-message`) rather than sent: this path has
+none of `send_message`'s encryption, and no local echo either, so a leak here
+would be silent at both ends.
 
 Server replies (WHOIS, LIST, …) arrive asynchronously in the network's server
 buffer, whose target is the literal `:server:<networkId>`. That buffer is
 deliberately absent from `list_buffers`, so the result carries a `serverBuffer`
-field with the exact string to hand to `recent_messages`. Same `not-connected`
-semantics as `send_message`.
+field with the exact string to hand to `recent_messages`.
+
+`not-connected` here means the socket is actually up, not merely that a
+connection object exists — a network in reconnect backoff would otherwise
+accept the call and drop the line. Every write verb below uses the same gate.
 
 ### `join_channel` _(read-write)_
 

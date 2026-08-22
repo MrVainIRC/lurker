@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { registerVerb } from '../verbRegistry.js';
-import ircManager from '../ircManager.js';
+import { writableConnection } from './liveConn.js';
 import { singleToken } from './args.js';
 
 interface VerbContext {
@@ -36,7 +36,7 @@ registerVerb({
       malformed: 'nick-must-be-single-token',
     });
     if ('error' in nick) return { ok: false, error: nick.error };
-    const conn = ircManager.getConnection(ctx.userId, networkId);
+    const conn = writableConnection(ctx.userId, networkId);
     if (!conn) return { ok: false, error: 'not-connected' };
     conn.raw(`WHOIS ${nick.value}`);
     // Hand back the concrete buffer target rather than describing it. The

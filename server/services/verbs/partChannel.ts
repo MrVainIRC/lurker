@@ -3,7 +3,8 @@
 
 import { registerVerb } from '../verbRegistry.js';
 import ircManager from '../ircManager.js';
-import { channelArg } from './args.js';
+import { channelArg, singleLine } from './args.js';
+import { writableConnection } from './liveConn.js';
 
 interface VerbContext {
   userId: number;
@@ -31,9 +32,11 @@ registerVerb({
     const networkId = Number(input.networkId);
     const channel = channelArg(input.channel);
     if ('error' in channel) return { ok: false, error: channel.error };
-    const reason =
-      typeof input.reason === 'string' && input.reason.trim() ? input.reason.trim() : undefined;
-    const ok = ircManager.partChannel(ctx.userId, networkId, channel.value, reason);
+    // Same unstripped path as join's key: client.part() writes verbatim.
+    const parsed = singleLine(input.reason, { malformed: 'reason-must-be-single-line' });
+    if ('error' in parsed) return { ok: false, error: parsed.error };
+    if (!writableConnection(ctx.userId, networkId)) return { ok: false, error: 'not-connected' };
+    const ok = ircManager.partChannel(ctx.userId, networkId, channel.value, parsed.value);
     return ok ? { ok: true } : { ok: false, error: 'not-connected' };
   },
 });

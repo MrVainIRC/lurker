@@ -17,6 +17,7 @@ let createNetwork: typeof import('../../db/networks.js').createNetwork;
 let insertMessage: typeof import('../../db/messages.js').insertMessage;
 let callVerb: typeof import('../verbRegistry.js').callVerb;
 let ircManager: typeof import('../ircManager.js').default;
+let setChannelConfig: typeof import('../../db/e2e.js').setChannelConfig;
 
 let owner: User;
 let intruder: User;
@@ -31,6 +32,7 @@ beforeAll(async () => {
   await import('./index.js');
   ({ callVerb } = await import('../verbRegistry.js'));
   ircManager = (await import('../ircManager.js')).default;
+  ({ setChannelConfig } = await import('../../db/e2e.js'));
 
   owner = createUser('verbs-owner');
   intruder = createUser('verbs-intruder');
@@ -583,7 +585,7 @@ const member = (nick: string) => [nick.toLowerCase(), { nick, modes: ['o'], away
 describe('agent control verbs', () => {
   type Chan = { name: string; topic: string | null; members: Map<string, unknown> };
 
-  function stubConn(networkId: number, channels: Chan[] = []) {
+  function stubConn(networkId: number, channels: Chan[] = [], state = 'connected') {
     const map = new Map(channels.map((c) => [c.name.toLowerCase(), c]));
     const sent: string[] = [];
     const joins: Array<[string, string | undefined]> = [];
@@ -592,6 +594,10 @@ describe('agent control verbs', () => {
       sent,
       joins,
       parts,
+      // Write verbs gate on this: an IrcConnection outlives its socket for the
+      // whole reconnect backoff, and irc-framework silently DROPS writes while
+      // it is down.
+      state,
       network: { id: networkId },
       channels: map,
       raw: (line: string) => sent.push(line),
@@ -611,8 +617,8 @@ describe('agent control verbs', () => {
   }
 
   type Conn = ReturnType<typeof ircManager.listConnections>[number];
-  function live(channels: Chan[] = []) {
-    const conn = stubConn(net.id, channels);
+  function live(channels: Chan[] = [], state = 'connected') {
+    const conn = stubConn(net.id, channels, state);
     ircManager.connectionsForUser(owner.id).set(net.id, conn as unknown as Conn);
     return conn;
   }
@@ -893,6 +899,147 @@ describe('agent control verbs', () => {
       expect(callVerb('disconnect_network', rwCtx(owner.id), { networkId: net.id })).toEqual({
         ok: true,
       });
+    });
+  });
+  // The reconnect-backoff case: the connection OBJECT is still in the manager's
+  // map, so the old `getConnection() !== null` check said "connected" and the
+  // verb answered ok — while irc-framework dropped the line on the floor. An
+  // agent would then poll recent_messages forever for a reply that can never
+  // arrive.
+  describe('a connection whose socket is down', () => {
+    it('reports not-connected from every write verb, and sends nothing', () => {
+      const conn = live([{ name: '#x', topic: 't', members: new Map() }], 'disconnected');
+      const offline = { ok: false, error: 'not-connected' };
+      expect(callVerb('send_raw', rwCtx(owner.id), { networkId: net.id, line: 'PING x' })).toEqual(
+        offline,
+      );
+      expect(callVerb('set_nick', rwCtx(owner.id), { networkId: net.id, nick: 'n' })).toEqual(
+        offline,
+      );
+      expect(callVerb('whois', rwCtx(owner.id), { networkId: net.id, nick: 'bob' })).toEqual(
+        offline,
+      );
+      expect(
+        callVerb('set_topic', rwCtx(owner.id), { networkId: net.id, channel: '#x', topic: 'hi' }),
+      ).toEqual(offline);
+      expect(
+        callVerb('join_channel', rwCtx(owner.id), { networkId: net.id, channel: '#x' }),
+      ).toEqual(offline);
+      expect(
+        callVerb('part_channel', rwCtx(owner.id), { networkId: net.id, channel: '#x' }),
+      ).toEqual(offline);
+      expect(conn.sent).toEqual([]);
+      expect(conn.joins).toEqual([]);
+      expect(conn.parts).toEqual([]);
+    });
+
+    it('still answers reads from last-known state', () => {
+      // Deliberately NOT gated: stale membership is not a lie, and refusing
+      // mid-reconnect would be strictly less useful.
+      live([{ name: '#x', topic: 't', members: new Map() }], 'disconnected');
+      expect(callVerb('get_topic', rCtx(owner.id), { networkId: net.id, channel: '#x' })).toEqual({
+        ok: true,
+        channel: '#x',
+        topic: 't',
+      });
+    });
+  });
+
+  // CR/LF in these reaches irc-framework's own client.join/part/quit/raw, which
+  // serialise and write the line VERBATIM — unlike IrcConnection.raw(), nothing
+  // strips it, so an embedded newline really is a second injected command.
+  describe('parameters that bypass the CR/LF stripper', () => {
+    it('rejects an injected channel key', () => {
+      const conn = live();
+      expect(
+        callVerb('join_channel', rwCtx(owner.id), {
+          networkId: net.id,
+          channel: '#x',
+          key: 'k\r\nOPER admin hunter2',
+        }),
+      ).toEqual({ ok: false, error: 'key-must-be-single-token' });
+      expect(conn.joins).toEqual([]);
+    });
+
+    it('rejects an injected part reason', () => {
+      const conn = live();
+      expect(
+        callVerb('part_channel', rwCtx(owner.id), {
+          networkId: net.id,
+          channel: '#x',
+          reason: 'bye\r\nJOIN #evil',
+        }),
+      ).toEqual({ ok: false, error: 'reason-must-be-single-line' });
+      expect(conn.parts).toEqual([]);
+    });
+
+    it('rejects an injected quit reason', () => {
+      expect(
+        callVerb('disconnect_network', rwCtx(owner.id), {
+          networkId: net.id,
+          reason: 'bye\r\nJOIN #evil',
+        }),
+      ).toEqual({ ok: false, error: 'reason-must-be-single-line' });
+    });
+
+    it('rejects an injected away message', () => {
+      // set_away is user-wide, so this would have gone out on EVERY connected
+      // network at once.
+      expect(callVerb('set_away', rwCtx(owner.id), { message: 'brb\r\nJOIN #evil' })).toEqual({
+        ok: false,
+        error: 'message-must-be-single-line',
+      });
+    });
+  });
+  // send_raw is the escape hatch, so it is the one verb that can put cleartext
+  // on a channel the user believes is encrypted — ircManager.send encrypts and
+  // refuses to fall through on failure, conn.raw() does neither. There is also
+  // no local echo on this path, so the leak would be silent at BOTH ends. A
+  // sentence in the tool description is not an enforcement mechanism for a
+  // confidentiality property.
+  describe('send_raw on an E2E channel', () => {
+    it('refuses a PRIVMSG and names the verb that encrypts', () => {
+      setChannelConfig(owner.id, net.id, {
+        channel: '#secret',
+        enabled: true,
+        mode: 'normal',
+      });
+      const conn = live();
+      expect(
+        callVerb('send_raw', rwCtx(owner.id), {
+          networkId: net.id,
+          line: 'PRIVMSG #secret :the passphrase is hunter2',
+        }),
+      ).toEqual({ ok: false, error: 'e2e-channel-use-send-message' });
+      expect(conn.sent).toEqual([]);
+
+      // Case-insensitive on the command, and the extra-whitespace form still
+      // resolves to the same target.
+      expect(
+        callVerb('send_raw', rwCtx(owner.id), {
+          networkId: net.id,
+          line: 'privmsg   #secret   :hi',
+        }),
+      ).toEqual({ ok: false, error: 'e2e-channel-use-send-message' });
+      expect(conn.sent).toEqual([]);
+    });
+
+    it('still allows non-PRIVMSG commands and other channels', () => {
+      setChannelConfig(owner.id, net.id, {
+        channel: '#secret',
+        enabled: true,
+        mode: 'normal',
+      });
+      const conn = live();
+      // Moderating an E2E channel is not a leak.
+      expect(
+        callVerb('send_raw', rwCtx(owner.id), { networkId: net.id, line: 'MODE #secret +o bob' }),
+      ).toMatchObject({ ok: true });
+      // A channel with no E2E config is unaffected.
+      expect(
+        callVerb('send_raw', rwCtx(owner.id), { networkId: net.id, line: 'PRIVMSG #open :hi' }),
+      ).toMatchObject({ ok: true });
+      expect(conn.sent).toEqual(['MODE #secret +o bob', 'PRIVMSG #open :hi']);
     });
   });
 });

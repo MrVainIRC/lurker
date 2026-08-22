@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { registerVerb } from '../verbRegistry.js';
-import ircManager from '../ircManager.js';
+import { writableConnection } from './liveConn.js';
 import { channelArg } from './args.js';
 
 interface VerbContext {
@@ -45,7 +45,7 @@ registerVerb({
     if (typeof input.topic !== 'string') return { ok: false, error: 'topic-must-be-a-string' };
     const topic = input.topic;
     if (/[\r\n]/.test(topic)) return { ok: false, error: 'topic-must-be-single-line' };
-    const conn = ircManager.getConnection(ctx.userId, networkId);
+    const conn = writableConnection(ctx.userId, networkId);
     if (!conn) return { ok: false, error: 'not-connected' };
     conn.raw(`TOPIC ${channel.value} :${topic}`);
     return { ok: true };
