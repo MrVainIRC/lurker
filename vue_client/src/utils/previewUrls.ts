@@ -138,9 +138,24 @@ export function previewableUrls(
 }
 
 interface UrlSpan {
+  /** The address, trailing punctuation trimmed — what actually gets resolved. */
   url: string;
-  /** Offsets into the VISIBLE body — formatting codes removed, spoiler text kept. */
+  /** Offset of the match in the VISIBLE body — formatting codes removed, spoiler text kept. */
   start: number;
+  /**
+   * Offset of the END OF THE MATCH — **not** of `url`.
+   *
+   * ⚠⚠ Untrimmed deliberately. Measuring to the end of the trimmed address leaves the
+   * punctuation `trimTrailingPunctuation` just discarded sitting between the span and the end of
+   * the message, so `look at this https://e.test/a.png.` failed the "nothing but whitespace after
+   * it" test and kept its address — while the same URL at the FRONT hid, the leading check being
+   * vacuously true at offset zero. Identical punctuation, opposite verdicts, decided by nothing
+   * but which end the URL sat at. (#774, fixed first on iOS as `PreviewText.UrlSpan.end`.)
+   *
+   * ⚠⚠ Whatever DELETES the URL has to agree with this or the fix just moves the damage: the
+   * rule counted the punctuation as part of the address, so leaving it behind orphans it. See
+   * `segmentsWithoutUrls`.
+   */
   end: number;
 }
 
@@ -165,7 +180,7 @@ function urlSpans(text: string): { visible: string; spans: UrlSpan[] } {
       if (isBracketedUrl(run.text, match.index, raw)) continue;
       const url = trimTrailingPunctuation(raw);
       if (!url) continue;
-      spans.push({ url, start: base + match.index, end: base + match.index + url.length });
+      spans.push({ url, start: base + match.index, end: base + match.index + raw.length });
     }
   }
   return { visible, spans };
@@ -238,6 +253,35 @@ function isTrimmableText(seg: RenderSegment): boolean {
 }
 
 /**
+ * `seg` with the punctuation that belonged to the URL just dropped taken off its front.
+ *
+ * ⚠⚠ The punctuation goes WITH the address, and this is the half of #774 that makes the span fix
+ * a fix rather than a relocation of the damage. `UrlSpan.end` measures the UNTRIMMED match, so the
+ * hiding rule counted a trailing `.` or an unbalanced `)` as part of the URL when it decided the
+ * URL sat against an edge — while the linkifier, which trims, left exactly those characters at the
+ * head of the following text segment. Dropping only the anchor orphans them: `look at this
+ * https://e.test/a.png.` rendered as `look at this .`, and a message that was ONLY
+ * `https://e.test/shot.png.` collapsed to a body of one full stop — which is not empty, so the
+ * end-trim (whitespace only) left it and a line holding a lone `.` was painted above the picture.
+ *
+ * How much to take is asked of `trimTrailingPunctuation` itself rather than re-derived from a
+ * character class: it is the function that decided where the address ended, and its bracket rule
+ * is balance-sensitive (`…/Foo_(bar)` keeps its `)`, `(see …com)` does not), so a hand-rolled
+ * class would disagree with it on exactly the inputs that matter.
+ *
+ * ⚠ A decorated segment is left alone. Punctuation on a mIRC background run is painted ink, and
+ * the same reasoning that stops the whitespace trim from eating a colour block applies here.
+ */
+function withoutOrphanedPunctuation(seg: RenderSegment, url: string): RenderSegment {
+  if (!isTrimmableText(seg)) return seg;
+  let n = 0;
+  while (n < seg.text.length && trimTrailingPunctuation(url + seg.text.slice(0, n + 1)) === url) {
+    n++;
+  }
+  return n === 0 ? seg : { ...seg, text: seg.text.slice(n) };
+}
+
+/**
  * The message body with `hidden`'s URL segments taken out, and the gap they leave closed up.
  *
  * Returns the ORIGINAL array when nothing is dropped, so the overwhelmingly common case costs one
@@ -253,8 +297,21 @@ export function segmentsWithoutUrls(
   hidden: ReadonlySet<string>,
 ): RenderSegment[] {
   if (!hidden.size) return segments;
-  const kept = segments.filter((seg) => !(seg.url && hidden.has(seg.url)));
-  if (kept.length === segments.length) return segments;
+  const kept: RenderSegment[] = [];
+  let dropped = 0;
+  // The URL just dropped, whose trailing punctuation the NEXT segment holds — see
+  // withoutOrphanedPunctuation.
+  let orphaned: string | null = null;
+  for (const seg of segments) {
+    if (seg.url && hidden.has(seg.url)) {
+      dropped++;
+      orphaned = seg.url;
+      continue;
+    }
+    kept.push(orphaned ? withoutOrphanedPunctuation(seg, orphaned) : seg);
+    orphaned = null;
+  }
+  if (!dropped) return segments;
 
   let lo = 0;
   let hi = kept.length;
