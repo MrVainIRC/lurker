@@ -503,11 +503,17 @@ describe('ircManager optimistic-publish gating', () => {
   // ratchet or burn a queued rekey on a line that never leaves the process.
   it('refuses an E2E send while not writable, without encrypting', () => {
     e2eManager.setChannelConfig(userId, networkId, '#e2eoffline', true, 'normal');
-    const { conn, say, publish } = fakeConn({ state: 'reconnecting' });
+    const flushE2eRekeys = vi.fn<() => void>();
+    const { conn, say, publish } = fakeConn({ state: 'reconnecting', flushE2eRekeys });
     vi.spyOn(ircManager, 'getConnection').mockReturnValue(conn);
     expect(ircManager.send(userId, networkId, '#e2eoffline', 'secret hello')).toBe(false);
     expect(say).not.toHaveBeenCalled();
     expect(publish).not.toHaveBeenCalled();
+    // ⚠⚠ This is the assertion that pins WHERE the gate sits. say/publish alone
+    // would still pass with the gate moved to just after encryptOutgoing() —
+    // which advances the ratchet and DRAINS the pending rekey queue into a dead
+    // socket, losing those rekeys for good. Only flushE2eRekeys catches that.
+    expect(flushE2eRekeys).not.toHaveBeenCalled();
   });
 
   it('the E2E branch keeps its optimistic plaintext publish even with echo active', () => {
