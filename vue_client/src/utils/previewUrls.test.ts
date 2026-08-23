@@ -310,6 +310,41 @@ describe('hideableUrls — when the address stops being worth showing', () => {
     expect([...hideableUrls(buried, all(A))]).toEqual([]);
   });
 
+  // ⚠⚠ #774. The span's end was measured to the end of the TRIMMED address, so the `.` the
+  // trimmer had just discarded sat between the span and the end of the message and failed the
+  // "nothing but whitespace after it" test. The same URL at the FRONT hid regardless, because
+  // the leading check is vacuously true at offset zero — so identical punctuation produced
+  // opposite verdicts decided by nothing but which end the URL sat at. Ported from
+  // PreviewHidingTests.trimmedPunctuationDoesNotBlockThePeel in lurker-ios.
+  it('is not blocked by punctuation the address trim discarded', () => {
+    expect([...hideableUrls(`look at this ${A}.`, all(A))]).toEqual([A]);
+    expect([...hideableUrls(`look at this ${A}!`, all(A))]).toEqual([A]);
+    expect([...hideableUrls(`look at this ${A}?`, all(A))]).toEqual([A]);
+    expect([...hideableUrls(`look at this ${A}...`, all(A))]).toEqual([A]);
+    // ...and prose still wins over punctuation, which is the rule the fix must not soften.
+    expect([...hideableUrls(`I read ${A}. this morning`, all(A))]).toEqual([]);
+  });
+
+  // ⚠⚠ A closing delimiter has a PARTNER sitting before the address, so it is not the URL's to
+  // take. The first cut of #774 absorbed everything trimTrailingPunctuation discarded, which
+  // made these hideable — and rendered `look at this (…)` as a line holding a lone `(` above the
+  // picture, the same orphan the fix exists to remove, moved to the other end. Not hiding them
+  // is the conservative answer: the address stays on screen next to its preview, which is
+  // merely redundant rather than broken.
+  it('will not absorb a delimiter whose partner is in the prose', () => {
+    expect([...hideableUrls(`look at this (${A})`, all(A))]).toEqual([]);
+    expect([...hideableUrls(`look at this [${A}]`, all(A))]).toEqual([]);
+    expect([...hideableUrls(`he said "check ${A}"`, all(A))]).toEqual([]);
+  });
+
+  // ⚠ Measured on the VISIBLE text, not on the regex match, which stops at a run boundary. Bold
+  // or colour wrapped around just the address is a common bot output shape, and it used to
+  // decide the verdict: the identical plain-text message hid.
+  it('sees punctuation across a formatting boundary', () => {
+    expect([...hideableUrls(`look at this \u0002${A}\u0002.`, all(A))]).toEqual([A]);
+    expect([...hideableUrls(`look at this \u001f${A}\u000f.`, all(A))]).toEqual([A]);
+  });
+
   it('hides nothing when there are no candidates', () => {
     expect([...hideableUrls(`${A} ${B}`, new Set())]).toEqual([]);
     expect([...hideableUrls(null, all(A))]).toEqual([]);
@@ -337,6 +372,68 @@ describe('segmentsWithoutUrls — closing the gap', () => {
 
   it('leaves nothing at all for a message that was only a link', () => {
     expect(segmentsWithoutUrls([{ text: A, url: A }], new Set([A]))).toEqual([]);
+  });
+
+  // ⚠⚠ The other half of #774, and the half that decides whether the span fix is a fix or just
+  // a relocation of the damage. The hiding rule counts trailing punctuation as part of the
+  // address, so the deletion has to as well — the linkifier trims it off into a text segment of
+  // its own, and the end-trim below strips whitespace only.
+  it('takes the punctuation the address trim split off with it', () => {
+    const segs = [{ text: 'look at this ' }, { text: A, url: A }, { text: '.' }];
+    expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([{ text: 'look at this' }]);
+  });
+
+  it('leaves nothing for a message that was only a link and a full stop', () => {
+    // The worst version of it: the body was a single `.`, which is not empty — so the
+    // attachments-only collapse never fired and a line holding one full stop was painted
+    // above the picture.
+    const segs = [{ text: A, url: A }, { text: '.' }];
+    expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([]);
+  });
+
+  it('leaves a closing delimiter alone, because its partner is not the URL to take', () => {
+    // ⚠⚠ The deletion must remove exactly what the SPAN counted, no more. It counted no `)`
+    // (hideableUrls won't hide a wrapped URL at all now), so neither does this — and the
+    // assertion is here rather than only on the verdict because the first cut of the fix did
+    // strip it, leaving `(` alone on a line above the picture. If a caller ever hides one
+    // anyway, the bracket survives rather than being half-deleted.
+    const wrapped = [{ text: '(' }, { text: A, url: A }, { text: ')' }];
+    expect(segmentsWithoutUrls(wrapped, new Set([A]))).toEqual([{ text: '(' }, { text: ')' }]);
+  });
+
+  it('follows a punctuation run across a formatting boundary', () => {
+    // The span crosses runs, so the deletion has to as well or it leaves the tail behind.
+    const segs = [{ text: A, url: A }, { text: '.', bold: true }, { text: '.' }];
+    expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([]);
+  });
+
+  it('stops absorbing once a segment survives', () => {
+    // ⚠ A positive control for the rule above: carrying on past a segment that kept text would
+    // eat punctuation belonging to whatever came after.
+    const segs = [{ text: A, url: A }, { text: '. done' }, { text: '. and more' }];
+    expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([
+      { text: 'done' },
+      { text: '. and more' },
+    ]);
+  });
+
+  it('does not eat text that merely follows a hidden URL', () => {
+    // The stripping is bounded by what the trimmer would have taken — the run stops at the
+    // first character it would have kept.
+    const segs = [{ text: A, url: A }, { text: ', which I liked' }];
+    expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([{ text: 'which I liked' }]);
+    const spaced = [{ text: A, url: A }, { text: ' see also' }];
+    expect(segmentsWithoutUrls(spaced, new Set([A]))).toEqual([{ text: 'see also' }]);
+  });
+
+  it('leaves punctuation that is painted ink alone', () => {
+    // Same rule as the whitespace trim: a mIRC background run is a drawing, so a `.` sitting on
+    // one is not stray punctuation to be tidied away.
+    const segs = [
+      { text: A, url: A },
+      { text: '.', bg: 4 },
+    ];
+    expect(segmentsWithoutUrls(segs, new Set([A]))).toEqual([{ text: '.', bg: 4 }]);
   });
 
   it('trims the front too, so a leading link does not leave an indent', () => {
