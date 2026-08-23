@@ -1020,6 +1020,94 @@ describe('disconnect quit message (#324)', () => {
   });
 });
 
+// #785. Clicking Disconnect during a backoff cancels the retry ladder, and until
+// now nothing said so — the outage's first "Reconnecting in Ns (attempt 1)…" is a
+// PERSISTED row, so the server buffer's last word on the subject was a promise to
+// retry that we then quietly broke.
+describe('cancelled-reconnect notice (#785)', () => {
+  // The notice is PERSISTED, not ephemeral — an ephemeral one would leave the
+  // outage's "Reconnecting in Ns (attempt 1)…" row dangling in history with no
+  // resolution, which is the complaint. So this needs a real network to insert
+  // against.
+  beforeAll(() => {
+    if (!getNetwork(1, 1)) {
+      createNetwork(1, {
+        name: 'n',
+        host: 'irc.example.test',
+        port: 6697,
+        tls: true,
+        nick: 'nick',
+      });
+    }
+  });
+
+  function makeConn(events: unknown[]): IrcConnection {
+    return new IrcConnection({
+      network: {
+        id: 1,
+        user_id: 1,
+        name: 'n',
+        host: 'irc.example.test',
+        port: 6697,
+        tls: 1,
+        trusted_certificates: 1,
+        nick: 'nick',
+        username: null,
+        realname: null,
+        server_password: null,
+        autoconnect: 1,
+        sasl_account: null,
+        sasl_password: null,
+        connect_commands: null,
+        position: 0,
+        casemapping: null,
+        created_at: new Date().toISOString(),
+      },
+      onEvent: (e: unknown) => events.push(e),
+    });
+  }
+
+  function cancelText(events: unknown[]): string[] {
+    return (events as Array<{ type?: string; text?: string }>)
+      .filter((e) => e.type === 'notice' && /Reconnecting cancelled/.test(e.text ?? ''))
+      .map((e) => e.text as string);
+  }
+
+  it('announces the cancellation when a retry was pending', () => {
+    const events: unknown[] = [];
+    const conn = makeConn(events);
+    conn.client.quit = vi.fn<(reason?: string) => void>();
+    conn.setState('reconnecting');
+    conn.disconnect(undefined, { announceCancelledRetry: true });
+    expect(cancelText(events)).toEqual(['Reconnecting cancelled — disconnected.']);
+    expect(conn.state).toBe('disconnected');
+  });
+
+  it('says nothing when there was no retry to cancel', () => {
+    // A normal /quit closes a healthy socket; it was never mid-ladder, and the
+    // 'close' handler is what settles the state.
+    const events: unknown[] = [];
+    const conn = makeConn(events);
+    conn.client.quit = vi.fn<(reason?: string) => void>();
+    conn.setState('connected');
+    conn.disconnect(undefined, { announceCancelledRetry: true });
+    expect(cancelText(events)).toEqual([]);
+  });
+
+  // ⚠⚠ disconnect() is also how a PAUSE and a shutdown tear connections down.
+  // Neither is the user cancelling anything, and announcing by default would
+  // write this row into every network that happened to be reconnecting.
+  it('stays silent on the paths that are not a person asking', () => {
+    const events: unknown[] = [];
+    const conn = makeConn(events);
+    conn.client.quit = vi.fn<(reason?: string) => void>();
+    conn.setState('reconnecting');
+    conn.disconnect('shutting down');
+    expect(cancelText(events)).toEqual([]);
+    expect(conn.state).toBe('disconnected');
+  });
+});
+
 describe('self nick updates the input bar (#362)', () => {
   function makeConn(): IrcConnection {
     return new IrcConnection({

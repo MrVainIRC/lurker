@@ -327,7 +327,10 @@ class IrcManager extends EventEmitter {
       fields: { networkId },
       text: reason ? `Stopping: ${reason}` : 'Stopping',
     });
-    conn.disconnect(reason);
+    // announceCancelledRetry: this is the one disconnect path that is always a
+    // person asking (the REST endpoint and the disconnect_network verb), so it is
+    // the one that should say so when it cancels a pending retry.
+    conn.disconnect(reason, { announceCancelledRetry: true });
     this.connectionsForUser(userId).delete(networkId);
   }
 
