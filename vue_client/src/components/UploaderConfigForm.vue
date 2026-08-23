@@ -24,6 +24,7 @@
         maxlength="64"
         :placeholder="driver.label"
         :disabled="busy"
+        @keydown.enter="blockImeEnter"
       />
     </label>
 
@@ -95,8 +96,15 @@ const values = ref<Record<string, string>>(
 
 // One handler for every driver field, since these are a v-for over the driver's
 // schema rather than named refs. Bound off the element because `incomplete`
-// below reads them as you type to gate the save button. The Name field above
-// keeps v-model on purpose: nothing reads it until submit.
+// below reads them as you type to gate the save button.
+//
+// The Name field above keeps v-model on purpose — nothing reads it until submit
+// — but still takes the Enter gate, because those are two separate questions.
+// It is a single-line input in a <form> whose submit button goes live as soon as
+// the DRIVER fields are complete, which is before you have finished the name if
+// you type it last. An IME's confirm-Enter there implicitly submits, and the
+// uploader is created early under the driver's default name (onSubmit falls back
+// to it) rather than the one still sitting in the preedit.
 function onFieldInput(key: string, e: Event) {
   values.value[key] = imeSafeValue(e);
 }

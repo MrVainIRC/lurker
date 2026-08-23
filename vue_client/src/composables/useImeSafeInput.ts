@@ -42,10 +42,15 @@
 // a theme saved as "nihao" and the field cleared out from under the user.
 //
 // So a field that DOES something on Enter — an explicit @keydown, or implicit
-// form submission from a single-line input — pairs the binding with isImeKey /
-// blockImeEnter below. A filter that only filters needs neither; a <textarea> in
-// a form needs neither either, since Enter there inserts a newline rather than
-// submitting.
+// form submission from a single-line input — needs isImeKey / blockImeEnter
+// below. A filter that only filters needs neither; a <textarea> in a form needs
+// neither either, since Enter there inserts a newline rather than submitting.
+//
+// That gate is a SEPARATE question from the binding, and a field can need one
+// without the other. A single-line input still on v-model needs it too: its
+// stale model doesn't make an early submit harmless, it just changes what gets
+// submitted (UploaderConfigForm's Name field is the worked example — see the
+// note there).
 //
 // ─── Scope ──────────────────────────────────────────────────────────────────
 //
