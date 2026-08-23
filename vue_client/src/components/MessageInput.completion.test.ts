@@ -683,6 +683,51 @@ describe('MessageInput command dispatch', () => {
     });
   });
 
+  // #785. `/disconnect` is the word people reach for when a network is stuck in a reconnect
+  // loop, and it used to fall through to the raw-line default — so it went out as an unknown
+  // IRC verb, and during a backoff nowhere at all. It shares /quit's branch: both route through
+  // the intentional-disconnect path, which is what sets irc-framework's requested_disconnect
+  // flag so the close doesn't look unexpected and trigger another auto-reconnect.
+  it.each([
+    ['/quit', undefined],
+    ['/disconnect', undefined],
+    ['/disconnect back later', 'back later'],
+  ])('%s stops the network instead of going out as a raw line', async (input, reason) => {
+    seedStores('#zebra');
+    const networks = useNetworksStore();
+    const disconnect = vi
+      .spyOn(networks, 'disconnect')
+      .mockResolvedValue(undefined as unknown as void);
+    const { el } = await mountComposer();
+
+    await type(el, input);
+    await enter(el);
+
+    expect(disconnect).toHaveBeenCalledWith(1, reason);
+    // ⚠ And emphatically not as a raw line — that is the shape of the bug.
+    expect(socketSend).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'raw' }));
+  });
+
+  it('reports a failed /disconnect in the buffer rather than swallowing it', async () => {
+    // The one branch the happy-path cases can't reach. It matters here more than for most
+    // commands: the whole point of #785 is a user trying to stop a network that won't stop, so
+    // "nothing happened" is precisely the wrong feedback if the call fails.
+    seedStores('#zebra');
+    const networks = useNetworksStore();
+    vi.spyOn(networks, 'disconnect').mockRejectedValue(new Error('network is paused'));
+    const buffers = useBuffersStore();
+    const pushMessage = vi.spyOn(buffers, 'pushMessage');
+    const { el } = await mountComposer();
+
+    await type(el, '/disconnect');
+    await enter(el);
+    await flush();
+
+    expect(pushMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ text: '/disconnect failed: network is paused' }),
+    );
+  });
+
   it('/part <#chan> [reason] retargets the named channel', async () => {
     seedStores('#zebra');
     const { el } = await mountComposer();

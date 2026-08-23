@@ -2409,7 +2409,7 @@ const COMMANDS_LINES = [
   '  /mode <target> <flags> — set modes (target defaults to current channel)',
   '  /topic [text]          — set/clear topic on current channel',
   '  /nick <newnick>        — change your nick',
-  '  /quit [reason]         — disconnect from current network',
+  '  /quit [reason]         — disconnect from current network (alias: /disconnect)',
   '  /reconnect             — reconnect to current network',
   '  /list                  — list channels on current network',
   '  /who [mask]            — find users (also /whowas /userhost /ison /names)',
@@ -3499,6 +3499,11 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       }
       return sendOrToast({ type: 'raw', networkId, line: `MODE ${argLine}` }, line);
     }
+    // `/disconnect` is the word people reach for when a network is stuck in a
+    // reconnect loop, and until #785 it fell through to the raw-line default —
+    // so it went out as an unknown IRC command (and during a backoff, nowhere at
+    // all). It means the same thing as /quit here: stop this network.
+    case 'disconnect':
     case 'quit': {
       // Route through the intentional-disconnect path (POST .../disconnect →
       // ircManager.stopNetwork → client.quit()), which sets irc-framework's
@@ -3509,7 +3514,7 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // an auto-disconnect.
       const reason = argLine || undefined;
       networks.disconnect(networkId, reason).catch((err) => {
-        localInfo(networkId, target, `/quit failed: ${err.message || 'could not disconnect'}`);
+        localInfo(networkId, target, `/${verb} failed: ${err.message || 'could not disconnect'}`);
       });
       return true;
     }

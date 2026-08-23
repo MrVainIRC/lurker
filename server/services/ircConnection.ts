@@ -5028,7 +5028,7 @@ export class IrcConnection {
     this.publishAwayState();
   }
 
-  disconnect(reason?: string): void {
+  disconnect(reason?: string, opts: { announceCancelledRetry?: boolean } = {}): void {
     // The user/system asked to disconnect — record intent BEFORE quit() so the
     // 'close' handler doesn't fight them by auto-reconnecting, and drop any
     // pending backoff so an earlier drop's retry can't resurrect the connection.
@@ -5043,7 +5043,31 @@ export class IrcConnection {
     // Assert the terminal state directly in that case. When a live socket IS
     // closed, its 'close' handler sets 'disconnected' too — setState is
     // change-guarded, so the double-call is a harmless no-op.
-    if (noLiveSocketToClose) this.setState('disconnected');
+    if (noLiveSocketToClose) {
+      // Say that the retry ladder stopped, because otherwise nothing does. The
+      // outage's first "Reconnecting in Ns (attempt 1)…" is a PERSISTED row, so
+      // without this the server buffer's last word on the subject is a promise to
+      // retry that we then quietly broke — and the user who just clicked
+      // Disconnect has no confirmation it took (#785). Only on the no-live-socket
+      // path: a normal /quit closes a healthy socket and was never mid-retry.
+      //
+      // ⚠ Opt-in rather than automatic, because disconnect() is also how a PAUSE
+      // and a shutdown tear connections down. Neither is the user cancelling
+      // anything, and both would otherwise write this row into every network that
+      // happened to be reconnecting at the time. stopNetwork — whose only two
+      // callers are the disconnect endpoint and the disconnect_network verb — is
+      // the one path that is always a person asking.
+      if (opts.announceCancelledRetry) {
+        this.publish({
+          type: 'notice',
+          target: this.serverTarget(),
+          nick: 'lurker',
+          notable: false, // status line, like the "Reconnecting in Ns" it answers
+          text: 'Reconnecting cancelled — disconnected.',
+        });
+      }
+      this.setState('disconnected');
+    }
   }
 
   // Cancel a pending backoff retry. Idempotent.
