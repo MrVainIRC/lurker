@@ -59,7 +59,8 @@
 
   <div class="theme-save">
     <input
-      v-model="newName"
+      :value="newName"
+      @input="onNameInput"
       type="text"
       :maxlength="THEME_NAME_MAX"
       :disabled="busy"
@@ -117,6 +118,7 @@ import { useThemesStore } from '../../stores/themes.js';
 import { prefersDark } from '../../utils/prefersDark.js';
 import { THEME_NAME_MAX, themeNameError } from '../../../../shared/themePresets.js';
 import type { ThemePreset } from '../../../../shared/themePresets.js';
+import { useImeSafeInput } from '../../composables/useImeSafeInput.js';
 
 const settings = useSettingsStore();
 const themes = useThemesStore();
@@ -124,6 +126,7 @@ const themes = useThemesStore();
 const error = ref('');
 const busy = ref(false);
 const newName = ref('');
+const onNameInput = useImeSafeInput(newName);
 
 const drifted = computed(() => settings.themeDriftKeys.length > 0);
 const mode = computed(() => String(settings.effective('look.theme.mode') ?? 'single'));
