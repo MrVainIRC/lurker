@@ -627,6 +627,62 @@ describe('MessageInput command dispatch', () => {
     });
   });
 
+  // #809 QA. The clear is optimistic — commitInput runs before the ACK — so a send
+  // that comes back not-connected used to leave the composer empty with nothing
+  // but a toast and up-arrow. Fine while a failed send was a rarity; the
+  // writable-connection gate makes it the ordinary outcome of any outage.
+  describe('a failed send comes back to the composer', () => {
+    async function failingSend(input: string) {
+      seedStores('#zebra');
+      vi.mocked(socketSendWithAck).mockReturnValue(
+        Promise.resolve({ ok: false, error: 'not-connected' }) as never,
+      );
+      const drafts = useDraftStore();
+      const { el } = await mountComposer();
+      await type(el, input);
+      await enter(el);
+      await flush();
+      return drafts;
+    }
+
+    it('restores a plain message as the buffer draft', async () => {
+      const drafts = await failingSend('hello there');
+      expect(drafts.forBuffer(1, '#zebra')).toBe('hello there');
+    });
+
+    it('restores the whole typed line for a command, not just its body', async () => {
+      // ⚠ `/me waves` and not `waves` — what comes back has to be re-sendable.
+      const drafts = await failingSend('/me waves');
+      expect(drafts.forBuffer(1, '#zebra')).toBe('/me waves');
+    });
+
+    it('restores a /notice to the buffer it was TYPED IN, not to its target', async () => {
+      const drafts = await failingSend('/notice bob psst');
+      expect(drafts.forBuffer(1, '#zebra')).toBe('/notice bob psst');
+      expect(drafts.forBuffer(1, 'bob')).toBe('');
+    });
+
+    // ⚠⚠ The rule that keeps this from being a regression of its own: the ACK is
+    // late, so the user may already be typing something else. Theirs wins.
+    it('never clobbers text typed while the ACK was in flight', async () => {
+      seedStores('#zebra');
+      let settle: (r: { ok: boolean; error: string }) => void = () => {};
+      vi.mocked(socketSendWithAck).mockReturnValue(
+        new Promise((r) => {
+          settle = r as typeof settle;
+        }) as never,
+      );
+      const drafts = useDraftStore();
+      const { el } = await mountComposer();
+      await type(el, 'first');
+      await enter(el);
+      await type(el, 'second thoughts');
+      settle({ ok: false, error: 'not-connected' });
+      await flush();
+      expect(drafts.forBuffer(1, '#zebra')).toBe('second thoughts');
+    });
+  });
+
   it('/part <#chan> [reason] retargets the named channel', async () => {
     seedStores('#zebra');
     const { el } = await mountComposer();

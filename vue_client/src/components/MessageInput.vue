@@ -192,7 +192,7 @@ import { ACCEPTED_FILE_TYPES, CAMERA_CAPTURE_TYPES, isUploadableType } from '../
 import { useWhoisStore } from '../stores/whois.js';
 import { useChanlistStore } from '../stores/chanlist.js';
 import { useChannelListModal } from '../composables/useChannelListModal.js';
-import { socketSend, socketSendWithAck } from '../composables/useSocket.js';
+import { socketSend, socketSendWithAck, type AckResult } from '../composables/useSocket.js';
 import { requestScrollToBottom } from '../composables/useScrollState.js';
 import { setComposingState } from '../composables/useComposing.js';
 import {
@@ -2043,6 +2043,35 @@ defineExpose({
   focus: () => inputEl.value?.focus(),
 });
 
+/**
+ * Put a failed send's text back where the user can act on it.
+ *
+ * ⚠⚠ The clear is OPTIMISTIC — commitInput runs before the ACK resolves, so by the time a send
+ * comes back `not-connected` the composer and the synced draft have already been emptied. That
+ * was survivable while a failed send was a rarity; the writable-connection gate (#809) makes it
+ * the ordinary outcome of any outage, and "your message vanished, there's a toast, press up-arrow"
+ * is not a thing a chat client should ask of you.
+ *
+ * Restoring the DRAFT is what does the work: the composer's `text` is a computed over the draft
+ * for the active buffer, so this refills the input if you're still looking at that buffer, and
+ * leaves it waiting for you (on every device) if you're not.
+ *
+ * ⚠⚠ Addressed to the buffer the send came FROM, never through `text.value` — whose setter
+ * targets whatever buffer is active NOW. `/msg nick text` activates the DM before we get here, so
+ * writing through the setter would strand the text in the wrong composer. Same trap commitInput
+ * documents (#4).
+ *
+ * ⚠ Never clobbers. The user may have started typing something else in the gap; theirs wins, and
+ * the toast (which carries the body) plus up-arrow are the fallback.
+ */
+function restoreFailedSend(networkId: number, target: string, raw: string): void {
+  if (drafts.forBuffer(networkId, target).trim() !== '') return;
+  drafts.setLocal(networkId, target, raw);
+  // Straight to the server rather than on the debounce, so closing the tab or
+  // switching buffers can't lose what we just recovered.
+  drafts.flushBuffer(networkId, target);
+}
+
 function toastSendFailure(error: string, body: string): void {
   // Translate the small set of ack/error strings into something a person can
   // act on. We keep the failed text in the toast body so the user can copy
@@ -2235,9 +2264,17 @@ async function submit() {
     // synchronously if the socket is closed so we don't silently swallow
     // them either.
     const said = chatMessagesSent;
+    // Cleared first so a stale ack from an earlier command can't be mistaken for
+    // this one's.
+    pendingCommandAck = null;
     const handled = await handleCommand(raw, networkId, target);
     if (!handled) return;
     commitInput(raw, networkId, target, { isChatMessage: chatMessagesSent > said });
+    const ack = takeCommandAck();
+    if (ack) {
+      const result = await ack.promise;
+      if (!result.ok) restoreFailedSend(ack.origin.networkId, ack.origin.target, ack.origin.line);
+    }
     return;
   }
 
@@ -2259,7 +2296,10 @@ async function submit() {
   clearInactivityTimer();
   commitInput(raw, networkId, target, { isChatMessage: true });
   const result = await pending;
-  if (!result.ok) toastSendFailure(result.error ?? 'unknown', raw);
+  if (!result.ok) {
+    toastSendFailure(result.error ?? 'unknown', raw);
+    restoreFailedSend(networkId, target, raw);
+  }
 }
 
 async function onLongMessageConfirm() {
@@ -2514,7 +2554,39 @@ function sendOrToast(payload: Record<string, unknown>, body: string): boolean {
 // to sequence wrongly against the read.
 let chatMessagesSent = 0;
 
-function ackedSend(payload: Record<string, unknown>, body: string): boolean {
+// The ACK of the last command that put something on the wire, plus the buffer it
+// was TYPED IN and the line as typed. submit() picks this up AFTER commitInput.
+//
+// ⚠⚠ Handed up rather than restored inside ackedSend, and the ordering is the
+// reason. submit does `await handleCommand(...)` — one microtask — and only then
+// calls commitInput to clear the composer. An ACK that resolves inside that
+// window would be restored and then immediately cleared again. A real socket
+// can't answer that fast, but "correct because the network is slow" is not an
+// invariant worth shipping.
+interface CommandAck {
+  promise: Promise<AckResult>;
+  origin: { networkId: number; target: string; line: string };
+}
+let pendingCommandAck: CommandAck | null = null;
+
+// Read-and-clear. A function rather than a bare read because TypeScript narrows
+// the module-level `let` to `null` at the reset in submit() and doesn't widen it
+// back across the `await handleCommand(...)` that fills it in.
+function takeCommandAck(): CommandAck | null {
+  const ack = pendingCommandAck;
+  pendingCommandAck = null;
+  return ack;
+}
+
+// `origin` is the buffer the command was TYPED IN plus the line as typed, so a
+// failure can hand the whole thing back — `/notice bob hi`, not the bare `hi`
+// that `body` carries. Not the payload's target: `/notice bob …` is addressed to
+// bob but was written in #chan, and #chan is where the text belongs.
+function ackedSend(
+  payload: Record<string, unknown>,
+  body: string,
+  origin?: { networkId: number; target: string; line: string },
+): boolean {
   const pending = socketSendWithAck(payload);
   if (!pending) {
     toastSendFailure('disconnected', body);
@@ -2523,10 +2595,11 @@ function ackedSend(payload: Record<string, unknown>, body: string): boolean {
   // 'notice' is deliberately not counted: it's addressed to someone else and
   // puts nothing in the buffer the command was run from.
   if (payload.type === 'send' || payload.type === 'action') chatMessagesSent += 1;
-  pending.then((result) => {
+  const settled = pending.then((result) => {
     if (!result.ok) toastSendFailure(result.error ?? 'unknown', body);
     return result;
   });
+  if (origin) pendingCommandAck = { promise: settled, origin };
   return true;
 }
 
@@ -3169,7 +3242,11 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       // relay mark is per-(network, nick), so it needs an active network.
       return runRelay(argLine, networkId, target);
     case 'me':
-      return ackedSend({ type: 'action', networkId, target, text: chatBody(argLine) }, argLine);
+      return ackedSend({ type: 'action', networkId, target, text: chatBody(argLine) }, argLine, {
+        networkId,
+        target,
+        line,
+      });
     case 'ctcp': {
       // /ctcp <nick> <type> [args] — send a CTCP query (#263). The cell frames
       // and sends it, echoes locally, and routes the reply back to this buffer.
@@ -3214,7 +3291,13 @@ function handleCommand(line: string, networkId: number | null, target: string): 
       if (!who) return true;
       const body = msgParts.join(' ');
       if (body) {
-        if (!ackedSend({ type: 'send', networkId, target: who, text: chatBody(body) }, body))
+        if (
+          !ackedSend({ type: 'send', networkId, target: who, text: chatBody(body) }, body, {
+            networkId,
+            target,
+            line,
+          })
+        )
           return false;
       }
       buffers.activate(networkId, who);
@@ -3454,7 +3537,11 @@ function handleCommand(line: string, networkId: number | null, target: string): 
         return true;
       }
       const url = `https://meet.jit.si/lurker-${randomRoomId()}`;
-      return ackedSend({ type: 'send', networkId, target, text: url }, url);
+      return ackedSend({ type: 'send', networkId, target, text: url }, url, {
+        networkId,
+        target,
+        line,
+      });
     }
     case 'op':
       return modeShortcut(networkId, target, rest, '+', 'o', 'usage: /op [#chan] <nick…>', line);
@@ -3593,7 +3680,11 @@ function handleCommand(line: string, networkId: number | null, target: string): 
         localInfo(networkId, target, 'usage: /notice <target> <text>');
         return true;
       }
-      return ackedSend({ type: 'notice', networkId, target: who, text: chatBody(body) }, body);
+      return ackedSend({ type: 'notice', networkId, target: who, text: chatBody(body) }, body, {
+        networkId,
+        target,
+        line,
+      });
     }
     case 'slap': {
       // mIRC's classic: a CTCP ACTION with the canonical trout line, so it rides
@@ -3608,7 +3699,11 @@ function handleCommand(line: string, networkId: number | null, target: string): 
         return true;
       }
       const slapText = `slaps ${who} around a bit with a large trout`;
-      return ackedSend({ type: 'action', networkId, target, text: slapText }, slapText);
+      return ackedSend({ type: 'action', networkId, target, text: slapText }, slapText, {
+        networkId,
+        target,
+        line,
+      });
     }
     case 'shrug': {
       // A plain message, not an ACTION: everywhere this convention comes from
@@ -3619,7 +3714,11 @@ function handleCommand(line: string, networkId: number | null, target: string): 
         return true;
       }
       const shrugText = shrugBody(argLine);
-      return ackedSend({ type: 'send', networkId, target, text: chatBody(shrugText) }, shrugText);
+      return ackedSend({ type: 'send', networkId, target, text: chatBody(shrugText) }, shrugText, {
+        networkId,
+        target,
+        line,
+      });
     }
     // Info/query commands. These already function via the raw fallback now that
     // unhandled server numerics surface in the server buffer (#269) — listing
