@@ -398,12 +398,6 @@ function buildRule(): IgnoreRule | null {
     formError.value = 'that would silence every highlight — add a mask, channel, or text pattern.';
     return null;
   }
-  // ⚠⚠ The same footgun, in the shape this change newly made reachable. A modifier-only rule
-  // with no who/where/what compiles to matchesNick = () => true with hides:false, and
-  // evaluateIgnores' no-applies branch is unbounded for a non-hiding rule — so it silently kills
-  // every highlight on every network, and the list shows it as nothing but `*  NOHIGHLIGHT`.
-  // Two clicks away from the default form, which is exactly why it needs saying out loud.
-
   let expiresAt: string | null = null;
   const dur = form.expiry.trim();
   if (dur) {
