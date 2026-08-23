@@ -19,8 +19,9 @@ import type { IrcConnection } from '../ircConnection.js';
 // already-materialised state (get_topic, list_members) deliberately do NOT go
 // through here: they return last-known membership, which is stale but not a
 // lie, and refusing them mid-reconnect would be strictly less useful.
+//
+// The test itself lives on ircManager (the send path needs the same gate and
+// can't import this module without a cycle); this stays the verbs' name for it.
 export function writableConnection(userId: number, networkId: number): IrcConnection | null {
-  const conn = ircManager.getConnection(userId, networkId);
-  if (!conn || conn.state !== 'connected') return null;
-  return conn;
+  return ircManager.writableConnection(userId, networkId);
 }
