@@ -22,6 +22,8 @@ import {
   joinRejectionMessage,
   joinRejectionMessageByTag,
   resolveChannelContext,
+  commandResultError,
+  isCommandResultErrorTag,
   sendRejectionTargetKind,
   sendRejectionText,
   outgoingAddr,
@@ -642,6 +644,75 @@ describe('formatSocketCloseErrorMessage', () => {
 });
 
 // End-to-end check that the real irc-framework event handlers route refused
+
+// A channel command that fails (kick / invite / mode / topic) used to report
+// only in the server buffer, far from the channel the user ran it in (#434).
+describe('command-result error classification (#434)', () => {
+  it('reads the channel out of ERR_CHANOPRIVSNEEDED (482)', () => {
+    expect(commandResultError('482', ['me', '#chan', "You're not channel operator"])).toEqual({
+      channel: '#chan',
+      text: "You're not a channel operator.",
+    });
+  });
+
+  it('takes ERR_USERNOTINCHANNEL (441) from the wire, not the framework', () => {
+    // The whole reason this reads raw params. irc-framework's generic map for
+    // 441 is off by one against its own 443: it reports OUR nick as `nick` and
+    // the target NICK as `channel`, so an event-driven version of this would
+    // publish into a buffer called "baduser".
+    expect(
+      commandResultError('441', ['me', 'baduser', '#chan', "They aren't on that channel"]),
+    ).toEqual({ channel: '#chan', text: "baduser isn't on this channel." });
+  });
+
+  it('names the subject for ERR_USERONCHANNEL (443), which sends a fragment', () => {
+    // The server's own trailing text is "is already on channel" — a sentence
+    // with its subject missing, which is why these messages are ours.
+    expect(commandResultError('443', ['me', 'bob', '#chan', 'is already on channel'])).toEqual({
+      channel: '#chan',
+      text: 'bob is already on this channel.',
+    });
+  });
+
+  it('covers the mode failures irc-framework never models at all', () => {
+    expect(commandResultError('467', ['me', '#chan', 'Channel key already set'])?.channel).toBe(
+      '#chan',
+    );
+    expect(commandResultError('478', ['me', '#chan', 'b', 'Channel list is full'])?.channel).toBe(
+      '#chan',
+    );
+  });
+
+  it('accepts every channel prefix, not just #', () => {
+    expect(commandResultError('482', ['me', '&local', 'nope'])?.channel).toBe('&local');
+  });
+
+  it('declines a numeric it does not own', () => {
+    expect(commandResultError('401', ['me', 'ghost', 'No such nick'])).toBeNull();
+    expect(commandResultError('482', [])).toBeNull();
+  });
+
+  it('declines when the channel param is not a channel', () => {
+    // A server shipping these params in another order must not be routed on.
+    expect(commandResultError('482', ['me', 'notachannel', 'nope'])).toBeNull();
+    expect(commandResultError('441', ['me', '#chan', 'baduser', 'nope'])).toBeNull();
+  });
+
+  it('declines when the subject param is missing', () => {
+    expect(commandResultError('443', ['me', '', '#chan'])).toBeNull();
+  });
+
+  it('claims exactly the tags whose server-buffer line is now a duplicate', () => {
+    expect(isCommandResultErrorTag('chanop_privs_needed')).toBe(true);
+    expect(isCommandResultErrorTag('user_not_in_channel')).toBe(true);
+    expect(isCommandResultErrorTag('user_on_channel')).toBe(true);
+    // Owned by other buckets — must keep their existing routing.
+    expect(isCommandResultErrorTag('cannot_send_to_channel')).toBe(false);
+    expect(isCommandResultErrorTag('banned_from_channel')).toBe(false);
+    expect(isCommandResultErrorTag('no_such_nick')).toBe(false);
+  });
+});
+
 // outgoing messages to the right buffer (#283). publish/publishEphemeral are
 // stubbed so we can assert the routing decision without a DB or a live socket.
 describe('refused-message handler routing (#283)', () => {
@@ -709,6 +780,95 @@ describe('refused-message handler routing (#283)', () => {
     expect(publish).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'error', target: 'sleepynick' }),
     );
+  });
+
+  // #434 — the third routing bucket. Driven through the 'raw' handler because
+  // that is where it lives: it is the only place with the numeric's params
+  // intact (see COMMAND_RESULT_ERRORS on why the parsed event won't do).
+  function emitRaw(conn: IrcConnection, line: string) {
+    conn.client.emit('raw', { from_server: true, line });
+  }
+
+  it('routes ERR_CHANOPRIVSNEEDED (482) inline to the channel the command ran in', () => {
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    emitRaw(conn, ":irc.example.test 482 nick #anime :You're not channel operator");
+
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        target: '#anime',
+        text: "You're not a channel operator.",
+      }),
+    );
+  });
+
+  it('still logs the server\u2019s own line to the server buffer', () => {
+    // Additive, like a join rejection: the friendly line goes to the channel,
+    // the authentic record stays in the server buffer (#342).
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    emitRaw(conn, ":irc.example.test 482 nick #anime :You're not channel operator");
+
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'motd',
+        target: ':server:1',
+        text: "#anime You're not channel operator",
+      }),
+    );
+  });
+
+  it('routes 441 to the channel, never to the nick the framework calls a channel', () => {
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    emitRaw(conn, ":irc.example.test 441 nick baduser #anime :They aren't on that channel");
+
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', target: '#anime' }),
+    );
+    expect(publish).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', target: 'baduser' }),
+    );
+  });
+
+  it('leaves a command aimed at a channel we are not in in the server buffer', () => {
+    // No buffer to land in, and fabricating one would be worse than the status
+    // quo. The raw line still reports it.
+    const conn = makeConn();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    emitRaw(conn, ":irc.example.test 482 nick #elsewhere :You're not channel operator");
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#elsewhere' }));
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ target: ':server:1' }));
+  });
+
+  it('drops the duplicate tag line the server buffer used to get as well', () => {
+    // 482 reached the server buffer twice: the raw line, plus a
+    // "chanop_privs_needed #anime — …" line from the 'irc error' catch-all.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.client.emit('irc error', {
+      error: 'chanop_privs_needed',
+      channel: '#anime',
+      reason: "You're not channel operator",
+    });
+
+    expect(publish).not.toHaveBeenCalled();
   });
 
   it('surfaces 477 inline as a speak rejection when we are already in the channel', () => {

@@ -1000,6 +1000,23 @@ export class IrcConnection {
       ) {
         this.registrationLines.push(burstLine);
       }
+      // Command-result errors (a failed kick / invite / mode / topic) name the
+      // channel they concern, so surface them in that buffer instead of leaving
+      // the user to find them in the server buffer (#434). Read off the raw
+      // params rather than the parsed 'irc error' event, which mis-maps some of
+      // these — see COMMAND_RESULT_ERRORS. Additive: the raw line still goes to
+      // the server buffer below, the same way a join rejection does. Only for
+      // channels we're actually in, so a command aimed elsewhere can't conjure
+      // a buffer; publish() canonicalizes the channel case.
+      const cmdError = commandResultError(rawCommand, msg?.params ?? []);
+      if (cmdError && this.isChannelJoined(cmdError.channel)) {
+        this.publish({
+          type: 'error',
+          target: cmdError.channel,
+          text: cmdError.text,
+          raw: { command: rawCommand, params: msg?.params ?? [] },
+        });
+      }
       if (isServerBufferDeniedNumeric(rawCommand)) return;
       // formatUnknownNumeric only renders 3-digit numerics (it strips the
       // leading recipient-nick param), so PRIVMSG/JOIN/NOTICE/etc. naturally
@@ -2732,6 +2749,11 @@ export class IrcConnection {
         this.handleSendRejection(sendRejectTarget, reason, event);
         return;
       }
+      // Command-result errors are routed to their channel off the raw line (see
+      // the 'raw' handler). The generic line below would be a second copy in the
+      // server buffer of what the raw handler already logged verbatim there, so
+      // it goes — whether or not the routing found a buffer to use (#434).
+      if (isCommandResultErrorTag(tag)) return;
       // ERR_UNKNOWNCOMMAND (421) carries the rejected command name in
       // event.command (irc-framework parses it from the numeric's params).
       // Include it so the buffer line names the offending command —
@@ -5579,6 +5601,86 @@ const SEND_REJECTION_TAGS: Record<string, 'channel' | 'nick'> = {
 
 export function sendRejectionTargetKind(tag: string): 'channel' | 'nick' | null {
   return SEND_REJECTION_TAGS[tag] || null;
+}
+
+// Command-result errors: a numeric that reports why a channel COMMAND failed —
+// a kick, an invite, a mode change, a topic set. A third bucket alongside the
+// two already here, and the one that had nowhere to go: join rejections (#260)
+// belong on a channel with no buffer yet, send rejections (#283) belong where
+// the refused message was typed, and these belong in the channel the command
+// was run in. Until now they fell through to the generic server-buffer line, so
+// the user sat in #channel, ran /kick, saw nothing happen, and the reason was
+// buried somewhere they weren't looking (#434).
+//
+// Indexes are into the RAW wire params, params[0] being our own nick. We read
+// the line ourselves rather than take irc-framework's parsed 'irc error' event
+// because its generic map is not reliable here, verified against 4.x:
+//   - ERR_USERNOTINCHANNEL (441) is off by one against its own 443 mapping. It
+//     reports OUR nick as `nick` and the target NICK as `channel`, so routing on
+//     event.channel would publish into a buffer named after a user.
+//   - ERR_USERONCHANNEL (443) carries no `reason` at all.
+//   - ERR_KEYSET (467) and ERR_BANLISTFULL (478) it doesn't model, so they never
+//     reach an 'irc error' event in the first place.
+// The 'raw' handler sees every line with its params intact, which makes one
+// table cover all of them.
+//
+// The message is ours rather than the server's trailing text, for the same
+// reason JOIN_REJECTION_MESSAGES exists: several of these numerics send a
+// sentence FRAGMENT meant to be prefixed by a param ("is already on channel"),
+// which reads as nonsense on its own. `subject` names the param to put in front
+// of it. The server's own line is still logged verbatim to the server buffer by
+// the 'raw' handler, so nothing is lost by not quoting it here.
+const COMMAND_RESULT_ERRORS: Record<
+  string,
+  { channel: number; subject?: number; message: (subject: string) => string }
+> = {
+  // ERR_CHANOPRIVSNEEDED — <client> <channel> :You're not channel operator
+  '482': { channel: 1, message: () => "You're not a channel operator." },
+  // ERR_USERNOTINCHANNEL — <client> <nick> <channel> :They aren't on that channel
+  '441': { channel: 2, subject: 1, message: (who) => `${who} isn't on this channel.` },
+  // ERR_USERONCHANNEL — <client> <nick> <channel> :is already on channel
+  '443': { channel: 2, subject: 1, message: (who) => `${who} is already on this channel.` },
+  // ERR_KEYSET — <client> <channel> :Channel key already set
+  '467': { channel: 1, message: () => 'The channel key is already set.' },
+  // ERR_BANLISTFULL — <client> <channel> <char> :Channel list is full
+  '478': { channel: 1, message: () => "The channel's ban/exception list is full." },
+};
+
+// Resolve a raw numeric into the channel it concerns and the line to show
+// there, or null if it isn't one of these / the params don't hold up. Callers
+// still have to check we're actually JOINED to the channel before publishing:
+// a command aimed at a channel you're not in has no buffer to land in, and
+// fabricating one would be worse than the server buffer.
+export function commandResultError(
+  numeric: string,
+  params: readonly (string | undefined)[],
+): { channel: string; text: string } | null {
+  const spec = COMMAND_RESULT_ERRORS[numeric];
+  if (!spec) return null;
+  const channel = params[spec.channel];
+  // Guards the 441-shaped case above from the other direction too: if a server
+  // ever ships these params in a different order, a non-channel value here
+  // fails the test and the line stays in the server buffer.
+  if (typeof channel !== 'string' || !isChannelTarget(channel)) return null;
+  const subject = spec.subject === undefined ? '' : params[spec.subject];
+  if (spec.subject !== undefined && (typeof subject !== 'string' || !subject)) return null;
+  return { channel, text: spec.message(subject as string) };
+}
+
+// True for numerics commandResultError owns, keyed by the tag irc-framework
+// reports on its 'irc error' event. The routing itself happens on the raw line;
+// this exists so the same error doesn't ALSO get written to the server buffer as
+// a tag line. That line was always a duplicate of the raw one the 'raw' handler
+// logs — routed or not — so suppressing it is not conditional on the routing
+// having found a buffer.
+const COMMAND_RESULT_ERROR_TAGS = new Set<string>([
+  'chanop_privs_needed', // 482
+  'user_not_in_channel', // 441
+  'user_on_channel', // 443
+]);
+
+export function isCommandResultErrorTag(tag: string): boolean {
+  return COMMAND_RESULT_ERROR_TAGS.has(tag);
 }
 
 // ERR_NEEDREGGEDNICK (477) is overloaded: a server sends it both to refuse a
