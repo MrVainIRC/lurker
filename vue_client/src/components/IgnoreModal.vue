@@ -13,6 +13,7 @@
             ref="inputEl"
             :value="mask"
             @input="onMaskInput"
+            @keydown.enter="blockImeEnter"
             type="text"
             spellcheck="false"
             autocapitalize="off"
@@ -61,7 +62,7 @@
 import { onMounted, ref } from 'vue';
 import AppModal from './AppModal.vue';
 import { useIgnoresStore } from '../stores/ignores.js';
-import { useImeSafeInput } from '../composables/useImeSafeInput.js';
+import { blockImeEnter, useImeSafeInput } from '../composables/useImeSafeInput.js';
 
 const props = withDefaults(
   defineProps<{

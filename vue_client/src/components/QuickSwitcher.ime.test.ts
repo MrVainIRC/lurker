@@ -33,9 +33,14 @@ function seedStores() {
     buffers.buffers[`1::${target}`] = { networkId: 1, target, members: [], messages: [] } as never;
   }
   networks.activeKey = '1::#apple';
+  buffersActivated = [];
+  buffers.activate = ((networkId: number, target: string) => {
+    buffersActivated.push(`${networkId}::${target}`);
+  }) as never;
 }
 
 let mounted: VueWrapper[] = [];
+let buffersActivated: string[] = [];
 
 async function mountSwitcher() {
   const wrapper = mount(QuickSwitcher, { attachTo: document.body });
@@ -87,6 +92,23 @@ describe('QuickSwitcher filter under IME composition', () => {
     await composeWord(el, 'zeb');
 
     expect(labels(wrapper)).toEqual(['#zebra']);
+  });
+
+  it('ignores the Enter that confirms an IME candidate', async () => {
+    // The regression a live model opens up: onKeydown's Enter branch picks the
+    // selected row, and with v-model gone this keypress is no longer answered
+    // with a stale-and-harmless query. The IME owns Enter while composing — it
+    // is confirming a candidate, not asking to switch buffers.
+    const { wrapper, el } = await mountSwitcher();
+    await composeWord(el, 'zeb');
+
+    el.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }),
+    );
+    await nextFrame();
+
+    expect(wrapper.emitted('close')).toBeUndefined();
+    expect(buffersActivated).toEqual([]);
   });
 
   it('keeps narrowing as the composed word grows', async () => {

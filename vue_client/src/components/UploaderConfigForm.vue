@@ -33,7 +33,9 @@
         <em v-if="!field.required" class="optional">optional</em>
       </span>
       <input
-        v-model="values[field.key]"
+        :value="values[field.key]"
+        @input="onFieldInput(field.key, $event)"
+        @keydown.enter="blockImeEnter"
         :type="field.type === 'secret' ? 'password' : 'text'"
         :placeholder="placeholderFor(field)"
         :autocomplete="field.type === 'secret' ? 'new-password' : 'off'"
@@ -62,6 +64,7 @@ import {
   valuesFrom,
   missingRequired,
 } from '../utils/uploaders.js';
+import { blockImeEnter, imeSafeValue } from '../composables/useImeSafeInput.js';
 
 const props = defineProps<{
   driver: UploaderDriver;
@@ -89,6 +92,14 @@ const label = ref(props.existing?.label ?? '');
 const values = ref<Record<string, string>>(
   props.existing ? valuesFrom(props.driver, props.existing.config) : emptyValues(props.driver),
 );
+
+// One handler for every driver field, since these are a v-for over the driver's
+// schema rather than named refs. Bound off the element because `incomplete`
+// below reads them as you type to gate the save button. The Name field above
+// keeps v-model on purpose: nothing reads it until submit.
+function onFieldInput(key: string, e: Event) {
+  values.value[key] = imeSafeValue(e);
+}
 
 const incomplete = computed(() =>
   missingRequired(props.driver, values.value, props.existing?.secretsSet ?? {}),

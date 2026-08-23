@@ -65,7 +65,7 @@
       :maxlength="THEME_NAME_MAX"
       :disabled="busy"
       placeholder="Save current look as…"
-      @keydown.enter.prevent="saveNew"
+      @keydown.enter.prevent="onNameEnter"
     />
     <button class="link" :disabled="busy || !newName.trim()" @click="saveNew">Save theme</button>
   </div>
@@ -118,7 +118,7 @@ import { useThemesStore } from '../../stores/themes.js';
 import { prefersDark } from '../../utils/prefersDark.js';
 import { THEME_NAME_MAX, themeNameError } from '../../../../shared/themePresets.js';
 import type { ThemePreset } from '../../../../shared/themePresets.js';
-import { useImeSafeInput } from '../../composables/useImeSafeInput.js';
+import { isImeKey, useImeSafeInput } from '../../composables/useImeSafeInput.js';
 
 const settings = useSettingsStore();
 const themes = useThemesStore();
@@ -127,6 +127,16 @@ const error = ref('');
 const busy = ref(false);
 const newName = ref('');
 const onNameInput = useImeSafeInput(newName);
+
+// Enter in this field saves the theme — but the Enter that CONFIRMS a CJK
+// candidate is the IME's, not ours, and the model now holds raw preedit while a
+// composition is live. Without the gate that keypress saves a theme named
+// `nihao` and clears the field the user was still typing into. `.prevent` stays
+// on the binding: the key is the IME's either way.
+function onNameEnter(e: KeyboardEvent) {
+  if (isImeKey(e)) return;
+  saveNew();
+}
 
 const drifted = computed(() => settings.themeDriftKeys.length > 0);
 const mode = computed(() => String(settings.effective('look.theme.mode') ?? 'single'));

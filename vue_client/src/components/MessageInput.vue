@@ -237,6 +237,7 @@ import {
 } from '../composables/useComposerOverlay.js';
 import { useNickColors } from '../composables/useNickColors.js';
 import type { Buffer } from '../stores/buffers.js';
+import { isImeKey } from '../composables/useImeSafeInput.js';
 
 const networks = useNetworksStore();
 const buffers = useBuffersStore();
@@ -1024,16 +1025,16 @@ function onKeydown(e: KeyboardEvent): void {
   // Escape-closes-color-picker — had predictably been missed). While an IME
   // composition is live, every key belongs to the IME: arrows/Tab/Enter drive
   // its candidate window, Escape cancels its preedit — nothing here should
-  // act. keyCode 229 is gated too: Safari fires the Enter that confirms a CJK
-  // composition AFTER compositionend, with isComposing already false but
-  // keyCode still 229 — without this, committing a word would send the message
-  // (the standard ProseMirror/Slate guard).
+  // act. isImeKey also covers keyCode 229, for Safari's confirm-Enter arriving
+  // after compositionend; it is shared with the other fields that had to stop
+  // acting on the IME's keys once their model went live (#622), so the rule is
+  // stated once.
   //
   // Tab still preventDefaults on the way out: the IME has already consumed the
   // key, and letting the default through would walk focus out of the composer
   // onto Send — which on Firefox/Gboard Android, where a composition is open
   // for every word, would be the *only* thing Tab ever did.
-  if (e.isComposing || e.keyCode === 229) {
+  if (isImeKey(e)) {
     if (e.key === 'Tab') e.preventDefault();
     return;
   }

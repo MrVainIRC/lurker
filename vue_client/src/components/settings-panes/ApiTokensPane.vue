@@ -24,6 +24,7 @@
         <input
           :value="newName"
           @input="onNameInput"
+          @keydown.enter="blockImeEnter"
           type="text"
           maxlength="64"
           placeholder="e.g. claude-desktop, autonotes"
@@ -80,7 +81,7 @@
 import { ref, onMounted } from 'vue';
 import { api } from '../../api.js';
 import { formatRelative } from '../../utils/timestamp.js';
-import { useImeSafeInput } from '../../composables/useImeSafeInput.js';
+import { blockImeEnter, useImeSafeInput } from '../../composables/useImeSafeInput.js';
 
 interface ApiToken {
   id: string;

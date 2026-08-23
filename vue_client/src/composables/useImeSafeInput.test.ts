@@ -25,7 +25,7 @@
 import { describe, it, expect } from 'vitest';
 import { mount } from '@vue/test-utils';
 import { defineComponent, h, nextTick, ref, vModelText, withDirectives, type Ref } from 'vue';
-import { useImeSafeInput } from './useImeSafeInput.js';
+import { blockImeEnter, isImeKey, useImeSafeInput } from './useImeSafeInput.js';
 
 // `:value` + an unconditional @input — what all twelve live-derived fields bind.
 function mountImeSafe(model: Ref<string>) {
@@ -131,6 +131,40 @@ describe('useImeSafeInput', () => {
 
       expect(el.value).toBe('zebra');
       wrapper.unmount();
+    });
+  });
+
+  // The other half of unfreezing the model. v-model used to answer the Enter
+  // that confirms a CJK candidate with the PRE-composition value — usually ''
+  // — so a submit handler's own `if (!name) return` swallowed it. Now the
+  // model holds live preedit, and that same keypress would run the action for
+  // real.
+  describe("the IME's own Enter", () => {
+    const key = (init: KeyboardEventInit) =>
+      new KeyboardEvent('keydown', { key: 'Enter', ...init });
+
+    it('is recognised while a composition is live', () => {
+      expect(isImeKey(key({ isComposing: true }))).toBe(true);
+    });
+
+    it('is recognised from keyCode 229 after compositionend', () => {
+      // Safari fires the confirming Enter once isComposing is already false.
+      expect(isImeKey(Object.assign(key({}), { keyCode: 229 }))).toBe(true);
+    });
+
+    it('leaves a real Enter alone', () => {
+      expect(isImeKey(key({}))).toBe(false);
+    });
+
+    it('cancels implicit form submission only for the IME', () => {
+      const composing = key({ isComposing: true, cancelable: true });
+      blockImeEnter(composing);
+      expect(composing.defaultPrevented).toBe(true);
+
+      // A real Enter must still submit the form it sits in.
+      const real = key({ cancelable: true });
+      blockImeEnter(real);
+      expect(real.defaultPrevented).toBe(false);
     });
   });
 

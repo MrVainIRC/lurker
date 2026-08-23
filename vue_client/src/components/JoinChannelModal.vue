@@ -19,6 +19,7 @@
           ref="inputEl"
           :value="channel"
           @input="onChannelInput"
+          @keydown.enter="blockImeEnter"
           class="chan-input"
           type="text"
           placeholder="#channel"
@@ -46,7 +47,7 @@ import { useNetworksStore } from '../stores/networks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { useChannelListModal } from '../composables/useChannelListModal.js';
 import { ensureChannelPrefix } from '../utils/channelTarget.js';
-import { useImeSafeInput } from '../composables/useImeSafeInput.js';
+import { blockImeEnter, useImeSafeInput } from '../composables/useImeSafeInput.js';
 
 const props = defineProps<{ networkId: number }>();
 const emit = defineEmits<{ close: [] }>();

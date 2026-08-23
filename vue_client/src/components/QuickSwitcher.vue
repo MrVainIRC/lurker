@@ -52,7 +52,7 @@ import { useNickColors } from '../composables/useNickColors.js';
 import { flattenBufferOrder, bufferSortKey } from '../utils/bufferOrder.js';
 import { smartSortRows } from '../utils/switcherSort.js';
 import { isChannelTarget } from '../../../shared/channels.js';
-import { useImeSafeInput } from '../composables/useImeSafeInput.js';
+import { isImeKey, useImeSafeInput } from '../composables/useImeSafeInput.js';
 
 interface Row {
   networkId: string | number;
@@ -187,6 +187,10 @@ function onPointerMove(e: MouseEvent, i: number) {
 }
 
 function onKeydown(e: KeyboardEvent) {
+  // While a composition is live every key belongs to the IME: arrows and Enter
+  // drive its candidate window, Escape cancels its preedit. One gate for the
+  // whole handler, as in the composer (MessageInput's onKeydown).
+  if (isImeKey(e)) return;
   if (e.key === 'ArrowDown') {
     e.preventDefault();
     if (rows.value.length === 0) return;
