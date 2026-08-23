@@ -400,7 +400,15 @@ function openBufferActions() {
       {
         label: serverConnectActionLabel.value,
         icon: serverConnectActionIcon.value,
-        onClick: toggleServerConnection,
+        // ⚠ The decision goes WITH the label. Unlike the desktop header — whose
+        // button binds the computed reactively, so the two are read at the same
+        // instant — this kebab snapshots the label into a static array when the
+        // menu opens, and the menu then sits there. Re-reading state at click
+        // time lets the item say "Disconnect" and fire a reconnect: open it
+        // during a backoff, have the retry gate refuse (paused account, host
+        // dropped from the allowlist) so stopReconnecting settles the state to
+        // 'disconnected', and tap. Same trap as useNetworkActions.buildItems.
+        onClick: () => toggleServerConnection(serverOffersDisconnect.value),
       },
       { label: 'Edit network', icon: 'fa-solid fa-gear', onClick: editActiveNetwork },
     );
@@ -439,14 +447,14 @@ const serverConnectActionLabel = computed(() =>
 const serverConnectActionIcon = computed(() =>
   serverOffersDisconnect.value ? 'fa-solid fa-plug-circle-xmark' : 'fa-solid fa-plug',
 );
-function toggleServerConnection() {
+function toggleServerConnection(offerDisconnect: boolean) {
   if (!active.value) return;
   const id = active.value.networkId;
   // Fire-and-forget — the button's label is driven by networks.states so
   // success reflects itself. A failed call stays observable via the state
   // (label doesn't flip), so we just log and let the user retry rather
   // than wiring a toast through the bar for this case.
-  const p = serverOffersDisconnect.value ? networks.disconnect(id) : networks.reconnect(id);
+  const p = offerDisconnect ? networks.disconnect(id) : networks.reconnect(id);
   p.catch((err) => console.error('[MobileChat] toggle server connection failed', err));
 }
 
