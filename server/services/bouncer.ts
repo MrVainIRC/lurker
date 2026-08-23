@@ -1735,6 +1735,19 @@ class BouncerSession {
       this.numeric('412', ':No text to send');
       return;
     }
+    // Upstream in reconnect backoff: ircManager refuses the write rather than
+    // persisting a message that never reaches IRC (#809). Say so here, or the
+    // line vanishes with no feedback at all — and skip registerEcho below, whose
+    // keys would otherwise sit in the pending list until they time out.
+    // Asked through ircManager, not by re-testing conn.state here: the whole point
+    // of consolidating the writable test is that a second copy of it can drift
+    // from the one ircManager.send actually applies, and then we either
+    // double-refuse or go back to dropping lines silently. conn.state is read
+    // only to NAME the state in the notice.
+    if (!ircManager.writableConnection(this.userId, this.networkId)) {
+      this.notice(`Upstream '${this.network?.name}' is ${conn.state} — message not sent.`);
+      return;
+    }
     for (const target of targets) {
       const isAction = text.startsWith('\u0001ACTION ') || text.startsWith('\u0001ACTION\u0001');
       if (text.startsWith('\u0001') && !isAction) {
