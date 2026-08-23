@@ -30,7 +30,8 @@
           <i class="fa-solid fa-magnifying-glass search-icon"></i>
           <input
             ref="searchEl"
-            v-model="query"
+            :value="query"
+            @input="onQueryInput"
             type="search"
             class="search-input"
             placeholder="Search filenames…"
@@ -211,6 +212,7 @@ import { formatRelative } from '../utils/timestamp.js';
 import { joinMeta } from '../utils/metaLine.js';
 import { iconForMime } from '../utils/uploaders.js';
 import { mediaKindForUrl } from '../utils/uploadHostMatch.js';
+import { useImeSafeInput } from '../composables/useImeSafeInput.js';
 
 // The server response can include extra metadata fields not tracked in the
 // store's base UploadItem shape (they come from the GET /api/uploads list).
@@ -256,6 +258,7 @@ const starring = ref(new Set<number>());
 // Local, so typing is never gated on a round trip; pushed to the store (and thus the
 // server) on a debounce.
 const query = ref(uploads.query);
+const onQueryInput = useImeSafeInput(query);
 let debounce: ReturnType<typeof setTimeout> | null = null;
 
 const isFiltered = computed(() => Boolean(uploads.query || uploads.kind || uploads.favoritesOnly));

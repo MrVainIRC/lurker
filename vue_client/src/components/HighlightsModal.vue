@@ -17,7 +17,8 @@
 
     <div class="search-row">
       <input
-        v-model="queryInput"
+        :value="queryInput"
+        @input="onQueryInput"
         class="filter"
         type="text"
         placeholder="filter highlights — from:nick in:#channel on:network"
@@ -49,6 +50,7 @@ import HistoryMessageRow, { type HistoryMessage } from './HistoryMessageRow.vue'
 import { useSettingsStore } from '../stores/settings.js';
 import { useHighlightsStore } from '../stores/highlights.js';
 import { useIgnoresStore } from '../stores/ignores.js';
+import { useImeSafeInput } from '../composables/useImeSafeInput.js';
 
 const emit = defineEmits<{
   close: [];
@@ -88,6 +90,7 @@ let autoFillFetched = 0;
 // debouncing the text field itself. Seeded from the store so a closed-then-
 // reopened modal keeps the active filter.
 const queryInput = ref(scoped ? `${props.scope} ` : store.query);
+const onQueryInput = useImeSafeInput(queryInput);
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 watch(queryInput, (val) => {
   store.setQuery(val);
