@@ -1005,14 +1005,21 @@ export class IrcConnection {
       // the user to find them in the server buffer (#434). Read off the raw
       // params rather than the parsed 'irc error' event, which mis-maps some of
       // these — see COMMAND_RESULT_ERRORS. Additive: the raw line still goes to
-      // the server buffer below, the same way a join rejection does. Only for
-      // channels we're actually in, so a command aimed elsewhere can't conjure
-      // a buffer; publish() canonicalizes the channel case.
+      // the server buffer below, the same way a join rejection does.
+      //
+      // channelState answers both questions at once — are we in it, and what do
+      // we call it — through ONE equivalence relation. Asking isChannelJoined
+      // and then letting publish() canonicalize would use two: membership folds
+      // through the server's CASEMAPPING, publish()'s canonicalizer is a plain
+      // toLowerCase. On an rfc1459 network (where [ \ ] ^ fold to { | } ~) a 482
+      // naming #news{dev} while we're joined as #news[dev] would pass the
+      // membership test and then publish a target no buffer is keyed by.
       const cmdError = commandResultError(rawCommand, msg?.params ?? []);
-      if (cmdError && this.isChannelJoined(cmdError.channel)) {
+      const cmdErrorChannel = cmdError ? this.channelState(cmdError.channel) : undefined;
+      if (cmdError && cmdErrorChannel) {
         this.publish({
           type: 'error',
-          target: cmdError.channel,
+          target: cmdErrorChannel.name,
           text: cmdError.text,
           raw: { command: rawCommand, params: msg?.params ?? [] },
         });
@@ -5627,23 +5634,44 @@ export function sendRejectionTargetKind(tag: string): 'channel' | 'nick' | null 
 // The message is ours rather than the server's trailing text, for the same
 // reason JOIN_REJECTION_MESSAGES exists: several of these numerics send a
 // sentence FRAGMENT meant to be prefixed by a param ("is already on channel"),
-// which reads as nonsense on its own. `subject` names the param to put in front
-// of it. The server's own line is still logged verbatim to the server buffer by
-// the 'raw' handler, so nothing is lost by not quoting it here.
+// which reads as nonsense on its own. Each entry reads whatever else it needs
+// out of the params itself and returns null to decline, since what those params
+// mean differs per numeric. The server's own line is still logged verbatim to
+// the server buffer by the 'raw' handler, so nothing is lost by not quoting it.
+type WireParams = readonly (string | undefined)[];
+const nonEmpty = (v: string | undefined): v is string => typeof v === 'string' && v.length > 0;
+// A single letter, so a server that omits the list-mode param and leaves the
+// trailing reason in its place can't be interpolated into the sentence.
+const isModeChar = (v: string | undefined): v is string =>
+  typeof v === 'string' && /^[a-zA-Z]$/.test(v);
+
 const COMMAND_RESULT_ERRORS: Record<
   string,
-  { channel: number; subject?: number; message: (subject: string) => string }
+  { channel: number; message: (params: WireParams) => string | null }
 > = {
   // ERR_CHANOPRIVSNEEDED — <client> <channel> :You're not channel operator
   '482': { channel: 1, message: () => "You're not a channel operator." },
   // ERR_USERNOTINCHANNEL — <client> <nick> <channel> :They aren't on that channel
-  '441': { channel: 2, subject: 1, message: (who) => `${who} isn't on this channel.` },
+  '441': {
+    channel: 2,
+    message: (p) => (nonEmpty(p[1]) ? `${p[1]} isn't on this channel.` : null),
+  },
   // ERR_USERONCHANNEL — <client> <nick> <channel> :is already on channel
-  '443': { channel: 2, subject: 1, message: (who) => `${who} is already on this channel.` },
+  '443': {
+    channel: 2,
+    message: (p) => (nonEmpty(p[1]) ? `${p[1]} is already on this channel.` : null),
+  },
   // ERR_KEYSET — <client> <channel> :Channel key already set
   '467': { channel: 1, message: () => 'The channel key is already set.' },
-  // ERR_BANLISTFULL — <client> <channel> <char> :Channel list is full
-  '478': { channel: 1, message: () => "The channel's ban/exception list is full." },
+  // ERR_BANLISTFULL — <client> <channel> <char> :Channel list is full. The char
+  // is the list that filled up, and it is not always +b: hitting the
+  // invite-exception (+I) or quiet (+q) limit gets the same numeric, so naming
+  // bans unconditionally would tell the user about the wrong list.
+  '478': {
+    channel: 1,
+    message: (p) =>
+      isModeChar(p[2]) ? `The channel's +${p[2]} list is full.` : 'That channel list is full.',
+  },
 };
 
 // Resolve a raw numeric into the channel it concerns and the line to show
@@ -5653,7 +5681,7 @@ const COMMAND_RESULT_ERRORS: Record<
 // fabricating one would be worse than the server buffer.
 export function commandResultError(
   numeric: string,
-  params: readonly (string | undefined)[],
+  params: WireParams,
 ): { channel: string; text: string } | null {
   const spec = COMMAND_RESULT_ERRORS[numeric];
   if (!spec) return null;
@@ -5662,9 +5690,8 @@ export function commandResultError(
   // ever ships these params in a different order, a non-channel value here
   // fails the test and the line stays in the server buffer.
   if (typeof channel !== 'string' || !isChannelTarget(channel)) return null;
-  const subject = spec.subject === undefined ? '' : params[spec.subject];
-  if (spec.subject !== undefined && (typeof subject !== 'string' || !subject)) return null;
-  return { channel, text: spec.message(subject as string) };
+  const text = spec.message(params);
+  return text ? { channel, text } : null;
 }
 
 // True for numerics commandResultError owns, keyed by the tag irc-framework

@@ -683,6 +683,22 @@ describe('command-result error classification (#434)', () => {
     );
   });
 
+  it('names the list that actually filled up on ERR_BANLISTFULL (478)', () => {
+    // Not always +b: the invite-exception and quiet limits send the same
+    // numeric, so a hardcoded "ban list" would report the wrong one.
+    expect(commandResultError('478', ['me', '#chan', 'I', 'Channel list is full'])?.text).toBe(
+      "The channel's +I list is full.",
+    );
+  });
+
+  it('stays vague on a 478 that omits the mode char', () => {
+    // Without the guard params[2] is the trailing reason, and the sentence
+    // becomes "The channel's +Channel list is full list is full."
+    expect(commandResultError('478', ['me', '#chan', 'Channel list is full'])?.text).toBe(
+      'That channel list is full.',
+    );
+  });
+
   it('accepts every channel prefix, not just #', () => {
     expect(commandResultError('482', ['me', '&local', 'nope'])?.channel).toBe('&local');
   });
@@ -838,6 +854,30 @@ describe('refused-message handler routing (#283)', () => {
     );
     expect(publish).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'error', target: 'baduser' }),
+    );
+  });
+
+  it('publishes the channel under the name we joined it by, not the wire\u2019s', () => {
+    // Membership and canonicalization used to be two different equivalence
+    // relations here: isChannelJoined folds through the server's CASEMAPPING,
+    // while publish()'s canonicalizer is a plain toLowerCase. They agree on
+    // ASCII case and disagree on rfc1459, where [ \\ ] ^ fold to { | } ~ — so a
+    // 482 naming #news{dev} while we were joined as #news[dev] passed the
+    // membership test and then published a target no buffer is keyed by.
+    // Resolving both through channelState is what fixes it; the fold rule
+    // itself is channelState's and is tested where it lives. This pins the
+    // wiring: that the handler publishes the name channelState hands back
+    // rather than the one off the wire.
+    const conn = makeConn();
+    conn.channelState = ((name: string) =>
+      name === '#news{dev}' ? { name: '#news[dev]' } : undefined) as never;
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    emitRaw(conn, ":irc.example.test 482 nick #news{dev} :You're not channel operator");
+
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', target: '#news[dev]' }),
     );
   });
 
