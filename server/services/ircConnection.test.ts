@@ -643,8 +643,6 @@ describe('formatSocketCloseErrorMessage', () => {
   });
 });
 
-// End-to-end check that the real irc-framework event handlers route refused
-
 // A channel command that fails (kick / invite / mode / topic) used to report
 // only in the server buffer, far from the channel the user ran it in (#434).
 describe('command-result error classification (#434)', () => {
@@ -729,6 +727,7 @@ describe('command-result error classification (#434)', () => {
   });
 });
 
+// End-to-end check that the real irc-framework event handlers route refused
 // outgoing messages to the right buffer (#283). publish/publishEphemeral are
 // stubbed so we can assert the routing decision without a DB or a live socket.
 describe('refused-message handler routing (#283)', () => {
