@@ -22,6 +22,7 @@ import {
   joinRejectionMessage,
   joinRejectionMessageByTag,
   resolveChannelContext,
+  channelCommandTargets,
   commandResultError,
   isCommandResultErrorTag,
   sendRejectionTargetKind,
@@ -727,6 +728,57 @@ describe('command-result error classification (#434)', () => {
   });
 });
 
+// ERR_NOSUCHNICK names no channel, so the only thing that can place it is the
+// command we sent — which the server, unlike the client, gets to read on the
+// way out (#434).
+describe('channel-command target extraction (#434)', () => {
+  it('reads KICK, whose channel comes first', () => {
+    expect(channelCommandTargets('KICK #anime fartboy')).toEqual([
+      { nick: 'fartboy', channel: '#anime' },
+    ]);
+  });
+
+  it('reads INVITE, whose operands are the other way round', () => {
+    expect(channelCommandTargets('INVITE fartboy #anime')).toEqual([
+      { nick: 'fartboy', channel: '#anime' },
+    ]);
+  });
+
+  it("doesn't mistake a word in a kick reason for a target", () => {
+    expect(channelCommandTargets('KICK #anime fartboy :go away bob')).toEqual([
+      { nick: 'fartboy', channel: '#anime' },
+    ]);
+  });
+
+  it('expands the comma lists KICK is allowed to carry', () => {
+    expect(channelCommandTargets('KICK #a,#b x,y')).toHaveLength(4);
+  });
+
+  it('takes MODE arguments without deciding which are nicks', () => {
+    // Whether an arg is a nick depends on the mode string read against
+    // CHANMODES; recording a mask or a limit anyway is inert, because it can
+    // only match a 401 naming that exact string and a 401 names a bare nick.
+    expect(channelCommandTargets('MODE #anime +o ghost')).toEqual([
+      { nick: 'ghost', channel: '#anime' },
+    ]);
+    expect(channelCommandTargets('MODE #anime +b *!*@host')).toEqual([
+      { nick: '*!*@host', channel: '#anime' },
+    ]);
+  });
+
+  it('claims nothing from commands that aren\u2019t channel-scoped', () => {
+    expect(channelCommandTargets('WHOIS fartboy')).toEqual([]);
+    expect(channelCommandTargets('PRIVMSG fartboy :hi')).toEqual([]);
+    expect(channelCommandTargets('MODE #anime')).toEqual([]);
+    expect(channelCommandTargets('')).toEqual([]);
+  });
+
+  it('rejects operands the wrong way round rather than guessing', () => {
+    // A channel where the nick should be is not an invite we can attribute.
+    expect(channelCommandTargets('INVITE #anime #other')).toEqual([]);
+  });
+});
+
 // End-to-end check that the real irc-framework event handlers route refused
 // outgoing messages to the right buffer (#283). publish/publishEphemeral are
 // stubbed so we can assert the routing decision without a DB or a live socket.
@@ -878,6 +930,59 @@ describe('refused-message handler routing (#283)', () => {
     expect(publish).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'error', target: '#news[dev]' }),
     );
+  });
+
+  it('places a 401 in the channel the command that caused it was aimed at', () => {
+    // The case a user actually hits: /kick someone who has left the network.
+    // 401 carries no channel, so this is attributed from the outgoing line.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.raw = vi.fn<(line: string) => void>(); // don't touch a real socket
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('KICK #anime fartboy');
+    conn.client.emit('irc error', {
+      error: 'no_such_nick',
+      nick: 'fartboy',
+      reason: 'No such nick/channel',
+    });
+
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        target: '#anime',
+        text: "fartboy isn't on this network.",
+      }),
+    );
+  });
+
+  it('leaves an unprompted 401 alone', () => {
+    // No command of ours named this nick, so there is nothing to attribute it
+    // to and it keeps its existing server-buffer routing.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'stranger' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
+  });
+
+  it("doesn't drag an unrelated /whois miss into the channel", () => {
+    // Attribution is keyed on the NICK, not on "a command went out recently",
+    // so a 401 for a different nick inside the same window stays put.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.raw = vi.fn<(line: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('KICK #anime fartboy');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'someoneelse' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
   });
 
   it('leaves a command aimed at a channel we are not in in the server buffer', () => {
