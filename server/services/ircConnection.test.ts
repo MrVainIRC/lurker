@@ -22,7 +22,7 @@ import {
   joinRejectionMessage,
   joinRejectionMessageByTag,
   resolveChannelContext,
-  channelCommandTargets,
+  outgoingNickIntents,
   commandResultError,
   isCommandResultErrorTag,
   sendRejectionTargetKind,
@@ -731,51 +731,58 @@ describe('command-result error classification (#434)', () => {
 // ERR_NOSUCHNICK names no channel, so the only thing that can place it is the
 // command we sent — which the server, unlike the client, gets to read on the
 // way out (#434).
-describe('channel-command target extraction (#434)', () => {
+describe('outgoing nick intent extraction (#434)', () => {
   it('reads KICK, whose channel comes first', () => {
-    expect(channelCommandTargets('KICK #anime fartboy')).toEqual([
+    expect(outgoingNickIntents('KICK #anime fartboy')).toEqual([
       { nick: 'fartboy', channel: '#anime' },
     ]);
   });
 
   it('reads INVITE, whose operands are the other way round', () => {
-    expect(channelCommandTargets('INVITE fartboy #anime')).toEqual([
+    expect(outgoingNickIntents('INVITE fartboy #anime')).toEqual([
       { nick: 'fartboy', channel: '#anime' },
     ]);
   });
 
   it("doesn't mistake a word in a kick reason for a target", () => {
-    expect(channelCommandTargets('KICK #anime fartboy :go away bob')).toEqual([
+    expect(outgoingNickIntents('KICK #anime fartboy :go away bob')).toEqual([
       { nick: 'fartboy', channel: '#anime' },
     ]);
   });
 
   it('expands the comma lists KICK is allowed to carry', () => {
-    expect(channelCommandTargets('KICK #a,#b x,y')).toHaveLength(4);
+    expect(outgoingNickIntents('KICK #a,#b x,y')).toHaveLength(4);
   });
 
   it('takes MODE arguments without deciding which are nicks', () => {
     // Whether an arg is a nick depends on the mode string read against
     // CHANMODES; recording a mask or a limit anyway is inert, because it can
     // only match a 401 naming that exact string and a 401 names a bare nick.
-    expect(channelCommandTargets('MODE #anime +o ghost')).toEqual([
+    expect(outgoingNickIntents('MODE #anime +o ghost')).toEqual([
       { nick: 'ghost', channel: '#anime' },
     ]);
-    expect(channelCommandTargets('MODE #anime +b *!*@host')).toEqual([
+    expect(outgoingNickIntents('MODE #anime +b *!*@host')).toEqual([
       { nick: '*!*@host', channel: '#anime' },
     ]);
   });
 
-  it('claims nothing from commands that aren\u2019t channel-scoped', () => {
-    expect(channelCommandTargets('WHOIS fartboy')).toEqual([]);
-    expect(channelCommandTargets('PRIVMSG fartboy :hi')).toEqual([]);
-    expect(channelCommandTargets('MODE #anime')).toEqual([]);
-    expect(channelCommandTargets('')).toEqual([]);
+  it('records a channel-less intent for commands that name a nick alone', () => {
+    // Not "nothing to record": a positive statement that the user's last move
+    // on this nick was direct, which has to overwrite a pending kick.
+    expect(outgoingNickIntents('WHOIS fartboy')).toEqual([{ nick: 'fartboy', channel: null }]);
+    expect(outgoingNickIntents('PRIVMSG fartboy :hi')).toEqual([
+      { nick: 'fartboy', channel: null },
+    ]);
+  });
+
+  it('claims nothing from a channel-directed message or a bare MODE query', () => {
+    expect(outgoingNickIntents('PRIVMSG #anime :hi')).toEqual([]);
+    expect(outgoingNickIntents('MODE #anime')).toEqual([]);
+    expect(outgoingNickIntents('')).toEqual([]);
   });
 
   it('rejects operands the wrong way round rather than guessing', () => {
-    // A channel where the nick should be is not an invite we can attribute.
-    expect(channelCommandTargets('INVITE #anime #other')).toEqual([]);
+    expect(outgoingNickIntents('INVITE #anime #other')).toEqual([]);
   });
 });
 
@@ -955,6 +962,81 @@ describe('refused-message handler routing (#283)', () => {
         text: "fartboy isn't on this network.",
       }),
     );
+  });
+
+  it('doesn\u2019t let a spent kick claim the query\u2019s 401 afterwards', () => {
+    // The reported bug. Kick fartboy in #anime, then open a query with them and
+    // send a message: both bounce 401, and the second belongs in the DM. The
+    // attribution is consumed by the first, so it isn't lying in wait for the
+    // second.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.raw = vi.fn<(line: string) => void>();
+    conn.client.say = vi.fn<(target: string, message: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('KICK #anime fartboy');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
+
+    publish.mockClear();
+    conn.say('fartboy', 'hi');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
+  });
+
+  it('attributes one command to one bounce, not to every 401 in the window', () => {
+    // Pins the consume half specifically: the supersede rule only fires when
+    // the user does something else with the nick, and a repeated numeric (a
+    // bouncer replaying, a server sending it twice) isn't that.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.raw = vi.fn<(line: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('KICK #anime fartboy');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+    publish.mockClear();
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
+  });
+
+  it('lets a direct send supersede a kick that never bounced', () => {
+    // Same hazard without the first 401 to consume the entry: the kick may have
+    // succeeded, or failed some other way. Messaging the nick says the user has
+    // moved on, so the 401 that follows answers the message.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.raw = vi.fn<(line: string) => void>();
+    conn.client.say = vi.fn<(target: string, message: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('KICK #anime fartboy');
+    conn.say('fartboy', 'hi');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
+  });
+
+  it('lets a whois supersede it too', () => {
+    // Same rule, via raw() rather than say(): "did that kick work? who is
+    // fartboy?" must not put the whois miss back in the channel.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.raw = vi.fn<(line: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('KICK #anime fartboy');
+    conn.raw('WHOIS fartboy');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
   });
 
   it('leaves an unprompted 401 alone', () => {

@@ -556,8 +556,9 @@ export class IrcConnection {
   // message (surface it inline) from an automated TAGMSG/typing bounce (stay
   // silent) — the rejection numeric doesn't say which command it refused (#283).
   lastUserSendAt: Map<string, number>;
-  // nick → the channel a command aimed it at, for placing a 401 (#434).
-  commandChannelByNick = new Map<string, { channel: string; at: number }>();
+  // nick → the user's last move on them, for placing a 401 (#434). A null
+  // channel means the move was a direct one (a query, a whois).
+  lastNickIntent = new Map<string, { channel: string | null; at: number }>();
   // Channels we auto-issued a WHO for on join (lowercase). The auto-WHO learns
   // away/ident state and would flood the server buffer if echoed per-member, so
   // the 'wholist' handler consumes these silently. Any wholist NOT in this set
@@ -2708,7 +2709,7 @@ export class IrcConnection {
       // aimed at a named channel, seconds ago — against "we have DM history
       // with this nick at some point in the past".
       if (tag === 'no_such_nick' && eventNick) {
-        const commandChannel = this.recentCommandChannel(eventNick);
+        const commandChannel = this.takeCommandChannel(eventNick);
         const joined = commandChannel ? this.channelState(commandChannel) : undefined;
         if (joined) {
           this.publish({
@@ -4973,6 +4974,11 @@ export class IrcConnection {
       if (now - at > SEND_REJECTION_ATTRIBUTION_MS) this.lastUserSendAt.delete(key);
     }
     this.lastUserSendAt.set(target.toLowerCase(), now);
+    // A direct message is a channel-less intent (#434): messaging someone you
+    // just tried to kick means the next 401 answers the message, not the kick.
+    // say/action/notice all funnel through here, and none of them pass through
+    // raw() where noteOutgoingCommand would otherwise see them.
+    if (!isChannelTarget(target)) this.noteNickIntent(target, null);
   }
 
   recentUserSend(target: string): boolean {
@@ -4980,26 +4986,35 @@ export class IrcConnection {
     return at != null && Date.now() - at <= SEND_REJECTION_ATTRIBUTION_MS;
   }
 
-  // Remember which channel an outgoing command aimed a nick at, so a 401 naming
-  // that nick can be placed (#434). Same shape as noteUserSend, including the
+  // Record the user's last move on each nick an outgoing line names, so a 401
+  // naming one can be placed (#434). Same shape as noteUserSend, including the
   // prune-before-insert: entries past the window can never match again, and a
-  // long-lived connection kicking at a lot of one-off nicks would otherwise grow
+  // long-lived connection touching a lot of one-off nicks would otherwise grow
   // the map without bound.
-  noteChannelCommand(line: string): void {
-    const targets = channelCommandTargets(line);
-    if (!targets.length) return;
+  noteNickIntent(nick: string, channel: string | null): void {
     const now = Date.now();
-    for (const [key, seen] of this.commandChannelByNick) {
-      if (now - seen.at > SEND_REJECTION_ATTRIBUTION_MS) this.commandChannelByNick.delete(key);
+    for (const [key, seen] of this.lastNickIntent) {
+      if (now - seen.at > SEND_REJECTION_ATTRIBUTION_MS) this.lastNickIntent.delete(key);
     }
-    for (const t of targets) {
-      this.commandChannelByNick.set(t.nick.toLowerCase(), { channel: t.channel, at: now });
+    this.lastNickIntent.set(nick.toLowerCase(), { channel, at: now });
+  }
+
+  noteOutgoingCommand(line: string): void {
+    for (const intent of outgoingNickIntents(line)) {
+      this.noteNickIntent(intent.nick, intent.channel);
     }
   }
 
-  recentCommandChannel(nick: string): string | null {
-    const seen = this.commandChannelByNick.get(nick.toLowerCase());
-    if (!seen || Date.now() - seen.at > SEND_REJECTION_ATTRIBUTION_MS) return null;
+  // The channel a 401 for `nick` belongs in, if the user's last move on them was
+  // a channel command. CONSUMES the intent: one command produces one bounce, and
+  // a spent entry left lying around is exactly what put a query's 401 into the
+  // channel the nick was last kicked from.
+  takeCommandChannel(nick: string): string | null {
+    const key = nick.toLowerCase();
+    const seen = this.lastNickIntent.get(key);
+    if (!seen) return null;
+    this.lastNickIntent.delete(key);
+    if (Date.now() - seen.at > SEND_REJECTION_ATTRIBUTION_MS) return null;
     return seen.channel;
   }
 
@@ -5038,7 +5053,7 @@ export class IrcConnection {
     // Read it before it goes out, so a 401 bouncing back off it can be placed
     // in the channel it was aimed at (#434). Cheap and total: this is the one
     // path every slash command and member-menu action takes.
-    this.noteChannelCommand(clean);
+    this.noteOutgoingCommand(clean);
     this.client.raw(clean);
   }
   // Whether the network negotiated IRCv3 message-tags. Client-only tags
@@ -5750,17 +5765,26 @@ export function commandResultError(
 // action goes out through IrcConnection.raw(), so unlike the client the server
 // can read the outgoing line and remember what it aimed at.
 //
-// Returns the (nick, channel) pairs a line claims, or [] for anything that
-// isn't a channel command. Attribution is keyed on the NICK rather than on
-// "a command went out recently", so an unrelated /whois for another missing
-// user can't be dragged into the channel by timing alone.
-export function channelCommandTargets(line: string): Array<{ nick: string; channel: string }> {
+// What gets remembered is INTENT, not just "a channel command happened": the
+// last thing we did that names this nick, and whether it had a channel. That
+// distinction is the whole design, because a nick's 401 is ambiguous the moment
+// you do two different things with it. Kick fartboy in #chan, then open a query
+// and message them: both bounce 401, and only the first belongs in the channel.
+// Recording the query send as a channel-less intent — and consuming an intent
+// when it is used — is what keeps the second one out of #chan.
+//
+// A `null` channel therefore is not "nothing to record". It is a positive
+// statement that the user's last move on this nick was a direct one, and it has
+// to overwrite whatever a channel command left behind.
+const NICK_ONLY_COMMANDS = new Set(['WHOIS', 'WHOWAS', 'PRIVMSG', 'NOTICE']);
+
+export function outgoingNickIntents(line: string): Array<{ nick: string; channel: string | null }> {
   const parts = line.trim().split(/ +/);
   const verb = (parts[0] || '').toUpperCase();
-  const out: Array<{ nick: string; channel: string }> = [];
-  const add = (nick: string | undefined, channel: string | undefined) => {
-    if (!nick || !channel) return;
-    if (!isChannelTarget(channel) || isChannelTarget(nick)) return;
+  const out: Array<{ nick: string; channel: string | null }> = [];
+  const add = (nick: string | undefined, channel: string | null) => {
+    if (!nick || isChannelTarget(nick)) return;
+    if (channel !== null && !isChannelTarget(channel)) return;
     out.push({ nick, channel });
   };
   if (verb === 'KICK') {
@@ -5771,14 +5795,17 @@ export function channelCommandTargets(line: string): Array<{ nick: string; chann
     }
   } else if (verb === 'INVITE') {
     // INVITE <nick> <channel> — the operand order is the other way round.
-    add(parts[1], parts[2]);
+    add(parts[1], parts[2] ?? null);
   } else if (verb === 'MODE') {
     // MODE <channel> <modes> [args…]. Which args are nicks depends on the mode
     // string read against CHANMODES/PREFIX, and we deliberately don't work that
     // out: recording a ban mask or a limit as though it were a nick is inert,
     // because it can only ever match a 401 that names that exact string, and a
     // 401 names a bare nick.
-    for (const arg of parts.slice(3)) add(arg, parts[1]);
+    for (const arg of parts.slice(3)) add(arg, parts[1] ?? null);
+  } else if (NICK_ONLY_COMMANDS.has(verb)) {
+    // Named the nick with no channel in sight — the superseding case above.
+    for (const nick of (parts[1] || '').split(',')) add(nick, null);
   }
   return out;
 }
