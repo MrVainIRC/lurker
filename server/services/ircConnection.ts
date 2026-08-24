@@ -2731,6 +2731,13 @@ export class IrcConnection {
       // aimed at a named channel, seconds ago — against "we have DM history
       // with this nick at some point in the past".
       if (tag === 'no_such_nick' && eventNick) {
+        // Read before takeCommandChannel consumes it: a nick-only command
+        // (/whois, /whowas) records an intent but is not a SEND, so
+        // takeCtcpIssuer's "is the CTCP still the last move here" gate — which
+        // reads lastUserSendAt — cannot see it on its own. Both maps record
+        // moves on a nick; the rule is only true to its own statement if it
+        // consults both (Copilot, PR #823).
+        const nickIntentAt = this.lastNickIntent.get(eventNick.toLowerCase())?.at ?? null;
         const commandChannel = this.takeCommandChannel(eventNick);
         const joined = commandChannel ? this.channelState(commandChannel) : undefined;
         if (joined) {
@@ -2753,7 +2760,7 @@ export class IrcConnection {
         // echo and the reply are both transient status. A persisted error row
         // would outlive the echo that gives it meaning and strand "bob isn't on
         // this network." in a channel after a reload.
-        const ctcpIssuer = this.takeCtcpIssuer(eventNick);
+        const ctcpIssuer = this.takeCtcpIssuer(eventNick, nickIntentAt);
         if (ctcpIssuer) {
           this.surfaceCtcp(ctcpIssuer, `${eventNick} isn't on this network.`);
           return;
@@ -3902,7 +3909,13 @@ export class IrcConnection {
     }
   }
 
-  takeCtcpIssuer(nick: string): string | null {
+  //
+  // `newerMoveAt` is the timestamp of a non-send move on this nick (a /whois),
+  // which the lastUserSendAt gate above is blind to. A request older than it is
+  // no longer the user's last move, so it must not claim this numeric — see the
+  // 401 bucket. Per-entry rather than a blanket refusal: with two requests
+  // outstanding and the whois between them, the NEWER one is still the answer.
+  takeCtcpIssuer(nick: string, newerMoveAt: number | null = null): string | null {
     const now = Date.now();
     this.pruneCtcpOutstanding(now);
     const lower = nick.toLowerCase();
@@ -3933,6 +3946,7 @@ export class IrcConnection {
       if (key.slice(0, key.lastIndexOf(' ')) !== lower) continue;
       const head = queue[0]; // each queue is already oldest-first
       if (head && now - head.sentAt > SEND_REJECTION_ATTRIBUTION_MS) continue;
+      if (head && newerMoveAt != null && head.sentAt < newerMoveAt) continue;
       if (head && head.sentAt < bestAt) {
         bestAt = head.sentAt;
         bestKey = key;

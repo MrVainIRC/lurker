@@ -693,6 +693,56 @@ describe('a CTCP claims a failure only while it is the last thing sent (#821)', 
     }
   });
 
+  it('yields to a /whois issued after it', () => {
+    // Copilot, PR #823. A nick-only command records a lastNickIntent but is not
+    // a send, so the lastUserSendAt gate is blind to it — and the channel bucket
+    // CONSUMES that intent before the CTCP bucket runs, so the signal is gone by
+    // the time we look. The reachable case: bob exists and ignores the probe,
+    // then quits, then /whois bob draws the 401. That 401 answers the whois.
+    vi.useFakeTimers();
+    try {
+      const { conn, ctcpLines } = harness();
+      conn.client.raw = vi.fn<(line: string) => void>();
+      conn.sendCtcpRequest('#anime', 'bob', 'CLIENTINFO', '');
+      const before = ctcpLines().length;
+      const publish = vi.fn<(event: unknown) => void>();
+      conn.publish = publish;
+
+      vi.advanceTimersByTime(2000);
+      conn.raw('WHOIS bob');
+      conn.client.emit('irc error', { error: 'no_such_nick', nick: 'bob' });
+
+      expect(ctcpLines().slice(before)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still claims a request issued AFTER that /whois', () => {
+    // Per-entry, not a blanket refusal: the whois only disqualifies the requests
+    // that predate it. Otherwise one /whois would poison the routing for every
+    // subsequent /ctcp to that nick inside the window.
+    vi.useFakeTimers();
+    try {
+      const { conn, ctcpLines } = harness();
+      conn.client.raw = vi.fn<(line: string) => void>();
+      conn.sendCtcpRequest('#anime', 'bob', 'CLIENTINFO', '');
+      vi.advanceTimersByTime(1000);
+      conn.raw('WHOIS bob');
+      vi.advanceTimersByTime(1000);
+      conn.sendCtcpRequest('#manga', 'bob', 'VERSION', '');
+      const before = ctcpLines().length;
+
+      conn.client.emit('irc error', { error: 'no_such_nick', nick: 'bob' });
+
+      expect(said(ctcpLines().slice(before))).toEqual([
+        { target: '#manga', text: "bob isn't on this network." },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('stops claiming once the send window has passed, though the reply TTL has not', () => {
     // The two windows are deliberately different lengths: a reply may be slow,
     // a refusal comes back on the same round trip. An entry a peer never
