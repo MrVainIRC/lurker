@@ -555,7 +555,12 @@ export class IrcConnection {
   // key → epoch ms). Lets the send-rejection handler tell an actual failed
   // message (surface it inline) from an automated TAGMSG/typing bounce (stay
   // silent) — the rejection numeric doesn't say which command it refused (#283).
-  lastUserSendAt: Map<string, number>;
+  //
+  // `conversational` separates the sends that ARE a conversation with the
+  // target from a CTCP probe, which is also a real user-initiated PRIVMSG but
+  // reports its outcome back to the buffer it was issued from. Both count for
+  // the rejection handler; only the former may open a DM buffer (#817).
+  lastUserSendAt: Map<string, { at: number; conversational: boolean }>;
   // nick → the user's last move on them, for placing a 401 (#434). A null
   // channel means the move was a direct one (a query, a whois).
   lastNickIntent = new Map<string, { channel: string | null; at: number }>();
@@ -2742,13 +2747,14 @@ export class IrcConnection {
       // persists, so the query survives a reload instead of vanishing with the
       // optimistic one the client opened.
       //
-      // recentUserSend has to stay narrower than "any recent interest in this
-      // nick" — a /whois miss must never conjure a DM buffer. Only say/action/
-      // notice set it, so it has that property; lastNickIntent deliberately
-      // does not (a whois records there too).
+      // The signal has to stay narrower than "any recent interest in this
+      // nick" — a /whois miss must never conjure a DM buffer, and neither may
+      // a /ctcp, which reports into the buffer it was issued from. So this
+      // reads recentConversationalSend (say/action/notice/multiline) rather
+      // than recentUserSend, and not lastNickIntent, which a whois writes to.
       if (
         isDmMiss &&
-        (this.recentUserSend(eventNick as string) ||
+        (this.recentConversationalSend(eventNick as string) ||
           hasMessageForTarget(this.network.id, eventNick as string))
       ) {
         const message = reason || 'No such nick — they may be offline.';
@@ -4300,7 +4306,9 @@ export class IrcConnection {
     const now = Date.now();
     let payload = args.trim();
     if (t === 'PING' && !payload) payload = String(now);
-    this.noteUserSend(target);
+    // Real enough for the rejection handler to surface a 531, but not a
+    // conversation: the outcome belongs in `issuing`, not in a new query.
+    this.noteUserSend(target, false);
     if (payload) this.client.ctcpRequest(target, t, payload);
     else this.client.ctcpRequest(target, t);
     this.pruneCtcpOutstanding(now);
@@ -4994,17 +5002,17 @@ export class IrcConnection {
   // Record that the user just sent a real message to `target`. handleSendRejection
   // reads this to tell an actual failed message from an automated TAGMSG/typing
   // bounce — the rejection numeric alone doesn't say which command it refused.
-  noteUserSend(target: string): void {
+  noteUserSend(target: string, conversational = true): void {
     const now = Date.now();
     // Prune entries past the attribution window before adding. They can never
     // satisfy recentUserSend again, so keeping them would let the map grow
     // unbounded as the user messages more one-off DM targets over a long-lived
     // connection. The live set is tiny — only targets messaged in the last few
     // seconds — so this stays cheap.
-    for (const [key, at] of this.lastUserSendAt) {
-      if (now - at > SEND_REJECTION_ATTRIBUTION_MS) this.lastUserSendAt.delete(key);
+    for (const [key, seen] of this.lastUserSendAt) {
+      if (now - seen.at > SEND_REJECTION_ATTRIBUTION_MS) this.lastUserSendAt.delete(key);
     }
-    this.lastUserSendAt.set(target.toLowerCase(), now);
+    this.lastUserSendAt.set(target.toLowerCase(), { at: now, conversational });
     // A direct message is a channel-less intent (#434): messaging someone you
     // just tried to kick means the next 401 answers the message, not the kick.
     // say/action/notice all funnel through here, and none of them pass through
@@ -5013,8 +5021,20 @@ export class IrcConnection {
   }
 
   recentUserSend(target: string): boolean {
-    const at = this.lastUserSendAt.get(target.toLowerCase());
-    return at != null && Date.now() - at <= SEND_REJECTION_ATTRIBUTION_MS;
+    const seen = this.lastUserSendAt.get(target.toLowerCase());
+    return seen != null && Date.now() - seen.at <= SEND_REJECTION_ATTRIBUTION_MS;
+  }
+
+  // Narrower than recentUserSend: did the user just say something TO this
+  // target, as opposed to probing it? Only this may conjure a DM buffer out of
+  // a 401 (#817) — a CTCP already reports into the buffer it was issued from,
+  // so answering one with a brand-new query would both fabricate a
+  // conversation the user never started and split the exchange in two.
+  recentConversationalSend(target: string): boolean {
+    const seen = this.lastUserSendAt.get(target.toLowerCase());
+    return (
+      seen != null && seen.conversational && Date.now() - seen.at <= SEND_REJECTION_ATTRIBUTION_MS
+    );
   }
 
   // Record the user's last move on each nick an outgoing line names, so a 401

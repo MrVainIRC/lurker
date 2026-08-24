@@ -19,7 +19,7 @@ import { mount } from '@vue/test-utils';
 import { setActivePinia, createPinia } from 'pinia';
 
 vi.mock('../composables/useSocket.js', () => ({
-  socketSend: vi.fn<(payload: Record<string, unknown>) => boolean>(),
+  socketSend: vi.fn<(payload: Record<string, unknown>) => boolean>(() => true),
 }));
 
 import { useWhoisStore } from '../stores/whois.js';
@@ -63,6 +63,20 @@ describe('UserProfileModal — no such user', () => {
     const dot = open('fartboy').find('.dot');
     expect(dot.classes()).toContain('offline');
     expect(dot.attributes('aria-label')).toBe('Offline');
+  });
+
+  it('goes back to waiting while a fresh lookup is out over a stale miss', () => {
+    // A cached miss is stale the moment a refresh goes out — they may have
+    // connected since. Asserting "isn't on this network" through that
+    // round-trip is a definite claim about a fact we're in the middle of
+    // re-checking, so the in-flight lookup demotes it.
+    const whois = useWhoisStore();
+    whois.applyResult(NET, { nick: 'fartboy', error: 'not_found' });
+    whois.openViewer(NET, 'fartboy');
+
+    const w = open('fartboy');
+    expect(w.text()).toContain('Waiting for whois reply');
+    expect(w.text()).not.toContain("isn't on this network");
   });
 
   it('hides Send DM for a nick that is not there', () => {

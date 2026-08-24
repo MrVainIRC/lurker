@@ -111,23 +111,15 @@
         </div>
       </section>
 
-      <!-- The lookup came back with nobody there. Say so: without this line the
-           modal renders a name, a note prompt and nothing else, which is
-           indistinguishable from a profile we simply have no details for — and
-           the header dot can't carry it either, since with no MONITOR data a
-           not-found nick reads as "Unknown" (#818). Wording matches the
-           channel-side 401 line so the same failure sounds the same
-           everywhere. -->
-      <section v-if="isNotFound" class="section status">
+      <!-- One status line, chosen in `statusLine` — see the note there for why
+           the miss has to be said out loud rather than left to the header
+           dot (#818). -->
+      <section v-if="statusLine === 'not-found'" class="section status">
         <p class="muted">
           <i class="fa-solid fa-circle-question"></i> {{ nick }} isn't on this network.
         </p>
       </section>
-      <!-- Transient waiting state — only while we're genuinely in the dark.
-           If MONITOR already knows they're offline the presence dot in the
-           header carries that, so we skip the redundant line and let "Your
-           note" stand on its own. -->
-      <section v-else-if="!hasDetails && !isOffline" class="section status">
+      <section v-else-if="statusLine === 'waiting'" class="section status">
         <p class="muted">
           <i class="fa-solid fa-circle-notch fa-spin"></i> Waiting for whois reply…
         </p>
@@ -324,6 +316,30 @@ const channelsList = computed(() => {
       const m = token.match(/^([~&@%+]*)(.*)$/);
       return { prefix: m?.[1] || '', name: m?.[2] || token };
     });
+});
+
+const isLookingUp = computed(() => whoisStore.isRefreshing(props.networkId, props.nick));
+
+// What the body says when it has something to say about the lookup itself.
+//
+// 'not-found' is the fix for #818: a whois that answers "nobody there" used to
+// render a name, a note prompt and nothing else, which is indistinguishable
+// from a profile we simply have no details for. The header dot can't carry it
+// either — with no MONITOR data a not-found nick read as "Unknown", the one
+// status we can rule out.
+//
+// But only once the claim is current. A cached miss goes stale the instant a
+// refresh goes out (they may have connected since), so an in-flight lookup
+// demotes it back to 'waiting' rather than asserting they aren't there.
+//
+// 'waiting' otherwise covers being genuinely in the dark. If MONITOR already
+// knows they're offline the presence dot carries that, so we skip the
+// redundant line and let "Your note" stand on its own.
+const statusLine = computed<'not-found' | 'waiting' | null>(() => {
+  if (isNotFound.value && !isLookingUp.value) return 'not-found';
+  if (hasDetails.value) return null;
+  if (isLookingUp.value || !isOffline.value) return 'waiting';
+  return null;
 });
 
 // Any detail row present → render the table. Covers every row (identity +

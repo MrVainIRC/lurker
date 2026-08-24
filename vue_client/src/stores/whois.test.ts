@@ -4,7 +4,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 
-// openViewer fires the WHOIS itself; nothing here needs a real socket.
+// openViewer fires the WHOIS itself; nothing here needs a real socket. It
+// defaults to a delivered send — the not-delivered case is its own test.
 vi.mock('../composables/useSocket.js', () => ({
   socketSend: vi.fn<(payload: Record<string, unknown>) => boolean>(),
 }));
@@ -22,7 +23,8 @@ const send = vi.mocked(socketSend);
 describe('whois store — in-flight tracking', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
-    send.mockClear();
+    send.mockReset();
+    send.mockReturnValue(true);
   });
 
   const NET = 1;
@@ -63,6 +65,32 @@ describe('whois store — in-flight tracking', () => {
 
     store.openViewer(NET, 'fartboy');
     expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("doesn't claim the slot for a WHOIS that never went out", () => {
+    // socketSend returns false with no live socket. Claiming the slot anyway
+    // wedges it exactly as a never-cleared one did — no reply is coming to
+    // free it — so a reconnected user could never look the nick up again.
+    const store = useWhoisStore();
+    send.mockReturnValue(false);
+    store.openViewer(NET, 'fartboy');
+    expect(store.refreshingKey).toBeNull();
+
+    send.mockReturnValue(true);
+    store.openViewer(NET, 'fartboy');
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(store.refreshingKey).not.toBeNull();
+  });
+
+  it('reports a lookup as in flight only for the nick it is out for', () => {
+    const store = useWhoisStore();
+    store.openViewer(NET, 'FartBoy');
+    expect(store.isRefreshing(NET, 'fartboy')).toBe(true);
+    expect(store.isRefreshing(NET, 'someoneelse')).toBe(false);
+    expect(store.isRefreshing(2, 'fartboy')).toBe(false);
+
+    store.applyResult(NET, { nick: 'fartboy', error: 'not_found' });
+    expect(store.isRefreshing(NET, 'fartboy')).toBe(false);
   });
 
   it('matches the reply to the request case-insensitively', () => {

@@ -1140,6 +1140,44 @@ describe('refused-message handler routing (#283)', () => {
     expect(publish).toHaveBeenCalledWith(expect.objectContaining({ target: ':server:1' }));
   });
 
+  it("doesn't open a query from a /ctcp to a nick that isn't there", () => {
+    // A CTCP is a real user-initiated PRIVMSG, so it marks the send — but its
+    // outcome is reported into the buffer it was issued from, and answering the
+    // 401 with a brand-new query would both fabricate a conversation the user
+    // never started and split the exchange across two buffers.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.ctcpRequest = vi.fn<(target: string, type: string, payload?: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.sendCtcpRequest('#anime', 'fartboy', 'VERSION', '');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: 'fartboy' }));
+  });
+
+  it('still surfaces a refused CTCP, which is what marks the send in the first place', () => {
+    // The guard above must not go so far as to silence 531 for a CTCP:
+    // handleSendRejection reads recentUserSend to tell a real send from a
+    // typing bounce, and a CTCP is a real send.
+    const conn = makeConn();
+    conn.client.ctcpRequest = vi.fn<(target: string, type: string, payload?: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.sendCtcpRequest(':server:1', 'fartboy', 'VERSION', '');
+    expect(conn.recentUserSend('fartboy')).toBe(true);
+    expect(conn.recentConversationalSend('fartboy')).toBe(false);
+
+    conn.client.emit('irc error', {
+      error: 'cannot_send_to_user',
+      nick: 'fartboy',
+      reason: 'They are blocking messages',
+    });
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ target: 'fartboy' }));
+  });
+
   it('forgets the send attribution across a reconnect, so a stale 401 stays put', () => {
     // Same reasoning resetSendState already applies to the 531 path: a send on
     // a dead socket must not place the first bounce on the new one.
