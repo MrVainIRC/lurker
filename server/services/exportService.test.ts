@@ -293,9 +293,17 @@ describe('export under concurrent IRC writes (lurker#175 regression)', () => {
       tls: true,
       nick: 'c',
     }) as Network;
-    // Several pages' worth (MESSAGE_PAGE = 2000) so the paged stream yields to
-    // the loop multiple times, giving the writer below room to interleave.
-    for (let i = 0; i < 8000; i += 1) {
+    // What this test needs is that the stream crosses page boundaries several
+    // times, so the writer below has room to interleave. It used to buy those
+    // crossings with ROWS — 8000 of them, to clear the production MESSAGE_PAGE
+    // of 2000 four times over — which made its cost scale with a constant while
+    // its 15s timeout stayed fixed, and it duly timed out on a loaded CI runner
+    // (#820). Buy them with the page size instead: 300 rows over pages of 25 is
+    // twelve crossings, three times as many as before, for a twenty-sixth of the
+    // seeding work.
+    const PAGE = 25;
+    const SEEDED = 300; // twelve pages of seeded rows before the writer adds any
+    for (let i = 0; i < SEEDED; i += 1) {
       insertMessage({
         networkId: net.id,
         target: '#c',
@@ -310,6 +318,15 @@ describe('export under concurrent IRC writes (lurker#175 regression)', () => {
     const sink = new PassThrough();
     const chunks: Buffer[] = [];
     sink.on('data', (c: Buffer) => chunks.push(c));
+
+    // Progress fires once per page, plus once at the end — so counting the calls
+    // is how many pages were actually walked. Asserted below rather than left to
+    // a comment: the whole property under test is "it yields between pages", and
+    // a single-page export would satisfy every other assertion here silently.
+    let progressCalls = 0;
+    const onProgress = (): void => {
+      progressCalls += 1;
+    };
 
     // Hammer the SAME shared connection the export reads from. The export pages
     // its reads with discrete `.all()` queries and never holds a cursor across
@@ -347,7 +364,13 @@ describe('export under concurrent IRC writes (lurker#175 regression)', () => {
     setImmediate(pump);
 
     try {
-      await buildExportZip(db, u.id, { includeMessages: true }, sink);
+      await buildExportZip(
+        db,
+        u.id,
+        { includeMessages: true, messagePageSize: PAGE },
+        sink,
+        onProgress,
+      );
     } finally {
       building = false;
     }
@@ -355,7 +378,52 @@ describe('export under concurrent IRC writes (lurker#175 regression)', () => {
     expect(writeError).toBeNull();
     expect(liveWrites).toBeGreaterThan(0);
     expect(Buffer.concat(chunks).slice(0, 2).toString()).toBe('PK');
-  }, 15_000);
+    // Deliberately NOT asserting the page count here. Progress fires once per
+    // page, but the live writer keeps pushing rows past the cursor, so the count
+    // is dominated by the interleaving rather than by the seeded rows crossing
+    // page boundaries — it reads as ~108 either way, and would pass even if the
+    // page size were ignored entirely. The sibling test below is what holds the
+    // fixture to spanning pages; this one owns the concurrency property.
+    expect(progressCalls).toBeGreaterThan(0);
+  });
+
+  it('pages the stream at the requested size, so the fixture stays cheap', () => {
+    // The guard on #820's fix. The test above needs its stream to cross page
+    // boundaries many times, and buys that with a small page rather than with
+    // thousands of rows — so if the page size ever stopped being honoured, that
+    // test would quietly become a single-page export still passing every one of
+    // its assertions, and the regression it exists to catch would go untested.
+    // No concurrent writer here: nothing must move the cursor but the pages.
+    const u = createUser('paged-reader');
+    const net = createNetwork(u.id, {
+      name: 'libera',
+      host: 'irc.libera.chat',
+      port: 6697,
+      tls: true,
+      nick: 'p',
+    }) as Network;
+    for (let i = 0; i < 300; i += 1) {
+      insertMessage({
+        networkId: net.id,
+        target: '#p',
+        time: '2026-05-17T10:00:00Z',
+        type: 'message',
+        nick: 'p',
+        text: `seed ${i}`,
+        self: false,
+      });
+    }
+
+    const sink = new PassThrough();
+    sink.resume();
+    let pages = 0;
+    return buildExportZip(db, u.id, { includeMessages: true, messagePageSize: 25 }, sink, () => {
+      pages += 1;
+    }).then(() => {
+      // 300 rows at 25 a page is 12 pages, plus the final progress report.
+      expect(pages).toBe(13);
+    });
+  });
 });
 
 describe('buildExportFilename', () => {
