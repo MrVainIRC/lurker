@@ -364,6 +364,8 @@ import type { ConsolidationGroup, NickEntry, RenameEntry } from '../../../shared
 import { collapseDisplay } from '../utils/collapseDisplay.js';
 import { parseRelayChain } from '../../../shared/parseRelay.js';
 import { asEventMode, eventModeKey, isNoiseType } from '../../../shared/eventFilter.js';
+import { smartHidesMode } from '../../../shared/modes.js';
+import type { ModeChange } from '../../../shared/modes.js';
 import NickRef from './NickRef.vue';
 import LinkedText from './LinkedText.vue';
 import RenderSegments from './RenderSegments.vue';
@@ -424,6 +426,10 @@ interface ChatMessage {
   // These exist only on the per-render display clone, never on the stored row.
   relayBot?: string;
   relaySource?: string | null;
+  // MODE rows (#673 / MODE_EVENT_NOISE.md): the message's change list, each
+  // entry carrying the class the server stamped on it. The browser never sees
+  // ISUPPORT, so `kind` is the only way to tell op churn from a ban.
+  modes?: ModeChange[];
   [key: string]: unknown;
 }
 
@@ -933,6 +939,7 @@ const smartFilterUnmaskMs = computed(
 const smartFilterJoin = computed(() => !!settings.effective('chat.smart_filter_join'));
 const smartFilterQuit = computed(() => !!settings.effective('chat.smart_filter_quit'));
 const smartFilterNick = computed(() => !!settings.effective('chat.smart_filter_nick'));
+const smartFilterMode = computed(() => !!settings.effective('chat.smart_filter_mode'));
 
 // At the `none` tier there are no event rows left to fold, so the consolidation
 // pass is skipped outright rather than run over a stream it can't match.
@@ -1018,6 +1025,7 @@ const renderRows = computed((): RenderRow[] => {
   const fJoin = smartFilterJoin.value;
   const fQuit = smartFilterQuit.value;
   const fNick = smartFilterNick.value;
+  const fMode = smartFilterMode.value;
 
   const dividerAfterId = buf?.dividerAfterId || 0;
   // Skip divider insertion entirely when there's nothing to mark (no pointer
@@ -1138,27 +1146,50 @@ const renderRows = computed((): RenderRow[] => {
     }
 
     if (filterOn && m.nick && !m.self) {
-      const filterable =
-        (m.type === 'join' && fJoin) ||
-        // chghost rides the quit toggle rather than adding a fourth setting:
-        // it's the same churn from the same silent lurkers (identifying to
-        // services after a netsplit fires one per shared channel), which is
-        // exactly what smart filtering exists to absorb. weechat ships a
-        // dedicated smart_filter_chghost for the same reason (#591).
-        ((m.type === 'part' || m.type === 'quit' || m.type === 'chghost') && fQuit) ||
-        (m.type === 'nick' && fNick);
-      if (filterable && m.nick.toLowerCase() !== ownNickLc) {
-        const lastSpoke = buf?.speakers[m.nick.toLowerCase()]?.lastTime;
-        const eventTime = Date.parse(m.time ?? '') || 0;
-        const recentlySpoke =
-          lastSpoke != null && lastSpoke <= eventTime && eventTime - lastSpoke <= delayMs;
-        const unmasked =
-          m.type === 'join' &&
-          unmaskMs > 0 &&
-          lastSpoke != null &&
-          lastSpoke > eventTime &&
-          lastSpoke - eventTime <= unmaskMs;
-        if (!recentlySpoke && !unmasked) hidden = true;
+      const eventTime = Date.parse(m.time ?? '') || 0;
+      const lastSpokeOf = (nick: string): number | undefined =>
+        buf?.speakers[nick.toLowerCase()]?.lastTime;
+      // Did this nick speak in the window ENDING at the event? Shared by the two
+      // branches below, which differ only in whose name they put through it.
+      const spokeRecently = (nick: string): boolean => {
+        const lastSpoke = lastSpokeOf(nick);
+        return lastSpoke != null && lastSpoke <= eventTime && eventTime - lastSpoke <= delayMs;
+      };
+
+      if (m.type === 'mode') {
+        // A MODE row is judged on the nicks it acted ON, never on the nick that
+        // sent it. The author of a mode line is nearly always ChanServ or an op
+        // bot, and those never speak in the channel — key on the author and the
+        // rung degenerates into "hide every mode change". weechat judges the
+        // target (irc-mode.c, where the speaking-time test sits inside the
+        // per-nick mode branch); halloy judges the author, and that looks like
+        // a bug rather than a choice.
+        //
+        // The decision itself is shared (and unit-tested) rather than written
+        // out here, because iOS has to reach the same verdict row for row.
+        if (fMode && smartHidesMode(m.modes, m.nick, ownNickLc, spokeRecently)) hidden = true;
+      } else {
+        const filterable =
+          (m.type === 'join' && fJoin) ||
+          // chghost rides the quit toggle rather than adding a fourth setting:
+          // it's the same churn from the same silent lurkers (identifying to
+          // services after a netsplit fires one per shared channel), which is
+          // exactly what smart filtering exists to absorb. weechat ships a
+          // dedicated smart_filter_chghost for the same reason (#591).
+          ((m.type === 'part' || m.type === 'quit' || m.type === 'chghost') && fQuit) ||
+          (m.type === 'nick' && fNick);
+        if (filterable && m.nick.toLowerCase() !== ownNickLc) {
+          const lastSpoke = lastSpokeOf(m.nick);
+          const unmasked =
+            m.type === 'join' &&
+            unmaskMs > 0 &&
+            lastSpoke != null &&
+            lastSpoke > eventTime &&
+            lastSpoke - eventTime <= unmaskMs;
+          // Joins only: a mode is never revived by what its target says next.
+          // weechat scopes smart_filter_join_unmask the same way.
+          if (!spokeRecently(m.nick) && !unmasked) hidden = true;
+        }
       }
     }
 

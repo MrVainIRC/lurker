@@ -977,6 +977,21 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     description: 'Apply smart filter to NICK change events.',
   },
   {
+    key: 'chat.smart_filter_mode',
+    label: 'Filter op and voice changes',
+    category: 'events',
+    group: 'smart-filter',
+    type: 'bool',
+    default: true,
+    dependsOn: EVENTS_SMART,
+    description:
+      'Apply smart filter to MODE events that only grant or revoke member status ' +
+      '(+o, +v, and the equivalents your network offers). The event is hidden when ' +
+      'none of the nicks it acts on has spoken recently. Bans, channel keys, user ' +
+      'limits and channel flags are never hidden, and a single MODE that mixes one ' +
+      'of those in with an op change is shown in full.',
+  },
+  {
     key: 'chat.smart_filter_join_unmask',
     label: 'Reveal join when user speaks (minutes)',
     category: 'events',
