@@ -263,8 +263,14 @@ function migrate() {
       used_by_user_id INTEGER,
       used_at TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      -- Both ends CASCADE: an invite row describes a transaction between two
+      -- live accounts, so it dies with either. used_by_user_id was SET NULL
+      -- (#590) — which silently RESURRECTED a spent invite when its redeemer
+      -- was deleted: used_by_user_id went NULL, inviteStatus() read 'valid'
+      -- again, and a one-time link admins believed was spent became live for a
+      -- second stranger. See the schemaVersion 20 rebuild for existing DBs.
       FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE,
-      FOREIGN KEY (used_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+      FOREIGN KEY (used_by_user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_invite_tokens_unused
       ON invite_tokens(token) WHERE used_by_user_id IS NULL;
@@ -929,6 +935,20 @@ interface TableInfoRow {
   pk: number;
 }
 
+// PRAGMA foreign_key_list(<table>) — one row per foreign key. Used to detect a
+// constraint that a migration needs to rewrite, since SQLite can only change a
+// foreign key by rebuilding the table.
+interface ForeignKeyListRow {
+  id: number;
+  seq: number;
+  table: string;
+  from: string;
+  to: string | null;
+  on_update: string;
+  on_delete: string;
+  match: string;
+}
+
 function ensureColumn(table: string, column: string, def: string): void {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all() as TableInfoRow[];
   if (!cols.find((c) => c.name === column)) {
@@ -1267,7 +1287,7 @@ ensureColumn('push_subscriptions', 'transport', "TEXT NOT NULL DEFAULT 'webpush'
 // Schema versioning lets us retire one-shot recovery blocks once every
 // production DB has run through them. Bump SCHEMA_VERSION when adding a new
 // recovery block, and delete blocks for versions far enough in the past.
-const SCHEMA_VERSION = 19;
+const SCHEMA_VERSION = 20;
 const schemaVersionRow = db
   .prepare(`SELECT value FROM app_meta WHERE key = 'schema_version'`)
   .get() as { value: string } | undefined;
@@ -2220,6 +2240,92 @@ if (schemaVersion < 19 && tableExists('contacts')) {
   const seeded = db.transaction(() => seedFavoritesFromContacts(db));
   const count = seeded.immediate();
   if (count > 0) console.log(`[db] migrated ${count} friend(s) into buffer favorites`);
+}
+
+// Issue #590: invite_tokens.used_by_user_id carried ON DELETE SET NULL, so
+// deleting a user RESURRECTED the invite they had redeemed — the id went NULL,
+// inviteStatus() saw no redeemer and reported 'valid', and a one-time link the
+// admin considered spent was live again for whoever still had the URL. Rebuild
+// the table with ON DELETE CASCADE (SQLite cannot alter a foreign key in place)
+// — same swap shape as the #301/#350 migrations above.
+//
+// Then purge the invites this already resurrected. `consumeInvite` writes
+// used_by_user_id and used_at together, so a row with used_at set but no
+// redeemer is not an ambiguous case: it is precisely an invite that WAS spent
+// and whose redeemer has since been deleted. Flipping the constraint only stops
+// the next revival; without this sweep every already-revived link on an
+// instance that has ever deleted a user stays redeemable.
+//
+// Deleting them is what makes history CONSISTENT rather than what makes it
+// lossy: from here on a user deletion takes the invite with it, so these rows
+// are exactly the ones that would already be gone had the constraint been right
+// when their redeemer was removed. The sweep finishes a deletion that was
+// botched. Carrying them forward instead is the asymmetric option — an
+// ownerless consumed row that could only ever exist for deletions predating
+// this upgrade. Only a count is logged, deliberately: an invite token is a
+// credential and does not belong in the log.
+//
+// Gated on the live constraint rather than on schema_version alone: fresh
+// installs get CASCADE from the CREATE TABLE above and must copy nothing.
+if (schemaVersion < 20) {
+  const usedByFk = (
+    db.prepare(`PRAGMA foreign_key_list(invite_tokens)`).all() as ForeignKeyListRow[]
+  ).find((f) => f.from === 'used_by_user_id');
+  if (usedByFk && usedByFk.on_delete !== 'CASCADE') {
+    const rebuild = db.transaction(() => {
+      const doomed = (
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM invite_tokens
+             WHERE used_by_user_id IS NULL AND used_at IS NOT NULL`,
+          )
+          .get() as { n: number }
+      ).n;
+      db.exec(`DROP INDEX IF EXISTS idx_invite_tokens_unused`);
+      db.exec(`
+        CREATE TABLE invite_tokens_new (
+          token TEXT PRIMARY KEY,
+          created_by INTEGER NOT NULL,
+          expires_at TEXT,
+          used_by_user_id INTEGER,
+          used_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (used_by_user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+      `);
+      // Copy everything EXCEPT the resurrected rows — they are spent invites
+      // wearing a pending row's shape, and carrying them over would leave the
+      // very links this migration exists to close still usable.
+      db.exec(`
+        INSERT INTO invite_tokens_new
+          (token, created_by, expires_at, used_by_user_id, used_at, created_at)
+        SELECT token, created_by, expires_at, used_by_user_id, used_at, created_at
+        FROM invite_tokens
+        WHERE NOT (used_by_user_id IS NULL AND used_at IS NOT NULL)
+      `);
+      db.exec(`DROP TABLE invite_tokens`);
+      db.exec(`ALTER TABLE invite_tokens_new RENAME TO invite_tokens`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_invite_tokens_unused
+               ON invite_tokens(token) WHERE used_by_user_id IS NULL`);
+      return doomed;
+    });
+    const prevFk = db.pragma('foreign_keys', { simple: true });
+    db.pragma('foreign_keys = OFF');
+    let purged = 0;
+    try {
+      // .immediate(), because this transaction opens with a read: on a hosted
+      // cell a deferred BEGIN takes a snapshot that Litestream's once-a-second
+      // sync can stale, and the write upgrade then dies with SQLITE_BUSY_SNAPSHOT,
+      // which busy_timeout does not retry (see lurker#603).
+      purged = rebuild.immediate();
+    } finally {
+      db.pragma(`foreign_keys = ${prevFk ? 'ON' : 'OFF'}`);
+    }
+    if (purged > 0) {
+      console.log(`[db] closed ${purged} invite(s) resurrected by a user deletion (#590)`);
+    }
+  }
 }
 
 // Issue #510: seed the uploader data model — instance x0/catbox rows +
