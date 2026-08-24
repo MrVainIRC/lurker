@@ -325,11 +325,13 @@ router.delete('/invites/:token', (req: Request<{ token: string }>, res: Response
     res.status(400).json({ error: 'missing token' });
     return;
   }
-  // Any invite can be removed, consumed ones included (#590). The list doubles
-  // as a record of who joined via whose invitation, but it is a management view
-  // and not an audit log — refusing the delete only left admins with a roster of
-  // spent links they had no way to clear. Deleting a consumed row cannot revive
-  // anything: the row IS the invite, so removing it makes the token unknown.
+  // Any invite can be removed, consumed ones included (#590). The 409 that used
+  // to guard consumed rows called them audit history, but the list is a
+  // management view, not an audit log — and it cannot be one either way, since
+  // an invite now CASCADEs with the member it let in. Refusing the delete only
+  // left admins with a roster of spent links they had no way to clear. Removing
+  // a consumed row cannot revive anything: the row IS the invite, so deleting it
+  // makes the token unknown rather than pending.
   const existing = getInvite(token);
   if (!existing) {
     res.status(404).json({ error: 'not found' });

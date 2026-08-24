@@ -2256,6 +2256,15 @@ if (schemaVersion < 19 && tableExists('contacts')) {
 // the next revival; without this sweep every already-revived link on an
 // instance that has ever deleted a user stays redeemable.
 //
+// Deleting them is what makes history CONSISTENT rather than what makes it
+// lossy: from here on a user deletion takes the invite with it, so these rows
+// are exactly the ones that would already be gone had the constraint been right
+// when their redeemer was removed. The sweep finishes a deletion that was
+// botched. Carrying them forward instead is the asymmetric option — an
+// ownerless consumed row that could only ever exist for deletions predating
+// this upgrade. Only a count is logged, deliberately: an invite token is a
+// credential and does not belong in the log.
+//
 // Gated on the live constraint rather than on schema_version alone: fresh
 // installs get CASCADE from the CREATE TABLE above and must copy nothing.
 if (schemaVersion < 20) {
@@ -2264,6 +2273,14 @@ if (schemaVersion < 20) {
   ).find((f) => f.from === 'used_by_user_id');
   if (usedByFk && usedByFk.on_delete !== 'CASCADE') {
     const rebuild = db.transaction(() => {
+      const doomed = (
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM invite_tokens
+             WHERE used_by_user_id IS NULL AND used_at IS NOT NULL`,
+          )
+          .get() as { n: number }
+      ).n;
       db.exec(`DROP INDEX IF EXISTS idx_invite_tokens_unused`);
       db.exec(`
         CREATE TABLE invite_tokens_new (
@@ -2291,20 +2308,17 @@ if (schemaVersion < 20) {
       db.exec(`ALTER TABLE invite_tokens_new RENAME TO invite_tokens`);
       db.exec(`CREATE INDEX IF NOT EXISTS idx_invite_tokens_unused
                ON invite_tokens(token) WHERE used_by_user_id IS NULL`);
+      return doomed;
     });
     const prevFk = db.pragma('foreign_keys', { simple: true });
     db.pragma('foreign_keys = OFF');
     let purged = 0;
     try {
-      purged = (
-        db
-          .prepare(
-            `SELECT COUNT(*) AS n FROM invite_tokens
-             WHERE used_by_user_id IS NULL AND used_at IS NOT NULL`,
-          )
-          .get() as { n: number }
-      ).n;
-      rebuild();
+      // .immediate(), because this transaction opens with a read: on a hosted
+      // cell a deferred BEGIN takes a snapshot that Litestream's once-a-second
+      // sync can stale, and the write upgrade then dies with SQLITE_BUSY_SNAPSHOT,
+      // which busy_timeout does not retry (see lurker#603).
+      purged = rebuild.immediate();
     } finally {
       db.pragma(`foreign_keys = ${prevFk ? 'ON' : 'OFF'}`);
     }

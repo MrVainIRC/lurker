@@ -3,7 +3,9 @@
   SPDX-License-Identifier: MPL-2.0
 
   Admin panel → Invites. Generate one-time invite links, revoke pending ones, and
-  clear out spent ones once they're just clutter (#590). Split out of the old combined
+  clear out spent ones once they're just clutter (#590). A spent invite belongs to
+  the member it let in and is removed with them, so this list tracks live accounts
+  rather than standing as a permanent record. Split out of the old combined
   settings-panes/UsersPane so members and invites get their own admin tabs.
   Drives the same `admin` Pinia store; the route/sidebar gate this to admins.
 -->
@@ -12,8 +14,8 @@
   <section id="admin-invites" class="settings-pane">
     <h2>invites</h2>
     <p class="section-desc">
-      Invite friends with a one-time link. A link works once; consumed ones stay listed so you can
-      see who joined, until you remove them.
+      Invite friends with a one-time link. A link works once. Used ones stay listed showing who
+      joined, until you remove the invite or the member.
     </p>
     <p v-if="adminError" class="error inline">{{ adminError }}</p>
 
@@ -109,7 +111,7 @@ async function onDeleteInvite(invite: AdminInvite) {
   // at click time — the same label/action drift the menu work kept hitting.
   const spent = invite.status === 'consumed';
   const prompt = spent
-    ? `Remove this used invite? ${invite.usedByUsername ?? 'The user'} stays; only the record goes.`
+    ? `Remove this used invite? ${invite.usedByUsername ?? 'The member'} stays; only the record goes.`
     : 'Revoke this invite? Anyone holding the link will no longer be able to use it.';
   if (!confirm(prompt)) return;
   adminError.value = '';
