@@ -619,3 +619,137 @@ describe('a failed /ctcp reports where it was issued (#821)', () => {
     expect(conn.takeCtcpIssuer('bob')).toBeNull();
   });
 });
+
+// Applying the #821 review: the claim on a failure numeric has to be BOUNDED,
+// or an outstanding CTCP quietly becomes an attractor for every later failure
+// naming the same target.
+describe('a CTCP claims a failure only while it is the last thing sent (#821)', () => {
+  const said = (lines: Array<{ target: string; text: string }>) =>
+    lines.map((l) => ({ target: l.target, text: l.text }));
+
+  it('yields to a real message sent after it', () => {
+    // The #434 rule. /ctcp bob from #anime, bob ignores it (they exist), then
+    // the user messages bob and bob has since quit. That 401 answers the
+    // MESSAGE, so it belongs in bob's query as the persisted row #817 puts
+    // there — not pulled into #anime as transient CTCP status.
+    const { conn, ctcpLines } = harness();
+    conn.sendCtcpRequest('#anime', 'bob', 'CLIENTINFO', '');
+    const before = ctcpLines().length;
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+    conn.client.say = vi.fn<(target: string, message: string) => void>();
+
+    conn.say('bob', 'you there?');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'bob' });
+
+    expect(ctcpLines().slice(before)).toHaveLength(0);
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', target: 'bob' }));
+  });
+
+  it('yields to a real message in a channel it was aimed at', () => {
+    // Same shape with a channel target: /ctcp #anime is legal, and a later
+    // refusal to SPEAK in #anime must stay the inline error #283 put there.
+    const { conn, ctcpLines } = harness();
+    conn.upsertChannel('#anime');
+    conn.sendCtcpRequest(':server:1', '#anime', 'VERSION', '');
+    const before = ctcpLines().length;
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+    conn.client.say = vi.fn<(target: string, message: string) => void>();
+
+    conn.say('#anime', 'hello');
+    conn.client.emit('irc error', {
+      error: 'cannot_send_to_channel',
+      channel: '#anime',
+      reason: 'You need voice',
+    });
+
+    expect(ctcpLines().slice(before)).toHaveLength(0);
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', target: '#anime' }),
+    );
+  });
+
+  it('pairs the failure with the LIVE request, not a stale one of another type', () => {
+    // The per-entry bound, which the last-send window alone does not give: a
+    // second /ctcp refreshes "last thing sent here", so without it the
+    // oldest-first scan would hand this 401 to the 20s-old VERSION request and
+    // report in the buffer that one came from.
+    vi.useFakeTimers();
+    try {
+      const { conn, ctcpLines } = harness();
+      conn.sendCtcpRequest('#anime', 'bob', 'VERSION', '');
+      vi.advanceTimersByTime(20_000); // VERSION is now past the send window
+      conn.sendCtcpRequest('#manga', 'bob', 'TIME', '');
+      const before = ctcpLines().length;
+
+      conn.client.emit('irc error', { error: 'no_such_nick', nick: 'bob' });
+
+      expect(said(ctcpLines().slice(before))).toEqual([
+        { target: '#manga', text: "bob isn't on this network." },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops claiming once the send window has passed, though the reply TTL has not', () => {
+    // The two windows are deliberately different lengths: a reply may be slow,
+    // a refusal comes back on the same round trip. An entry a peer never
+    // answered must stop catching unrelated failures long before it stops
+    // being able to catch its own late reply.
+    vi.useFakeTimers();
+    try {
+      const { conn, ctcpLines } = harness();
+      conn.sendCtcpRequest('#anime', 'bob', 'CLIENTINFO', '');
+      const before = ctcpLines().length;
+      const publish = vi.fn<(event: unknown) => void>();
+      conn.publish = publish;
+
+      vi.advanceTimersByTime(30_000); // past the 15s send window, inside the 60s TTL
+      conn.client.emit('irc error', { error: 'no_such_nick', nick: 'bob' });
+
+      expect(ctcpLines().slice(before)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('CTCP routing survives the shapes clients actually send (#821 review)', () => {
+  it('routes a multi-token type, instead of building a key nothing can match', () => {
+    // Only the web client guarantees a single-token type; iOS and MCP pass
+    // through whatever was typed. `PING FOO` used to build the key
+    // `bob PING FOO`, which no lookup could match — costing the reply AND the
+    // failure their routing, silently.
+    const { conn, ctcpRequest, ctcpLines } = harness();
+    conn.sendCtcpRequest('#anime', 'bob', 'PING FOO', '');
+
+    // The spare word becomes args, exactly as parseCtcp would split it inbound.
+    expect(ctcpRequest).toHaveBeenCalledWith('bob', 'PING', 'FOO');
+
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'bob' });
+    expect(ctcpLines().map((l) => l.target)).toEqual(['#anime', '#anime']);
+  });
+
+  it('carries an outstanding request through a /nick, for the reply and the failure', () => {
+    // The re-key beside this one looked up the bare nick, but every key is
+    // `<nick-lc> <TYPE>` — so the queue never followed a rename at all.
+    const { conn, ctcpLines } = harness();
+    conn.sendCtcpRequest('#anime', 'bob', 'VERSION', '');
+    conn.client.emit('nick', { nick: 'bob', new_nick: 'rob' });
+
+    conn.client.emit('ctcp response', {
+      nick: 'rob',
+      ident: 'b',
+      hostname: 'h',
+      target: 'alice',
+      type: 'VERSION',
+      message: 'VERSION SomeClient 1.0',
+    });
+
+    const last = ctcpLines()[ctcpLines().length - 1];
+    expect(last.target).toBe('#anime'); // not the server buffer as unsolicited
+    expect(last.text).toContain('SomeClient 1.0');
+  });
+});

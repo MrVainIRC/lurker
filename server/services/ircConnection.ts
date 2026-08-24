@@ -2321,6 +2321,7 @@ export class IrcConnection {
       if (!isSelfNick) {
         this.markPeerEvent(eventNick, 'offline');
         this.markPeerEvent(eventNewNick, 'online');
+        this.rekeyCtcpOutstanding(eventNick, eventNewNick);
         this.renameDmForNickChange(eventNick, eventNewNick, userhost, event.time);
       }
     });
@@ -3226,7 +3227,13 @@ export class IrcConnection {
       // Per-target in-memory state follows the buffer. Each map is keyed by
       // the folded target; leaving an entry behind resurrects the exact bug
       // class renameChannel's comment catalogues (a stale can't-speak-here
-      // flag, a leaked one-shot WHO suppression, a stranded CTCP queue).
+      // flag, a leaked one-shot WHO suppression).
+      //
+      // ⚠ The outstanding-CTCP queue is NOT one of these, though it used to be
+      // listed here. It keys on the nick as ADDRESSED, not on a buffer, and a
+      // /ctcp can be issued from a channel with no DM at all — so it re-keys
+      // from the 'nick' handler, which fires for every peer rename rather than
+      // only the ones that rename a DM. See rekeyCtcpOutstanding.
       if (this.unsendableTargets.delete(oldLower)) this.unsendableTargets.add(newLower);
       const lastSend = this.lastUserSendAt.get(oldLower);
       if (lastSend !== undefined) {
@@ -3242,11 +3249,6 @@ export class IrcConnection {
       // and the stale entry it leaves can only ever suppress a channel
       // attribution, which is the safe direction. It expires on its own window
       // and is cleared wholesale by resetSendState.
-      const ctcpQueue = this.ctcpOutstanding.get(oldLower);
-      if (ctcpQueue) {
-        this.ctcpOutstanding.delete(oldLower);
-        this.ctcpOutstanding.set(newLower, ctcpQueue);
-      }
       const hint = this.e2eHintAt.get(oldLower);
       if (hint !== undefined) {
         this.e2eHintAt.delete(oldLower);
@@ -3869,17 +3871,68 @@ export class IrcConnection {
   // request. Each CTCP is its own PRIVMSG and draws its own numeric back, so
   // oldest-first pairs a burst of failures with the requests in the order they
   // were sent — the same FIFO discipline handleInboundCtcpReply uses per type.
+  // Follow a renamed peer, so a request we sent to their old nick still matches
+  // the reply that comes back from the new one — and so a failure naming them
+  // still finds the buffer it was issued from.
+  //
+  // ⚠ Keys are `<nick-lc> <TYPE>`, not the bare nick. The re-key this replaces
+  // read `ctcpOutstanding.get(oldNick)`, a key that cannot exist, so the queue
+  // never followed a rename at all. A rename ONTO a nick we already have
+  // requests out to merges rather than clobbers, re-sorted by send time so the
+  // FIFO pairing both consumers rely on still holds.
+  rekeyCtcpOutstanding(oldNick: string, newNick: string): void {
+    const oldLower = oldNick.toLowerCase();
+    const newLower = newNick.toLowerCase();
+    if (oldLower === newLower) return;
+    // Collected before mutating: the loop below both deletes and inserts keys,
+    // and a Map iterator walks entries added mid-iteration.
+    const moving: string[] = [];
+    for (const key of this.ctcpOutstanding.keys()) {
+      if (key.slice(0, key.lastIndexOf(' ')) === oldLower) moving.push(key);
+    }
+    for (const key of moving) {
+      const queue = this.ctcpOutstanding.get(key);
+      if (!queue) continue;
+      const moved = this.ctcpKey(newLower, key.slice(key.lastIndexOf(' ') + 1));
+      this.ctcpOutstanding.delete(key);
+      const existing = this.ctcpOutstanding.get(moved);
+      const merged = existing ? [...existing, ...queue] : queue;
+      merged.sort((a, b) => a.sentAt - b.sentAt);
+      this.ctcpOutstanding.set(moved, merged);
+    }
+  }
+
   takeCtcpIssuer(nick: string): string | null {
     const now = Date.now();
     this.pruneCtcpOutstanding(now);
     const lower = nick.toLowerCase();
+    // ⚠ Claim only while the CTCP is still the user's LAST move on this target
+    // — the #434 rule, and for the same reason it had to be learned there: a
+    // nick's failure numeric is ambiguous the moment you do two things with the
+    // nick. sendCtcpRequest records a NON-conversational send, and say / action /
+    // notice / multiline overwrite that with a conversational one, so this reads
+    // "the last thing sent here was a probe, not a message". Without it a real
+    // /msg to a nick who quit mid-probe would have its 401 pulled into the CTCP's
+    // buffer as transient status, losing the persisted row #817 puts in the query
+    // — and a plain message refused in a channel we'd CTCP'd would lose the
+    // inline error #283 puts there.
+    const lastSend = this.lastUserSendAt.get(lower);
+    if (!lastSend || lastSend.conversational) return null;
+    // ⚠ And only inside the SEND window, not the 60s reply TTL. A reply may
+    // legitimately be slow; a refusal comes back on the same round trip, so a
+    // numeric arriving a minute later is not this request's answer. The entry
+    // lives longer than the claim on purpose: a peer that silently ignores an
+    // unsupported type leaves one sitting there, and it must stop being able to
+    // catch an unrelated failure long before it stops being able to catch a reply.
+    if (now - lastSend.at > SEND_REJECTION_ATTRIBUTION_MS) return null;
     let bestKey: string | null = null;
     let bestAt = Infinity;
     for (const [key, queue] of this.ctcpOutstanding) {
-      // Keys are `<nick-lc> <TYPE>` and neither half can contain a space, so
-      // the last space splits them unambiguously.
+      // Keys are `<nick-lc> <TYPE>`; sendCtcpRequest guarantees the type is a
+      // single token, so the last space splits them unambiguously.
       if (key.slice(0, key.lastIndexOf(' ')) !== lower) continue;
       const head = queue[0]; // each queue is already oldest-first
+      if (head && now - head.sentAt > SEND_REJECTION_ATTRIBUTION_MS) continue;
       if (head && head.sentAt < bestAt) {
         bestAt = head.sentAt;
         bestKey = key;
@@ -4390,9 +4443,19 @@ export class IrcConnection {
   sendCtcpRequest(issuingTarget: string, target: string, type: string, args: string): void {
     if (this.disposed) return;
     const issuing = issuingTarget || this.serverTarget();
-    const t = type.toUpperCase();
     const now = Date.now();
-    let payload = args.trim();
+    // A CTCP type is a single token on the wire — parseCtcp splits the inbound
+    // side at the first space. Only the web client's own /ctcp guarantees that
+    // shape; iOS and MCP hand us whatever was typed, and a type of "PING FOO"
+    // used to build the key `bob PING FOO`, which no lookup could ever match —
+    // silently costing the reply AND the failure their routing. Split it the
+    // same way the receiving side does, so the extra words become args rather
+    // than being dropped.
+    const trimmedType = type.trim();
+    const sp = trimmedType.indexOf(' ');
+    const t = (sp === -1 ? trimmedType : trimmedType.slice(0, sp)).toUpperCase();
+    const spilled = sp === -1 ? '' : trimmedType.slice(sp + 1).trim();
+    let payload = [spilled, args.trim()].filter(Boolean).join(' ');
     if (t === 'PING' && !payload) payload = String(now);
     // Real enough for the rejection handler to surface a 531, but not a
     // conversation: the outcome belongs in `issuing`, not in a new query.
