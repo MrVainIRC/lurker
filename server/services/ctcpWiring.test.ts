@@ -17,6 +17,7 @@ import { createUser } from '../db/users.js';
 import { createNetwork } from '../db/networks.js';
 import { APP_NAME, APP_VERSION } from '../utils/userAgent.js';
 import settingsService from './settingsService.js';
+import * as buffers from '../db/buffers.js';
 import ircManager from './ircManager.js';
 
 // The default ctcp.version template (`${name} ${version}`) expands to this.
@@ -460,5 +461,161 @@ describe('outbound CTCP needs a writable connection', () => {
     const sendCtcpRequest = stub('connected');
     expect(ircManager.ctcpRequest(1, 1, '#chan', 'bob', 'PING', '')).toBe(true);
     expect(sendCtcpRequest).toHaveBeenCalledWith('#chan', 'bob', 'PING', '');
+  });
+});
+
+// #821. The exchange already routes its two happy halves to the buffer the
+// command was typed in — the "→ CTCP VERSION to bob" echo and, via
+// ctcpOutstanding, the reply. Failures consulted none of it and routed by nick,
+// so the half that says "you tried" and the half that says "it failed" landed in
+// different buffers, and WHICH buffer depended on why it failed.
+describe('a failed /ctcp reports where it was issued (#821)', () => {
+  type Lines = () => Array<{ target: string; text: string }>;
+
+  // ctcpLines() hands back whole publish events; assertions here only care where
+  // a line went and what it said.
+  const said = (lines: Array<{ target: string; text: string }>) =>
+    lines.map((l) => ({ target: l.target, text: l.text }));
+
+  // Sends a /ctcp from #anime, then hands back only the lines that came after,
+  // so the outbound echo doesn't have to be filtered out of every assertion.
+  function issued(conn: IrcConnection, ctcpLines: Lines) {
+    conn.sendCtcpRequest('#anime', 'bob', 'VERSION', '');
+    const before = ctcpLines().length;
+    return () => said(ctcpLines().slice(before));
+  }
+
+  it('puts the echo and the failure in the same buffer', () => {
+    const { conn, ctcpLines } = harness();
+    conn.sendCtcpRequest('#anime', 'bob', 'VERSION', '');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'bob' });
+
+    expect(said(ctcpLines())).toEqual([
+      { target: '#anime', text: '→ CTCP VERSION to bob' },
+      { target: '#anime', text: "bob isn't on this network." },
+    ]);
+  });
+
+  it('says it in the issuing buffer even when a DM with that nick exists', () => {
+    // The pre-fix split: with DM history the 401 fell to the DM-miss bucket, so
+    // the attempt showed in #anime and the outcome in the bob query.
+    const { conn, ctcpLines } = harness();
+    const after = issued(conn, ctcpLines);
+    conn.recentConversationalSend = (() => true) as never;
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'bob' });
+
+    expect(after()).toEqual([{ target: '#anime', text: "bob isn't on this network." }]);
+    expect(publish).not.toHaveBeenCalled(); // nothing landed in the bob query
+  });
+
+  it('routes a 531 to the same place as a 401 — the whole point', () => {
+    // ⚠ The two failure paths must move together. Fixing only the 401 is worse
+    // than fixing neither: one command would then report in two different
+    // buffers depending on whether the nick was absent or just refusing.
+    const { conn, ctcpLines } = harness();
+    const after = issued(conn, ctcpLines);
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.client.emit('irc error', {
+      error: 'cannot_send_to_user',
+      nick: 'bob',
+      reason: 'You must be voiced',
+    });
+
+    expect(after()).toEqual([
+      { target: '#anime', text: 'Message not delivered — You must be voiced' },
+    ]);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('still marks the target unsendable when it redirects a 531', () => {
+    // The redirect changes where the failure is SHOWN; the speak-permission mark
+    // that stops us firing typing TAGMSGs at a target that bounces them is a
+    // separate job and must survive it (#283).
+    const { conn } = harness();
+    conn.sendCtcpRequest('#anime', 'bob', 'VERSION', '');
+    conn.client.emit('irc error', { error: 'cannot_send_to_user', nick: 'bob' });
+    expect(conn.unsendableTargets.has('bob')).toBe(true);
+  });
+
+  it('consumes the request, so a later unrelated 401 is not claimed by it', () => {
+    // The hazard takeCommandChannel had to learn in #815: one command, one
+    // bounce. A spent entry left in the map lies in wait.
+    const { conn, ctcpLines } = harness();
+    const after = issued(conn, ctcpLines);
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'bob' });
+    expect(after()).toHaveLength(1);
+
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+    conn.client.say = vi.fn<(target: string, message: string) => void>(); // no real socket
+    conn.say('bob', 'hi'); // a real message, minutes later
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'bob' });
+
+    expect(after()).toHaveLength(1); // nothing new in #anime
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ target: 'bob' }));
+  });
+
+  it('pairs a burst of failures with the requests oldest-first, across types', () => {
+    // ctcpOutstanding is keyed by nick AND type; a 401 names only the nick. Each
+    // CTCP is its own PRIVMSG and draws its own numeric, so the Nth failure
+    // belongs to the Nth request regardless of which type it was.
+    const { conn, ctcpLines } = harness();
+    conn.sendCtcpRequest('#anime', 'bob', 'VERSION', '');
+    conn.sendCtcpRequest('#manga', 'bob', 'TIME', '');
+    const before = ctcpLines().length;
+
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'bob' });
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'bob' });
+
+    expect(
+      ctcpLines()
+        .slice(before)
+        .map((l) => l.target),
+    ).toEqual(['#anime', '#manga']);
+  });
+
+  it('leaves a 401 with no outstanding CTCP alone', () => {
+    // The gate that keeps this off every unrelated failure.
+    const { conn, ctcpLines } = harness();
+    conn.recentConversationalSend = (() => true) as never;
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'stranger' });
+
+    expect(ctcpLines()).toHaveLength(0);
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ target: 'stranger' }));
+  });
+
+  it('falls back to the server buffer when the issuing buffer was closed', () => {
+    // Same guard the reply path uses, and the reason it exists: wsHub drops an
+    // ephemeral event aimed at a closed buffer, so a /ctcp issued in a channel
+    // the user then closed would end in silence rather than in the server
+    // buffer. Really closes it rather than stubbing the lookup — the guard is
+    // shared with the reply path, so what needs proving is that the FAILURE path
+    // goes through it at all.
+    const { conn, ctcpLines } = harness();
+    buffers.ensureExists(1, 1, '#closed-later');
+    conn.sendCtcpRequest('#closed-later', 'bob', 'VERSION', '');
+    const before = ctcpLines().length;
+    expect(buffers.close(1, 1, '#closed-later')).toBe(true);
+
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'bob' });
+
+    expect(said(ctcpLines().slice(before))).toEqual([
+      { target: ':server:1', text: "bob isn't on this network." },
+    ]);
+  });
+
+  it('does not touch DCC, which reports to the nick on purpose', () => {
+    // DCC calls surfaceCtcp(nick, …) in many places and never records an
+    // outstanding request, so there is nothing here for a failure to claim.
+    const { conn } = harness();
+    expect(conn.takeCtcpIssuer('bob')).toBeNull();
   });
 });

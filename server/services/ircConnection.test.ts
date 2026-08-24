@@ -1163,14 +1163,21 @@ describe('refused-message handler routing (#283)', () => {
     expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: 'fartboy' }));
   });
 
-  it('still surfaces a refused CTCP, which is what marks the send in the first place', () => {
+  it('still surfaces a refused CTCP — in the buffer it was issued from', () => {
     // The guard above must not go so far as to silence 531 for a CTCP:
     // handleSendRejection reads recentUserSend to tell a real send from a
     // typing bounce, and a CTCP is a real send.
+    //
+    // ⚠ Where it surfaces changed in #821. This used to publish a persisted
+    // error into the fartboy DM — one of the three different places the same
+    // command's failure could land — and now joins its own echo and reply in the
+    // issuing buffer. The assertion that matters is unchanged: not silenced.
     const conn = makeConn();
     conn.client.ctcpRequest = vi.fn<(target: string, type: string, payload?: string) => void>();
     const publish = vi.fn<(event: unknown) => void>();
+    const publishEphemeral = vi.fn<(event: Record<string, unknown>) => void>();
     conn.publish = publish;
+    conn.publishEphemeral = publishEphemeral;
 
     conn.sendCtcpRequest(':server:1', 'fartboy', 'VERSION', '');
     expect(conn.recentUserSend('fartboy')).toBe(true);
@@ -1181,7 +1188,14 @@ describe('refused-message handler routing (#283)', () => {
       nick: 'fartboy',
       reason: 'They are blocking messages',
     });
-    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ target: 'fartboy' }));
+    expect(publishEphemeral).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'ctcp',
+        target: ':server:1',
+        text: 'Message not delivered — They are blocking messages',
+      }),
+    );
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: 'fartboy' }));
   });
 
   it('forgets the send attribution across a reconnect, so a stale 401 stays put', () => {

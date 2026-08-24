@@ -2725,6 +2725,22 @@ export class IrcConnection {
           });
           return;
         }
+        // A /ctcp to this nick is outstanding, so the failure belongs where the
+        // attempt was announced — the exchange already put "→ CTCP VERSION to
+        // bob" there, and the reply would have landed there too (#821). Ahead of
+        // the DM-miss bucket below on purpose: with DM history the failure used
+        // to land in that query instead, splitting one command's visible attempt
+        // from its outcome.
+        //
+        // Ephemeral, via surfaceCtcp, because the rest of the exchange is: the
+        // echo and the reply are both transient status. A persisted error row
+        // would outlive the echo that gives it meaning and strand "bob isn't on
+        // this network." in a channel after a reload.
+        const ctcpIssuer = this.takeCtcpIssuer(eventNick);
+        if (ctcpIssuer) {
+          this.surfaceCtcp(ctcpIssuer, `${eventNick} isn't on this network.`);
+          return;
+        }
       }
       const isDmMiss = tag === 'no_such_nick' && eventNick && isDmTargetName(eventNick);
       // For ERR_NOSUCHNICK against a nick the user just messaged, or has any DM
@@ -2754,13 +2770,12 @@ export class IrcConnection {
       // notice / multiline) rather than recentUserSend, and not lastNickIntent,
       // which a whois writes to.
       //
-      // ⚠ "Conjure" is the exact scope, and the hasMessageForTarget fallback
-      // below is deliberately untouched: a /ctcp miss against a nick you
-      // ALREADY have a DM with still lands in that DM rather than in the buffer
-      // the ctcp was issued from. That predates this branch, and it's what
-      // handleSendRejection does with a 531 for a CTCP too — so it is at least
-      // consistent. Routing a CTCP failure back to its issuing buffer is a
-      // separate change, and it would have to move both paths together.
+      // ⚠ "Conjure" is the exact scope. A CTCP miss no longer reaches here at
+      // all — the bucket above claims it first and routes it to the buffer the
+      // /ctcp was issued from, 401 and 531 alike (#821). What this gate still
+      // decides is whether a 401 with no outstanding CTCP may open a NEW query,
+      // and the hasMessageForTarget fallback below stays the wider signal for a
+      // nick the user already has history with.
       if (
         isDmMiss &&
         (this.recentConversationalSend(eventNick as string) ||
@@ -3814,6 +3829,53 @@ export class IrcConnection {
     this.publishEphemeral({ type: 'ctcp', level: 'info', target, text });
   }
 
+  // Where an outcome for a /ctcp issued in `issuingTarget` can actually be
+  // shown. The buffer may have been closed since the request went out, and
+  // wsHub drops an ephemeral event aimed at a closed buffer — so the exchange
+  // would end in silence rather than in the server buffer.
+  private ctcpIssuingBuffer(issuingTarget: string): string {
+    return isBufferClosed(this.network.user_id, this.network.id, issuingTarget)
+      ? this.serverTarget()
+      : issuingTarget;
+  }
+
+  // The buffer a FAILED /ctcp to `nick` belongs in — the one it was issued from,
+  // the same place its echo and its reply go (#821). Returns null when no
+  // request to that nick is outstanding, which is what keeps this off every
+  // unrelated 401.
+  //
+  // ⚠ CONSUMES the entry, on the "one command, one bounce" discipline
+  // takeCommandChannel had to learn in #815: a spent CTCP left lying around is
+  // exactly the shape that lies in wait and claims a later unrelated failure.
+  //
+  // ⚠ ctcpOutstanding is keyed by nick AND type, but a 401 names only the nick,
+  // so this scans every type for that nick and takes the OLDEST outstanding
+  // request. Each CTCP is its own PRIVMSG and draws its own numeric back, so
+  // oldest-first pairs a burst of failures with the requests in the order they
+  // were sent — the same FIFO discipline handleInboundCtcpReply uses per type.
+  takeCtcpIssuer(nick: string): string | null {
+    const now = Date.now();
+    this.pruneCtcpOutstanding(now);
+    const lower = nick.toLowerCase();
+    let bestKey: string | null = null;
+    let bestAt = Infinity;
+    for (const [key, queue] of this.ctcpOutstanding) {
+      // Keys are `<nick-lc> <TYPE>` and neither half can contain a space, so
+      // the last space splits them unambiguously.
+      if (key.slice(0, key.lastIndexOf(' ')) !== lower) continue;
+      const head = queue[0]; // each queue is already oldest-first
+      if (head && head.sentAt < bestAt) {
+        bestAt = head.sentAt;
+        bestKey = key;
+      }
+    }
+    if (!bestKey) return null;
+    const queue = this.ctcpOutstanding.get(bestKey);
+    const entry = queue?.shift();
+    if (queue && queue.length === 0) this.ctcpOutstanding.delete(bestKey);
+    return entry ? this.ctcpIssuingBuffer(entry.issuingTarget) : null;
+  }
+
   // Route an INCOMING CTCP status line (a probe, or an unsolicited reply) per
   // the user's ctcp.msgbuffer setting — WeeChat's irc.msgbuffer.ctcp:
   //   server  → this network's server buffer (default)
@@ -4297,10 +4359,7 @@ export class IrcConnection {
       // buffer if it has since been closed — a wsHub guard would otherwise drop
       // an ephemeral event to a closed buffer). ctcp.msgbuffer governs only
       // UNSOLICITED CTCP, never a reply the user explicitly asked for.
-      const target = isBufferClosed(this.network.user_id, this.network.id, pending.issuingTarget)
-        ? this.serverTarget()
-        : pending.issuingTarget;
-      this.surfaceCtcp(target, line);
+      this.surfaceCtcp(this.ctcpIssuingBuffer(pending.issuingTarget), line);
       return;
     }
     // Unsolicited reply: rate-limit per-peer, then route per ctcp.msgbuffer.
@@ -5091,6 +5150,18 @@ export class IrcConnection {
   // buffer with "Message not delivered".
   handleSendRejection(target: string, reason: string | null | undefined, raw: unknown): void {
     this.unsendableTargets.add(target.toLowerCase());
+    // ⚠ MUST move together with the 401 path above (#821). 401 (the nick isn't
+    // there) and 531 (the nick won't take it) are the two ways a /ctcp fails, so
+    // fixing only one is worse than fixing neither: the same command would then
+    // report in the issuing buffer or in the peer's DM depending on WHY it
+    // failed. Ahead of the recentUserSend gate because an outstanding request is
+    // the stronger claim — the user asked for this outcome by name, and the two
+    // windows are not the same length.
+    const ctcpIssuer = this.takeCtcpIssuer(target);
+    if (ctcpIssuer) {
+      this.surfaceCtcp(ctcpIssuer, sendRejectionText(reason));
+      return;
+    }
     if (!this.recentUserSend(target)) return;
     this.publish({ type: 'error', target, text: sendRejectionText(reason), raw });
   }
