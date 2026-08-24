@@ -1116,10 +1116,16 @@ describe('refused-message handler routing (#283)', () => {
       reason: 'No such nick/channel',
     });
 
-    // In the query, not the server buffer. The publish is what leaves a buffer
-    // behind as well: an 'error' row persists, so the query survives a reload.
+    // In the query, not the server buffer, and in the same words the channel
+    // routing and the profile modal use rather than the server's raw
+    // "No such nick/channel". The publish is what leaves a buffer behind as
+    // well: an 'error' row persists, so the query survives a reload.
     expect(publish).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'error', target: 'fartboy' }),
+      expect.objectContaining({
+        type: 'error',
+        target: 'fartboy',
+        text: "fartboy isn't on this network.",
+      }),
     );
     expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: ':server:1' }));
   });

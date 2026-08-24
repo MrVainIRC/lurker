@@ -2757,11 +2757,15 @@ export class IrcConnection {
         (this.recentConversationalSend(eventNick as string) ||
           hasMessageForTarget(this.network.id, eventNick as string))
       ) {
-        const message = reason || 'No such nick — they may be offline.';
+        // Same sentence the channel-routed 401 uses (#815) and the profile
+        // modal now uses (#818). It replaces the server's raw `reason`, which
+        // on almost every ircd is the literal "No such nick/channel" — one
+        // failure the user can meet in three places shouldn't speak ircd in
+        // one of them and English in the other two.
         this.publish({
           type: 'error',
           target: eventNick,
-          text: message,
+          text: `${eventNick} isn't on this network.`,
           raw: event,
         });
         return;
