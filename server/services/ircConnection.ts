@@ -2722,12 +2722,35 @@ export class IrcConnection {
         }
       }
       const isDmMiss = tag === 'no_such_nick' && eventNick && isDmTargetName(eventNick);
-      // For ERR_NOSUCHNICK against a nick the user has any DM history with,
-      // route the error into that DM buffer so the failure surfaces where
-      // they sent the message instead of getting lost in the server buffer.
-      // Presence is no longer driven from here — MONITOR is the authority
-      // for online/offline state.
-      if (isDmMiss && hasMessageForTarget(this.network.id, eventNick as string)) {
+      // For ERR_NOSUCHNICK against a nick the user just messaged, or has any DM
+      // history with, route the error into that DM buffer so the failure
+      // surfaces where they sent the message instead of getting lost in the
+      // server buffer. Presence is no longer driven from here — MONITOR is the
+      // authority for online/offline state.
+      //
+      // recentUserSend is checked first, and not just because it's a map read
+      // against a DB one. Under echo-message the FIRST message to a nick that
+      // doesn't exist has no history to find, by construction: the optimistic
+      // publish is skipped (ircManager waits for the server to echo) and the
+      // server answers 401 instead of echoing, so no row is ever written. So
+      // history alone is blind to precisely the case that needs this most —
+      // the first thing you ever say to someone (#817). handleSendRejection
+      // already gates the sibling numeric (531) on recentUserSend for the same
+      // reason; this brings the two into line.
+      //
+      // The publish below is what leaves a buffer behind, too: an 'error' row
+      // persists, so the query survives a reload instead of vanishing with the
+      // optimistic one the client opened.
+      //
+      // recentUserSend has to stay narrower than "any recent interest in this
+      // nick" — a /whois miss must never conjure a DM buffer. Only say/action/
+      // notice set it, so it has that property; lastNickIntent deliberately
+      // does not (a whois records there too).
+      if (
+        isDmMiss &&
+        (this.recentUserSend(eventNick as string) ||
+          hasMessageForTarget(this.network.id, eventNick as string))
+      ) {
         const message = reason || 'No such nick — they may be offline.';
         this.publish({
           type: 'error',
