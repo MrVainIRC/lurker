@@ -1163,14 +1163,21 @@ describe('refused-message handler routing (#283)', () => {
     expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: 'fartboy' }));
   });
 
-  it('still surfaces a refused CTCP, which is what marks the send in the first place', () => {
+  it('still surfaces a refused CTCP — in the buffer it was issued from', () => {
     // The guard above must not go so far as to silence 531 for a CTCP:
     // handleSendRejection reads recentUserSend to tell a real send from a
     // typing bounce, and a CTCP is a real send.
+    //
+    // ⚠ Where it surfaces changed in #821. This used to publish a persisted
+    // error into the fartboy DM — one of the three different places the same
+    // command's failure could land — and now joins its own echo and reply in the
+    // issuing buffer. The assertion that matters is unchanged: not silenced.
     const conn = makeConn();
     conn.client.ctcpRequest = vi.fn<(target: string, type: string, payload?: string) => void>();
     const publish = vi.fn<(event: unknown) => void>();
+    const publishEphemeral = vi.fn<(event: Record<string, unknown>) => void>();
     conn.publish = publish;
+    conn.publishEphemeral = publishEphemeral;
 
     conn.sendCtcpRequest(':server:1', 'fartboy', 'VERSION', '');
     expect(conn.recentUserSend('fartboy')).toBe(true);
@@ -1181,7 +1188,14 @@ describe('refused-message handler routing (#283)', () => {
       nick: 'fartboy',
       reason: 'They are blocking messages',
     });
-    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ target: 'fartboy' }));
+    expect(publishEphemeral).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'ctcp',
+        target: ':server:1',
+        text: 'Message not delivered — They are blocking messages',
+      }),
+    );
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: 'fartboy' }));
   });
 
   it('forgets the send attribution across a reconnect, so a stale 401 stays put', () => {
@@ -1357,6 +1371,71 @@ describe('refused-message handler routing (#283)', () => {
         text: 'This channel requires a registered nickname.',
       }),
     );
+  });
+
+  // Found by QA against a real ergo 2.18, not by reading the RFC: 477 has a
+  // THIRD meaning. A DM refused because the recipient only accepts messages from
+  // registered users (+R) answers 477 naming the NICK — where the code, and
+  // issue #821, both expected 531.
+  //
+  //   :ergo.test 477 me blocker :You must be registered to send a direct message
+  //
+  // params[1] is where a channel normally sits, so this raised a JOIN toast, in
+  // the peer's DM, telling the user "This channel requires a registered
+  // nickname" about a person.
+  it('treats a 477 that names a nick as a send rejection, not a join failure', () => {
+    const conn = makeConn();
+    const publish = vi.fn<(event: unknown) => void>();
+    const publishEphemeral = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+    conn.publishEphemeral = publishEphemeral;
+    conn.client.say = vi.fn<(target: string, message: string) => void>();
+    conn.say('blocker', 'hi'); // marks the send, so the rejection is attributable
+
+    conn.client.emit('unknown command', {
+      command: '477',
+      params: ['me', 'blocker', 'You must be registered to send a direct message to this user'],
+    });
+
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        target: 'blocker',
+        text: 'Message not delivered — You must be registered to send a direct message to this user',
+      }),
+    );
+    // Nothing can be joined that isn't a channel, so no join toast may fire.
+    expect(publishEphemeral).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'join-error' }),
+    );
+  });
+
+  it('routes a nick-targeted 477 for a /ctcp back to the issuing buffer', () => {
+    // The #821 rule has to hold for every way a CTCP can be refused, or the same
+    // command still reports in two places depending on which numeric the ircd
+    // happens to use — and on ergo this is the one it uses.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.ctcpRequest = vi.fn<(target: string, type: string, payload?: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    const publishEphemeral = vi.fn<(event: Record<string, unknown>) => void>();
+    conn.publish = publish;
+    conn.publishEphemeral = publishEphemeral;
+
+    conn.sendCtcpRequest('#anime', 'blocker', 'VERSION', '');
+    conn.client.emit('unknown command', {
+      command: '477',
+      params: ['me', 'blocker', 'You must be registered to send a direct message to this user'],
+    });
+
+    expect(publishEphemeral).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'ctcp',
+        target: '#anime',
+        text: 'Message not delivered — You must be registered to send a direct message to this user',
+      }),
+    );
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: 'blocker' }));
   });
 });
 

@@ -1048,7 +1048,8 @@ export class IrcConnection {
     c.on('unknown command', (cmd: { command?: string; params?: string[] }) => {
       const command = (cmd?.command || '').toString();
       const params = Array.isArray(cmd?.params) ? (cmd.params as string[]) : [];
-      // These numerics arrive as [nick, #channel, reason].
+      // These numerics arrive as [nick, <target>, reason] — usually a channel,
+      // but see the nick case below.
       const channel = typeof params[1] === 'string' ? params[1] : '';
       const reason = params[params.length - 1] || null;
       // ERR_NEEDREGGEDNICK (477) to a channel we're already in is a speak
@@ -1059,14 +1060,29 @@ export class IrcConnection {
         this.handleSendRejection(channel, reason, { command, params });
         return;
       }
+      // ⚠ 477 has a THIRD meaning, found by QA against ergo 2.18 (#821): a DM
+      // refused because the recipient takes messages only from registered users
+      // (+R) answers 477 naming the NICK, where 531 might be expected. Nothing
+      // can be joined that isn't a channel, so a 477 whose target is a nick
+      // cannot be a join failure at all — it is a send rejection, and routing it
+      // as one is what puts it in the DM (or, for a /ctcp, back in the buffer the
+      // command came from) instead of raising "This channel requires a registered
+      // nickname" as a join toast against a person.
+      if (channel && !isChannelTarget(channel) && joinRejectionMessage(command)) {
+        this.handleSendRejection(channel, reason, { command, params });
+        return;
+      }
       // Channel-join rejections irc-framework doesn't model (476/477) arrive
       // here too. Route them to the channel as an ephemeral toast so the failure
       // surfaces where the user tried to join, not buried in the server buffer
       // (#260). The client never opened the buffer (it waits for channel-joined),
       // so this is toast-only — the raw line is still logged to the server buffer
       // by the 'raw' handler, which is the additive authentic record.
+      // Gated on the target really being a channel: a join rejection names one by
+      // definition, and the branch above has already claimed the nick-targeted
+      // 477. Without the gate this is what aimed a "couldn't join" toast at a DM.
       const joinMsg = joinRejectionMessage(command);
-      if (joinMsg && channel) {
+      if (joinMsg && channel && isChannelTarget(channel)) {
         this.publishEphemeral({
           type: 'join-error',
           target: channel,
@@ -2305,6 +2321,7 @@ export class IrcConnection {
       if (!isSelfNick) {
         this.markPeerEvent(eventNick, 'offline');
         this.markPeerEvent(eventNewNick, 'online');
+        this.rekeyCtcpOutstanding(eventNick, eventNewNick);
         this.renameDmForNickChange(eventNick, eventNewNick, userhost, event.time);
       }
     });
@@ -2714,6 +2731,13 @@ export class IrcConnection {
       // aimed at a named channel, seconds ago — against "we have DM history
       // with this nick at some point in the past".
       if (tag === 'no_such_nick' && eventNick) {
+        // Read before takeCommandChannel consumes it: a nick-only command
+        // (/whois, /whowas) records an intent but is not a SEND, so
+        // takeCtcpIssuer's "is the CTCP still the last move here" gate — which
+        // reads lastUserSendAt — cannot see it on its own. Both maps record
+        // moves on a nick; the rule is only true to its own statement if it
+        // consults both (Copilot, PR #823).
+        const nickIntentAt = this.lastNickIntent.get(eventNick.toLowerCase())?.at ?? null;
         const commandChannel = this.takeCommandChannel(eventNick);
         const joined = commandChannel ? this.channelState(commandChannel) : undefined;
         if (joined) {
@@ -2723,6 +2747,22 @@ export class IrcConnection {
             text: `${eventNick} isn't on this network.`,
             raw: event,
           });
+          return;
+        }
+        // A /ctcp to this nick is outstanding, so the failure belongs where the
+        // attempt was announced — the exchange already put "→ CTCP VERSION to
+        // bob" there, and the reply would have landed there too (#821). Ahead of
+        // the DM-miss bucket below on purpose: with DM history the failure used
+        // to land in that query instead, splitting one command's visible attempt
+        // from its outcome.
+        //
+        // Ephemeral, via surfaceCtcp, because the rest of the exchange is: the
+        // echo and the reply are both transient status. A persisted error row
+        // would outlive the echo that gives it meaning and strand "bob isn't on
+        // this network." in a channel after a reload.
+        const ctcpIssuer = this.takeCtcpIssuer(eventNick, nickIntentAt);
+        if (ctcpIssuer) {
+          this.surfaceCtcp(ctcpIssuer, `${eventNick} isn't on this network.`);
           return;
         }
       }
@@ -2754,13 +2794,12 @@ export class IrcConnection {
       // notice / multiline) rather than recentUserSend, and not lastNickIntent,
       // which a whois writes to.
       //
-      // ⚠ "Conjure" is the exact scope, and the hasMessageForTarget fallback
-      // below is deliberately untouched: a /ctcp miss against a nick you
-      // ALREADY have a DM with still lands in that DM rather than in the buffer
-      // the ctcp was issued from. That predates this branch, and it's what
-      // handleSendRejection does with a 531 for a CTCP too — so it is at least
-      // consistent. Routing a CTCP failure back to its issuing buffer is a
-      // separate change, and it would have to move both paths together.
+      // ⚠ "Conjure" is the exact scope. A CTCP miss no longer reaches here at
+      // all — the bucket above claims it first and routes it to the buffer the
+      // /ctcp was issued from, 401 and 531 alike (#821). What this gate still
+      // decides is whether a 401 with no outstanding CTCP may open a NEW query,
+      // and the hasMessageForTarget fallback below stays the wider signal for a
+      // nick the user already has history with.
       if (
         isDmMiss &&
         (this.recentConversationalSend(eventNick as string) ||
@@ -3195,7 +3234,13 @@ export class IrcConnection {
       // Per-target in-memory state follows the buffer. Each map is keyed by
       // the folded target; leaving an entry behind resurrects the exact bug
       // class renameChannel's comment catalogues (a stale can't-speak-here
-      // flag, a leaked one-shot WHO suppression, a stranded CTCP queue).
+      // flag, a leaked one-shot WHO suppression).
+      //
+      // ⚠ The outstanding-CTCP queue is NOT one of these, though it used to be
+      // listed here. It keys on the nick as ADDRESSED, not on a buffer, and a
+      // /ctcp can be issued from a channel with no DM at all — so it re-keys
+      // from the 'nick' handler, which fires for every peer rename rather than
+      // only the ones that rename a DM. See rekeyCtcpOutstanding.
       if (this.unsendableTargets.delete(oldLower)) this.unsendableTargets.add(newLower);
       const lastSend = this.lastUserSendAt.get(oldLower);
       if (lastSend !== undefined) {
@@ -3211,11 +3256,6 @@ export class IrcConnection {
       // and the stale entry it leaves can only ever suppress a channel
       // attribution, which is the safe direction. It expires on its own window
       // and is cleared wholesale by resetSendState.
-      const ctcpQueue = this.ctcpOutstanding.get(oldLower);
-      if (ctcpQueue) {
-        this.ctcpOutstanding.delete(oldLower);
-        this.ctcpOutstanding.set(newLower, ctcpQueue);
-      }
       const hint = this.e2eHintAt.get(oldLower);
       if (hint !== undefined) {
         this.e2eHintAt.delete(oldLower);
@@ -3814,6 +3854,111 @@ export class IrcConnection {
     this.publishEphemeral({ type: 'ctcp', level: 'info', target, text });
   }
 
+  // Where an outcome for a /ctcp issued in `issuingTarget` can actually be
+  // shown. The buffer may have been closed since the request went out, and
+  // wsHub drops an ephemeral event aimed at a closed buffer — so the exchange
+  // would end in silence rather than in the server buffer.
+  private ctcpIssuingBuffer(issuingTarget: string): string {
+    return isBufferClosed(this.network.user_id, this.network.id, issuingTarget)
+      ? this.serverTarget()
+      : issuingTarget;
+  }
+
+  // The buffer a FAILED /ctcp to `nick` belongs in — the one it was issued from,
+  // the same place its echo and its reply go (#821). Returns null when no
+  // request to that nick is outstanding, which is what keeps this off every
+  // unrelated 401.
+  //
+  // ⚠ CONSUMES the entry, on the "one command, one bounce" discipline
+  // takeCommandChannel had to learn in #815: a spent CTCP left lying around is
+  // exactly the shape that lies in wait and claims a later unrelated failure.
+  //
+  // ⚠ ctcpOutstanding is keyed by nick AND type, but a 401 names only the nick,
+  // so this scans every type for that nick and takes the OLDEST outstanding
+  // request. Each CTCP is its own PRIVMSG and draws its own numeric back, so
+  // oldest-first pairs a burst of failures with the requests in the order they
+  // were sent — the same FIFO discipline handleInboundCtcpReply uses per type.
+  // Follow a renamed peer, so a request we sent to their old nick still matches
+  // the reply that comes back from the new one — and so a failure naming them
+  // still finds the buffer it was issued from.
+  //
+  // ⚠ Keys are `<nick-lc> <TYPE>`, not the bare nick. The re-key this replaces
+  // read `ctcpOutstanding.get(oldNick)`, a key that cannot exist, so the queue
+  // never followed a rename at all. A rename ONTO a nick we already have
+  // requests out to merges rather than clobbers, re-sorted by send time so the
+  // FIFO pairing both consumers rely on still holds.
+  rekeyCtcpOutstanding(oldNick: string, newNick: string): void {
+    const oldLower = oldNick.toLowerCase();
+    const newLower = newNick.toLowerCase();
+    if (oldLower === newLower) return;
+    // Collected before mutating: the loop below both deletes and inserts keys,
+    // and a Map iterator walks entries added mid-iteration.
+    const moving: string[] = [];
+    for (const key of this.ctcpOutstanding.keys()) {
+      if (key.slice(0, key.lastIndexOf(' ')) === oldLower) moving.push(key);
+    }
+    for (const key of moving) {
+      const queue = this.ctcpOutstanding.get(key);
+      if (!queue) continue;
+      const moved = this.ctcpKey(newLower, key.slice(key.lastIndexOf(' ') + 1));
+      this.ctcpOutstanding.delete(key);
+      const existing = this.ctcpOutstanding.get(moved);
+      const merged = existing ? [...existing, ...queue] : queue;
+      merged.sort((a, b) => a.sentAt - b.sentAt);
+      this.ctcpOutstanding.set(moved, merged);
+    }
+  }
+
+  //
+  // `newerMoveAt` is the timestamp of a non-send move on this nick (a /whois),
+  // which the lastUserSendAt gate above is blind to. A request older than it is
+  // no longer the user's last move, so it must not claim this numeric — see the
+  // 401 bucket. Per-entry rather than a blanket refusal: with two requests
+  // outstanding and the whois between them, the NEWER one is still the answer.
+  takeCtcpIssuer(nick: string, newerMoveAt: number | null = null): string | null {
+    const now = Date.now();
+    this.pruneCtcpOutstanding(now);
+    const lower = nick.toLowerCase();
+    // ⚠ Claim only while the CTCP is still the user's LAST move on this target
+    // — the #434 rule, and for the same reason it had to be learned there: a
+    // nick's failure numeric is ambiguous the moment you do two things with the
+    // nick. sendCtcpRequest records a NON-conversational send, and say / action /
+    // notice / multiline overwrite that with a conversational one, so this reads
+    // "the last thing sent here was a probe, not a message". Without it a real
+    // /msg to a nick who quit mid-probe would have its 401 pulled into the CTCP's
+    // buffer as transient status, losing the persisted row #817 puts in the query
+    // — and a plain message refused in a channel we'd CTCP'd would lose the
+    // inline error #283 puts there.
+    const lastSend = this.lastUserSendAt.get(lower);
+    if (!lastSend || lastSend.conversational) return null;
+    // ⚠ And only inside the SEND window, not the 60s reply TTL. A reply may
+    // legitimately be slow; a refusal comes back on the same round trip, so a
+    // numeric arriving a minute later is not this request's answer. The entry
+    // lives longer than the claim on purpose: a peer that silently ignores an
+    // unsupported type leaves one sitting there, and it must stop being able to
+    // catch an unrelated failure long before it stops being able to catch a reply.
+    if (now - lastSend.at > SEND_REJECTION_ATTRIBUTION_MS) return null;
+    let bestKey: string | null = null;
+    let bestAt = Infinity;
+    for (const [key, queue] of this.ctcpOutstanding) {
+      // Keys are `<nick-lc> <TYPE>`; sendCtcpRequest guarantees the type is a
+      // single token, so the last space splits them unambiguously.
+      if (key.slice(0, key.lastIndexOf(' ')) !== lower) continue;
+      const head = queue[0]; // each queue is already oldest-first
+      if (head && now - head.sentAt > SEND_REJECTION_ATTRIBUTION_MS) continue;
+      if (head && newerMoveAt != null && head.sentAt < newerMoveAt) continue;
+      if (head && head.sentAt < bestAt) {
+        bestAt = head.sentAt;
+        bestKey = key;
+      }
+    }
+    if (!bestKey) return null;
+    const queue = this.ctcpOutstanding.get(bestKey);
+    const entry = queue?.shift();
+    if (queue && queue.length === 0) this.ctcpOutstanding.delete(bestKey);
+    return entry ? this.ctcpIssuingBuffer(entry.issuingTarget) : null;
+  }
+
   // Route an INCOMING CTCP status line (a probe, or an unsolicited reply) per
   // the user's ctcp.msgbuffer setting — WeeChat's irc.msgbuffer.ctcp:
   //   server  → this network's server buffer (default)
@@ -4297,10 +4442,7 @@ export class IrcConnection {
       // buffer if it has since been closed — a wsHub guard would otherwise drop
       // an ephemeral event to a closed buffer). ctcp.msgbuffer governs only
       // UNSOLICITED CTCP, never a reply the user explicitly asked for.
-      const target = isBufferClosed(this.network.user_id, this.network.id, pending.issuingTarget)
-        ? this.serverTarget()
-        : pending.issuingTarget;
-      this.surfaceCtcp(target, line);
+      this.surfaceCtcp(this.ctcpIssuingBuffer(pending.issuingTarget), line);
       return;
     }
     // Unsolicited reply: rate-limit per-peer, then route per ctcp.msgbuffer.
@@ -4315,9 +4457,19 @@ export class IrcConnection {
   sendCtcpRequest(issuingTarget: string, target: string, type: string, args: string): void {
     if (this.disposed) return;
     const issuing = issuingTarget || this.serverTarget();
-    const t = type.toUpperCase();
     const now = Date.now();
-    let payload = args.trim();
+    // A CTCP type is a single token on the wire — parseCtcp splits the inbound
+    // side at the first space. Only the web client's own /ctcp guarantees that
+    // shape; iOS and MCP hand us whatever was typed, and a type of "PING FOO"
+    // used to build the key `bob PING FOO`, which no lookup could ever match —
+    // silently costing the reply AND the failure their routing. Split it the
+    // same way the receiving side does, so the extra words become args rather
+    // than being dropped.
+    const trimmedType = type.trim();
+    const sp = trimmedType.indexOf(' ');
+    const t = (sp === -1 ? trimmedType : trimmedType.slice(0, sp)).toUpperCase();
+    const spilled = sp === -1 ? '' : trimmedType.slice(sp + 1).trim();
+    let payload = [spilled, args.trim()].filter(Boolean).join(' ');
     if (t === 'PING' && !payload) payload = String(now);
     // Real enough for the rejection handler to surface a 531, but not a
     // conversation: the outcome belongs in `issuing`, not in a new query.
@@ -5091,6 +5243,18 @@ export class IrcConnection {
   // buffer with "Message not delivered".
   handleSendRejection(target: string, reason: string | null | undefined, raw: unknown): void {
     this.unsendableTargets.add(target.toLowerCase());
+    // ⚠ MUST move together with the 401 path above (#821). 401 (the nick isn't
+    // there) and 531 (the nick won't take it) are the two ways a /ctcp fails, so
+    // fixing only one is worse than fixing neither: the same command would then
+    // report in the issuing buffer or in the peer's DM depending on WHY it
+    // failed. Ahead of the recentUserSend gate because an outstanding request is
+    // the stronger claim — the user asked for this outcome by name, and the two
+    // windows are not the same length.
+    const ctcpIssuer = this.takeCtcpIssuer(target);
+    if (ctcpIssuer) {
+      this.surfaceCtcp(ctcpIssuer, sendRejectionText(reason));
+      return;
+    }
     if (!this.recentUserSend(target)) return;
     this.publish({ type: 'error', target, text: sendRejectionText(reason), raw });
   }
