@@ -13,7 +13,13 @@ import {
   setUserIdent,
 } from '../db/users.js';
 import type { User } from '../db/users.js';
-import { createInvite, listInvites, deleteInvite, getInvite } from '../db/invites.js';
+import {
+  createInvite,
+  listInvites,
+  deleteInvite,
+  getInvite,
+  isInviteSpent,
+} from '../db/invites.js';
 import ircManager from '../services/ircManager.js';
 import { presenceDiagnostics } from '../services/wsHub.js';
 import { isIdentdEnabled, isOidentdFileEnabled } from '../services/identd.js';
@@ -35,7 +41,7 @@ router.use('/networks', adminNetworksRouter);
 // invites.ts is still untyped — row shape inferred as any from the JS module
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function deriveInviteStatus(row: any): string {
-  if (row.usedByUserId != null) return 'consumed';
+  if (isInviteSpent(row)) return 'consumed';
   if (row.expiresAt && Date.parse(row.expiresAt) < Date.now()) return 'expired';
   return 'pending';
 }
@@ -319,15 +325,14 @@ router.delete('/invites/:token', (req: Request<{ token: string }>, res: Response
     res.status(400).json({ error: 'missing token' });
     return;
   }
-  // Refuse to delete consumed invites — they're audit history (which user
-  // joined via which admin's invitation). Pending/expired are fair game.
+  // Any invite can be removed, consumed ones included (#590). The list doubles
+  // as a record of who joined via whose invitation, but it is a management view
+  // and not an audit log — refusing the delete only left admins with a roster of
+  // spent links they had no way to clear. Deleting a consumed row cannot revive
+  // anything: the row IS the invite, so removing it makes the token unknown.
   const existing = getInvite(token);
   if (!existing) {
     res.status(404).json({ error: 'not found' });
-    return;
-  }
-  if (existing.usedByUserId != null) {
-    res.status(409).json({ error: 'cannot delete a consumed invite' });
     return;
   }
   deleteInvite(token);
