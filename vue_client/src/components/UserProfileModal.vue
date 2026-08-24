@@ -111,11 +111,23 @@
         </div>
       </section>
 
+      <!-- The lookup came back with nobody there. Say so: without this line the
+           modal renders a name, a note prompt and nothing else, which is
+           indistinguishable from a profile we simply have no details for — and
+           the header dot can't carry it either, since with no MONITOR data a
+           not-found nick reads as "Unknown" (#818). Wording matches the
+           channel-side 401 line so the same failure sounds the same
+           everywhere. -->
+      <section v-if="isNotFound" class="section status">
+        <p class="muted">
+          <i class="fa-solid fa-circle-question"></i> {{ nick }} isn't on this network.
+        </p>
+      </section>
       <!-- Transient waiting state — only while we're genuinely in the dark.
-           If we already know they're offline (MONITOR or not_found whois)
-           the presence dot in the header carries that, so we skip the
-           redundant line and let "Your note" stand on its own. -->
-      <section v-if="!hasDetails && !isOffline" class="section status">
+           If MONITOR already knows they're offline the presence dot in the
+           header carries that, so we skip the redundant line and let "Your
+           note" stand on its own. -->
+      <section v-else-if="!hasDetails && !isOffline" class="section status">
         <p class="muted">
           <i class="fa-solid fa-circle-notch fa-spin"></i> Waiting for whois reply…
         </p>
@@ -216,8 +228,12 @@ const presenceClass = computed(() => {
   if (isPeerOffline(peer.value)) return 'offline';
   if (isPeerAway(peer.value) || awayMessage.value) return 'away';
   if (isPeerOnline(peer.value)) return 'online';
-  // No presence data — if whois returned an identity we know they're online.
-  if (whois.value && !isNotFound.value) return 'online';
+  // No presence data — the whois reply settles it either way: an identity
+  // means they're online, and a not-found means there's nobody there to be
+  // anything else. Without the second branch a missing nick showed "Unknown",
+  // which is the one thing we do know it isn't (#818).
+  if (isNotFound.value) return 'offline';
+  if (whois.value) return 'online';
   return 'unknown';
 });
 const presenceLabel = computed(() => {

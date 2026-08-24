@@ -56,8 +56,9 @@ export const useWhoisStore = defineStore('whois', {
   state: () => ({
     byKey: {} as Record<string, WhoisEntry>,
     viewer: { open: false, networkId: null, nick: '' } as WhoisViewerState,
-    // Tracks the nicks we've kicked a refresh for during this open viewer
-    // session, so reopening a different nick triggers its own refresh.
+    // The lookup currently in flight, if any. Set when the viewer kicks a
+    // WHOIS and cleared when that WHOIS answers (or the viewer closes), so a
+    // reopen while the reply is still out doesn't fire a second one.
     refreshingKey: null as string | null,
   }),
   getters: {
@@ -68,7 +69,14 @@ export const useWhoisStore = defineStore('whois', {
     applyResult(networkId: number | string, data: WhoisData) {
       const nick = (data && (data.nick as string)) || '';
       if (!networkId || !nick) return;
-      this.byKey[key(networkId, nick)] = { data };
+      const k = key(networkId, nick);
+      this.byKey[k] = { data };
+      // The lookup answered — with an identity, or with `error: 'not_found'`
+      // when the nick isn't on the network — so it is no longer in flight.
+      // Leaving refreshingKey set is what wedged a failed lookup: the slot
+      // stayed claimed for the rest of the viewer session, so reopening the
+      // same nick never retried it (#818).
+      if (this.refreshingKey === k) this.refreshingKey = null;
     },
     openViewer(networkId: number | string, nick: string) {
       if (!networkId || !nick) return;
@@ -76,9 +84,9 @@ export const useWhoisStore = defineStore('whois', {
       this.viewer = { open: true, networkId: Number(networkId), nick };
       // Always kick a fresh whois on open. The cached entry (if any) renders
       // immediately for instant feedback; the new data overwrites it when it
-      // arrives. Skip the refresh only if we already refreshed this exact
-      // (nick, network) during this viewer session — keeps reopens on the
-      // same nick from spamming the server.
+      // arrives. Skip only while a lookup for this exact (nick, network) is
+      // still out — keeps reopens on the same nick from spamming the server
+      // without leaving a failed lookup un-retryable.
       if (this.refreshingKey !== k) {
         this.refreshingKey = k;
         socketSend({ type: 'raw', networkId, line: `WHOIS ${nick}` });
