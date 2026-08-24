@@ -2748,10 +2748,19 @@ export class IrcConnection {
       // optimistic one the client opened.
       //
       // The signal has to stay narrower than "any recent interest in this
-      // nick" — a /whois miss must never conjure a DM buffer, and neither may
-      // a /ctcp, which reports into the buffer it was issued from. So this
-      // reads recentConversationalSend (say/action/notice/multiline) rather
-      // than recentUserSend, and not lastNickIntent, which a whois writes to.
+      // nick": neither a /whois nor a /ctcp may CONJURE a DM buffer — a whois
+      // isn't a message at all, and a ctcp already reports into the buffer it
+      // was issued from. So this reads recentConversationalSend (say / action /
+      // notice / multiline) rather than recentUserSend, and not lastNickIntent,
+      // which a whois writes to.
+      //
+      // ⚠ "Conjure" is the exact scope, and the hasMessageForTarget fallback
+      // below is deliberately untouched: a /ctcp miss against a nick you
+      // ALREADY have a DM with still lands in that DM rather than in the buffer
+      // the ctcp was issued from. That predates this branch, and it's what
+      // handleSendRejection does with a 531 for a CTCP too — so it is at least
+      // consistent. Routing a CTCP failure back to its issuing buffer is a
+      // separate change, and it would have to move both paths together.
       if (
         isDmMiss &&
         (this.recentConversationalSend(eventNick as string) ||

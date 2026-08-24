@@ -23,6 +23,7 @@ vi.mock('../composables/useSocket.js', () => ({
 }));
 
 import { useWhoisStore } from '../stores/whois.js';
+import { useNetworksStore } from '../stores/networks.js';
 import UserProfileModal from './UserProfileModal.vue';
 
 const NET = 1;
@@ -76,6 +77,25 @@ describe('UserProfileModal — no such user', () => {
 
     const w = open('fartboy');
     expect(w.text()).toContain('Waiting for whois reply');
+    expect(w.text()).not.toContain("isn't on this network");
+  });
+
+  it('stays quiet for a peer MONITOR already knows is offline', () => {
+    // The pre-existing rule, which the in-flight demotion must not trample: if
+    // MONITOR has told us they're offline, the header dot carries it and the
+    // body lets "Your note" stand on its own. A WHOIS is in flight here — it
+    // always is on open — and that alone must not put a spinner on screen.
+    const networks = useNetworksStore();
+    networks.states[NET] = {
+      state: 'connected',
+      peerPresence: {
+        fartboy: { nick: 'fartboy', state: 'offline', stateAt: null, awayMessage: null },
+      },
+    } as never;
+    useWhoisStore().openViewer(NET, 'fartboy');
+
+    const w = open('fartboy');
+    expect(w.text()).not.toContain('Waiting for whois reply');
     expect(w.text()).not.toContain("isn't on this network");
   });
 

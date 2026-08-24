@@ -335,11 +335,17 @@ const isLookingUp = computed(() => whoisStore.isRefreshing(props.networkId, prop
 // 'waiting' otherwise covers being genuinely in the dark. If MONITOR already
 // knows they're offline the presence dot carries that, so we skip the
 // redundant line and let "Your note" stand on its own.
+//
+// ⚠ That last test reads isPeerOffline, NOT isOffline. isOffline folds a
+// not-found whois in with MONITOR's verdict, which is right for hiding Send DM
+// (a DM bounces either way) and wrong here: it would send a miss we're
+// re-checking down the quiet path and blank the modal — the very bug #818 is
+// about. The two questions only look like one.
 const statusLine = computed<'not-found' | 'waiting' | null>(() => {
   if (isNotFound.value && !isLookingUp.value) return 'not-found';
   if (hasDetails.value) return null;
-  if (isLookingUp.value || !isOffline.value) return 'waiting';
-  return null;
+  if (isNotFound.value) return 'waiting';
+  return isPeerOffline(peer.value) ? null : 'waiting';
 });
 
 // Any detail row present → render the table. Covers every row (identity +
