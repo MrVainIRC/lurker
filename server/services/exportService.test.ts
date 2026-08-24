@@ -319,13 +319,13 @@ describe('export under concurrent IRC writes (lurker#175 regression)', () => {
     const chunks: Buffer[] = [];
     sink.on('data', (c: Buffer) => chunks.push(c));
 
-    // Progress fires once per page, plus once at the end — so counting the calls
-    // is how many pages were actually walked. Asserted below rather than left to
-    // a comment: the whole property under test is "it yields between pages", and
-    // a single-page export would satisfy every other assertion here silently.
-    let progressCalls = 0;
-    const onProgress = (): void => {
-      progressCalls += 1;
+    // The denominator must never trail the numerator. `total` is a COUNT(*) taken
+    // before the walk, and the writer below commits rows after it — so this is
+    // the one place the generator's `Math.max(total, processed)` can actually be
+    // observed doing its job. Counting PAGES here would prove nothing (see below).
+    let progressBackwards = 0;
+    const onProgress = (processed: number, total: number): void => {
+      if (total < processed) progressBackwards += 1;
     };
 
     // Hammer the SAME shared connection the export reads from. The export pages
@@ -378,13 +378,14 @@ describe('export under concurrent IRC writes (lurker#175 regression)', () => {
     expect(writeError).toBeNull();
     expect(liveWrites).toBeGreaterThan(0);
     expect(Buffer.concat(chunks).slice(0, 2).toString()).toBe('PK');
-    // Deliberately NOT asserting the page count here. Progress fires once per
-    // page, but the live writer keeps pushing rows past the cursor, so the count
-    // is dominated by the interleaving rather than by the seeded rows crossing
-    // page boundaries — it reads as ~108 either way, and would pass even if the
-    // page size were ignored entirely. The sibling test below is what holds the
-    // fixture to spanning pages; this one owns the concurrency property.
-    expect(progressCalls).toBeGreaterThan(0);
+    // A write that lands after the COUNT(*) must not produce "1200 of 1000".
+    expect(progressBackwards).toBe(0);
+    // ⚠ Deliberately NOT asserting the page COUNT here, though this test is the
+    // reason the fixture spans pages at all. The live writer keeps pushing rows
+    // past the keyset cursor, so that count is dominated by the interleaving
+    // rather than by seeded rows crossing page boundaries — it reads ~108 whether
+    // or not the page size is honoured, and passes with the seam broken. The
+    // sibling test below owns that property; this one owns concurrency.
   });
 
   it('pages the stream at the requested size, so the fixture stays cheap', () => {
@@ -423,6 +424,28 @@ describe('export under concurrent IRC writes (lurker#175 regression)', () => {
       // 300 rows at 25 a page is 12 pages, plus the final progress report.
       expect(pages).toBe(13);
     });
+  });
+
+  it('falls back to the default page rather than building invalid SQL', async () => {
+    // The page size is interpolated into the LIMIT, so a nonsense value has to
+    // degrade to the default instead of failing prepare(). Infinity is the one a
+    // plain positive-integer clamp lets through: it survives Math.max and
+    // interpolates literally, as does anything from 1e21 up in exponent form.
+    const u = createUser('bad-page-size');
+    createNetwork(u.id, {
+      name: 'libera',
+      host: 'irc.libera.chat',
+      port: 6697,
+      tls: true,
+      nick: 'b',
+    });
+    for (const bad of [Number.POSITIVE_INFINITY, Number.NaN, 0, -5, 1e21]) {
+      const sink = new PassThrough();
+      sink.resume();
+      await expect(
+        buildExportZip(db, u.id, { includeMessages: true, messagePageSize: bad }, sink),
+      ).resolves.toBeUndefined();
+    }
   });
 });
 

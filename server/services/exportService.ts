@@ -136,9 +136,15 @@ async function* messagesNdjsonGenerator(
   const def = EXPORT_TABLES.messages as ExportTableDefWithScope;
   const { where, params } = scopeFilter(def.scope, userId);
   const cols = def.columns.join(', ');
-  // Interpolated, like the default was, but from a caller-supplied value now —
-  // so coerce to a positive integer rather than trusting it into the SQL.
-  const limit = Math.max(1, Math.floor(pageSize)) || MESSAGE_PAGE;
+  // Interpolated, like the default was, but from a caller-supplied value now, so
+  // it has to be coerced rather than trusted into the SQL. Finite as well as
+  // positive: Infinity survives a Math.max clamp and interpolates as
+  // `LIMIT Infinity`, and anything from 1e21 up stringifies in exponent form —
+  // both are syntax errors that would fail the whole export at prepare() rather
+  // than degrade to a sane page.
+  const requested = Math.floor(pageSize);
+  const limit =
+    Number.isFinite(requested) && requested >= 1 ? Math.min(requested, 1_000_000) : MESSAGE_PAGE;
   const pageStmt = db.prepare(
     `SELECT ${cols} FROM messages ${where} AND id > ? ORDER BY id ASC LIMIT ${limit}`,
   );
