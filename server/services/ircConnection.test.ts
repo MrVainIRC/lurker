@@ -1099,6 +1099,106 @@ describe('refused-message handler routing (#283)', () => {
     expect(publish).toHaveBeenCalledWith(expect.objectContaining({ target: ':server:1' }));
   });
 
+  it('puts the first DM to a nick that does not exist in the query (#817)', () => {
+    // The reported bug. Under echo-message nothing is persisted for a send the
+    // server never echoes, so the has-DM-history gate is false by construction
+    // on a FIRST message — the one case where the user most needs to be told.
+    // The DB here is empty, which is exactly that state.
+    const conn = makeConn();
+    conn.client.say = vi.fn<(target: string, message: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.say('fartboy', 'you stink');
+    conn.client.emit('irc error', {
+      error: 'no_such_nick',
+      nick: 'fartboy',
+      reason: 'No such nick/channel',
+    });
+
+    // In the query, not the server buffer, and in the same words the channel
+    // routing and the profile modal use rather than the server's raw
+    // "No such nick/channel". The publish is what leaves a buffer behind as
+    // well: an 'error' row persists, so the query survives a reload.
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        target: 'fartboy',
+        text: "fartboy isn't on this network.",
+      }),
+    );
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: ':server:1' }));
+  });
+
+  it('still refuses to open a query from a /whois miss', () => {
+    // The guard rail on the widened gate. recentUserSend is set only by
+    // say/action/notice, so looking someone up must not conjure a DM buffer for
+    // a nick the user never messaged — it stays in the server buffer.
+    const conn = makeConn();
+    conn.client.raw = vi.fn<(line: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('WHOIS fartboy');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: 'fartboy' }));
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ target: ':server:1' }));
+  });
+
+  it("doesn't open a query from a /ctcp to a nick that isn't there", () => {
+    // A CTCP is a real user-initiated PRIVMSG, so it marks the send — but its
+    // outcome is reported into the buffer it was issued from, and answering the
+    // 401 with a brand-new query would both fabricate a conversation the user
+    // never started and split the exchange across two buffers.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.ctcpRequest = vi.fn<(target: string, type: string, payload?: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.sendCtcpRequest('#anime', 'fartboy', 'VERSION', '');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: 'fartboy' }));
+  });
+
+  it('still surfaces a refused CTCP, which is what marks the send in the first place', () => {
+    // The guard above must not go so far as to silence 531 for a CTCP:
+    // handleSendRejection reads recentUserSend to tell a real send from a
+    // typing bounce, and a CTCP is a real send.
+    const conn = makeConn();
+    conn.client.ctcpRequest = vi.fn<(target: string, type: string, payload?: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.sendCtcpRequest(':server:1', 'fartboy', 'VERSION', '');
+    expect(conn.recentUserSend('fartboy')).toBe(true);
+    expect(conn.recentConversationalSend('fartboy')).toBe(false);
+
+    conn.client.emit('irc error', {
+      error: 'cannot_send_to_user',
+      nick: 'fartboy',
+      reason: 'They are blocking messages',
+    });
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ target: 'fartboy' }));
+  });
+
+  it('forgets the send attribution across a reconnect, so a stale 401 stays put', () => {
+    // Same reasoning resetSendState already applies to the 531 path: a send on
+    // a dead socket must not place the first bounce on the new one.
+    const conn = makeConn();
+    conn.client.say = vi.fn<(target: string, message: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.say('fartboy', 'you stink');
+    conn.resetSendState();
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: 'fartboy' }));
+  });
+
   it('drops the duplicate tag line the server buffer used to get as well', () => {
     // 482 reached the server buffer twice: the raw line, plus a
     // "chanop_privs_needed #anime — …" line from the 'irc error' catch-all.
