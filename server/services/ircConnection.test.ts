@@ -22,6 +22,9 @@ import {
   joinRejectionMessage,
   joinRejectionMessageByTag,
   resolveChannelContext,
+  outgoingNickIntents,
+  commandResultError,
+  isCommandResultErrorTag,
   sendRejectionTargetKind,
   sendRejectionText,
   outgoingAddr,
@@ -641,6 +644,148 @@ describe('formatSocketCloseErrorMessage', () => {
   });
 });
 
+// A channel command that fails (kick / invite / mode / topic) used to report
+// only in the server buffer, far from the channel the user ran it in (#434).
+describe('command-result error classification (#434)', () => {
+  it('reads the channel out of ERR_CHANOPRIVSNEEDED (482)', () => {
+    expect(commandResultError('482', ['me', '#chan', "You're not channel operator"])).toEqual({
+      channel: '#chan',
+      text: "You're not a channel operator.",
+    });
+  });
+
+  it('takes ERR_USERNOTINCHANNEL (441) from the wire, not the framework', () => {
+    // The whole reason this reads raw params. irc-framework's generic map for
+    // 441 is off by one against its own 443: it reports OUR nick as `nick` and
+    // the target NICK as `channel`, so an event-driven version of this would
+    // publish into a buffer called "baduser".
+    expect(
+      commandResultError('441', ['me', 'baduser', '#chan', "They aren't on that channel"]),
+    ).toEqual({ channel: '#chan', text: "baduser isn't on this channel." });
+  });
+
+  it('names the subject for ERR_USERONCHANNEL (443), which sends a fragment', () => {
+    // The server's own trailing text is "is already on channel" — a sentence
+    // with its subject missing, which is why these messages are ours.
+    expect(commandResultError('443', ['me', 'bob', '#chan', 'is already on channel'])).toEqual({
+      channel: '#chan',
+      text: 'bob is already on this channel.',
+    });
+  });
+
+  it('covers the mode failures irc-framework never models at all', () => {
+    expect(commandResultError('467', ['me', '#chan', 'Channel key already set'])?.channel).toBe(
+      '#chan',
+    );
+    expect(commandResultError('478', ['me', '#chan', 'b', 'Channel list is full'])?.channel).toBe(
+      '#chan',
+    );
+  });
+
+  it('names the list that actually filled up on ERR_BANLISTFULL (478)', () => {
+    // Not always +b: the invite-exception and quiet limits send the same
+    // numeric, so a hardcoded "ban list" would report the wrong one.
+    expect(commandResultError('478', ['me', '#chan', 'I', 'Channel list is full'])?.text).toBe(
+      "The channel's +I list is full.",
+    );
+  });
+
+  it('stays vague on a 478 that omits the mode char', () => {
+    // Without the guard params[2] is the trailing reason, and the sentence
+    // becomes "The channel's +Channel list is full list is full."
+    expect(commandResultError('478', ['me', '#chan', 'Channel list is full'])?.text).toBe(
+      'That channel list is full.',
+    );
+  });
+
+  it('accepts every channel prefix, not just #', () => {
+    expect(commandResultError('482', ['me', '&local', 'nope'])?.channel).toBe('&local');
+  });
+
+  it('declines a numeric it does not own', () => {
+    expect(commandResultError('401', ['me', 'ghost', 'No such nick'])).toBeNull();
+    expect(commandResultError('482', [])).toBeNull();
+  });
+
+  it('declines when the channel param is not a channel', () => {
+    // A server shipping these params in another order must not be routed on.
+    expect(commandResultError('482', ['me', 'notachannel', 'nope'])).toBeNull();
+    expect(commandResultError('441', ['me', '#chan', 'baduser', 'nope'])).toBeNull();
+  });
+
+  it('declines when the subject param is missing', () => {
+    expect(commandResultError('443', ['me', '', '#chan'])).toBeNull();
+  });
+
+  it('claims exactly the tags whose server-buffer line is now a duplicate', () => {
+    expect(isCommandResultErrorTag('chanop_privs_needed')).toBe(true);
+    expect(isCommandResultErrorTag('user_not_in_channel')).toBe(true);
+    expect(isCommandResultErrorTag('user_on_channel')).toBe(true);
+    // Owned by other buckets — must keep their existing routing.
+    expect(isCommandResultErrorTag('cannot_send_to_channel')).toBe(false);
+    expect(isCommandResultErrorTag('banned_from_channel')).toBe(false);
+    expect(isCommandResultErrorTag('no_such_nick')).toBe(false);
+  });
+});
+
+// ERR_NOSUCHNICK names no channel, so the only thing that can place it is the
+// command we sent — which the server, unlike the client, gets to read on the
+// way out (#434).
+describe('outgoing nick intent extraction (#434)', () => {
+  it('reads KICK, whose channel comes first', () => {
+    expect(outgoingNickIntents('KICK #anime fartboy')).toEqual([
+      { nick: 'fartboy', channel: '#anime' },
+    ]);
+  });
+
+  it('reads INVITE, whose operands are the other way round', () => {
+    expect(outgoingNickIntents('INVITE fartboy #anime')).toEqual([
+      { nick: 'fartboy', channel: '#anime' },
+    ]);
+  });
+
+  it("doesn't mistake a word in a kick reason for a target", () => {
+    expect(outgoingNickIntents('KICK #anime fartboy :go away bob')).toEqual([
+      { nick: 'fartboy', channel: '#anime' },
+    ]);
+  });
+
+  it('expands the comma lists KICK is allowed to carry', () => {
+    expect(outgoingNickIntents('KICK #a,#b x,y')).toHaveLength(4);
+  });
+
+  it('takes MODE arguments without deciding which are nicks', () => {
+    // Whether an arg is a nick depends on the mode string read against
+    // CHANMODES; recording a mask or a limit anyway is inert, because it can
+    // only match a 401 naming that exact string and a 401 names a bare nick.
+    expect(outgoingNickIntents('MODE #anime +o ghost')).toEqual([
+      { nick: 'ghost', channel: '#anime' },
+    ]);
+    expect(outgoingNickIntents('MODE #anime +b *!*@host')).toEqual([
+      { nick: '*!*@host', channel: '#anime' },
+    ]);
+  });
+
+  it('records a channel-less intent for commands that name a nick alone', () => {
+    // Not "nothing to record": a positive statement that the user's last move
+    // on this nick was direct, which has to overwrite a pending kick.
+    expect(outgoingNickIntents('WHOIS fartboy')).toEqual([{ nick: 'fartboy', channel: null }]);
+    expect(outgoingNickIntents('PRIVMSG fartboy :hi')).toEqual([
+      { nick: 'fartboy', channel: null },
+    ]);
+  });
+
+  it('claims nothing from a channel-directed message or a bare MODE query', () => {
+    expect(outgoingNickIntents('PRIVMSG #anime :hi')).toEqual([]);
+    expect(outgoingNickIntents('MODE #anime')).toEqual([]);
+    expect(outgoingNickIntents('')).toEqual([]);
+  });
+
+  it('rejects operands the wrong way round rather than guessing', () => {
+    expect(outgoingNickIntents('INVITE #anime #other')).toEqual([]);
+  });
+});
+
 // End-to-end check that the real irc-framework event handlers route refused
 // outgoing messages to the right buffer (#283). publish/publishEphemeral are
 // stubbed so we can assert the routing decision without a DB or a live socket.
@@ -709,6 +854,266 @@ describe('refused-message handler routing (#283)', () => {
     expect(publish).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'error', target: 'sleepynick' }),
     );
+  });
+
+  // #434 — the third routing bucket. Driven through the 'raw' handler because
+  // that is where it lives: it is the only place with the numeric's params
+  // intact (see COMMAND_RESULT_ERRORS on why the parsed event won't do).
+  function emitRaw(conn: IrcConnection, line: string) {
+    conn.client.emit('raw', { from_server: true, line });
+  }
+
+  it('routes ERR_CHANOPRIVSNEEDED (482) inline to the channel the command ran in', () => {
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    emitRaw(conn, ":irc.example.test 482 nick #anime :You're not channel operator");
+
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        target: '#anime',
+        text: "You're not a channel operator.",
+      }),
+    );
+  });
+
+  it('still logs the server\u2019s own line to the server buffer', () => {
+    // Additive, like a join rejection: the friendly line goes to the channel,
+    // the authentic record stays in the server buffer (#342).
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    emitRaw(conn, ":irc.example.test 482 nick #anime :You're not channel operator");
+
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'motd',
+        target: ':server:1',
+        text: "#anime You're not channel operator",
+      }),
+    );
+  });
+
+  it('routes 441 to the channel, never to the nick the framework calls a channel', () => {
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    emitRaw(conn, ":irc.example.test 441 nick baduser #anime :They aren't on that channel");
+
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', target: '#anime' }),
+    );
+    expect(publish).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', target: 'baduser' }),
+    );
+  });
+
+  it('publishes the channel under the name we joined it by, not the wire\u2019s', () => {
+    // Membership and canonicalization used to be two different equivalence
+    // relations here: isChannelJoined folds through the server's CASEMAPPING,
+    // while publish()'s canonicalizer is a plain toLowerCase. They agree on
+    // ASCII case and disagree on rfc1459, where [ \\ ] ^ fold to { | } ~ — so a
+    // 482 naming #news{dev} while we were joined as #news[dev] passed the
+    // membership test and then published a target no buffer is keyed by.
+    // Resolving both through channelState is what fixes it; the fold rule
+    // itself is channelState's and is tested where it lives. This pins the
+    // wiring: that the handler publishes the name channelState hands back
+    // rather than the one off the wire.
+    const conn = makeConn();
+    conn.channelState = ((name: string) =>
+      name === '#news{dev}' ? { name: '#news[dev]' } : undefined) as never;
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    emitRaw(conn, ":irc.example.test 482 nick #news{dev} :You're not channel operator");
+
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', target: '#news[dev]' }),
+    );
+  });
+
+  it('places a 401 in the channel the command that caused it was aimed at', () => {
+    // The case a user actually hits: /kick someone who has left the network.
+    // 401 carries no channel, so this is attributed from the outgoing line.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.raw = vi.fn<(line: string) => void>(); // don't touch a real socket
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('KICK #anime fartboy');
+    conn.client.emit('irc error', {
+      error: 'no_such_nick',
+      nick: 'fartboy',
+      reason: 'No such nick/channel',
+    });
+
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        target: '#anime',
+        text: "fartboy isn't on this network.",
+      }),
+    );
+  });
+
+  it('doesn\u2019t let a spent kick claim the query\u2019s 401 afterwards', () => {
+    // The reported bug. Kick fartboy in #anime, then open a query with them and
+    // send a message: both bounce 401, and the second belongs in the DM. The
+    // attribution is consumed by the first, so it isn't lying in wait for the
+    // second.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.raw = vi.fn<(line: string) => void>();
+    conn.client.say = vi.fn<(target: string, message: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('KICK #anime fartboy');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
+
+    publish.mockClear();
+    conn.say('fartboy', 'hi');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
+  });
+
+  it('forgets an intent across a reconnect', () => {
+    // The intent describes a command that went out on a socket that is now
+    // gone; the reply to it died with it. Left in place, a kick nobody ever saw
+    // the outcome of could place an unrelated 401 on the new connection —
+    // resetSendState clears the sibling send-attribution maps for exactly this
+    // reason (#283) and this one is the same class of state.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.raw = vi.fn<(line: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('KICK #anime fartboy');
+    conn.resetSendState();
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
+  });
+
+  it('attributes one command to one bounce, not to every 401 in the window', () => {
+    // Pins the consume half specifically: the supersede rule only fires when
+    // the user does something else with the nick, and a repeated numeric (a
+    // bouncer replaying, a server sending it twice) isn't that.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.raw = vi.fn<(line: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('KICK #anime fartboy');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+    publish.mockClear();
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
+  });
+
+  it('lets a direct send supersede a kick that never bounced', () => {
+    // Same hazard without the first 401 to consume the entry: the kick may have
+    // succeeded, or failed some other way. Messaging the nick says the user has
+    // moved on, so the 401 that follows answers the message.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.raw = vi.fn<(line: string) => void>();
+    conn.client.say = vi.fn<(target: string, message: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('KICK #anime fartboy');
+    conn.say('fartboy', 'hi');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
+  });
+
+  it('lets a whois supersede it too', () => {
+    // Same rule, via raw() rather than say(): "did that kick work? who is
+    // fartboy?" must not put the whois miss back in the channel.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.raw = vi.fn<(line: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('KICK #anime fartboy');
+    conn.raw('WHOIS fartboy');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
+  });
+
+  it('leaves an unprompted 401 alone', () => {
+    // No command of ours named this nick, so there is nothing to attribute it
+    // to and it keeps its existing server-buffer routing.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'stranger' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
+  });
+
+  it("doesn't drag an unrelated /whois miss into the channel", () => {
+    // Attribution is keyed on the NICK, not on "a command went out recently",
+    // so a 401 for a different nick inside the same window stays put.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.raw = vi.fn<(line: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('KICK #anime fartboy');
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'someoneelse' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
+  });
+
+  it('leaves a command aimed at a channel we are not in in the server buffer', () => {
+    // No buffer to land in, and fabricating one would be worse than the status
+    // quo. The raw line still reports it.
+    const conn = makeConn();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    emitRaw(conn, ":irc.example.test 482 nick #elsewhere :You're not channel operator");
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#elsewhere' }));
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ target: ':server:1' }));
+  });
+
+  it('drops the duplicate tag line the server buffer used to get as well', () => {
+    // 482 reached the server buffer twice: the raw line, plus a
+    // "chanop_privs_needed #anime — …" line from the 'irc error' catch-all.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.client.emit('irc error', {
+      error: 'chanop_privs_needed',
+      channel: '#anime',
+      reason: "You're not channel operator",
+    });
+
+    expect(publish).not.toHaveBeenCalled();
   });
 
   it('surfaces 477 inline as a speak rejection when we are already in the channel', () => {

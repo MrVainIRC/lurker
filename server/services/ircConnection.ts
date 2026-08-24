@@ -556,6 +556,9 @@ export class IrcConnection {
   // message (surface it inline) from an automated TAGMSG/typing bounce (stay
   // silent) — the rejection numeric doesn't say which command it refused (#283).
   lastUserSendAt: Map<string, number>;
+  // nick → the user's last move on them, for placing a 401 (#434). A null
+  // channel means the move was a direct one (a query, a whois).
+  lastNickIntent = new Map<string, { channel: string | null; at: number }>();
   // Channels we auto-issued a WHO for on join (lowercase). The auto-WHO learns
   // away/ident state and would flood the server buffer if echoed per-member, so
   // the 'wholist' handler consumes these silently. Any wholist NOT in this set
@@ -999,6 +1002,30 @@ export class IrcConnection {
           rawCommand === '005')
       ) {
         this.registrationLines.push(burstLine);
+      }
+      // Command-result errors (a failed kick / invite / mode / topic) name the
+      // channel they concern, so surface them in that buffer instead of leaving
+      // the user to find them in the server buffer (#434). Read off the raw
+      // params rather than the parsed 'irc error' event, which mis-maps some of
+      // these — see COMMAND_RESULT_ERRORS. Additive: the raw line still goes to
+      // the server buffer below, the same way a join rejection does.
+      //
+      // channelState answers both questions at once — are we in it, and what do
+      // we call it — through ONE equivalence relation. Asking isChannelJoined
+      // and then letting publish() canonicalize would use two: membership folds
+      // through the server's CASEMAPPING, publish()'s canonicalizer is a plain
+      // toLowerCase. On an rfc1459 network (where [ \ ] ^ fold to { | } ~) a 482
+      // naming #news{dev} while we're joined as #news[dev] would pass the
+      // membership test and then publish a target no buffer is keyed by.
+      const cmdError = commandResultError(rawCommand, msg?.params ?? []);
+      const cmdErrorChannel = cmdError ? this.channelState(cmdError.channel) : undefined;
+      if (cmdError && cmdErrorChannel) {
+        this.publish({
+          type: 'error',
+          target: cmdErrorChannel.name,
+          text: cmdError.text,
+          raw: { command: rawCommand, params: msg?.params ?? [] },
+        });
       }
       if (isServerBufferDeniedNumeric(rawCommand)) return;
       // formatUnknownNumeric only renders 3-digit numerics (it strips the
@@ -2676,6 +2703,24 @@ export class IrcConnection {
         const banned = classifyServerBan(reason);
         if (banned) this.pendingServerBan = `banned by the server (${banned})`;
       }
+      // A 401 for a nick we just named in a channel command belongs in that
+      // channel, not the server buffer (#434). Checked before the DM fallback
+      // below because it is the more specific signal: an explicit command,
+      // aimed at a named channel, seconds ago — against "we have DM history
+      // with this nick at some point in the past".
+      if (tag === 'no_such_nick' && eventNick) {
+        const commandChannel = this.takeCommandChannel(eventNick);
+        const joined = commandChannel ? this.channelState(commandChannel) : undefined;
+        if (joined) {
+          this.publish({
+            type: 'error',
+            target: joined.name,
+            text: `${eventNick} isn't on this network.`,
+            raw: event,
+          });
+          return;
+        }
+      }
       const isDmMiss = tag === 'no_such_nick' && eventNick && isDmTargetName(eventNick);
       // For ERR_NOSUCHNICK against a nick the user has any DM history with,
       // route the error into that DM buffer so the failure surfaces where
@@ -2732,6 +2777,11 @@ export class IrcConnection {
         this.handleSendRejection(sendRejectTarget, reason, event);
         return;
       }
+      // Command-result errors are routed to their channel off the raw line (see
+      // the 'raw' handler). The generic line below would be a second copy in the
+      // server buffer of what the raw handler already logged verbatim there, so
+      // it goes — whether or not the routing found a buffer to use (#434).
+      if (isCommandResultErrorTag(tag)) return;
       // ERR_UNKNOWNCOMMAND (421) carries the rejected command name in
       // event.command (irc-framework parses it from the numeric's params).
       // Include it so the buffer line names the offending command —
@@ -3111,6 +3161,14 @@ export class IrcConnection {
         this.lastUserSendAt.set(newLower, lastSend);
       }
       if (this.autoWhoTargets.delete(oldLower)) this.autoWhoTargets.add(newLower);
+      // lastNickIntent is deliberately NOT re-keyed, though it looks like it
+      // belongs here. The maps above are keyed by the TARGET, which follows the
+      // buffer through a rename; that one is keyed by the nick as we addressed
+      // it on the wire, because that is the nick a 401 will name back at us.
+      // Moving it to the new nick would break the lookup rather than fix it,
+      // and the stale entry it leaves can only ever suppress a channel
+      // attribution, which is the safe direction. It expires on its own window
+      // and is cleared wholesale by resetSendState.
       const ctcpQueue = this.ctcpOutstanding.get(oldLower);
       if (ctcpQueue) {
         this.ctcpOutstanding.delete(oldLower);
@@ -4924,11 +4982,48 @@ export class IrcConnection {
       if (now - at > SEND_REJECTION_ATTRIBUTION_MS) this.lastUserSendAt.delete(key);
     }
     this.lastUserSendAt.set(target.toLowerCase(), now);
+    // A direct message is a channel-less intent (#434): messaging someone you
+    // just tried to kick means the next 401 answers the message, not the kick.
+    // say/action/notice all funnel through here, and none of them pass through
+    // raw() where noteOutgoingCommand would otherwise see them.
+    if (!isChannelTarget(target)) this.noteNickIntent(target, null);
   }
 
   recentUserSend(target: string): boolean {
     const at = this.lastUserSendAt.get(target.toLowerCase());
     return at != null && Date.now() - at <= SEND_REJECTION_ATTRIBUTION_MS;
+  }
+
+  // Record the user's last move on each nick an outgoing line names, so a 401
+  // naming one can be placed (#434). Same shape as noteUserSend, including the
+  // prune-before-insert: entries past the window can never match again, and a
+  // long-lived connection touching a lot of one-off nicks would otherwise grow
+  // the map without bound.
+  noteNickIntent(nick: string, channel: string | null): void {
+    const now = Date.now();
+    for (const [key, seen] of this.lastNickIntent) {
+      if (now - seen.at > SEND_REJECTION_ATTRIBUTION_MS) this.lastNickIntent.delete(key);
+    }
+    this.lastNickIntent.set(nick.toLowerCase(), { channel, at: now });
+  }
+
+  noteOutgoingCommand(line: string): void {
+    for (const intent of outgoingNickIntents(line)) {
+      this.noteNickIntent(intent.nick, intent.channel);
+    }
+  }
+
+  // The channel a 401 for `nick` belongs in, if the user's last move on them was
+  // a channel command. CONSUMES the intent: one command produces one bounce, and
+  // a spent entry left lying around is exactly what put a query's 401 into the
+  // channel the nick was last kicked from.
+  takeCommandChannel(nick: string): string | null {
+    const key = nick.toLowerCase();
+    const seen = this.lastNickIntent.get(key);
+    if (!seen) return null;
+    this.lastNickIntent.delete(key);
+    if (Date.now() - seen.at > SEND_REJECTION_ATTRIBUTION_MS) return null;
+    return seen.channel;
   }
 
   // The server refused an outgoing message to `target` (ERR_CANNOTSENDTOCHAN
@@ -4952,6 +5047,10 @@ export class IrcConnection {
   resetSendState(): void {
     this.unsendableTargets.clear();
     this.lastUserSendAt.clear();
+    // Same reasoning for the 401 attribution (#434): an intent recorded on the
+    // old socket describes a command that died with it, and letting it survive
+    // would let a kick nobody ever saw place an unrelated 401 on the new one.
+    this.lastNickIntent.clear();
   }
   raw(line: string): void {
     // Strip CR/LF/NUL before the line hits the socket. irc-framework's
@@ -4962,7 +5061,12 @@ export class IrcConnection {
     // alike — rather than scrubbing each interpolated string at its source.
     // Matching control chars is the whole point, so the lint rule is moot here.
     // eslint-disable-next-line no-control-regex
-    this.client.raw(line.replace(/[\u000d\u000a\u0000]/g, ''));
+    const clean = line.replace(/[\u000d\u000a\u0000]/g, '');
+    // Read it before it goes out, so a 401 bouncing back off it can be placed
+    // in the channel it was aimed at (#434). Cheap and total: this is the one
+    // path every slash command and member-menu action takes.
+    this.noteOutgoingCommand(clean);
+    this.client.raw(clean);
   }
   // Whether the network negotiated IRCv3 message-tags. Client-only tags
   // (+typing, +draft/react, …) and TAGMSG only mean anything to a server that
@@ -5579,6 +5683,159 @@ const SEND_REJECTION_TAGS: Record<string, 'channel' | 'nick'> = {
 
 export function sendRejectionTargetKind(tag: string): 'channel' | 'nick' | null {
   return SEND_REJECTION_TAGS[tag] || null;
+}
+
+// Command-result errors: a numeric that reports why a channel COMMAND failed —
+// a kick, an invite, a mode change, a topic set. A third bucket alongside the
+// two already here, and the one that had nowhere to go: join rejections (#260)
+// belong on a channel with no buffer yet, send rejections (#283) belong where
+// the refused message was typed, and these belong in the channel the command
+// was run in. Until now they fell through to the generic server-buffer line, so
+// the user sat in #channel, ran /kick, saw nothing happen, and the reason was
+// buried somewhere they weren't looking (#434).
+//
+// Indexes are into the RAW wire params, params[0] being our own nick. We read
+// the line ourselves rather than take irc-framework's parsed 'irc error' event
+// because its generic map is not reliable here, verified against 4.x:
+//   - ERR_USERNOTINCHANNEL (441) is off by one against its own 443 mapping. It
+//     reports OUR nick as `nick` and the target NICK as `channel`, so routing on
+//     event.channel would publish into a buffer named after a user.
+//   - ERR_USERONCHANNEL (443) carries no `reason` at all.
+//   - ERR_KEYSET (467) and ERR_BANLISTFULL (478) it doesn't model, so they never
+//     reach an 'irc error' event in the first place.
+// The 'raw' handler sees every line with its params intact, which makes one
+// table cover all of them.
+//
+// The message is ours rather than the server's trailing text, for the same
+// reason JOIN_REJECTION_MESSAGES exists: several of these numerics send a
+// sentence FRAGMENT meant to be prefixed by a param ("is already on channel"),
+// which reads as nonsense on its own. Each entry reads whatever else it needs
+// out of the params itself and returns null to decline, since what those params
+// mean differs per numeric. The server's own line is still logged verbatim to
+// the server buffer by the 'raw' handler, so nothing is lost by not quoting it.
+type WireParams = readonly (string | undefined)[];
+const nonEmpty = (v: string | undefined): v is string => typeof v === 'string' && v.length > 0;
+// A single letter, so a server that omits the list-mode param and leaves the
+// trailing reason in its place can't be interpolated into the sentence.
+const isModeChar = (v: string | undefined): v is string =>
+  typeof v === 'string' && /^[a-zA-Z]$/.test(v);
+
+const COMMAND_RESULT_ERRORS: Record<
+  string,
+  { channel: number; message: (params: WireParams) => string | null }
+> = {
+  // ERR_CHANOPRIVSNEEDED — <client> <channel> :You're not channel operator
+  '482': { channel: 1, message: () => "You're not a channel operator." },
+  // ERR_USERNOTINCHANNEL — <client> <nick> <channel> :They aren't on that channel
+  '441': {
+    channel: 2,
+    message: (p) => (nonEmpty(p[1]) ? `${p[1]} isn't on this channel.` : null),
+  },
+  // ERR_USERONCHANNEL — <client> <nick> <channel> :is already on channel
+  '443': {
+    channel: 2,
+    message: (p) => (nonEmpty(p[1]) ? `${p[1]} is already on this channel.` : null),
+  },
+  // ERR_KEYSET — <client> <channel> :Channel key already set
+  '467': { channel: 1, message: () => 'The channel key is already set.' },
+  // ERR_BANLISTFULL — <client> <channel> <char> :Channel list is full. The char
+  // is the list that filled up, and it is not always +b: hitting the
+  // invite-exception (+I) or quiet (+q) limit gets the same numeric, so naming
+  // bans unconditionally would tell the user about the wrong list.
+  '478': {
+    channel: 1,
+    message: (p) =>
+      isModeChar(p[2]) ? `The channel's +${p[2]} list is full.` : 'That channel list is full.',
+  },
+};
+
+// Resolve a raw numeric into the channel it concerns and the line to show
+// there, or null if it isn't one of these / the params don't hold up. Callers
+// still have to check we're actually JOINED to the channel before publishing:
+// a command aimed at a channel you're not in has no buffer to land in, and
+// fabricating one would be worse than the server buffer.
+export function commandResultError(
+  numeric: string,
+  params: WireParams,
+): { channel: string; text: string } | null {
+  const spec = COMMAND_RESULT_ERRORS[numeric];
+  if (!spec) return null;
+  const channel = params[spec.channel];
+  // Guards the 441-shaped case above from the other direction too: if a server
+  // ever ships these params in a different order, a non-channel value here
+  // fails the test and the line stays in the server buffer.
+  if (typeof channel !== 'string' || !isChannelTarget(channel)) return null;
+  const text = spec.message(params);
+  return text ? { channel, text } : null;
+}
+
+// ERR_NOSUCHNICK (401) is the failure you actually hit first — you kick or
+// invite a nick that has since left the network, or you fat-finger it — and it
+// is the one numeric in this family that names NO channel, so commandResultError
+// can't place it. The only thing that knows which buffer it belongs to is the
+// command we just sent, and we sent it: every slash command and member-menu
+// action goes out through IrcConnection.raw(), so unlike the client the server
+// can read the outgoing line and remember what it aimed at.
+//
+// What gets remembered is INTENT, not just "a channel command happened": the
+// last thing we did that names this nick, and whether it had a channel. That
+// distinction is the whole design, because a nick's 401 is ambiguous the moment
+// you do two different things with it. Kick fartboy in #chan, then open a query
+// and message them: both bounce 401, and only the first belongs in the channel.
+// Recording the query send as a channel-less intent — and consuming an intent
+// when it is used — is what keeps the second one out of #chan.
+//
+// A `null` channel therefore is not "nothing to record". It is a positive
+// statement that the user's last move on this nick was a direct one, and it has
+// to overwrite whatever a channel command left behind.
+const NICK_ONLY_COMMANDS = new Set(['WHOIS', 'WHOWAS', 'PRIVMSG', 'NOTICE']);
+
+export function outgoingNickIntents(line: string): Array<{ nick: string; channel: string | null }> {
+  const parts = line.trim().split(/ +/);
+  const verb = (parts[0] || '').toUpperCase();
+  const out: Array<{ nick: string; channel: string | null }> = [];
+  const add = (nick: string | undefined, channel: string | null) => {
+    if (!nick || isChannelTarget(nick)) return;
+    if (channel !== null && !isChannelTarget(channel)) return;
+    out.push({ nick, channel });
+  };
+  if (verb === 'KICK') {
+    // KICK <channel>[,<channel>] <user>[,<user>] [:reason] — the reason is
+    // never read, so a word in it that happens to be a nick is not a target.
+    for (const channel of (parts[1] || '').split(',')) {
+      for (const nick of (parts[2] || '').split(',')) add(nick, channel);
+    }
+  } else if (verb === 'INVITE') {
+    // INVITE <nick> <channel> — the operand order is the other way round.
+    add(parts[1], parts[2] ?? null);
+  } else if (verb === 'MODE') {
+    // MODE <channel> <modes> [args…]. Which args are nicks depends on the mode
+    // string read against CHANMODES/PREFIX, and we deliberately don't work that
+    // out: recording a ban mask or a limit as though it were a nick is inert,
+    // because it can only ever match a 401 that names that exact string, and a
+    // 401 names a bare nick.
+    for (const arg of parts.slice(3)) add(arg, parts[1] ?? null);
+  } else if (NICK_ONLY_COMMANDS.has(verb)) {
+    // Named the nick with no channel in sight — the superseding case above.
+    for (const nick of (parts[1] || '').split(',')) add(nick, null);
+  }
+  return out;
+}
+
+// True for numerics commandResultError owns, keyed by the tag irc-framework
+// reports on its 'irc error' event. The routing itself happens on the raw line;
+// this exists so the same error doesn't ALSO get written to the server buffer as
+// a tag line. That line was always a duplicate of the raw one the 'raw' handler
+// logs — routed or not — so suppressing it is not conditional on the routing
+// having found a buffer.
+const COMMAND_RESULT_ERROR_TAGS = new Set<string>([
+  'chanop_privs_needed', // 482
+  'user_not_in_channel', // 441
+  'user_on_channel', // 443
+]);
+
+export function isCommandResultErrorTag(tag: string): boolean {
+  return COMMAND_RESULT_ERROR_TAGS.has(tag);
 }
 
 // ERR_NEEDREGGEDNICK (477) is overloaded: a server sends it both to refuse a
