@@ -987,6 +987,25 @@ describe('refused-message handler routing (#283)', () => {
     expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
   });
 
+  it('forgets an intent across a reconnect', () => {
+    // The intent describes a command that went out on a socket that is now
+    // gone; the reply to it died with it. Left in place, a kick nobody ever saw
+    // the outcome of could place an unrelated 401 on the new connection —
+    // resetSendState clears the sibling send-attribution maps for exactly this
+    // reason (#283) and this one is the same class of state.
+    const conn = makeConn();
+    conn.upsertChannel('#anime');
+    conn.client.raw = vi.fn<(line: string) => void>();
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.raw('KICK #anime fartboy');
+    conn.resetSendState();
+    conn.client.emit('irc error', { error: 'no_such_nick', nick: 'fartboy' });
+
+    expect(publish).not.toHaveBeenCalledWith(expect.objectContaining({ target: '#anime' }));
+  });
+
   it('attributes one command to one bounce, not to every 401 in the window', () => {
     // Pins the consume half specifically: the supersede rule only fires when
     // the user does something else with the nick, and a repeated numeric (a

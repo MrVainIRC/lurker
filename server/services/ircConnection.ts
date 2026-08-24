@@ -3161,6 +3161,14 @@ export class IrcConnection {
         this.lastUserSendAt.set(newLower, lastSend);
       }
       if (this.autoWhoTargets.delete(oldLower)) this.autoWhoTargets.add(newLower);
+      // lastNickIntent is deliberately NOT re-keyed, though it looks like it
+      // belongs here. The maps above are keyed by the TARGET, which follows the
+      // buffer through a rename; that one is keyed by the nick as we addressed
+      // it on the wire, because that is the nick a 401 will name back at us.
+      // Moving it to the new nick would break the lookup rather than fix it,
+      // and the stale entry it leaves can only ever suppress a channel
+      // attribution, which is the safe direction. It expires on its own window
+      // and is cleared wholesale by resetSendState.
       const ctcpQueue = this.ctcpOutstanding.get(oldLower);
       if (ctcpQueue) {
         this.ctcpOutstanding.delete(oldLower);
@@ -5039,6 +5047,10 @@ export class IrcConnection {
   resetSendState(): void {
     this.unsendableTargets.clear();
     this.lastUserSendAt.clear();
+    // Same reasoning for the 401 attribution (#434): an intent recorded on the
+    // old socket describes a command that died with it, and letting it survive
+    // would let a kick nobody ever saw place an unrelated 401 on the new one.
+    this.lastNickIntent.clear();
   }
   raw(line: string): void {
     // Strip CR/LF/NUL before the line hits the socket. irc-framework's
