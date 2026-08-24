@@ -426,9 +426,10 @@ interface ChatMessage {
   // These exist only on the per-render display clone, never on the stored row.
   relayBot?: string;
   relaySource?: string | null;
-  // MODE rows (#673 / MODE_EVENT_NOISE.md): the message's change list, each
-  // entry carrying the class the server stamped on it. The browser never sees
-  // ISUPPORT, so `kind` is the only way to tell op churn from a ban.
+  // MODE rows: the message's change list, each entry carrying the class the
+  // server stamped on it (`prefix` / `list` / `chan`). The browser never sees
+  // ISUPPORT, so `kind` is the only way to tell op churn from a ban — see
+  // shared/modes.ts and docs/CLIENT_PROTOCOL.md §7.4.
   modes?: ModeChange[];
   [key: string]: unknown;
 }
@@ -1027,6 +1028,18 @@ const renderRows = computed((): RenderRow[] => {
   const fNick = smartFilterNick.value;
   const fMode = smartFilterMode.value;
 
+  // "Did this nick speak in the window ending at `at`?" — the one comparison
+  // both smart-filter branches make, differing only in whose name goes in: the
+  // presence branch asks about an event's actor, the mode branch about each
+  // nick it acted on. Hoisted out of the row loop below so an ordinary chat
+  // line doesn't allocate a pair of closures it will never call.
+  const lastSpokeOf = (nick: string): number | undefined =>
+    buf?.speakers[nick.toLowerCase()]?.lastTime;
+  const spokeRecently = (nick: string, at: number): boolean => {
+    const lastSpoke = lastSpokeOf(nick);
+    return lastSpoke != null && lastSpoke <= at && at - lastSpoke <= delayMs;
+  };
+
   const dividerAfterId = buf?.dividerAfterId || 0;
   // Skip divider insertion entirely when there's nothing to mark (no pointer
   // yet, or pointer at 0 = brand-new buffer where every message is "first
@@ -1145,17 +1158,12 @@ const renderRows = computed((): RenderRow[] => {
       });
     }
 
-    if (filterOn && m.nick && !m.self) {
-      const eventTime = Date.parse(m.time ?? '') || 0;
-      const lastSpokeOf = (nick: string): number | undefined =>
-        buf?.speakers[nick.toLowerCase()]?.lastTime;
-      // Did this nick speak in the window ENDING at the event? Shared by the two
-      // branches below, which differ only in whose name they put through it.
-      const spokeRecently = (nick: string): boolean => {
-        const lastSpoke = lastSpokeOf(nick);
-        return lastSpoke != null && lastSpoke <= eventTime && eventTime - lastSpoke <= delayMs;
-      };
+    // Parsed once and reused by the smart filter and the presence dividers
+    // below — this is a string parse on every surviving row, so it should
+    // happen exactly once.
+    const mTimeMs = Date.parse(m.time ?? '') || 0;
 
+    if (filterOn && m.nick && !m.self) {
       if (m.type === 'mode') {
         // A MODE row is judged on the nicks it acted ON, never on the nick that
         // sent it. The author of a mode line is nearly always ChanServ or an op
@@ -1167,7 +1175,12 @@ const renderRows = computed((): RenderRow[] => {
         //
         // The decision itself is shared (and unit-tested) rather than written
         // out here, because iOS has to reach the same verdict row for row.
-        if (fMode && smartHidesMode(m.modes, m.nick, ownNickLc, spokeRecently)) hidden = true;
+        if (
+          fMode &&
+          smartHidesMode(m.modes, m.nick, ownNickLc, (nick) => spokeRecently(nick, mTimeMs))
+        ) {
+          hidden = true;
+        }
       } else {
         const filterable =
           (m.type === 'join' && fJoin) ||
@@ -1184,11 +1197,11 @@ const renderRows = computed((): RenderRow[] => {
             m.type === 'join' &&
             unmaskMs > 0 &&
             lastSpoke != null &&
-            lastSpoke > eventTime &&
-            lastSpoke - eventTime <= unmaskMs;
+            lastSpoke > mTimeMs &&
+            lastSpoke - mTimeMs <= unmaskMs;
           // Joins only: a mode is never revived by what its target says next.
           // weechat scopes smart_filter_join_unmask the same way.
-          if (!spokeRecently(m.nick) && !unmasked) hidden = true;
+          if (!spokeRecently(m.nick, mTimeMs) && !unmasked) hidden = true;
         }
       }
     }
@@ -1209,7 +1222,6 @@ const renderRows = computed((): RenderRow[] => {
       lastDayKey = dayKey;
     }
 
-    const mTimeMs = Date.parse(m.time ?? '') || 0;
     if (!awayInserted && awaySinceMs != null && mTimeMs > awaySinceMs) {
       pushAwayDivider();
       awayInserted = true;

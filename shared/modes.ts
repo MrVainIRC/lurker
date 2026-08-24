@@ -128,6 +128,15 @@ export function modeTargets(modes: readonly ModeChange[] | null | undefined): st
  * already owns that comparison. The rest of the decision is identical
  * everywhere, so it lives here rather than being written twice.
  *
+ * ⚠ Known trade-off, inherited from weechat's default and not yet decided
+ * against: in a moderated (+m) channel, `+v alice` is the permission for alice
+ * to START speaking, so "has the target spoken recently" is guaranteed false and
+ * the grant is always hidden — in exactly the channels where voice grants carry
+ * the most meaning. The candidate remedy is to extend the join-unmask idea to
+ * mode grants (reveal the row when the target speaks shortly AFTER it), which
+ * this signature has room for. Left alone for now rather than diverging from the
+ * reference on a guess.
+ *
  * @param actorNick who sent the MODE. Used only to spot our own.
  * @param ownNickLc our nick on this network, lowercased; null when unknown.
  * @param spokeRecently whether a nick spoke inside the window ending at this event.
