@@ -1048,7 +1048,8 @@ export class IrcConnection {
     c.on('unknown command', (cmd: { command?: string; params?: string[] }) => {
       const command = (cmd?.command || '').toString();
       const params = Array.isArray(cmd?.params) ? (cmd.params as string[]) : [];
-      // These numerics arrive as [nick, #channel, reason].
+      // These numerics arrive as [nick, <target>, reason] — usually a channel,
+      // but see the nick case below.
       const channel = typeof params[1] === 'string' ? params[1] : '';
       const reason = params[params.length - 1] || null;
       // ERR_NEEDREGGEDNICK (477) to a channel we're already in is a speak
@@ -1059,14 +1060,29 @@ export class IrcConnection {
         this.handleSendRejection(channel, reason, { command, params });
         return;
       }
+      // ⚠ 477 has a THIRD meaning, found by QA against ergo 2.18 (#821): a DM
+      // refused because the recipient takes messages only from registered users
+      // (+R) answers 477 naming the NICK, where 531 might be expected. Nothing
+      // can be joined that isn't a channel, so a 477 whose target is a nick
+      // cannot be a join failure at all — it is a send rejection, and routing it
+      // as one is what puts it in the DM (or, for a /ctcp, back in the buffer the
+      // command came from) instead of raising "This channel requires a registered
+      // nickname" as a join toast against a person.
+      if (channel && !isChannelTarget(channel) && joinRejectionMessage(command)) {
+        this.handleSendRejection(channel, reason, { command, params });
+        return;
+      }
       // Channel-join rejections irc-framework doesn't model (476/477) arrive
       // here too. Route them to the channel as an ephemeral toast so the failure
       // surfaces where the user tried to join, not buried in the server buffer
       // (#260). The client never opened the buffer (it waits for channel-joined),
       // so this is toast-only — the raw line is still logged to the server buffer
       // by the 'raw' handler, which is the additive authentic record.
+      // Gated on the target really being a channel: a join rejection names one by
+      // definition, and the branch above has already claimed the nick-targeted
+      // 477. Without the gate this is what aimed a "couldn't join" toast at a DM.
       const joinMsg = joinRejectionMessage(command);
-      if (joinMsg && channel) {
+      if (joinMsg && channel && isChannelTarget(channel)) {
         this.publishEphemeral({
           type: 'join-error',
           target: channel,
