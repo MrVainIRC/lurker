@@ -3000,6 +3000,131 @@ describe('channel mode display (status bar)', () => {
     ];
   }
 
+  // Grab the latest published `mode` row — the one that carries the stamped
+  // change list the clients filter on.
+  function latestModeRow(
+    publish: ReturnType<typeof vi.fn>,
+  ): { modes?: Array<{ mode: string; param?: string; kind?: string }> } | undefined {
+    const calls = publish.mock.calls
+      .map(
+        (c) =>
+          c[0] as { type: string; modes?: Array<{ mode: string; param?: string; kind?: string }> },
+      )
+      .filter((e) => e.type === 'mode');
+    return calls.at(-1);
+  }
+
+  it('stamps each change with its class, so the clients can filter without ISUPPORT', () => {
+    const conn = makeConn();
+    solanumIsupport(conn);
+    conn.upsertChannel('#chan');
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.client.emit('mode', {
+      target: '#chan',
+      modes: [
+        { mode: '+o', param: 'alice' },
+        { mode: '+b', param: '*!*@host' },
+        { mode: '+m' },
+        { mode: '+k', param: 'hunter2' },
+      ],
+      raw_modes: '+obmk',
+      raw_params: ['alice', '*!*@host', 'hunter2'],
+    });
+
+    expect(latestModeRow(publish)?.modes).toEqual([
+      { mode: '+o', param: 'alice', kind: 'prefix' },
+      { mode: '+b', param: '*!*@host', kind: 'list' },
+      { mode: '+m', kind: 'chan' },
+      { mode: '+k', param: 'hunter2', kind: 'chan' },
+    ]);
+  });
+
+  it('stamps solanum +q as list even though its param is a real member (#486)', () => {
+    // The stamp and the member map have to reach the same verdict here, or a
+    // quiet is filtered as op churn while being applied as a ban. They share
+    // classifyModeChange precisely so they can't diverge — this pins both ends.
+    const conn = makeConn();
+    solanumIsupport(conn);
+    const ch = conn.upsertChannel('#chan');
+    ch.members.set('troll', {
+      nick: 'troll',
+      modes: [],
+      away: false,
+      user: null,
+      host: null,
+      account: null,
+    });
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.client.emit('mode', {
+      target: '#chan',
+      modes: [{ mode: '+q', param: 'troll' }],
+      raw_modes: '+q',
+      raw_params: ['troll'],
+    });
+
+    expect(latestModeRow(publish)?.modes).toEqual([{ mode: '+q', param: 'troll', kind: 'list' }]);
+    // …and the member map agrees: no phantom owner badge.
+    expect(ch.members.get('troll')?.modes).toEqual([]);
+  });
+
+  it('stamps a param-less member mode as chan, matching where the handler applies it', () => {
+    const conn = makeConn();
+    solanumIsupport(conn);
+    const ch = conn.upsertChannel('#chan');
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.client.emit('mode', {
+      target: '#chan',
+      modes: [{ mode: '+o' }],
+      raw_modes: '+o',
+      raw_params: [],
+    });
+
+    expect(latestModeRow(publish)?.modes).toEqual([{ mode: '+o', kind: 'chan' }]);
+    // Tracked as a channel flag, which is what the handler has always done with
+    // a malformed bare +o.
+    expect(ch.modes.has('o')).toBe(true);
+  });
+
+  it('stamps modes for a channel it is not tracking members for', () => {
+    // The class is a property of the letters and 005, not of whether the
+    // channel is in our map — so the stamp must not sit behind the `ch` guard.
+    const conn = makeConn();
+    solanumIsupport(conn);
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.client.emit('mode', {
+      target: '#untracked',
+      modes: [{ mode: '+o', param: 'alice' }],
+      raw_modes: '+o',
+      raw_params: ['alice'],
+    });
+
+    expect(latestModeRow(publish)?.modes).toEqual([{ mode: '+o', param: 'alice', kind: 'prefix' }]);
+  });
+
+  it('stamps against the PREFIX fallback before 005 lands', () => {
+    const conn = makeConn();
+    conn.upsertChannel('#chan');
+    const publish = vi.fn<(event: unknown) => void>();
+    conn.publish = publish;
+
+    conn.client.emit('mode', {
+      target: '#chan',
+      modes: [{ mode: '+o', param: 'alice' }],
+      raw_modes: '+o',
+      raw_params: ['alice'],
+    });
+
+    expect(latestModeRow(publish)?.modes?.[0]?.kind).toBe('prefix');
+  });
+
   it('routes solanum +q to the list-mode path, not the member-prefix path (#486)', () => {
     const conn = makeConn();
     solanumIsupport(conn);

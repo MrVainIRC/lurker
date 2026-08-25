@@ -924,7 +924,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
       'that collapse into the consolidation summary above stay account-less.',
   },
 
-  // ─── Smart filter tuning (join/part/quit/nick noise) ──────────────────
+  // ─── Smart filter tuning (join/part/quit/nick/mode noise) ─────────────
   // Last of the three Events groups, and the narrowest — it only does anything
   // on one rung of the filter.
   //
@@ -942,9 +942,11 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     default: 5,
     dependsOn: EVENTS_SMART,
     description:
-      'Window in minutes for "recently spoke". A join/part/quit/nick event is hidden ' +
-      'if the affected nick has not posted a message within this many minutes before ' +
-      'the event.',
+      'Window in minutes for "recently spoke". An event is hidden if the nick it ' +
+      'concerns has not posted a message within this many minutes before it. For ' +
+      'joins, parts, quits and nick changes that is the nick the event is about; ' +
+      'for op and voice changes it is the nick being opped or voiced, not whoever ' +
+      'set the mode.',
   },
   {
     key: 'chat.smart_filter_join',
@@ -975,6 +977,21 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     default: true,
     dependsOn: EVENTS_SMART,
     description: 'Apply smart filter to NICK change events.',
+  },
+  {
+    key: 'chat.smart_filter_mode',
+    label: 'Filter op and voice changes',
+    category: 'events',
+    group: 'smart-filter',
+    type: 'bool',
+    default: true,
+    dependsOn: EVENTS_SMART,
+    description:
+      'Apply smart filter to MODE events that only grant or revoke member status ' +
+      '(+o, +v, and the equivalents your network offers). The event is hidden when ' +
+      'none of the nicks it acts on has spoken recently. Bans, channel keys, user ' +
+      'limits and channel flags are never hidden, and a single MODE that mixes one ' +
+      'of those in with an op change is shown in full.',
   },
   {
     key: 'chat.smart_filter_join_unmask',

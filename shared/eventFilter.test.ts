@@ -99,6 +99,9 @@ describe('tier resolution', () => {
       'chat.smart_filter_join',
       'chat.smart_filter_quit',
       'chat.smart_filter_nick',
+      // The event kinds read in wire order — join, part/quit, nick, mode — with
+      // the join-specific unmask tuning left trailing behind them.
+      'chat.smart_filter_mode',
       'chat.smart_filter_join_unmask',
     ]);
     expect([...new Set(events.map((o) => o.group))]).toEqual([

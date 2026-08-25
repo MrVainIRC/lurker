@@ -40,6 +40,8 @@ import { APP_NAME, APP_VERSION } from '../utils/userAgent.js';
 import { findUserById } from '../db/users.js';
 import { isNodeMode } from '../utils/edition.js';
 import { deriveIdent } from '../../shared/ident.js';
+import { classifyModeChange, modeLetter } from '../../shared/modes.js';
+import type { ModeChange } from '../../shared/modes.js';
 import { registerIdent, unregisterIdent, isIdentdEnabled, isOidentdFileEnabled } from './identd.js';
 import { MESSAGE_MAX_BYTES, partitionMultiline, reassembleMultiline } from './messageSplit.js';
 import type { MultilineLimits } from './messageSplit.js';
@@ -287,10 +289,10 @@ interface ChannelState {
   modes: Set<string>;
 }
 
-interface ModeEntry {
-  mode: string;
-  param?: string;
-}
+// irc-framework hands us `{mode, param}`; we add `kind` before publishing (see
+// the `mode` handler), so the stored row carries the classification the clients
+// can't compute for themselves.
+type ModeEntry = ModeChange;
 
 interface AwayState {
   active: boolean;
@@ -2393,14 +2395,28 @@ export class IrcConnection {
       let chanModesChanged = false;
       const listModes = this.listModes();
       const prefixModes = this.prefixModes();
+      // Classify each change once, up front, and carry the class onto the row we
+      // publish. The clients never see ISUPPORT, so this stamp is the only way
+      // they can tell op/voice churn from a ban — which is what the event
+      // filters need in order to hide the first without hiding the second.
+      //
+      // Stamped unconditionally, before the `ch` guard: the class is a property
+      // of the letters and the server's 005, not of whether we happen to be
+      // tracking this channel's members. And it is the SAME call the member
+      // branch below now switches on, so a change can never be filtered as one
+      // thing and applied as another.
+      const stampedModes: ModeEntry[] = eventModes
+        .filter((m) => m && m.mode)
+        .map((m) => ({ ...m, kind: classifyModeChange(m, prefixModes, listModes) }));
       if (ch) {
-        for (const m of eventModes) {
-          if (!m || !m.mode) continue;
+        for (const m of stampedModes) {
           const sign = m.mode[0];
-          const letter = m.mode.slice(1);
+          const letter = modeLetter(m.mode);
           // Per-user prefix mode: lands on the member, not on the channel.
-          if (m.param && prefixModes.has(letter)) {
-            const member = ch.members.get(m.param.toLowerCase());
+          if (m.kind === 'prefix') {
+            // classifyModeChange only returns 'prefix' for a change that has a
+            // param, so this is a narrowing rather than a second condition.
+            const member = ch.members.get(m.param!.toLowerCase());
             if (!member) continue;
             const set = new Set(member.modes);
             if (sign === '+') set.add(letter);
@@ -2411,8 +2427,10 @@ export class IrcConnection {
           }
           // Channel-level flag mode (or parameter mode like +k/+l). We track
           // them to surface them in the status bar, but exclude list-type modes
-          // (bans/exceptions/quiets) so their masks don't pollute the display.
-          if (!listModes.has(letter)) {
+          // (bans/exceptions/quiets) so their masks don't pollute the display —
+          // which is exactly what `kind` already says, so read it rather than
+          // re-testing listModes and giving the two a chance to drift.
+          if (m.kind === 'chan') {
             if (sign === '+' && !ch.modes.has(letter)) {
               ch.modes.add(letter);
               chanModesChanged = true;
@@ -2437,7 +2455,7 @@ export class IrcConnection {
         target,
         nick: eventNick,
         text,
-        modes: eventModes,
+        modes: stampedModes,
         time: event.time,
       });
       if (memberModesChanged && ch) {

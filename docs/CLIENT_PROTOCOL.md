@@ -379,7 +379,9 @@ names/hosts — fetch `GET /api/networks` for the roster (the iOS app does this
 before opening the socket; it doubles as a token validity check).
 
 Member `modes` are **prefix-mode letters, highest first** (`q a o h v`), _not_
-sigils (`~ & @ % +`). Map to sigils yourself for display.
+sigils (`~ & @ % +`). Map to sigils yourself for display. That letter list is a
+display ordering, not a classification set — don't reuse it to decide what a
+mode letter _means_ on a given network (§7.4).
 
 ### 5.2 Buffers
 
@@ -675,7 +677,7 @@ Also the `type` of rows inside `backlog`/`history` `events[]`. **P** = persisted
 | `kick`                        | P   | `kicked`, `text`                                                              |
 | `nick`                        | P   | `newNick`                                                                     |
 | `own-nick`                    | E   | your nick changed — `nick` is the new one                                     |
-| `mode`                        | P   | `text`, `modes[]`                                                             |
+| `mode`                        | P   | `text`, `modes[]` — see §7.4 for the entry shape and `kind`                   |
 | `usermode`                    | E   | your user modes, whole string                                                 |
 | `topic`                       | P   | a topic _change_ (renders as a line)                                          |
 | `channel-topic`               | E   | RPL_TOPIC on join — set state, render nothing                                 |
@@ -708,6 +710,45 @@ Route them to that network's `:server:` buffer. `motd` is deliberately the
 catch-all for all "server voice" text that has no better home — don't build a
 taxonomy on top of it. `system` events (with `networkId:null`) belong to
 `:system:`.
+
+### 7.4 `mode` events: the `modes[]` entry shape
+
+A single MODE message carries a list of changes. `text` is the raw form
+(`"+o-b alice *!*@host"`) for display; `modes[]` is the parsed list, and each
+entry is:
+
+```
+{ mode: "+o",            // the signed token
+  param?: "alice",       // the argument, when the mode takes one
+  kind?: "prefix" | "list" | "chan" }
+```
+
+`kind` is the server's classification of the letter, and it is **the only
+correct way to tell one kind of change from another**:
+
+| `kind`   | meaning                                        | examples                 |
+| -------- | ---------------------------------------------- | ------------------------ |
+| `prefix` | a member's status changed; `param` is a nick   | `+o alice`, `-v bob`     |
+| `list`   | a mask was added to / removed from a list mode | `+b *!*@host`, `-e mask` |
+| `chan`   | a channel flag or parameter mode               | `+m`, `+k key`, `+l 50`  |
+
+⚠ **Do not classify mode letters yourself.** It requires the network's ISUPPORT
+`PREFIX` and `CHANMODES`, which is not in any client-facing frame, and the
+obvious shortcut is wrong: a hardcoded `q a o h v` prefix set disagrees with
+solanum, where `+q` is a _quiet_ (a list mode) whose mask is often a bare nick —
+so `+q troll` looks exactly like an owner grant and is nothing of the sort. That
+is a real bug we shipped once (lurker#486). The member-`modes` letters in §5.1
+are a **display** ordering for sigils and are not a classification set; don't
+reuse them here.
+
+An entry with **no `kind`** was stored before the server stamped it. Treat
+missing as "not `prefix`": show the row, and don't fold or filter it. There is
+no backfill.
+
+Clients use this to decide what counts as presence churn. Lurker's own rule, in
+`shared/modes.ts`: a mode row is churn only if **every** entry in it is `prefix`
+with a `param` — one ban or channel flag anywhere in the message and the whole
+row is shown, since a row renders as a single line and can't be half-hidden.
 
 ---
 
