@@ -79,10 +79,13 @@ export function asEventMode(value: unknown): EventMode {
  * foldsIntoRun); it just does so without being a member of the set that sizes
  * pages. Don't "fix" the divergence by merging them.
  *
- * Deliberately NOT included, because they are content rather than churn:
- * `kick` (someone was removed, and by whom), `topic`, `invite`, `error`,
- * `motd` and the various status lines. Hiding those would make the buffer lie
- * about what happened rather than merely quieter.
+ * ⚠ `kick`, `topic`, `invite`, `error`, `motd` and the various status lines are
+ * absent here, and that is an UNDOCUMENTED DEFAULT rather than a decision
+ * anyone made — they were simply never brought into the filters, and nobody has
+ * revisited it. Earlier revisions of this comment asserted a principle ("things
+ * that happened, not churn") as though it were settled; it wasn't. Don't cite it
+ * as a reason for anything. If someone asks for these to be hidden, that is a
+ * live question rather than a closed one.
  */
 export const NOISE_TYPES: ReadonlySet<string> = new Set([...CONSOLIDATABLE_TYPES, 'mode']);
 
