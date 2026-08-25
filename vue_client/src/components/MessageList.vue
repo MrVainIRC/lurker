@@ -89,7 +89,8 @@
             ><template v-else-if="g.kind === 'left'"> left</template
             ><template v-else-if="g.kind === 'reconnected'"> reconnected</template
             ><template v-else-if="g.kind === 'joinedAndLeft'"> joined briefly</template
-            ><template v-else-if="g.kind === 'rehosted'"> changed host</template></template
+            ><template v-else-if="g.kind === 'rehosted'"> changed host</template
+            ><template v-else-if="g.letter">{{ modePhrase(g) }}</template></template
           >
         </span>
       </div>
@@ -1509,6 +1510,32 @@ function asRename(item: NickEntry | RenameEntry): RenameEntry {
 }
 function asNick(item: NickEntry | RenameEntry): NickEntry {
   return item as NickEntry;
+}
+
+// The verb for a folded run of member-status changes, e.g. " were opped".
+//
+// Only the LETTER travels on the group — the words are each client's own
+// business, the same way "joined" and "changed host" are — so this table lives
+// here rather than in shared/consolidate.ts.
+//
+// `o` and `v` are effectively all real traffic and get proper verbs. Anything
+// else falls back to the token: inventing English for `+a` on an ircd nobody
+// in the room runs would be guessing, and `was given +a` is honest and
+// readable. Revocation says "lost", which needs no copula, so it reads the
+// same for one name or ten.
+const MODE_VERBS: Record<string, [string, string]> = {
+  o: ['opped', 'deopped'],
+  v: ['voiced', 'devoiced'],
+};
+
+function modePhrase(g: ConsolidationGroup): string {
+  const granted = g.kind === 'modeGranted';
+  const letter = g.letter ?? '';
+  const plural = g.visible.length + g.hidden !== 1;
+  const verb = MODE_VERBS[letter];
+  if (verb) return `${plural ? ' were ' : ' was '}${granted ? verb[0] : verb[1]}`;
+  if (granted) return `${plural ? ' were ' : ' was '}given +${letter}`;
+  return ` lost +${letter}`;
 }
 
 function requestMoreHistory() {

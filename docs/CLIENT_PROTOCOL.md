@@ -772,18 +772,30 @@ whose token you've superseded.
 
 ### `countBy` — what `limit` counts
 
-`limit` counts **stored rows**. If you consolidate presence noise — both
-first-party clients fold runs of `join`/`part`/`quit`/`nick`/`chghost` into one
-summary line, per `shared/consolidate.ts`, which is the canonical set — that is
-not the unit you render in, and on a busy channel the
-gap is enormous: a 100-row page out of a netsplit can render as three visible
-lines. You fetch, fold it to nothing, notice the page was short, fetch again —
-and the user watches the buffer assemble itself.
+`limit` counts **stored rows**. If you consolidate presence noise — the web
+client folds runs of `join`/`part`/`quit`/`nick`/`chghost`, **plus `mode` rows
+that only grant or revoke member status**, into one summary line, per
+`shared/consolidate.ts` — that is not the unit you render in, and on a busy
+channel the gap is enormous: a 100-row page out of a netsplit can render as
+three visible lines. You fetch, fold it to nothing, notice the page was short,
+fetch again — and the user watches the buffer assemble itself.
+
+⚠ **`CONSOLIDATABLE_TYPES` is not the fold set.** It is the five presence types,
+and it is deliberately narrower than what folds: `mode` stays out of it because
+that set also defines the `renderable` unit for every client, including shipped
+ones. `foldsIntoRun` answers what folds; `countsTowardPage` answers what counts.
+The two agree on churn modes and are free to diverge elsewhere.
 
 Send **`countBy:'renderable'`** (every `history` mode, and `open-buffer`) and the
-server sizes the page in rows that render as their own line. The consolidatable
-rows still come back — consolidation needs the whole run to summarize it — they
-just don't spend the budget. Default is `'event'`, i.e. today's behavior; an
+server sizes the page in rows that render as their own line — the five presence
+types, and a `mode` row whose every change is a member-status grant or
+revocation (§7.4). The folded rows still come back — consolidation needs the
+whole run to summarize it — they just don't spend the budget.
+
+If you fold presence but **not** mode, `renderable` is still safe: you receive
+mode rows that cost nothing, so your page renders longer than you asked rather
+than shorter. The rule to keep on the right side of is that the unit must never
+be **finer** than what you draw. Default is `'event'`, i.e. today's behavior; an
 older server ignores the field and answers exactly as before.
 
 Send **`countBy:'chat'`** instead if you hide event noise **entirely** — the
