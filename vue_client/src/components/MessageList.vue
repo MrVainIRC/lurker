@@ -257,14 +257,19 @@
               />{{ eventHostSuffix(row.m) }}</template
             >
             <template v-else-if="row.m?.type === 'mode'"
-              >mode by
-              <NickRef
+              ><NickRef
                 :nick="row.m.nick ?? ''"
                 interactive
-                @click.stop.prevent="onNickMenu($event, row.m?.nick, row.m)" /><template
-                v-if="row.m.text"
-                >: <LinkedText :text="row.m.text" /></template
-            ></template>
+                @click.stop.prevent="onNickMenu($event, row.m?.nick, row.m)"
+              /><template v-for="(seg, si) in describeMode(row.m.modes, row.m.text)" :key="si"
+                ><template v-if="seg.t === 'nick'"
+                  ><NickRef
+                    :nick="seg.nick"
+                    interactive
+                    @click.stop.prevent="onNickMenu($event, seg.nick, row.m)" /></template
+                ><template v-else>{{ seg.text }}</template></template
+              ></template
+            >
             <template v-else-if="row.m?.type === 'topic'"
               >topic set by
               <NickRef
@@ -365,6 +370,7 @@ import { collapseDisplay } from '../utils/collapseDisplay.js';
 import { parseRelayChain } from '../../../shared/parseRelay.js';
 import { asEventMode, eventModeKey, isNoiseType } from '../../../shared/eventFilter.js';
 import { smartHidesMode } from '../../../shared/modes.js';
+import { describeMode } from '../../../shared/modeNarration.js';
 import type { ModeChange } from '../../../shared/modes.js';
 import NickRef from './NickRef.vue';
 import LinkedText from './LinkedText.vue';
