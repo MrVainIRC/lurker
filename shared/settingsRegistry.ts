@@ -857,10 +857,10 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
       'the settings below are shared.',
   },
 
-  // ─── Join/part consolidation (IRCCloud-style summary line) ────────────
+  // ─── Event consolidation (IRCCloud-style summary line) ────────────────
   {
     key: 'chat.consolidate_joins',
-    label: 'Consolidate join/part/quit/nick/host-change events',
+    label: 'Consolidate join/part/quit/nick/host-change and op/voice events',
     category: 'events',
     group: 'consolidate',
     type: 'bool',
@@ -869,6 +869,10 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     description:
       'Merge consecutive join/part/quit/nick/host-change events into a single summary line ' +
       'per nick (e.g. "Alice and Bob joined; Dave left; Eve → Eve_afk"). ' +
+      'Mode changes that only grant or revoke member status join the same line ' +
+      '("…; Alice and Bob were opped"), reporting who ended up with what rather ' +
+      'than who set it — bans, channel keys, limits and channel flags always keep ' +
+      'their own line. ' +
       'Off shows every event individually. Composes with the "smart" tier — events ' +
       'it hides are excluded from the summary.',
   },
@@ -885,7 +889,8 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     // transitively through chat.consolidate_joins.
     dependsOn: [{ key: 'chat.consolidate_joins', in: [true] }],
     description:
-      'In each category (joined / left / reconnected / renamed / changed host) of a summary ' +
+      'In each category (joined / left / reconnected / renamed / changed host / ' +
+      'opped / voiced) of a summary ' +
       'line, show at most this many nicks before collapsing the rest into ' +
       '"and N others". Recent speakers (those tracked for nick completion) ' +
       'are preferred when picking which names to show.',

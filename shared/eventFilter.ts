@@ -17,6 +17,7 @@
 // need is the page UNIT (see PageUnit below), which the client asks for.
 
 import { CONSOLIDATABLE_TYPES } from './consolidate.js';
+import { isChurnMode, type ModeChange } from './modes.js';
 
 // ─── The tier ──────────────────────────────────────────────────────────────
 
@@ -66,10 +67,17 @@ export function asEventMode(value: unknown): EventMode {
  * by "event noise", so consolidation, smart filtering, and page sizing can't
  * drift apart on the definition.
  *
- * It is CONSOLIDATABLE_TYPES plus `mode`. Mode changes are excluded from
- * consolidation (they render as their own line and don't fold into a per-nick
- * net effect), but a reader who asked for no event noise means op/voice/ban
- * churn too — that's the point of the tier's strictest rung.
+ * It is CONSOLIDATABLE_TYPES plus `mode`. The two sets differ because they
+ * answer different questions: CONSOLIDATABLE_TYPES is the per-identity fold set
+ * AND the definition of the `renderable` page unit, while this is "what does
+ * `none` hide". A reader who asked for no event noise means op/voice/ban churn
+ * too — including the bans and channel flags that never fold — which is the
+ * point of the tier's strictest rung.
+ *
+ * ⚠ `mode` being absent from CONSOLIDATABLE_TYPES does NOT mean mode rows never
+ * fold. Member-status churn folds into the summary (shared/consolidate.ts,
+ * foldsIntoRun); it just does so without being a member of the set that sizes
+ * pages. Don't "fix" the divergence by merging them.
  *
  * Deliberately NOT included, because they are content rather than churn:
  * `kick` (someone was removed, and by whom), `topic`, `invite`, `error`,
@@ -112,13 +120,39 @@ export function asPageUnit(value: unknown): PageUnit {
   return value === 'renderable' || value === 'chat' ? value : 'event';
 }
 
+/** The parts of a stored row that decide whether it spends page budget. */
+export interface PageCountable {
+  type: string;
+  /** A `mode` row's parsed change list, when it has one. */
+  modes?: readonly ModeChange[] | null;
+}
+
 /**
  * Whether a row spends page budget under the given unit. `event` counts
- * everything; the other two subtract their respective noise set.
+ * everything; the other two subtract what their client doesn't draw.
+ *
+ * ⚠ The invariant, and the direction that matters: the unit must be no FINER
+ * than what the client renders. Counting rows that collapse to nothing is what
+ * produces a page of `limit` units that draws as two lines — the reader watches
+ * the buffer assemble itself while the client re-fetches (#10, and
+ * docs/CLIENT_PROTOCOL.md's `countBy` section). Counting FEWER rows than are
+ * drawn is harmless by comparison: the page simply renders longer than asked.
+ *
+ * So `renderable` subtracts member-status mode churn as well as
+ * CONSOLIDATABLE_TYPES, because a folding client draws one summary line for the
+ * whole run. This needs the row rather than its type alone — whether a mode row
+ * is churn lives in its `modes`, and the type string can't answer it.
+ *
+ * A client that folds presence but NOT mode (any iOS build before the fold
+ * lands) is on the safe side of this: it gets pages carrying uncounted mode
+ * rows, which render as extra lines rather than missing ones.
  */
-export function countsTowardPage(type: string, unit: PageUnit): boolean {
-  if (unit === 'renderable') return !CONSOLIDATABLE_TYPES.has(type);
-  if (unit === 'chat') return !NOISE_TYPES.has(type);
+export function countsTowardPage(row: PageCountable, unit: PageUnit): boolean {
+  if (unit === 'renderable') {
+    if (CONSOLIDATABLE_TYPES.has(row.type)) return false;
+    return !(row.type === 'mode' && isChurnMode(row.modes));
+  }
+  if (unit === 'chat') return !NOISE_TYPES.has(row.type);
   return true;
 }
 

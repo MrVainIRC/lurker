@@ -9,6 +9,7 @@ import {
 } from './bufferResolve.js';
 import { countsTowardPage } from '../../shared/eventFilter.js';
 import type { PageUnit } from '../../shared/eventFilter.js';
+import type { ModeChange } from '../../shared/modes.js';
 
 // Buffer identity is buffers.id as of schema 17: every predicate in this file
 // filters on `buffer_id`, and `target` is written at insert as an observation
@@ -320,6 +321,24 @@ function listMessagesById(
 // motivated the feature.
 export const RENDERABLE_MAX_SCAN = 2000;
 
+/**
+ * A scanned mode row's change list, for the `renderable` count.
+ *
+ * Only mode rows carry an `extra` here (the scan's CASE sees to that), so this
+ * is null for everything else. Malformed JSON reads as "no changes", which makes
+ * the row count — the fail-visible direction, and the same way rowToEvent
+ * tolerates it.
+ */
+function parseScannedModes(extra: string | null): ModeChange[] | null {
+  if (!extra) return null;
+  try {
+    const parsed = JSON.parse(extra) as { modes?: ModeChange[] };
+    return Array.isArray(parsed?.modes) ? parsed.modes : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 /** Cursor + sizing options shared by every paging entry point here. */
 interface PageOptions {
   before?: number;
@@ -372,16 +391,25 @@ function listMessagesCountedById(
 
   // Step 1: walk out from the cursor and stop at whichever comes first — the
   // `limit`-th COUNTING row, or `maxScan` rows.
+  // `extra` comes back only for mode rows: it is the one type whose countability
+  // depends on its contents (member-status churn folds, a ban doesn't), and
+  // pulling the column for every scanned row would cost bytes on a scan bounded
+  // at RENDERABLE_MAX_SCAN for no gain.
+  const cols = `id, type, CASE WHEN type = 'mode' THEN extra END AS extra`;
   const scanSql = forward
-    ? `SELECT id, type FROM messages WHERE buffer_id = ? AND id > ? ORDER BY id ASC LIMIT ?`
+    ? `SELECT ${cols} FROM messages WHERE buffer_id = ? AND id > ? ORDER BY id ASC LIMIT ?`
     : before
-      ? `SELECT id, type FROM messages WHERE buffer_id = ? AND id < ? ORDER BY id DESC LIMIT ?`
-      : `SELECT id, type FROM messages WHERE buffer_id = ? ORDER BY id DESC LIMIT ?`;
+      ? `SELECT ${cols} FROM messages WHERE buffer_id = ? AND id < ? ORDER BY id DESC LIMIT ?`
+      : `SELECT ${cols} FROM messages WHERE buffer_id = ? ORDER BY id DESC LIMIT ?`;
   const cursor = forward ? afterId : before;
   const scanParams: Array<number | string> = cursor
     ? [bufferId, cursor, maxScan]
     : [bufferId, maxScan];
-  const scanned = db.prepare(scanSql).all(...scanParams) as Array<{ id: number; type: string }>;
+  const scanned = db.prepare(scanSql).all(...scanParams) as Array<{
+    id: number;
+    type: string;
+    extra: string | null;
+  }>;
   if (scanned.length === 0) return [];
 
   // The last row to include. Landing ON the `limit`-th counting row (rather
@@ -390,7 +418,7 @@ function listMessagesCountedById(
   let boundary = scanned[scanned.length - 1].id;
   let counted = 0;
   for (const row of scanned) {
-    if (!countsTowardPage(row.type, unit)) continue;
+    if (!countsTowardPage({ type: row.type, modes: parseScannedModes(row.extra) }, unit)) continue;
     counted += 1;
     if (counted === limit) {
       boundary = row.id;
