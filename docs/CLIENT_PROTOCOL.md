@@ -810,10 +810,11 @@ ask for the unit your tier would otherwise use and accept the occasional short
 page.
 
 - **What counts is the complement of the set you hide**, not "messages". Under
-  `'renderable'` a `kick`, `mode`, `topic`, `error`, or `invite` each renders
-  standalone, so each is worth one slot; under `'chat'` the same holds minus
-  `mode`. Kicks, topics and invites are never free under either — they are
-  things that happened, not churn.
+  `'renderable'` a `kick`, `topic`, `error`, or `invite` each renders standalone,
+  so each is worth one slot — as does a `mode` row that isn't pure member-status
+  churn. Under `'chat'` no `mode` row counts at all. Kicks, topics and invites
+  are never free under either; that they aren't in the noise set is an
+  undocumented default rather than a decision, so don't reason from it.
 - **The slice is still a contiguous id range**, exactly like an event-counted
   one. `hasMoreOlder`, prepend-and-dedupe, and the `before: <oldest returned
 id>` cursor are unchanged. This cannot open a hole.
