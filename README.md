@@ -37,6 +37,8 @@ Lurker is a beautiful self-hosted IRC client with a retro aesthetic and modern c
 - `<jadeia> lurker is really nice. this is streets ahead of irccloud in terms of design and ease of use.`
 - `<helsinski> Lurker iOS is certainly shaping up to be real good.`
 - `<quark> These days I am only using Lurker. Desktop and mobile.`
+- `<CrashOverripe> Lurker solves most of my IRC problems - very happy you decided to take it on as more than just a solution for yourself.`
+- `<Samien> Ever since I started using [Lurker], things have become so much more convenient. I can use IRC anytime, anywhere—whether at the office, at home, or on the metro—without any restrictions. and it's far way better than irc cloud`
 
 # Installation
 
