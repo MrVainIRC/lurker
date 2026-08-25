@@ -748,6 +748,45 @@ export function hasMessageForTarget(networkId: number, target: string): boolean 
   return !!db.prepare('SELECT 1 FROM messages WHERE buffer_id = ? LIMIT 1').get(bufferId);
 }
 
+// Whether a row with this server-assigned msgid already exists on the network.
+// Used by the engine-mode catch-up window (ircConnection.catchingUp): a line the
+// previous process persisted but had not yet acked when it died is delivered
+// again to its successor, and the msgid is the only thing that says so. Index
+// seek on idx_messages_msgid.
+const hasMsgidStmt = db.prepare(
+  'SELECT 1 FROM messages WHERE network_id = ? AND msgid = ? LIMIT 1',
+);
+export function hasMessageWithMsgid(networkId: number, msgid: string): boolean {
+  if (!networkId || !msgid) return false;
+  return !!hasMsgidStmt.get(networkId, msgid);
+}
+
+// The msgid-less version of the same question, for networks that don't tag
+// messages (Libera, OFTC, ZNC…): the same target, sender, kind and text within
+// a short window of the same time. Only ever consulted in the catch-up window,
+// where a repeat means a re-delivery, not a user saying the same thing twice.
+const hasLikeStmt = db.prepare(
+  `SELECT 1 FROM messages
+   WHERE network_id = ? AND target = ? AND type = ? AND nick IS ? AND text IS ?
+     AND time BETWEEN ? AND ? LIMIT 1`,
+);
+export function hasRecentMessageLike(
+  networkId: number,
+  target: string,
+  type: string,
+  nick: string | null,
+  text: string | null,
+  time: string,
+  toleranceMs = 5000,
+): boolean {
+  if (!networkId || !target) return false;
+  const t = Date.parse(time);
+  if (!Number.isFinite(t)) return false;
+  const lo = new Date(t - toleranceMs).toISOString();
+  const hi = new Date(t + toleranceMs).toISOString();
+  return !!hasLikeStmt.get(networkId, target, type, nick, text, lo, hi);
+}
+
 // Whether a target has a real (non-notice) conversation — at least one PRIVMSG or
 // ACTION. NOTICE-only buffers (services like NickServ/ChanServ, which now get a
 // buffer of their own, #439) are NOT conversations: presence-tracking keys off

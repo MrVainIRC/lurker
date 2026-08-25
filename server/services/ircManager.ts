@@ -3,6 +3,7 @@
 
 import { EventEmitter } from 'events';
 import { IrcConnection } from './ircConnection.js';
+import { EngineLink, engineConfigured, engineConnectionId } from './engineLink.js';
 import * as systemLog from './systemLog.js';
 import connectScheduler from './connectScheduler.js';
 import { listNetworksForUser, getNetwork } from '../db/networks.js';
@@ -131,8 +132,13 @@ export function planChannelRejoins(
   return ops;
 }
 
+function engineHolds(userId: number, networkId: number): boolean {
+  return engineConfigured() && EngineLink.shared().holds(engineConnectionId(userId, networkId));
+}
+
 class IrcManager extends EventEmitter {
   byUser: Map<number, Map<number, IrcConnection>>;
+  private engineReconcileHooked = false;
 
   constructor() {
     super();
@@ -191,6 +197,46 @@ class IrcManager extends EventEmitter {
       .all()
       .map((r) => (r as { id: number }).id);
     for (const id of userIds) this.initForUser(id);
+    if (engineConfigured()) {
+      this.reconcileEngine();
+      // Again whenever the link (re)connects: an engine that answered after the
+      // boot-time wait, or came back from an outage, reports a fresh held list.
+      if (!this.engineReconcileHooked) {
+        this.engineReconcileHooked = true;
+        EngineLink.shared().on('ready', () => this.reconcileEngine());
+      }
+    }
+  }
+
+  // Engine mode: every socket the engine holds that no connection here speaks
+  // for. The previous process had it open — manually, or before the network was
+  // deleted or the account paused — and a held socket is a stronger statement
+  // of intent than the autoconnect flag, so it is ADOPTED (startNetwork, which
+  // attaches) whenever policy still allows, and closed when it doesn't: a
+  // paused account must not stay on IRC because the engine held the door.
+  reconcileEngine(): void {
+    const link = EngineLink.shared();
+    if (link.state !== 'ready') return;
+    for (const id of link.held) {
+      const m = /^(\d+):(\d+)$/.exec(id);
+      if (!m) continue;
+      const userId = Number(m[1]);
+      const networkId = Number(m[2]);
+      if (this.getConnection(userId, networkId)) continue;
+      const gate = this.connectGate(userId, networkId);
+      if (gate.ok) {
+        systemLog.log({
+          userId,
+          scope: `net:${gate.network.name}`,
+          fields: { networkId },
+          text: 'Adopting the connection the engine kept open',
+        });
+        this.startNetwork(userId, networkId);
+      } else {
+        console.warn(`[lurker] engine holds ${id} but ${gate.reason} — closing it`);
+        link.send({ op: 'close', id });
+      }
+    }
   }
 
   /**
@@ -280,6 +326,20 @@ class IrcManager extends EventEmitter {
       // so a reconnect re-clears the same gates the initial connect did. Read
       // live (not captured), because pause/lockdown can change mid-backoff.
       reconnectGate: () => this.gateReconnect(userId, networkId),
+      // Engine mode: a newer process claimed this connection. Drop the corpse
+      // (and tear its timers down — the transport is already dead, so the QUIT
+      // dispose() sends goes nowhere) so the next /connect builds afresh
+      // instead of finding it and doing nothing.
+      onTakenOver: () => {
+        if (this.connectionsForUser(userId).get(networkId) === conn) {
+          this.connectionsForUser(userId).delete(networkId);
+          try {
+            conn?.dispose('taken over by a newer process');
+          } catch (_) {
+            /* ignore */
+          }
+        }
+      },
     });
     this.connectionsForUser(userId).set(networkId, conn);
     // Seed self-presence from the per-user truth before the IRC handshake. The
@@ -298,29 +358,38 @@ class IrcManager extends EventEmitter {
     // object, so we bail instead of opening an orphan socket.
     const launch = (): void => {
       if (this.getConnection(userId, networkId) !== connRef || connRef.disposed) return;
+      // Engine mode: if the engine reports holding this connection, the CONNECT
+      // about to go out is an attach — say so, rather than announce a dial.
+      const held = engineHolds(userId, networkId);
       systemLog.log({
         userId,
         scope: `net:${network.name}`,
         fields: { networkId },
-        text: `Starting connection to ${network.host}:${network.port}${network.tls ? ' (TLS)' : ''}`,
+        text: held
+          ? `Attaching to the connection the engine kept open to ${network.host}`
+          : `Starting connection to ${network.host}:${network.port}${network.tls ? ' (TLS)' : ''}`,
       });
       connRef.connect();
     };
-    if (opts.deferrable) {
+    // An attach registers nothing on the ircd, so the per-host dial stagger
+    // has nothing to protect: engine-held sessions come back at once.
+    if (opts.deferrable && !engineHolds(userId, networkId)) {
       // Stagger bulk (re)connects per destination host so a fleet-wide restart
       // doesn't flood one IRC network from our IP. See connectScheduler / #236.
       connectScheduler.schedule(network.host, launch);
     } else {
       launch();
     }
-    conn.client.on('registered', () => {
-      // The rejoin list is where the user actually WAS (autojoin is written on
-      // the join echo, never the request), so a forwarded/failed join can't
-      // replay itself here.
-      const joined = listAutojoinChannels(networkId).map((b) => ({
-        name: b.target,
-        key: b.key,
-      }));
+    // The rejoin list is where the user actually WAS (autojoin is written on
+    // the join echo, never the request), so a forwarded/failed join can't
+    // replay itself here. On a re-attach the pass waits for the replay to walk
+    // the synthesised JOINs (onceRestored) and then joins only what the socket
+    // is NOT in — a socket the engine registered on its own (no channels), or
+    // one whose autojoin list grew while this process was away.
+    const rejoin = (onlyMissing: boolean): void => {
+      const joined = listAutojoinChannels(networkId)
+        .filter((b) => !onlyMissing || !connRef.isChannelJoined(b.target))
+        .map((b) => ({ name: b.target, key: b.key }));
       const names = joined.map((c) => c.name);
       if (names.length > 0) {
         systemLog.log({
@@ -331,6 +400,10 @@ class IrcManager extends EventEmitter {
         });
       }
       for (const op of planChannelRejoins(joined)) connRef.join(op.channels, op.keys);
+    };
+    conn.client.on('registered', () => {
+      if (connRef.restoring) connRef.onceRestored(() => rejoin(true));
+      else rejoin(false);
     });
 
     return conn;
@@ -872,7 +945,10 @@ class IrcManager extends EventEmitter {
     for (const userMap of this.byUser.values()) {
       for (const conn of userMap.values()) {
         try {
-          conn.disconnect();
+          // Engine mode: leave the sockets in the engine for the next process —
+          // that is the whole point. Otherwise QUIT as before.
+          if (engineConfigured()) conn.detach();
+          else conn.disconnect();
         } catch (_) {
           /* ignore */
         }
