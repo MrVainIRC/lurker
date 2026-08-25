@@ -526,6 +526,61 @@ Playback replays the last 50 lines per joined channel (plus your 20 most recentl
 
 Known limitations (shared-connection bouncer semantics): replies to one attached client's WHOIS/LIST are visible to all attached clients on that network; Lurker-side ignore rules don't filter the live relay; and on end-to-end encrypted channels an attached client sees the wire ciphertext for incoming messages.
 
+### IRC engine (upgrade without dropping IRC)
+
+_Available from 2.1.4._ Every Lurker upgrade restarts the container, and the container holds your IRC connections — so every upgrade has meant a reconnect: re-register, re-identify, rejoin, and a `Quit`/`Join` for everyone in your channels. The **engine** ends that. It is a second container that holds the IRC sockets and nothing else, and the ordinary upgrade never recreates it.
+
+Enable it with the overlay:
+
+```bash
+echo "LURKER_ENGINE_SECRET=$(openssl rand -hex 32)" >> .env
+docker compose -f docker-compose.yml -f docker-compose.engine.yml up -d
+```
+
+That first `up -d` recreates `lurker` with the new setting and drops IRC one last time. From then on:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.engine.yml pull
+docker compose -f docker-compose.yml -f docker-compose.engine.yml up -d
+```
+
+replaces only the app. Your connections stay up — same nick, same channels, nothing re-registers — and whatever was said while the app was down is delivered when it comes back. The web UI reconnects on its own, as it does after any restart. (Tip: put `COMPOSE_FILE=docker-compose.yml:docker-compose.engine.yml` in `.env` and the commands go back to plain `pull` / `up -d`; remember that line when you turn the engine off again, below.)
+
+Without the overlay nothing changes: the app dials IRC itself exactly as before. `LURKER_ENGINE_URL` is the whole switch.
+
+**What still drops IRC:** an upgrade of the engine itself. Its image tag is `engine-1`, which only moves when a release changes the engine — rare, and called out in that release's notes. `pull` fetches nothing new for it otherwise, and `up -d` leaves it running. A release that needs `engine-2` is called out too, and for that one **stop the engine first** (`docker compose … stop lurker-engine`), then upgrade both: an old engine that refuses the new app would otherwise keep every session alive while the app dials its own and collides with its own ghosts. (The engine ends any session no app has claimed for an hour — `LURKER_ENGINE_ORPHAN_MS` — but that is a backstop, not a procedure.)
+
+**identd moves with the socket.** If you run the built-in identd (`LURKER_IDENTD_ENABLED`, and `LURKER_IDENTD_PORT`/`LURKER_IDENTD_BIND` if set) or the oidentd file (`LURKER_OIDENTD_FILE`), they now belong on the engine — it is the process holding the connection the network asks about; the app ignores them while an engine is configured, and the engine logs which mode it resolved at boot. Where they live decides what to do:
+
+- In `.env`: nothing to edit — the overlay forwards them to `lurker-engine`.
+- In an `environment:` block on `lurker` in your `docker-compose.override.yml` (how most people set them): move that block to `lurker-engine`. The overlay cannot see values set there.
+
+The host `:113` mapping is yours to add on `lurker-engine`, as it was yours to add on `lurker` — the overlay deliberately does not publish it, because a host that already runs its own ident daemon owns that port (that is what `LURKER_OIDENTD_FILE` mode is for). For oidentd, the file's bind mount moves too. In `docker-compose.override.yml`:
+
+```yaml
+services:
+  lurker-engine:
+    ports:
+      - '113:113' # built-in identd
+    volumes:
+      - ./oidentd:/oidentd # oidentd file mode: LURKER_OIDENTD_FILE=/oidentd/lurker.conf
+```
+
+…and remove the same from `lurker` (if you used the DigitalOcean deploy's identd overlay, that is where its `113:113` lives). `LURKER_OUTGOING_ADDR` is the exception: it **stays on `lurker`** — the app reads it and tells the engine which address to bind — but the address must of course exist on the engine's host.
+
+**Turning it off again.** Stop the engine first, or the network briefly sees two of you; then bring the stack up _without_ the overlay — and if you added the `COMPOSE_FILE` line to `.env`, take the overlay out of it first, otherwise the plain command still loads it and simply restarts the engine you just stopped:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.engine.yml stop lurker-engine
+COMPOSE_FILE=docker-compose.yml docker compose up -d --remove-orphans
+```
+
+**If the engine refuses the app** — wrong `LURKER_ENGINE_SECRET`, or an app that needs a newer engine — the app logs exactly that at startup and falls back to dialing IRC directly for that run: IRC works, but ident is not answered until you fix it (the engine owns `:113` now). **If the engine is merely unreachable** — it is down, or `LURKER_ENGINE_URL` has a typo — that is _not_ a fallback: the app stays in engine mode and its connections wait for it, retrying and logging that they are waiting, because the sockets may well still be alive in there. `docker compose logs lurker` says which of the two you are looking at.
+
+**Buffering while the app is down.** The engine keeps what arrives per connection (4 MiB by default, 256 MiB in total; `LURKER_ENGINE_BUFFER_BYTES` / `LURKER_ENGINE_BUFFER_TOTAL_BYTES`, digits, at least 65536). Past that the oldest lines go, and the app notes where the hole is in the network's server buffer when it comes back. Deploys take seconds; the buffer covers hours of normal traffic.
+
+**Health.** `curl http://lurker-engine:8016/healthz` from inside the compose network answers `{"ok":true,"held":N}` with the number of connections it is holding; the overlay uses the same probe as the service's healthcheck. `LURKER_ENGINE_IMAGE` overrides the image reference — a locally built image, or a pinned release.
+
 ---
 
 ## Troubleshooting
