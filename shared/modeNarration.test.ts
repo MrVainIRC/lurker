@@ -124,6 +124,22 @@ describe('describeMode — the fallbacks', () => {
     expect(say(null, '+nt')).toBe(' set +nt');
   });
 
+  it('withholds the key from the raw-text path too, by dropping every param', () => {
+    // Reachable, not theoretical: rows written before `modes` was persisted take
+    // this path, and their `text` is the wire form. Which param is the key can't
+    // be worked out without CHANMODES — and a row with no parsed list has no
+    // classification either — so the letters stay and the params go.
+    expect(say([], '+k hunter2')).toBe(' set +k');
+    expect(say([], '+ok alice hunter2')).toBe(' set +ok');
+    expect(say([], '-k hunter2')).toBe(' set -k');
+    expect(say([], '+k hunter2')).not.toContain('hunter2');
+  });
+
+  it('leaves a key-less raw text with its params intact', () => {
+    expect(say([], '+b *!*@host')).toBe(' set +b *!*@host');
+    expect(say([], '+l 50')).toBe(' set +l 50');
+  });
+
   it('still says something when the row has nothing usable', () => {
     expect(say([], '')).toBe(' changed the channel modes');
     expect(say(null, null)).toBe(' changed the channel modes');

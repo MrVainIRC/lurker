@@ -146,6 +146,26 @@ function rawSegments(modes: readonly ModeChange[]): ModeSegment[] {
 }
 
 /**
+ * The wire text of a mode message, with its parameters dropped when a `k` is
+ * among the letters.
+ *
+ * `text` is `raw_modes` followed by every parameter, so it carries the channel
+ * key — and this is the one path that would show it, since it is the parsed
+ * list that lets rawSegments withhold it everywhere else. Which parameter is
+ * the key can't be worked out here: mapping parameters to letters needs
+ * CHANMODES, and a row with no parsed list has no classification either. So
+ * when a key may be present, keep the letters and drop every parameter — the
+ * same trade the channel-mode display already makes (#476).
+ *
+ * Reachable rather than theoretical: mode rows written before `modes` was
+ * persisted take this path.
+ */
+function withoutKeyParam(text: string): string {
+  const modeToken = text.split(/\s+/)[0] ?? '';
+  return modeToken.includes('k') ? modeToken : text;
+}
+
+/**
  * Narrate a MODE row: the segments that follow the actor's nick.
  *
  * Every segment list starts with a leading space, so a caller renders the actor
@@ -163,8 +183,9 @@ export function describeMode(
 
   if (list.length === 0) {
     // No parsed changes. Show whatever the row does have rather than nothing —
-    // this is pre-stamp backlog, and its text is the only description it has.
-    const text = (rawText ?? '').trim();
+    // this is backlog old enough to predate `modes` being persisted at all, and
+    // its raw text is the only description it has.
+    const text = withoutKeyParam((rawText ?? '').trim());
     if (!text) return [{ t: 'text', text: ' changed the channel modes' }];
     return [
       { t: 'text', text: ' set ' },

@@ -266,7 +266,7 @@
                   ><NickRef
                     :nick="seg.nick"
                     interactive
-                    @click.stop.prevent="onNickMenu($event, seg.nick, row.m)" /></template
+                    @click.stop.prevent="onNickMenu($event, seg.nick)" /></template
                 ><template v-else>{{ seg.text }}</template></template
               ></template
             >
