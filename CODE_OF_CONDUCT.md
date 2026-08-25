@@ -1,20 +1,21 @@
 # Contributor Covenant Code of Conduct
 
+> Love is that which enables choice. Love is always stronger than fear. Always
+> choose on the basis of love.
+>
+> — Forrest Landry, Magic-Flight
+
 ## Our Pledge
 
 We as members, contributors, and leaders pledge to make participation in our
 community a harassment-free experience for everyone, regardless of age, body
 size, visible or invisible disability, ethnicity, sex characteristics, gender
 identity and expression, level of experience, education, socio-economic status,
-nationality, personal appearance, race, religion, or sexual identity
-and orientation.
+nationality, personal appearance, race, caste, color, religion, or sexual
+identity and orientation.
 
 We pledge to act and interact in ways that contribute to an open, welcoming,
 diverse, inclusive, and healthy community.
-
-If you need a pithy aphorism to help you understand what this means, this may help:
-
-> Love is that which enables choice. Love is always stronger than fear. Always choose on the basis of love.
 
 ## Our Standards
 
@@ -58,9 +59,22 @@ decisions when appropriate.
 
 This Code of Conduct applies within all community spaces, and also applies when
 an individual is officially representing the community in public spaces.
+
+Lurker's community spaces include:
+
+- Lurker's GitHub repositories, including issues, pull requests, and code
+  review
+- The **#lurker** channel on [Libera.Chat](https://libera.chat)
+- Any other space the maintainers designate as an official Lurker space
+
 Examples of representing our community include using an official e-mail address,
 posting via an official social media account, or acting as an appointed
 representative at an online or offline event.
+
+This document governs the Lurker project community. Use of the hosted service
+at lurker.chat is governed separately by its
+[Terms of Service](https://lurker.chat/terms) and
+[Acceptable Use Policy](https://lurker.chat/acceptable-use).
 
 ## Enforcement
 
@@ -121,14 +135,18 @@ the community.
 ## Attribution
 
 This Code of Conduct is adapted from the [Contributor Covenant][homepage],
-version 2.0, available at
-https://www.contributor-covenant.org/version/2/0/code_of_conduct.html.
+version 2.1, available at
+[https://www.contributor-covenant.org/version/2/1/code_of_conduct.html][v2.1].
 
-Community Impact Guidelines were inspired by [Mozilla's code of conduct
-enforcement ladder](https://github.com/mozilla/diversity).
-
-[homepage]: https://www.contributor-covenant.org
+Community Impact Guidelines were inspired by
+[Mozilla's code of conduct enforcement ladder][Mozilla CoC].
 
 For answers to common questions about this code of conduct, see the FAQ at
-https://www.contributor-covenant.org/faq. Translations are available at
-https://www.contributor-covenant.org/translations.
+[https://www.contributor-covenant.org/faq][FAQ]. Translations are available at
+[https://www.contributor-covenant.org/translations][translations].
+
+[homepage]: https://www.contributor-covenant.org
+[v2.1]: https://www.contributor-covenant.org/version/2/1/code_of_conduct.html
+[Mozilla CoC]: https://github.com/mozilla/diversity
+[FAQ]: https://www.contributor-covenant.org/faq
+[translations]: https://www.contributor-covenant.org/translations
