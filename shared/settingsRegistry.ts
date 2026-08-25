@@ -838,7 +838,7 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
       'consolidation is on. "Smart filter" shows events only for nicks who have recently ' +
       'spoken, so silent lurkers cycling on and off stay invisible. "Hide all" removes ' +
       'event rows entirely, leaving conversation only. Kicks, topic changes and ' +
-      'invites are never hidden — they are things that happened, not churn.',
+      'invites are never hidden at any setting.',
   },
   {
     key: 'chat.events.mobile',

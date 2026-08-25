@@ -1121,8 +1121,8 @@ const renderRows = computed((): RenderRow[] => {
     // and including mode changes. Unconditional on purpose: a reader who asked
     // for no event noise on this device wants none of it, not
     // none-except-mine. Kicks, topic changes and invites sit outside
-    // NOISE_TYPES and still render, because they are things that happened
-    // rather than churn. Placed with the other hard hides so the rows never
+    // NOISE_TYPES and still render — see the warning there before treating that
+    // as a principle. Placed with the other hard hides so the rows never
     // reach the ignore/highlight evaluation below, and so dividers anchor to
     // the first row the reader can actually see.
     if (hideAllEvents && isNoiseType(m.type)) continue;
