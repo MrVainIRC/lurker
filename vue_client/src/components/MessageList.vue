@@ -90,9 +90,7 @@
             ><template v-else-if="g.kind === 'reconnected'"> reconnected</template
             ><template v-else-if="g.kind === 'joinedAndLeft'"> joined briefly</template
             ><template v-else-if="g.kind === 'rehosted'"> changed host</template
-            ><template v-else-if="g.kind === 'modeGranted' || g.kind === 'modeRevoked'">{{
-              modePhrase(g)
-            }}</template></template
+            ><template v-else-if="g.letter">{{ modePhrase(g) }}</template></template
           >
         </span>
       </div>

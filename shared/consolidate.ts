@@ -89,14 +89,19 @@ export type ConsolidationKind =
   | 'renamed'
   | 'rehosted'
   | 'modeGranted'
-  | 'modeRevoked';
+  | 'modeRevoked'
+  | 'modeBriefly'
+  | 'modeRegranted';
 
 /**
  * The kinds the per-identity walk can produce. Split out so the bucket record
  * below stays exhaustive by construction: adding a mode kind to
  * ConsolidationKind must not silently leave a hole there.
  */
-type IdentityKind = Exclude<ConsolidationKind, 'modeGranted' | 'modeRevoked'>;
+type IdentityKind = Exclude<
+  ConsolidationKind,
+  'modeGranted' | 'modeRevoked' | 'modeBriefly' | 'modeRegranted'
+>;
 
 /** A nick that joined / left / reconnected / rehosted within the run. */
 export interface NickEntry {
@@ -115,7 +120,7 @@ export interface ConsolidationGroup {
   visible: Array<NickEntry | RenameEntry>;
   hidden: number;
   /**
-   * For `modeGranted` / `modeRevoked` only: the member-prefix letter the group
+   * For the four `mode*` kinds only: the member-prefix letter the group
    * is about (`o`, `v`, …). The WORDS for it are the renderer's business —
    * each client picks its own phrasing, the way it already does for joined /
    * left — so only the letter travels.
@@ -171,10 +176,14 @@ const CONSOLIDATABLE_TYPES: ReadonlySet<string> = new Set([
  * of that set — because that set also defines the `renderable` page unit
  * (shared/eventFilter.ts), and moving `mode` into it would change what a
  * `countBy:'renderable'` page contains for every client, shipped iOS builds
- * included. Folding is a render-time concern; the page unit only has to be no
- * FINER than what a client draws, so a folding client just gets a page that
- * renders shorter than budgeted — the harmless direction, never the empty-page
- * under-count of the netsplit bug.
+ * included.
+ *
+ * What folds and what counts are therefore two questions, and they must stay in
+ * step: `countsTowardPage` subtracts churn modes under `renderable` for exactly
+ * this reason. Folding MORE than the unit counts is the harmful direction — the
+ * page renders shorter than budgeted and the client re-fetches (#10). Folding
+ * LESS is harmless: the page renders longer than asked, which is where a client
+ * that folds presence but not mode sits.
  */
 function foldsIntoRun(m: ConsolidatableMessage): boolean {
   if (CONSOLIDATABLE_TYPES.has(m.type)) return true;
@@ -230,8 +239,32 @@ function cap<T extends { nick?: string; to?: string }>(
 interface ModeState {
   nick: string;
   letter: string;
-  sign: '+' | '-';
+  /** The run's first change to this pair — which implies the state BEFORE it. */
+  first: '+' | '-';
+  /** The run's last change, i.e. the state after. */
+  last: '+' | '-';
   seenIndex: number;
+}
+
+/**
+ * Classify a (nick, letter) pair by its first and last change in the run —
+ * the same first/last reading `classify()` gives a presence identity, and for
+ * the same reason: the FIRST change implies the prior state. An opening `-o`
+ * means they held op before the run started.
+ *
+ *   +…+  didn't have it, does now          → modeGranted     "was opped"
+ *   -…-  had it, doesn't now               → modeRevoked     "was deopped"
+ *   +…-  didn't have it, blipped, doesn't  → modeBriefly     "was briefly opped"
+ *   -…+  had it, lost it, has it again     → modeRegranted   "was opped again"
+ *
+ * The last two are the mode-side of `joinedAndLeft` and `reconnected`. Keeping
+ * them means a cancelled pair is never silently dropped OR misreported as its
+ * end state alone — which matters here more than for presence, because the
+ * summary row has no expand affordance to recover the detail from.
+ */
+function classifyMode(first: '+' | '-', last: '+' | '-'): ConsolidationKind {
+  if (first === '+') return last === '+' ? 'modeGranted' : 'modeBriefly';
+  return last === '+' ? 'modeRegranted' : 'modeRevoked';
 }
 
 /**
@@ -245,13 +278,12 @@ interface ModeState {
  * second summary vocabulary, which is exactly what the lurker-ios prototype
  * flagged when it tried this and backed it out; we pay it deliberately.
  *
- * **The last change to a (nick, letter) in the run wins, and nothing is ever
- * dropped.** `+o alice` then `-o alice` reads "alice was deopped" rather than
- * vanishing the way a join/part pair does. The asymmetry is deliberate: the
- * summary row has no expand affordance, so a nick dropped here is information
- * deleted with no way to get it back. The Lounge can afford to drop a cancelled
- * pair because a click restores the raw lines; we can't. Reporting the end
- * state keeps every affected nick visible exactly once.
+ * Each pair is classified by its first and last change (see classifyMode), so a
+ * nick appears exactly once per letter and a cancelled pair reads "was briefly
+ * opped" — the mode-side of `joinedAndLeft`, and the same vocabulary the
+ * presence half already uses for the same shape. Nothing is ever dropped: the
+ * summary row has no expand affordance, so a nick dropped here would be
+ * information deleted with no way to get it back.
  *
  * Renames are NOT followed. The identity walk migrates a nick across an 'R'
  * action; this keys on the parameter as written, so alice→bob opped as bob is
@@ -273,13 +305,17 @@ function modeGroups(
       const letter = modeLetter(c.mode);
       if (!letter) continue;
       const key = `${c.param.toLowerCase()}\u0000${letter}`;
+      const sign: '+' | '-' = c.mode.startsWith('-') ? '-' : '+';
       const prev = net.get(key);
       net.set(key, {
         nick: c.param,
         letter,
-        sign: c.mode.startsWith('-') ? '-' : '+',
+        // The first change is captured once and never overwritten — it is what
+        // says whether they held the mode before the run.
+        first: prev ? prev.first : sign,
+        last: sign,
         // First appearance fixes the display order; later changes to the same
-        // pair overwrite the verdict without moving it.
+        // pair update the verdict without moving it.
         seenIndex: prev ? prev.seenIndex : seen++,
       });
     }
@@ -293,15 +329,11 @@ function modeGroups(
   }
   const buckets = new Map<string, Bucket>();
   for (const st of Array.from(net.values()).toSorted((a, b) => a.seenIndex - b.seenIndex)) {
-    const bucketKey = `${st.sign}${st.letter}`;
+    const kind = classifyMode(st.first, st.last);
+    const bucketKey = `${kind}${st.letter}`;
     let bucket = buckets.get(bucketKey);
     if (!bucket) {
-      bucket = {
-        kind: st.sign === '+' ? 'modeGranted' : 'modeRevoked',
-        letter: st.letter,
-        entries: [],
-        seenIndex: st.seenIndex,
-      };
+      bucket = { kind, letter: st.letter, entries: [], seenIndex: st.seenIndex };
       buckets.set(bucketKey, bucket);
     }
     bucket.entries.push({ nick: st.nick });

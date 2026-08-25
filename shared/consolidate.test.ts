@@ -129,17 +129,47 @@ describe('mode consolidation (#673)', () => {
     });
   });
 
-  it('reports the end state of a pair that cancels, and never drops the nick', () => {
-    // Deliberately unlike join/part, which vanish when they cancel. The summary
-    // has no expand affordance, so dropping a nick here deletes information
-    // with no way to get it back.
+  it('reads a cancelled pair as "briefly", the way joinedAndLeft does', () => {
+    // First change implies the prior state, exactly as in the presence walk: an
+    // opening `+o` means they did not hold it before, so `+o` then `-o` is the
+    // mode-side of joined-and-left rather than a plain deop.
     const row = onlyRow([grant('o', 'alice'), revoke('o', 'alice'), ev('join', 'bob')]);
-    expect(summarize(row.groups)).toEqual({ joined: ['bob'], 'modeRevoked:o': ['alice'] });
+    expect(summarize(row.groups)).toEqual({ joined: ['bob'], 'modeBriefly:o': ['alice'] });
   });
 
-  it('reports a re-grant as granted', () => {
+  it('reads a regained mode as "again", the way reconnected does', () => {
+    // An opening `-o` means they DID hold it before the run.
     const row = onlyRow([revoke('o', 'alice'), grant('o', 'alice'), ev('join', 'bob')]);
-    expect(summarize(row.groups)).toEqual({ joined: ['bob'], 'modeGranted:o': ['alice'] });
+    expect(summarize(row.groups)).toEqual({ joined: ['bob'], 'modeRegranted:o': ['alice'] });
+  });
+
+  it('classifies every letter the same way, not just op', () => {
+    const row = onlyRow([
+      grant('v', 'alice'),
+      revoke('v', 'alice'),
+      revoke('v', 'bob'),
+      grant('v', 'bob'),
+      grant('h', 'carol'),
+      revoke('q', 'dave'),
+    ]);
+    expect(summarize(row.groups)).toEqual({
+      'modeBriefly:v': ['alice'],
+      'modeRegranted:v': ['bob'],
+      'modeGranted:h': ['carol'],
+      'modeRevoked:q': ['dave'],
+    });
+  });
+
+  it('ignores the churn between the first and last change', () => {
+    const row = onlyRow([
+      grant('o', 'alice'),
+      revoke('o', 'alice'),
+      grant('o', 'alice'),
+      revoke('o', 'alice'),
+      ev('join', 'bob'),
+    ]);
+    // Started without it, ended without it, blipped in between.
+    expect(summarize(row.groups)).toEqual({ joined: ['bob'], 'modeBriefly:o': ['alice'] });
   });
 
   it('keeps a nick in one group per letter, however many changes it saw', () => {
