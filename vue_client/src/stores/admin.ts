@@ -46,6 +46,12 @@ export interface AdminNetworkPreset {
 
 export type AdminNetworkPresetInput = Omit<AdminNetworkPreset, 'id' | 'position'>;
 
+export interface AdminSettingVisibility {
+  id: number;
+  username: string;
+  hiddenKeys: string[];
+}
+
 export const useAdminStore = defineStore('admin', {
   state: () => ({
     users: [] as AdminUser[],
@@ -68,6 +74,9 @@ export const useAdminStore = defineStore('admin', {
     usersLoaded: false,
     invitesLoaded: false,
     uploadersLoaded: false,
+    settingsVisibility: [] as AdminSettingVisibility[],
+    settingKeys: [] as string[],
+    settingsVisibilityLoaded: false,
     // Monotonic per-resource fetch generation. The admin panes refetch on every
     // mount (#613), so a slow GET can still be in flight when a local mutation
     // (delete/pause/create/revoke) patches the list. Each fetch captures the seq
@@ -254,6 +263,26 @@ export const useAdminStore = defineStore('admin', {
       // Refetch rather than assign: the server 409s this when no presets exist,
       // and the throw must leave the checkbox showing the truth, not the attempt.
       await this.fetchNetworkPresets();
+    },
+    async fetchSettingsVisibility() {
+      this.error = '';
+      try {
+        const data = await api('/api/admin/settings-visibility');
+        this.settingsVisibility = data.users || [];
+        this.settingKeys = data.settingKeys || [];
+        this.settingsVisibilityLoaded = true;
+      } catch (e: any) {
+        this.error = e.message || 'failed to load settings visibility';
+        throw e;
+      }
+    },
+    async setSettingsVisibility(userId: number, hiddenKeys: string[]) {
+      const data = await api(`/api/admin/users/${userId}/settings-visibility`, {
+        method: 'PUT',
+        body: { hiddenKeys },
+      });
+      const row = this.settingsVisibility.find((user) => user.id === userId);
+      if (row) row.hiddenKeys = data.hiddenKeys || hiddenKeys;
     },
   },
 });

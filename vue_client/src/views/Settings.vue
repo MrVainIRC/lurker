@@ -51,7 +51,7 @@ import { useSettingsStore } from '../stores/settings.js';
 import { useAuthStore } from '../stores/auth.js';
 import { useConfigStore } from '../stores/config.js';
 import { useSocket } from '../composables/useSocket.js';
-import { CATEGORIES, GROUPS, REGISTRY, categoryVisible } from '../utils/settingsRegistry.js';
+import { CATEGORIES, GROUPS, categoryVisible } from '../utils/settingsRegistry.js';
 import SettingsSidebar from '../components/SettingsSidebar.vue';
 import RegistryPane from '../components/settings-panes/RegistryPane.vue';
 import AppearancePane from '../components/settings-panes/AppearancePane.vue';
@@ -137,7 +137,7 @@ const appearanceSubsections = computed<SettingsSubsection[]>(() => {
   // Themes leads the pane but isn't a registry group — ThemesSection renders
   // its own [data-setting-group="themes"] heading for the scroll-spy.
   const subsections: SettingsSubsection[] = [{ id: 'themes', label: 'Themes' }];
-  for (const opt of REGISTRY) {
+  for (const opt of settings.registry) {
     if (opt.category !== 'appearance') continue;
     const id = opt.group || '_';
     if (seen.has(id)) continue;

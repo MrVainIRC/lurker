@@ -53,6 +53,7 @@ type NickSelectHandler = (nick: string) => void;
 type EmojiSelectHandler = (item: EmojiMatch) => void;
 type ColorApplyHandler = (fg: string | null, bg: string | null) => void;
 type VoidHandler = () => void;
+type EditHandler = (text: string) => void;
 
 // Handlers MessageInput registers on mount. Defaults are no-ops so a pick
 // before registration is dropped silently rather than crashing.
@@ -71,6 +72,7 @@ let onPickCamera: VoidHandler = () => {};
 // Same signature as a nick pick, but it prepends `nick: ` to the whole draft
 // rather than splicing at a token span, so it gets its own handler.
 let onAddress: NickSelectHandler = () => {};
+let onEdit: EditHandler = () => {};
 
 export interface ComposerOverlayHandlers {
   onNickSelect?: NickSelectHandler;
@@ -81,6 +83,7 @@ export interface ComposerOverlayHandlers {
   onPickFile?: VoidHandler;
   onPickCamera?: VoidHandler;
   onAddress?: NickSelectHandler;
+  onEdit?: EditHandler;
 }
 
 export function setComposerOverlayHandlers(h: ComposerOverlayHandlers): void {
@@ -92,6 +95,7 @@ export function setComposerOverlayHandlers(h: ComposerOverlayHandlers): void {
   if (h.onPickFile) onPickFile = h.onPickFile;
   if (h.onPickCamera) onPickCamera = h.onPickCamera;
   if (h.onAddress) onAddress = h.onAddress;
+  if (h.onEdit) onEdit = h.onEdit;
 }
 
 export function setNickStrip(open: boolean, items: NickStripItem[] = []): void {
@@ -165,6 +169,9 @@ export function selectNick(nick: string): void {
 // which owns the draft text and the focus/caret dance.
 export function addressNick(nick: string): void {
   onAddress(nick);
+}
+export function editMessage(text: string): void {
+  onEdit(text);
 }
 export function selectEmoji(item: EmojiMatch): void {
   onEmojiSelect(item);

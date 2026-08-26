@@ -102,8 +102,9 @@
 import { ref, computed, watch, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
 import type { SettingCategory } from '../../../shared/settingsRegistry.js';
-import { REGISTRY, CATEGORIES, optionVisible } from '../utils/settingsRegistry.js';
+import { CATEGORIES, optionVisible } from '../utils/settingsRegistry.js';
 import { useConfigStore } from '../stores/config.js';
+import { useSettingsStore } from '../stores/settings.js';
 import { useImeSafeInput } from '../composables/useImeSafeInput.js';
 
 const props = defineProps<{
@@ -124,6 +125,7 @@ interface SettingsSubsection {
 
 const router = useRouter();
 const config = useConfigStore();
+const settings = useSettingsStore();
 const searchInput = ref('');
 const onSearchInput = useImeSafeInput(searchInput);
 const searchEl = ref<HTMLInputElement | null>(null);
@@ -140,23 +142,25 @@ const searchActive = computed(() => searchInput.value.trim().length > 0);
 // couldn't have honoured it: settings for a feature the instance doesn't have stayed
 // searchable, and picking one navigated to a pane where the row does not exist.
 const searchIndex = computed(() =>
-  REGISTRY.filter(
-    (opt) =>
-      CATEGORIES.some((c) => c.id === opt.category) &&
-      optionVisible(opt, {
-        isNode: config.isNode,
-        features: { linkPreviews: config.linkPreviews },
-      }),
-  ).map((opt) => {
-    const cat = CATEGORIES.find((c) => c.id === opt.category);
-    return {
-      key: opt.key,
-      label: opt.label || opt.key,
-      description: opt.description || '',
-      categoryId: opt.category,
-      categoryLabel: cat?.label || opt.category,
-    };
-  }),
+  settings.registry
+    .filter(
+      (opt) =>
+        CATEGORIES.some((c) => c.id === opt.category) &&
+        optionVisible(opt, {
+          isNode: config.isNode,
+          features: { linkPreviews: config.linkPreviews },
+        }),
+    )
+    .map((opt) => {
+      const cat = CATEGORIES.find((c) => c.id === opt.category);
+      return {
+        key: opt.key,
+        label: opt.label || opt.key,
+        description: opt.description || '',
+        categoryId: opt.category,
+        categoryLabel: cat?.label || opt.category,
+      };
+    }),
 );
 
 const searchResults = computed(() => {

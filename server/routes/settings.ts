@@ -8,14 +8,18 @@ import { REGISTRY } from '../services/settingsRegistry.js';
 import { getUserSettings } from '../db/settings.js';
 import { listThemesForUser } from '../db/themes.js';
 import settingsService from '../services/settingsService.js';
+import { listHiddenSettingKeys } from '../db/userSettingVisibility.js';
 
 const router = Router();
 router.use(requireAuth);
 
 router.get('/bootstrap', (req: Request, res: Response) => {
+  const hidden = new Set(req.user!.role === 'admin' ? [] : listHiddenSettingKeys(req.user!.id));
+  const registry = REGISTRY.filter((option) => !hidden.has(option.key));
+  const values = getUserSettings(req.user!.id);
   res.json({
-    registry: REGISTRY,
-    values: getUserSettings(req.user!.id),
+    registry,
+    values: Object.fromEntries(Object.entries(values).filter(([key]) => !hidden.has(key))),
     // Saved themes ride the same response so the theme resolver never renders a
     // frame with values loaded but the pointed-at theme still in flight.
     themes: listThemesForUser(req.user!.id),

@@ -28,6 +28,8 @@ import { deriveIdent, isValidIdentOverride, MAX_IDENT_LENGTH } from '../../share
 import { basePath } from '../utils/basePath.js';
 import adminUploadersRouter from './adminUploaders.js';
 import adminNetworksRouter from './adminNetworks.js';
+import { REGISTRY } from '../services/settingsRegistry.js';
+import { listHiddenSettingKeys, replaceHiddenSettingKeys } from '../db/userSettingVisibility.js';
 
 const router = Router();
 router.use(requireAuth, requireAdmin);
@@ -120,6 +122,52 @@ router.get('/users', (_req: Request, res: Response) => {
     // which the client already knows from /api/config.)
     identdEnabled: isIdentdEnabled() || isOidentdFileEnabled(),
   });
+});
+
+// Per-account settings visibility. This is a presentation policy: it controls
+// the registry sent to a regular user's Settings UI, while admins retain the
+// complete registry and all setting writes remain validated by settingsService.
+router.get('/settings-visibility', (_req: Request, res: Response) => {
+  res.json({
+    users: listUsers()
+      .filter((user) => user.role !== 'admin')
+      .map((user) => ({
+        id: user.id,
+        username: user.username,
+        hiddenKeys: listHiddenSettingKeys(user.id),
+      })),
+    settingKeys: REGISTRY.map((option) => option.key),
+  });
+});
+
+router.put('/users/:id/settings-visibility', (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: 'invalid id' });
+    return;
+  }
+  const target = findUserById(id);
+  if (!target) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  if (target.role === 'admin') {
+    res.status(409).json({ error: 'administrator settings visibility cannot be restricted' });
+    return;
+  }
+  const hiddenKeys = req.body?.hiddenKeys;
+  if (!Array.isArray(hiddenKeys) || !hiddenKeys.every((key: unknown) => typeof key === 'string')) {
+    res.status(400).json({ error: 'hiddenKeys must be an array of setting keys' });
+    return;
+  }
+  const known = new Set(REGISTRY.map((option) => option.key));
+  const unique = [...new Set(hiddenKeys as string[])];
+  if (unique.some((key) => !known.has(key))) {
+    res.status(400).json({ error: 'hiddenKeys contains an unknown setting' });
+    return;
+  }
+  replaceHiddenSettingKeys(id, unique);
+  res.json({ id, hiddenKeys: listHiddenSettingKeys(id) });
 });
 
 // Assign (or clear, with null/'') an account's ident — the name a network sees

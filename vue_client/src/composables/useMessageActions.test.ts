@@ -158,6 +158,55 @@ describe('useMessageActions', () => {
       expect(menu.state.open).toBe(false);
     });
   });
+
+  describe('more actions menu tree', () => {
+    it('offers reactions, custom reaction, unreact, edit, and redact in nested items', () => {
+      const networks = useNetworksStore();
+      networks.applyFeatures({
+        networkId: 1,
+        negotiatedFeatures: {
+          reply: true,
+          messageTags: true,
+          reactions: true,
+          redaction: true,
+        },
+      });
+      networks.applyOwnNick({ networkId: 1, nick: 'me' });
+      const ctx: MessageContext = {
+        ...makeCtx(),
+        onReact: vi.fn(),
+        onCustomReact: vi.fn(),
+        onUnreact: vi.fn(),
+        onEdit: vi.fn(),
+        onRedact: vi.fn(),
+      };
+      const message = other({
+        self: true,
+        reactions: [
+          { actor: 'me', reaction: '🔥' },
+          { actor: 'other', reaction: '👍' },
+        ],
+      });
+
+      const more = useMessageActions().buildMoreItems(message, ctx);
+      const react = more.find((item) => item.label === 'React');
+      const unreact = more.find((item) => item.label === 'Unreact');
+      expect(react?.children?.map((item) => item.label)).toContain('Custom reaction…');
+      expect(unreact?.children?.map((item) => item.label)).toEqual(['🔥']);
+      expect(more.map((item) => item.label)).toContain('Edit & resend');
+      expect(more.map((item) => item.label)).toContain('Redact message');
+    });
+
+    it('does not offer edit or redact for another user', () => {
+      const ctx: MessageContext = {
+        ...makeCtx(),
+        onEdit: vi.fn(),
+        onRedact: vi.fn(),
+      };
+      const more = useMessageActions().buildMoreItems(other(), ctx);
+      expect(more).toEqual([]);
+    });
+  });
 });
 
 describe('copy link to message (#744)', () => {

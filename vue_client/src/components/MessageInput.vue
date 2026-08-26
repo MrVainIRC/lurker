@@ -18,6 +18,17 @@
         ><span v-if="awayLabel" class="away">&nbsp;{{ awayLabel }}</span
         >&nbsp;</template
       ><span
+        v-if="multilineAvailable"
+        class="prompt-break"
+        role="button"
+        tabindex="0"
+        title="Insert line break"
+        aria-label="Insert line break"
+        @mousedown.prevent
+        @click="insertMultilineBreak"
+        @keydown.enter.prevent="insertMultilineBreak"
+        >↵</span
+      ><span
         v-if="hasHistory"
         ref="promptBtnEl"
         role="button"
@@ -239,6 +250,7 @@ import {
   moveNickActive,
   confirmNickActive,
   hasNickCandidates,
+  editMessage,
   type NickStripItem,
 } from '../composables/useComposerOverlay.js';
 import { useNickColors } from '../composables/useNickColors.js';
@@ -605,6 +617,8 @@ function currentMultilineLimits(): MultilineLimits | null {
   if (nid == null) return null;
   return networks.states[nid]?.multilineLimits ?? null;
 }
+
+const multilineAvailable = computed(() => currentMultilineLimits() !== null && sendable.value);
 
 // How many draft/multiline messages `raw` will become on this network: 0 when
 // it won't be a multiline send (a slash command, /me, no newline, or the
@@ -1928,6 +1942,25 @@ function insertUrlAtCaret(url: string): void {
   });
 }
 
+function insertMultilineBreak(): void {
+  if (!multilineAvailable.value) return;
+  const el = inputEl.value;
+  const current = text.value;
+  const start = el?.selectionStart ?? current.length;
+  const end = el?.selectionEnd ?? current.length;
+  const next = `${current.slice(0, start)}\n${current.slice(end)}`;
+  text.value = next;
+  closeStrip();
+  closeEmojiStrip();
+  closeEmojiPicker();
+  nextTick(() => {
+    const input = inputEl.value;
+    if (!input) return;
+    input.focus();
+    input.setSelectionRange(start + 1, start + 1);
+  });
+}
+
 let unsubInsert: (() => boolean) | null = null;
 onMounted(() => {
   unsubInsert = onInsertUrl(insertUrlAtCaret);
@@ -1944,6 +1977,15 @@ onMounted(() => {
     onPickFile,
     onPickCamera,
     onAddress: addressInComposer,
+    onEdit: (value) => {
+      if (!sendable.value) return;
+      text.value = value;
+      nextTick(() => {
+        const input = inputEl.value;
+        input?.focus();
+        input?.setSelectionRange(value.length, value.length);
+      });
+    },
   });
 });
 
@@ -3106,6 +3148,7 @@ async function runNetwork(
 // Notifications still own registry-backed keys, which belong in the surface.
 function settingExposed(opt: SettingOption): boolean {
   return (
+    settings.registry.some((candidate) => candidate.key === opt.key) &&
     CATEGORIES.some((c) => c.id === opt.category) &&
     // ⚠ Same visibility rule as the settings pane, deliberately. `/set` is a first-class way to
     // operate every setting, so a key hidden in one surface and offered in the other is a
@@ -3128,7 +3171,7 @@ function lookupSetting(key: string): SettingOption | null {
 function listSettings(networkId: number | null, target: string): void {
   localInfo(networkId, target, 'settings — /set <key> <value> to change, /get <key> to read:');
   for (const cat of CATEGORIES) {
-    const opts = REGISTRY.filter((o) => o.category === cat.id && settingExposed(o));
+    const opts = settings.registry.filter((o) => o.category === cat.id && settingExposed(o));
     if (!opts.length) continue;
     localInfo(networkId, target, `${cat.label.toLowerCase()}:`);
     const rows = opts.map((o) => [`  ${o.key}`, formatSettingValue(o, settings.effective(o.key))]);
@@ -3813,6 +3856,19 @@ function handleCommand(line: string, networkId: number | null, target: string): 
 }
 .prompt .away {
   color: var(--warn);
+}
+.prompt-break {
+  position: relative;
+  display: inline-block;
+  margin-right: var(--space-1);
+  color: var(--fg-muted);
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.prompt-break:hover,
+.prompt-break:focus-visible {
+  color: var(--fg);
 }
 .reply-banner {
   flex: 0 1 22em;

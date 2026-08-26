@@ -14,21 +14,7 @@
       @click.stop
       @contextmenu.prevent
     >
-      <template v-for="(item, i) in state.items" :key="i">
-        <div v-if="item.divider" class="divider" role="separator"></div>
-        <div v-else-if="item.heading" class="heading" role="presentation">{{ item.heading }}</div>
-        <button
-          v-else
-          type="button"
-          class="item"
-          role="menuitem"
-          :disabled="item.disabled"
-          @click="activate(item)"
-        >
-          <i v-if="item.icon" :class="['icon', item.icon]" aria-hidden="true"></i>
-          <span class="label">{{ item.label }}</span>
-        </button>
-      </template>
+      <ContextMenuBranch :items="state.items" @select="activate" />
     </div>
   </Teleport>
 </template>
@@ -36,6 +22,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { useContextMenu, type ContextMenuItem } from '../composables/useContextMenu.js';
+import ContextMenuBranch from './ContextMenuBranch.vue';
 
 const menu = useContextMenu();
 const { state } = menu;

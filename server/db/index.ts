@@ -219,6 +219,16 @@ function migrate() {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
+    -- Admin-controlled presentation policy for ordinary users. Missing rows
+    -- mean visible; only hidden settings are persisted so new settings remain
+    -- available by default.
+    CREATE TABLE IF NOT EXISTS user_setting_visibility (
+      user_id INTEGER NOT NULL,
+      setting_key TEXT NOT NULL,
+      PRIMARY KEY (user_id, setting_key),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
     -- A highlight rule marks a matching message (line accent + sidebar dot).
     -- pattern is the keyword/regex (NULL for a pure mask rule); mask is an
     -- optional nick!user@host glob that highlights every message from matching

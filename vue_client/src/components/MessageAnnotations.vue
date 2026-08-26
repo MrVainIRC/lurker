@@ -54,15 +54,6 @@
       {{ emoji }}
     </button>
   </div>
-  <button
-    v-if="canRedact && message.msgid && message.self"
-    type="button"
-    class="redact-action"
-    title="Redact message"
-    @click.stop="redact"
-  >
-    redact
-  </button>
 </template>
 
 <script setup lang="ts">
@@ -120,7 +111,6 @@ const emojiChoices = [
 const buffer = computed(() => buffers.findByTarget(props.networkId, props.target));
 const features = computed(() => networks.states[props.networkId]?.negotiatedFeatures || {});
 const canReact = computed(() => !!features.value.reactions && !!features.value.messageTags);
-const canRedact = computed(() => !!features.value.redaction);
 const selfActor = computed(() => networks.states[props.networkId]?.nick || '');
 const parent = computed(() => {
   if (!props.message.replyTo) return null;
@@ -159,16 +149,6 @@ function toggle(reaction: string, removed: boolean): void {
 function chooseReaction(reaction: string): void {
   emojiPickerOpen.value = false;
   toggle(reaction, false);
-}
-
-function redact(): void {
-  if (!props.message.msgid || !canRedact.value) return;
-  socketSend({
-    type: 'redact',
-    networkId: props.networkId,
-    target: props.target,
-    msgid: props.message.msgid,
-  });
 }
 
 function jumpToParent(): void {

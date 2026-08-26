@@ -339,6 +339,17 @@
           >
             <i :class="a.icon"></i>
           </button>
+          <button
+            v-if="moreActionsFor(row.m).length"
+            type="button"
+            class="row-action"
+            title="More message actions"
+            aria-label="More message actions"
+            @click.stop="openMoreActions($event, row.m)"
+            @contextmenu.stop.prevent
+          >
+            <i class="fa-solid fa-ellipsis"></i>
+          </button>
         </div>
       </div>
     </template>
@@ -350,6 +361,11 @@
     :host="ignoreTarget.host || null"
     :network-id="ignoreTarget.networkId || null"
     @close="ignoreTarget = null"
+  />
+  <MessageReactionModal
+    v-if="customReactionTarget"
+    @submit="submitCustomReaction"
+    @close="customReactionTarget = null"
   />
 </template>
 
@@ -407,9 +423,10 @@ import { useMemberActions } from '../composables/useMemberActions.js';
 import type { MemberContext, MemberLike } from '../composables/useMemberActions.js';
 import { useContextMenu, type ContextMenuItem } from '../composables/useContextMenu.js';
 import { useWhoisStore } from '../stores/whois.js';
-import { addressNick } from '../composables/useComposerOverlay.js';
+import { addressNick, editMessage } from '../composables/useComposerOverlay.js';
 import { setViewedBuffer } from '../composables/useViewedBuffer.js';
 import { isChannelTarget } from '../../../shared/channels.js';
+import MessageReactionModal from './MessageReactionModal.vue';
 
 // Extended BufferMessage fields accessed in the template and script
 // (beyond the core BufferMessage definition which uses [key: string]: unknown).
@@ -708,6 +725,7 @@ function rowClass(row: RenderRow) {
 // need to know which view they live in (mirrors MemberList's pattern).
 const messageActions = useMessageActions();
 const ignoreTarget = ref<IgnoreTarget | null>(null);
+const customReactionTarget = ref<ChatMessage | null>(null);
 
 function eligibleForActions(m: ChatMessage | undefined | null): boolean {
   if (!m || m.id == null) return false;
@@ -751,7 +769,46 @@ const actionContext: MessageContext = {
       networkId: buffer.value?.networkId ?? undefined,
     };
   },
+  onReact: (msg, reaction) => {
+    const b = buffer.value;
+    if (b?.networkId == null || !msg.msgid) return;
+    socketSend({
+      type: 'react',
+      networkId: b.networkId,
+      target: b.target,
+      msgid: msg.msgid,
+      reaction,
+    });
+  },
+  onCustomReact: (msg) => {
+    customReactionTarget.value = msg as ChatMessage;
+  },
+  onUnreact: (msg, reaction) => {
+    const b = buffer.value;
+    if (b?.networkId == null || !msg.msgid) return;
+    socketSend({
+      type: 'unreact',
+      networkId: b.networkId,
+      target: b.target,
+      msgid: msg.msgid,
+      reaction,
+    });
+  },
+  onRedact: (msg) => {
+    const b = buffer.value;
+    if (b?.networkId == null || !msg.msgid) return;
+    socketSend({ type: 'redact', networkId: b.networkId, target: b.target, msgid: msg.msgid });
+  },
+  onEdit: (msg) => {
+    if (typeof msg.text === 'string' && msg.text.length) editMessage(msg.text);
+  },
 };
+
+function submitCustomReaction(reaction: string): void {
+  const target = customReactionTarget.value;
+  customReactionTarget.value = null;
+  if (target) actionContext.onReact?.(target, reaction);
+}
 
 function actionsFor(m: ChatMessage | undefined | null): MessageAction[] {
   if (!m) return [];
@@ -763,6 +820,18 @@ function runAction(key: MessageActionKey, m: ChatMessage | undefined | null): vo
   if (!m) return;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   messageActions.run(key, m as any, actionContext);
+}
+
+function moreActionsFor(m: ChatMessage | undefined | null): ContextMenuItem[] {
+  if (!m) return [];
+  return messageActions.buildMoreItems(m as any, actionContext);
+}
+
+function openMoreActions(e: MouseEvent, m: ChatMessage | undefined | null): void {
+  if (!m) return;
+  const items = moreActionsFor(m);
+  if (!items.length) return;
+  contextMenu.open(items, e.clientX, e.clientY, e.currentTarget as Element);
 }
 
 // Click/tap → message action menu (#392). The entry point whenever the hover

@@ -4,7 +4,7 @@
 import { defineStore } from 'pinia';
 import { api } from '../api.js';
 import { REGISTRY, getDefault, getOption } from '../utils/settingsRegistry.js';
-import type { SettingValue } from '../../../shared/settingsRegistry.js';
+import type { SettingOption, SettingValue } from '../../../shared/settingsRegistry.js';
 import { useThemesStore } from './themes.js';
 
 function valuesEqual(a: unknown, b: unknown): boolean {
@@ -20,11 +20,11 @@ function valuesEqual(a: unknown, b: unknown): boolean {
 export const useSettingsStore = defineStore('settings', {
   state: () => ({
     values: {} as Record<string, SettingValue>,
+    registry: [...REGISTRY] as SettingOption[],
     loaded: false,
     loading: null as Promise<void> | null,
   }),
   getters: {
-    registry: () => REGISTRY,
     /**
      * What a key renders as WITHOUT a per-key override: the active theme's
      * value for `themed` keys, the registry default otherwise. Split out from
@@ -63,8 +63,9 @@ export const useSettingsStore = defineStore('settings', {
     async fetchAll() {
       if (this.loading) return this.loading;
       this.loading = (async () => {
-        const { values, themes } = await api('/api/settings/bootstrap');
+        const { values, themes, registry } = await api('/api/settings/bootstrap');
         this.values = { ...values };
+        if (Array.isArray(registry)) this.registry = registry;
         // Saved themes ride the bootstrap so the theme resolver never runs
         // against values whose pointed-at theme is still in flight.
         if (Array.isArray(themes)) useThemesStore().hydrate(themes);

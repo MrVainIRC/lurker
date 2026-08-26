@@ -25,12 +25,18 @@ export interface MessageLike {
   // answer, when the row came from the server rather than being minted here.
   bufferId?: number;
   msgid?: string;
+  reactions?: Array<{ actor: string; reaction: string }>;
 }
 
 export interface MessageContext {
   networkId: number;
   onReply(message: MessageLike): void;
   onIgnore(message: MessageLike): void;
+  onReact?(message: MessageLike, reaction: string): void;
+  onCustomReact?(message: MessageLike): void;
+  onUnreact?(message: MessageLike, reaction: string): void;
+  onRedact?(message: MessageLike): void;
+  onEdit?(message: MessageLike): void;
 }
 
 export type MessageActionKey = 'reply' | 'copy' | 'link' | 'save' | 'ignore';
@@ -51,6 +57,7 @@ export interface MessageActionsAPI {
   // The same actions rendered as ContextMenuItem[] for the right-click / tap
   // menu (#392). Derived from buildActions so the bar and the menu can't drift.
   buildItems(message: MessageLike | null | undefined, ctx: MessageContext): ContextMenuItem[];
+  buildMoreItems(message: MessageLike | null | undefined, ctx: MessageContext): ContextMenuItem[];
   // Open the shared context menu at a viewport point for this message.
   openMenu(
     message: MessageLike | null | undefined,
@@ -213,11 +220,102 @@ export function useMessageActions(): MessageActionsAPI {
     ctx: MessageContext,
   ): ContextMenuItem[] {
     if (!message) return [];
-    return buildActions(message).map((a) => ({
+    const items: ContextMenuItem[] = buildActions(message).map((a) => ({
       label: a.label,
       icon: a.icon,
       onClick: () => run(a.key, message, ctx),
     }));
+    const more = buildMoreItems(message, ctx);
+    if (more.length) {
+      items.push(
+        { divider: true },
+        { label: 'More actions', icon: 'fa-solid fa-ellipsis', children: more },
+      );
+    }
+    return items;
+  }
+
+  function buildMoreItems(
+    message: MessageLike | null | undefined,
+    ctx: MessageContext,
+  ): ContextMenuItem[] {
+    if (!message) return [];
+    const networkId = message.networkId ?? message.network_id;
+    const features = networkId == null ? null : networks.states[networkId]?.negotiatedFeatures;
+    const items: ContextMenuItem[] = [];
+
+    if (message.msgid && features?.reactions && features.messageTags && ctx.onReact) {
+      const choices = [
+        '😀',
+        '😂',
+        '😍',
+        '😮',
+        '😢',
+        '😡',
+        '👍',
+        '👎',
+        '❤️',
+        '🎉',
+        '🚀',
+        '👀',
+        '🙏',
+        '🔥',
+        '💯',
+        '✅',
+        '❌',
+        '🤝',
+      ];
+      items.push({
+        label: 'React',
+        icon: 'fa-regular fa-face-smile',
+        children: [
+          ...choices.map((reaction) => ({
+            label: reaction,
+            onClick: () => ctx.onReact?.(message, reaction),
+          })),
+          { divider: true },
+          { label: 'Custom reaction…', onClick: () => ctx.onCustomReact?.(message) },
+        ],
+      });
+      const actor = networkId == null ? '' : networks.states[networkId]?.nick || '';
+      const own = [
+        ...new Set(
+          (message.reactions || [])
+            .filter((reaction) => reaction.actor === actor)
+            .map((reaction) => reaction.reaction),
+        ),
+      ];
+      items.push({
+        label: 'Unreact',
+        icon: 'fa-regular fa-face-frown',
+        disabled: own.length === 0,
+        children: own.length
+          ? own.map((reaction) => ({
+              label: reaction,
+              onClick: () => ctx.onUnreact?.(message, reaction),
+            }))
+          : [{ label: 'No reactions to remove', disabled: true }],
+      });
+    }
+
+    const hasEdit = !!message.self && !!message.text && !!ctx.onEdit;
+    const hasRedact = !!message.self && !!message.msgid && !!features?.redaction && !!ctx.onRedact;
+    if (items.length && (hasEdit || hasRedact)) items.push({ divider: true });
+    if (hasEdit) {
+      items.push({
+        label: 'Edit & resend',
+        icon: 'fa-solid fa-pen',
+        onClick: () => ctx.onEdit?.(message),
+      });
+    }
+    if (hasRedact) {
+      items.push({
+        label: 'Redact message',
+        icon: 'fa-solid fa-eraser',
+        onClick: () => ctx.onRedact?.(message),
+      });
+    }
+    return items;
   }
 
   function openMenu(
@@ -233,5 +331,5 @@ export function useMessageActions(): MessageActionsAPI {
     menu.open(items, x, y, triggerEl);
   }
 
-  return { buildActions, run, buildItems, openMenu };
+  return { buildActions, run, buildItems, buildMoreItems, openMenu };
 }

@@ -9,7 +9,7 @@ import { reactive } from 'vue';
 // <ContextMenu /> at the app root (App.vue) — it reads from this state.
 //
 // Items shape:
-//   { label, onClick, icon?, disabled?, divider? }
+//   { label, onClick, icon?, disabled?, divider?, children? }
 // `icon` is a Font Awesome class string (e.g. 'fa-solid fa-thumbtack'); the
 // menu renders it as `<i class="…">`. A `divider: true` item is rendered as a
 // separator line; other fields ignored.
@@ -23,6 +23,8 @@ export interface ContextMenuItem {
   // A non-interactive small-caps group label (e.g. "Notifications" above a radio
   // group). Rendered as a muted heading row; other fields ignored.
   heading?: string;
+  /** Nested items rendered as a fly-out submenu. */
+  children?: ContextMenuItem[];
 }
 
 export interface ContextMenuState {
