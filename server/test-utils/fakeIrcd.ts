@@ -73,6 +73,9 @@ export class FakeIrcd extends EventEmitter {
   readonly clients: FakeClient[] = [];
   readonly registrations: Array<{ nick: string; at: number }> = [];
   readonly topics = new Map<string, string>();
+  // Test hook: return true to swallow a client command — no reply of any kind —
+  // for a test of what the client does when a reply never comes.
+  hold: ((cmd: string, params: string[], c: FakeClient) => boolean) | null = null;
   private msgidCounter = 0;
   private server!: net.Server;
   port = 0;
@@ -257,8 +260,14 @@ export class FakeIrcd extends EventEmitter {
     return this.clients.filter((c) => c.channels.has(lower) && !c.socket.destroyed);
   }
 
+  // Every line this server actually writes is also emitted as 'sent' (line,
+  // client), so a test can log both directions of a conversation in causal
+  // order. Only on a real write — a line dropped to a destroyed socket never
+  // went on the wire and must not show up in a wire log.
   private raw(c: FakeClient, line: string): void {
-    if (!c.socket.destroyed) c.socket.write(line + '\r\n');
+    if (c.socket.destroyed) return;
+    c.socket.write(line + '\r\n');
+    this.emit('sent', line, c);
   }
 
   private num(c: FakeClient, code: string, ...params: string[]): void {
@@ -286,6 +295,7 @@ export class FakeIrcd extends EventEmitter {
     if (!msg) return;
     const cmd = String(msg.command || '').toUpperCase();
     const p = msg.params;
+    if (this.hold?.(cmd, p, c)) return;
     switch (cmd) {
       case 'CAP':
         return this.onCap(c, p);
