@@ -221,6 +221,7 @@ describe('useMessageActions', () => {
       const more = useMessageActions().buildMoreItems(message, ctx);
       const react = more.find((item) => item.label === 'React');
       const unreact = more.find((item) => item.label === 'Unreact');
+      expect(react?.layout).toBe('grid');
       expect(react?.children?.map((item) => item.label)).toContain('Custom reaction…');
       expect(unreact?.children?.map((item) => item.label)).toEqual(['🔥']);
       expect(more.map((item) => item.label)).toContain('Edit');
@@ -243,7 +244,9 @@ describe('useMessageActions', () => {
         ctx,
       );
       expect(items.find((item) => item.label === 'More actions')).toBeUndefined();
-      expect(items.find((item) => item.label === 'React')?.children?.length).toBeGreaterThan(20);
+      const react = items.find((item) => item.label === 'React');
+      expect(react?.layout).toBe('grid');
+      expect(react?.children?.length).toBeGreaterThan(20);
     });
 
     it('does not offer edit or redact for another user', () => {

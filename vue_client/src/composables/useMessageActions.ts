@@ -307,6 +307,7 @@ export function useMessageActions(): MessageActionsAPI {
         return {
           label: a.label,
           icon: a.icon,
+          ...(a.key === 'react' ? { layout: 'grid' as const } : {}),
           children: children.length
             ? children
             : [{ label: 'No reactions to remove', disabled: true }],
@@ -334,6 +335,7 @@ export function useMessageActions(): MessageActionsAPI {
       items.push({
         label: 'React',
         icon: 'fa-regular fa-face-smile',
+        layout: 'grid',
         children: buildReactionItems(message, ctx),
       });
       const own = buildUnreactionItems(message, ctx);

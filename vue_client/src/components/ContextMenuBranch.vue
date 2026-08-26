@@ -22,7 +22,12 @@
         <span class="label">{{ item.label }}</span>
         <i class="arrow fa-solid fa-chevron-right" aria-hidden="true"></i>
       </button>
-      <div v-if="openIndex === i" class="submenu" role="menu">
+      <div
+        v-if="openIndex === i"
+        class="submenu"
+        :class="{ grid: item.layout === 'grid' }"
+        role="menu"
+      >
         <ContextMenuBranch :items="item.children" @select="emit('select', $event)" />
       </div>
     </div>
@@ -76,6 +81,34 @@ function toggleBranch(index: number): void {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-popover);
+}
+.submenu.grid {
+  display: grid;
+  grid-template-columns: repeat(6, 2.25rem);
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-2);
+}
+.submenu.grid :deep(.item) {
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+}
+.submenu.grid :deep(.item .icon),
+.submenu.grid :deep(.item .arrow) {
+  display: none;
+}
+.submenu.grid :deep(.divider) {
+  grid-column: 1 / -1;
+  width: auto;
+}
+.submenu.grid :deep(.divider) + .item {
+  grid-column: 1 / -1;
+  justify-content: flex-start;
+  width: auto;
+  height: auto;
+  padding: var(--space-3) var(--space-4);
 }
 .item {
   display: flex;

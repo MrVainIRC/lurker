@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { describe, it, expect } from 'vitest';
+import { createPinia, setActivePinia } from 'pinia';
 
-import { canDisconnect } from './networks.js';
+import { canDisconnect, useNetworksStore } from './networks.js';
 
 // The predicate behind every "Disconnect ⟷ Reconnect" control (the network context
 // menu and both chat views' server-buffer headers). It is one function precisely so
@@ -40,5 +41,25 @@ describe('canDisconnect — which action a network state needs', () => {
     expect(canDisconnect(undefined)).toBe(false);
     expect(canDisconnect(null)).toBe(false);
     expect(canDisconnect('')).toBe(false);
+  });
+});
+
+describe('IRC metadata targets', () => {
+  it('keeps DM metadata under the visible nick', () => {
+    setActivePinia(createPinia());
+    const networks = useNetworksStore();
+    networks.applyMetadata({
+      networkId: 1,
+      target: '@ident@example.test',
+      metadataTarget: 'Alice',
+      key: 'avatar',
+      value: 'https://cdn.example.test/alice.png',
+      visibility: '*',
+    });
+
+    expect(networks.states[1]?.metadata?.Alice).toEqual([
+      { key: 'avatar', value: 'https://cdn.example.test/alice.png', visibility: '*' },
+    ]);
+    expect(networks.states[1]?.metadata?.['@ident@example.test']).toBeUndefined();
   });
 });

@@ -24,6 +24,14 @@ describe('useContextMenu toggle', () => {
     expect(menu.state.triggerEl).toBe(triggerA);
   });
 
+  it('tracks a grid layout for direct emoji pickers', () => {
+    const menu = useContextMenu();
+    menu.open(items, 10, 20, null, 'grid');
+    expect(menu.state.layout).toBe('grid');
+    menu.close();
+    expect(menu.state.layout).toBeNull();
+  });
+
   it('re-opening from the SAME trigger toggles it closed', () => {
     const menu = useContextMenu();
     menu.open(items, 10, 20, triggerA);

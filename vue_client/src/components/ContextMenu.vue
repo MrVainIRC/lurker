@@ -9,6 +9,7 @@
       v-if="state.open"
       ref="menuEl"
       class="context-menu"
+      :class="{ grid: state.layout === 'grid' }"
       :style="positionStyle"
       role="menu"
       @click.stop
@@ -159,6 +160,34 @@ onBeforeUnmount(() => {
   padding: var(--space-2) var(--space-1);
   color: var(--fg);
   user-select: none;
+}
+.context-menu.grid {
+  display: grid;
+  grid-template-columns: repeat(6, 2.25rem);
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-2);
+}
+.context-menu.grid :deep(.item) {
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+}
+.context-menu.grid :deep(.item .icon),
+.context-menu.grid :deep(.item .arrow) {
+  display: none;
+}
+.context-menu.grid :deep(.divider) {
+  grid-column: 1 / -1;
+  width: auto;
+}
+.context-menu.grid :deep(.divider) + .item {
+  grid-column: 1 / -1;
+  justify-content: flex-start;
+  width: auto;
+  height: auto;
+  padding: var(--space-3) var(--space-4);
 }
 .item {
   display: flex;

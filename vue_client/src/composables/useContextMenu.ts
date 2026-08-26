@@ -9,7 +9,7 @@ import { reactive } from 'vue';
 // <ContextMenu /> at the app root (App.vue) — it reads from this state.
 //
 // Items shape:
-//   { label, onClick, icon?, disabled?, divider?, children? }
+//   { label, onClick, icon?, disabled?, divider?, layout?, children? }
 // `icon` is a Font Awesome class string (e.g. 'fa-solid fa-thumbtack'); the
 // menu renders it as `<i class="…">`. A `divider: true` item is rendered as a
 // separator line; other fields ignored.
@@ -23,15 +23,20 @@ export interface ContextMenuItem {
   // A non-interactive small-caps group label (e.g. "Notifications" above a radio
   // group). Rendered as a muted heading row; other fields ignored.
   heading?: string;
+  /** Optional layout hint for a nested submenu, such as an emoji grid. */
+  layout?: 'grid';
   /** Nested items rendered as a fly-out submenu. */
   children?: ContextMenuItem[];
 }
+
+export type ContextMenuLayout = 'grid';
 
 export interface ContextMenuState {
   open: boolean;
   x: number;
   y: number;
   items: ContextMenuItem[];
+  layout: ContextMenuLayout | null;
   // The element that opened the menu, if any. Used by ContextMenu's
   // click-outside listener to recognize a re-click on the same trigger and
   // swallow it — without this, the listener closes the menu but the trigger's
@@ -42,7 +47,13 @@ export interface ContextMenuState {
 
 export interface ContextMenuAPI {
   state: ContextMenuState;
-  open(items: ContextMenuItem[], x: number, y: number, triggerEl?: Element | null): void;
+  open(
+    items: ContextMenuItem[],
+    x: number,
+    y: number,
+    triggerEl?: Element | null,
+    layout?: ContextMenuLayout | null,
+  ): void;
   close(): void;
 }
 
@@ -51,19 +62,27 @@ const state = reactive<ContextMenuState>({
   x: 0,
   y: 0,
   items: [],
+  layout: null,
   triggerEl: null,
 });
 
 function closeMenu(): void {
   state.open = false;
   state.items = [];
+  state.layout = null;
   state.triggerEl = null;
 }
 
 export function useContextMenu(): ContextMenuAPI {
   return {
     state,
-    open(items: ContextMenuItem[], x: number, y: number, triggerEl: Element | null = null): void {
+    open(
+      items: ContextMenuItem[],
+      x: number,
+      y: number,
+      triggerEl: Element | null = null,
+      layout: ContextMenuLayout | null = null,
+    ): void {
       // Toggle: re-invoking open() from the same trigger while its menu is up
       // closes it. The toggle MUST live here, not in the close-on-outside
       // listener (ContextMenu.vue) — a pointerdown there can't cancel the click
@@ -78,6 +97,7 @@ export function useContextMenu(): ContextMenuAPI {
       state.items = items;
       state.x = x;
       state.y = y;
+      state.layout = layout;
       state.triggerEl = triggerEl;
       state.open = true;
     },

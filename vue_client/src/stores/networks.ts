@@ -256,7 +256,15 @@ export const useNetworksStore = defineStore('networks', {
     applyMetadata(event: any) {
       const id = Number(event.networkId);
       const current = this.states[id] || { networkId: id, channels: [] };
-      const target = typeof event.target === 'string' ? event.target : '';
+      // Keep metadata keyed by the IRC target named by METADATA, not the
+      // canonical DM routing target used for delivery. A DM buffer may use an
+      // @ident@host key while the metadata belongs to the visible nick.
+      const target =
+        typeof event.metadataTarget === 'string'
+          ? event.metadataTarget
+          : typeof event.target === 'string'
+            ? event.target
+            : '';
       if (!target || typeof event.key !== 'string') return;
       const metadata = { ...current.metadata };
       const entries = [...(metadata[target] || [])];

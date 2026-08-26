@@ -4,33 +4,32 @@
 -->
 
 <template>
-  <div v-if="message.redacted" class="message-redacted">
-    [message redacted]<span v-if="message.redactionReason"> — {{ message.redactionReason }}</span>
-  </div>
-  <button
-    v-if="message.replyTo"
-    type="button"
-    class="reply-reference"
-    :title="parent ? 'Jump to original message' : 'Original message unavailable'"
-    @click.stop="jumpToParent"
-  >
-    ↳ <strong>{{ parent?.nick || 'Original message' }}</strong
-    ><template v-if="parent">: {{ preview(parent.text) }}</template
-    ><template v-else> — original message unavailable</template>
-  </button>
-  <div v-if="reactions.length && canReact" class="reactions" aria-label="Reactions">
+  <span class="message-annotations">
     <button
-      v-for="entry in reactions"
-      :key="entry.reaction"
+      v-if="message.replyTo"
       type="button"
-      class="reaction"
-      :class="{ mine: entry.actors.includes(selfActor) }"
-      :title="entry.actors.join(', ')"
-      @click.stop="toggle(entry.reaction, entry.actors.includes(selfActor))"
+      class="reply-reference"
+      :title="parent ? 'Jump to original message' : 'Original message unavailable'"
+      @click.stop="jumpToParent"
     >
-      {{ entry.reaction }} {{ entry.actors.length }}
+      ↳ <strong>{{ parent?.nick || 'Original message' }}</strong
+      ><template v-if="parent">: {{ preview(parent.text) }}</template
+      ><template v-else> — original message unavailable</template>
     </button>
-  </div>
+    <span v-if="reactions.length && canReact" class="reactions" aria-label="Reactions">
+      <button
+        v-for="entry in reactions"
+        :key="entry.reaction"
+        type="button"
+        class="reaction"
+        :class="{ mine: entry.actors.includes(selfActor) }"
+        :title="entry.actors.join(', ')"
+        @click.stop="toggle(entry.reaction, entry.actors.includes(selfActor))"
+      >
+        {{ entry.reaction }} {{ entry.actors.length }}
+      </button>
+    </span>
+  </span>
 </template>
 
 <script setup lang="ts">
@@ -102,6 +101,9 @@ function jumpToParent(): void {
 </script>
 
 <style scoped>
+.message-annotations {
+  display: block;
+}
 .reply-reference,
 .reaction {
   font: inherit;
@@ -121,10 +123,6 @@ function jumpToParent(): void {
 }
 .reply-reference:hover {
   color: var(--fg);
-}
-.message-redacted {
-  color: var(--fg-muted);
-  font-style: italic;
 }
 .reactions {
   display: flex;

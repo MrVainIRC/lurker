@@ -13,6 +13,14 @@
         @click="onRowClick($event, m)"
         @contextmenu.prevent="onRowContextMenu($event, m)"
       >
+        <img
+          v-if="avatarOf(m)"
+          class="avatar"
+          :src="avatarOf(m) ?? undefined"
+          alt=""
+          loading="lazy"
+          @error="onAvatarError"
+        />
         <span class="prefix">{{ prefixOf(m) }}</span>
         <span class="nick" :style="nickStyle(m)" :title="nickOf(m)">{{ nickOf(m) }}</span>
         <span v-if="m.bot" class="bot-badge" title="Bot">bot</span>
@@ -101,6 +109,26 @@ function nickStyle(m: BufferMember): { color: string } | null {
 
 function nickOf(m: BufferMember): string {
   return m.nick;
+}
+
+function avatarOf(m: BufferMember): string | null {
+  const networkId = buffer.value?.networkId;
+  if (networkId == null) return null;
+  const rows = networks.states[networkId]?.metadata || {};
+  const target = Object.keys(rows).find((key) => key.toLowerCase() === m.nick.toLowerCase());
+  const value = target ? rows[target].find((entry) => entry.key === 'avatar')?.value : '';
+  if (!value) return null;
+  try {
+    const url = new URL(value.replace(/\{size\}/g, '64'));
+    return url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function onAvatarError(event: Event): void {
+  const image = event.currentTarget;
+  if (image instanceof HTMLImageElement) image.hidden = true;
 }
 function userOf(m: BufferMember): string | null {
   return m.user ?? null;
@@ -209,6 +237,15 @@ li {
   user-select: none;
   cursor: pointer;
   position: relative;
+}
+.avatar {
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: 0 0 1.5rem;
+  align-self: center;
+  object-fit: cover;
+  background: var(--bg-soft);
+  border-radius: 50%;
 }
 li:hover {
   background: var(--bg-soft);

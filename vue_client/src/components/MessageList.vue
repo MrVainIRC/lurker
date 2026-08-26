@@ -141,14 +141,13 @@
               :network-id="buffer?.networkId ?? null"
               interactive-nicks
               @nick-click="onMentionMenu"
+            /><MessageAnnotations
+              v-if="row.m && buffer?.networkId != null"
+              :message="row.m"
+              :network-id="buffer.networkId"
+              :target="buffer.target"
             />
           </span>
-          <MessageAnnotations
-            v-if="row.m && buffer?.networkId != null"
-            :message="row.m"
-            :network-id="buffer.networkId"
-            :target="buffer.target"
-          />
           <span class="time">{{ row.continuationTime ? '' : time(row.m?.time) }}</span>
         </template>
         <template v-else>
@@ -312,13 +311,13 @@
                  every event row from an edit site giving no hint the two were connected.
                  They now render inside MessageBody, which IS the chain's first branch, so the
                  hazard is gone rather than avoided. -->
+            ><MessageAnnotations
+              v-if="row.m && buffer?.networkId != null"
+              :message="row.m"
+              :network-id="buffer.networkId"
+              :target="buffer.target"
+            />
           </span>
-          <MessageAnnotations
-            v-if="row.m && buffer?.networkId != null"
-            :message="row.m"
-            :network-id="buffer.networkId"
-            :target="buffer.target"
-          />
         </template>
         <div
           v-if="hoverActions && eligibleForActions(row.m)"
@@ -832,7 +831,7 @@ function openReactionMenu(
   const x = e?.clientX ?? contextMenu.state.x;
   const y = e?.clientY ?? contextMenu.state.y;
   const trigger = (e?.currentTarget as Element | null) ?? contextMenu.state.triggerEl;
-  contextMenu.open(items, x, y, trigger);
+  contextMenu.open(items, x, y, trigger, unreact ? null : 'grid');
 }
 
 function runAction(key: MessageActionKey, m: ChatMessage | undefined | null, e: MouseEvent): void {
