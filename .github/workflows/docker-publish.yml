@@ -40,7 +40,12 @@ jobs:
         with:
           # The engine step diffs against the previous release tag; a plain
           # push build needs no history.
-          fetch-depth: ${{ github.event_name == 'release' && 0 || 1 }}
+          #
+          # The values are QUOTED on purpose. `cond && 0 || 1` always evaluates
+          # to 1 in a GitHub Actions expression, because 0 is falsy and the
+          # `|| 1` branch wins — which would silently make every release a
+          # shallow checkout, and every release move the engine tag.
+          fetch-depth: ${{ github.event_name == 'release' && '0' || '1' }}
 
       # The IRC engine (server/engine.ts) ships in this same image under its
       # own tag lineage, `engine-<protocol major>`, that moves ONLY when a
@@ -66,6 +71,14 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           changed=false
           if [ "${{ github.event_name }}" = "release" ]; then
+            # Without history there is nothing to diff, and the fallback below
+            # is "publish" — so a shallow checkout here would quietly move the
+            # engine tag on every release, which is the one thing this step
+            # exists to prevent. Fail loudly instead.
+            if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+              echo "shallow clone: cannot decide the engine tag (fetch-depth must be 0 on releases)" >&2
+              exit 1
+            fi
             prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
             if [ -z "$prev" ]; then
               changed=true

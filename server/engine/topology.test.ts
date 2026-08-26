@@ -31,4 +31,24 @@ describe('engine topology artefacts', () => {
     // And it never trips on the version bump every release makes.
     expect(wf).not.toMatch(/git diff --quiet[^\n]*package\.json/);
   });
+
+  // `${{ cond && 0 || 1 }}` always evaluates to 1 in a GitHub Actions
+  // expression: 0 is falsy, so the `|| 1` branch wins. In the checkout step
+  // that silently turns every release into a shallow clone, `git describe`
+  // finds no previous tag, the step falls back to "the engine changed", and
+  // `engine-<major>` moves on EVERY release — recreating the engine container,
+  // and dropping the IRC connections the whole overlay exists to keep. It
+  // fails in the direction that looks like success, and nothing but a
+  // self-hoster noticing their connections drop would report it.
+  it('the publish workflow cannot land a falsy value in a GitHub Actions ternary', () => {
+    const wf = fs.readFileSync(path.join(root, '.github/workflows/docker-publish.yml'), 'utf8');
+    const ternaries = [...wf.matchAll(/\$\{\{[^}]*?&&([^}]*?)\|\|[^}]*?\}\}/g)];
+    expect(ternaries.length, 'expected at least the fetch-depth ternary').toBeGreaterThan(0);
+    for (const t of ternaries) {
+      expect(t[1].trim(), `falsy true-branch in ${t[0]}`).not.toMatch(/^(0|false|'')$/);
+    }
+    // The release path must also refuse to decide from a clone that cannot see
+    // history, rather than falling through to "publish".
+    expect(wf).toMatch(/is-shallow-repository/);
+  });
 });
