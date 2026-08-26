@@ -163,10 +163,29 @@ const MAX_CONSECUTIVE_SASL_FAILURES = 3;
 // short window after the restore — see RESTORE_QUIET_MS.
 const RESTORE_QUIET_NUMERICS = new Set(['221', '324', '329', '331', '332', '333']);
 const RESTORE_QUIET_MS = 10_000;
-// The per-channel state requests after a restore go out paced, not as one
-// burst: three lines per channel for forty channels in one tick is exactly
-// the flood the JOIN coalescing elsewhere exists to avoid.
-const RESTORE_REQUEST_INTERVAL_MS = 400;
+// The per-channel state requests after a restore go out one channel at a time,
+// and the next channel waits for this one's replies (drainRestoreQueue). This
+// deadline is the fallback for a reply that never comes — a server that skips
+// a numeric, or a channel the engine still counts us in and the server does
+// not — so one silent channel costs one wait, not the whole restore.
+// Overridable so a test of the fallback does not have to sit through it.
+const RESTORE_STEP_DEADLINE_MS = 10_000;
+function restoreStepDeadlineMs(): number {
+  const n = Number(process.env.LURKER_RESTORE_STEP_DEADLINE_MS);
+  return Number.isFinite(n) && n > 0 ? n : RESTORE_STEP_DEADLINE_MS;
+}
+// The terminal reply of each request a restore step makes, and the errors
+// that say no reply is coming for the channel at all.
+type RestoreReply = 'names' | 'topic' | 'mode' | 'who';
+const RESTORE_REPLY_OF: Record<string, RestoreReply | 'all'> = {
+  '366': 'names', // RPL_ENDOFNAMES
+  '331': 'topic', // RPL_NOTOPIC
+  '332': 'topic', // RPL_TOPIC
+  '324': 'mode', // RPL_CHANNELMODEIS
+  '315': 'who', // RPL_ENDOFWHO — the WHO the NAMES reply triggers (see 'userlist')
+  '403': 'all', // ERR_NOSUCHCHANNEL
+  '442': 'all', // ERR_NOTONCHANNEL
+};
 // How long a link-loss re-attach waits for the engine to say what it holds
 // before treating the session as gone and taking the ordinary reconnect ladder.
 const ENGINE_REATTACH_WAIT_MS = 10_000;
@@ -694,6 +713,9 @@ export class IrcConnection {
   private restoredCallbacks: Array<() => void>;
   private restoreQueue: string[];
   private restoreTimer: ReturnType<typeof setTimeout> | null;
+  // The restore step in flight: the folded channel and which of its replies
+  // are still owed. Null between steps and outside a restore.
+  private restoreStep: { key: string; owed: Set<RestoreReply> } | null;
   private engineTransport: EngineTransport | null;
   private engineSocketAlive: boolean;
   // folded channel → the state replies still owed from the restore's own
@@ -809,6 +831,7 @@ export class IrcConnection {
     this.restoredCallbacks = [];
     this.restoreQueue = [];
     this.restoreTimer = null;
+    this.restoreStep = null;
     this.engineTransport = null;
     this.engineSocketAlive = false;
     this.restoreQuiet = new Map();
@@ -1124,6 +1147,10 @@ export class IrcConnection {
           raw: { command: rawCommand, params: msg?.params ?? [] },
         });
       }
+      // A reply to the restore step in flight is what releases the next
+      // channel's requests. Before the denylist: 366 and 315 are exactly the
+      // kind of line the server buffer never shows.
+      if (this.restoreStep) this.noteRestoreReply(rawCommand, msg?.params?.[1]);
       if (isServerBufferDeniedNumeric(rawCommand)) return;
       if (
         RESTORE_QUIET_NUMERICS.has(rawCommand) &&
@@ -3996,8 +4023,9 @@ export class IrcConnection {
         this.restoring = false;
         // A synthesised JOIN gets none of what a real one is volunteered — no
         // 353/366, no 332, and the join handler's MODE is skipped on a restore —
-        // so ask, one channel at a time (RESTORE_REQUEST_INTERVAL_MS), keeping
-        // each channel's replies out of the server buffer until they arrive.
+        // so ask, one channel at a time, each waiting for the last one's
+        // replies (drainRestoreQueue), keeping each channel's replies out of
+        // the server buffer until they arrive.
         // Our umodes were set after the burst ended (the post-MOTD `MODE nick
         // +i`), so they are not in the replay either.
         this.restoreQuiet.set('*', {
@@ -4061,27 +4089,62 @@ export class IrcConnection {
       this.restoreTimer = null;
     }
     this.restoreQuiet.clear();
+    this.restoreStep = null;
   }
 
+  // One channel in flight. The next channel's three requests go out when this
+  // one's replies are all in — NAMES → 366, TOPIC → 331/332, MODE → 324, and
+  // the WHO the NAMES reply triggers ('userlist') → 315 — or when the step
+  // deadline passes. Closed-loop rather than a fixed interval because the
+  // interval was a guess at one ircd's flood budget, and wrong: solanum
+  // (Libera) lets a registered client past its grace period send 5 lines and
+  // then 2 per second, and kills at 20 unprocessed — so 4 lines per channel
+  // every 400 ms was "Excess Flood" by the seventh channel on every restart.
+  // Gated on replies, the server's queue never holds more than these four
+  // lines of ours, on any ircd, and a server that throttles simply sets the
+  // pace. (irc-framework already serialises WHO behind its 315, so one channel
+  // at a time is also the only order the WHOs could go out in.)
   private drainRestoreQueue(): void {
-    const name = this.restoreQueue.shift();
-    if (name === undefined) return;
-    // Still in it? (A backlog KICK may have arrived in between.)
-    if (this.channels.has(name.toLowerCase())) {
-      this.restoreQuiet.set(name.toLowerCase(), {
-        until: Date.now() + RESTORE_QUIET_MS,
-        mode: true,
-        topic: true,
-      });
-      this.rawQuiet('NAMES', name);
-      this.rawQuiet('TOPIC', name);
-      this.rawQuiet('MODE', name);
+    if (this.restoreTimer) {
+      clearTimeout(this.restoreTimer);
+      this.restoreTimer = null;
     }
-    if (this.restoreQueue.length === 0) return;
+    this.restoreStep = null;
+    // Skip what we are no longer in (a backlog KICK may have arrived in between).
+    let name = this.restoreQueue.shift();
+    while (name !== undefined && !this.channels.has(name.toLowerCase())) {
+      name = this.restoreQueue.shift();
+    }
+    if (name === undefined) return;
+    const key = name.toLowerCase();
+    this.restoreQuiet.set(key, {
+      until: Date.now() + RESTORE_QUIET_MS,
+      mode: true,
+      topic: true,
+    });
+    this.restoreStep = { key, owed: new Set(['names', 'topic', 'mode', 'who']) };
+    this.rawQuiet('NAMES', name);
+    this.rawQuiet('TOPIC', name);
+    this.rawQuiet('MODE', name);
     this.restoreTimer = setTimeout(() => {
       this.restoreTimer = null;
       if (!this.disposed && this.state === 'connected') this.drainRestoreQueue();
-    }, RESTORE_REQUEST_INTERVAL_MS);
+    }, restoreStepDeadlineMs());
+  }
+
+  // A server line naming the in-flight step's channel: retire the reply it is,
+  // and when nothing is owed, move on. 403/442 mean the channel will answer
+  // nothing at all.
+  private noteRestoreReply(numeric: string, channel: unknown): void {
+    const step = this.restoreStep;
+    if (!step || typeof channel !== 'string' || channel.toLowerCase() !== step.key) return;
+    const reply = RESTORE_REPLY_OF[numeric];
+    if (!reply) return;
+    if (reply === 'all') step.owed.clear();
+    else step.owed.delete(reply);
+    if (step.owed.size === 0 && !this.disposed && this.state === 'connected') {
+      this.drainRestoreQueue();
+    }
   }
 
   private rawQuiet(command: string, arg: string): void {

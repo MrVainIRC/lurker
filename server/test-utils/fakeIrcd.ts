@@ -73,6 +73,9 @@ export class FakeIrcd extends EventEmitter {
   readonly clients: FakeClient[] = [];
   readonly registrations: Array<{ nick: string; at: number }> = [];
   readonly topics = new Map<string, string>();
+  // Test hook: return true to swallow a client command — no reply of any kind —
+  // so a test can hold a specific reply back and release it with answer().
+  hold: ((cmd: string, params: string[], c: FakeClient) => boolean) | null = null;
   private msgidCounter = 0;
   private server!: net.Server;
   port = 0;
@@ -271,6 +274,12 @@ export class FakeIrcd extends EventEmitter {
     );
   }
 
+  // Send a numeric to a client by nick — for a reply a test held back.
+  answer(nick: string, code: string, ...params: string[]): void {
+    const c = this.client(nick);
+    if (c) this.num(c, code, ...params);
+  }
+
   // Prefix a relayed line with tags the client negotiated.
   private tagged(c: FakeClient, line: string, msgid?: string): void {
     const tags: string[] = [];
@@ -286,6 +295,7 @@ export class FakeIrcd extends EventEmitter {
     if (!msg) return;
     const cmd = String(msg.command || '').toUpperCase();
     const p = msg.params;
+    if (this.hold?.(cmd, p, c)) return;
     switch (cmd) {
       case 'CAP':
         return this.onCap(c, p);
