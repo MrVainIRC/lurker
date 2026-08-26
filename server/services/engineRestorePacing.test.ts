@@ -3,9 +3,9 @@
 
 // The restore's per-channel state requests are paced by the server's replies,
 // not by a timer: one channel in flight, the next released by the previous
-// one's 366 / 331|332 / 324 / 315, with a deadline as the only fallback. Read
-// off the wire against the fake ircd — the same shape an ircd's flood control
-// judges (see drainRestoreQueue in ircConnection.ts).
+// one's 366 / 331|332 / 324, with a deadline as the only fallback. Read off the
+// wire against the fake ircd — the same shape an ircd's flood control judges
+// (see drainRestoreQueue in ircConnection.ts).
 
 // MUST be first: redirects DATABASE_PATH before anything opens the db.
 import '../test-utils/isolateDb.js';
@@ -22,9 +22,9 @@ import { EngineLink, engineConfigured } from './engineLink.js';
 const SECRET = 'restore-pacing-secret';
 const CHANNELS = ['#p1', '#p2', '#p3', '#p4', '#p5', '#p6'];
 // This channel's TOPIC is never answered: its step can only end by the deadline.
-// (TOPIC, not WHO: irc-framework serialises WHO requests behind their 315, so a
-// WHO held back would also wedge every later channel's auto-WHO — a test of the
-// framework's queue, not of the pacing.)
+// (TOPIC rather than WHO: the WHO is not part of the gate, and irc-framework
+// serialises WHO requests behind their 315, so a WHO held back would also wedge
+// every later channel's auto-WHO — the framework's queue, not the pacing.)
 const HELD = '#p3';
 const DEADLINE_MS = 1500;
 
@@ -33,8 +33,12 @@ let engine: EngineServer;
 let network: Network;
 let userId: number;
 
-// Every line on the wire, in the order it happened: '>' client → server (the
-// fake ircd's 'line' event), '<' server → client (the Client's 'raw').
+// Every line on the wire, in causal order: '>' is stamped as the Client writes
+// it — the same synchronous chain that arms the step deadline, so the timing
+// assertions read one clock — and '<' as the fake ircd sends it, which is
+// before the relay hop, so a reply is always logged ahead of the request it
+// releases. (Recording both at the Client would log them the other way round:
+// Lurker's own 'raw' handler runs first and writes the next request inside it.)
 interface Wire {
   t: number;
   dir: '>' | '<';
@@ -62,7 +66,6 @@ function until(pred: () => boolean, ms = 5000, what = 'condition'): Promise<void
 
 beforeAll(async () => {
   ircd = await FakeIrcd.start();
-  ircd.on('line', (line: string) => wire.push({ t: Date.now(), dir: '>', line }));
   engine = new EngineServer({
     secret: SECRET,
     bufferBytes: 64 * 1024,
@@ -110,30 +113,45 @@ describe('engine restore pacing', () => {
     const conn = new IrcConnection({ network, onEvent: () => {} });
     conn.connect();
     await until(() => conn.state === 'connected', 5000, 'connected');
+    // Let the first session's join-time WHOs finish before it lets go: a WHO
+    // still in flight at detach has its 315 land in the engine's backlog and
+    // replay to the next session, where it would pass for that session's own.
+    const whoAnswered = new Set<string>();
+    conn.client.on('raw', (ev: { line: string; from_server: boolean }) => {
+      const m = ev.from_server ? /^\S+ 315 \S+ (#p\d)\b/.exec(ev.line) : null;
+      if (m) whoAnswered.add(m[1]);
+    });
     for (const ch of CHANNELS) conn.join(ch);
     await until(() => CHANNELS.every((ch) => conn.isChannelJoined(ch)), 5000, 'joins');
+    await until(() => whoAnswered.size === CHANNELS.length, 5000, "first session's WHOs answered");
     conn.detach();
     await until(() => conn.state === 'disconnected', 5000, 'detached');
 
     ircd.hold = (cmd, p) => cmd === 'TOPIC' && (p[0] ?? '').toLowerCase() === HELD;
-    const restoreStart = wire.length;
     const conn2 = ircManager.startNetwork(userId, network.id)!;
+    ircd.on('sent', (line: string) => wire.push({ t: Date.now(), dir: '<', line }));
     conn2.client.on('raw', (ev: { line: string; from_server: boolean }) => {
-      if (ev.from_server) wire.push({ t: Date.now(), dir: '<', line: ev.line });
+      if (!ev.from_server) wire.push({ t: Date.now(), dir: '>', line: ev.line });
     });
     await until(() => conn2.state === 'connected', 5000, 'reattached');
+    // Done when the last channel's own WHO — the one this session sent — is
+    // answered.
     const last = CHANNELS[CHANNELS.length - 1];
     await until(
-      () => wire.slice(restoreStart).some((w) => w.dir === '<' && numericFor(w.line, '315', last)),
+      () => {
+        const who = wire.findIndex((w) => w.dir === '>' && w.line.startsWith(`WHO ${last}`));
+        return (
+          who >= 0 && wire.slice(who).some((w) => w.dir === '<' && numericFor(w.line, '315', last))
+        );
+      },
       DEADLINE_MS + 5000,
       "the last channel's WHO answered",
     );
 
-    const since = wire.slice(restoreStart);
-    const sentIdx = (line: string) => since.findIndex((w) => w.dir === '>' && w.line === line);
-    const sentAt = (line: string) => since[sentIdx(line)].t;
+    const sentIdx = (line: string) => wire.findIndex((w) => w.dir === '>' && w.line === line);
+    const sentAt = (line: string) => wire[sentIdx(line)].t;
     const gotIdx = (numeric: string, chan: string) =>
-      since.findIndex((w) => w.dir === '<' && numericFor(w.line, numeric, chan));
+      wire.findIndex((w) => w.dir === '<' && numericFor(w.line, numeric, chan));
 
     // Every channel was asked all four things.
     for (const ch of CHANNELS) {
@@ -141,18 +159,18 @@ describe('engine restore pacing', () => {
         expect(sentIdx(`${cmd} ${ch}`), `${cmd} ${ch}`).toBeGreaterThanOrEqual(0);
       }
       expect(
-        since.some((w) => w.dir === '>' && w.line.startsWith(`WHO ${ch}`)),
+        wire.some((w) => w.dir === '>' && w.line.startsWith(`WHO ${ch}`)),
         `WHO ${ch}`,
       ).toBe(true);
     }
 
     // The gate: a channel's first request goes out only after the previous
-    // channel's last reply came in — all four of them.
+    // channel's last gated reply came in — all three of them.
     for (let i = 1; i < CHANNELS.length; i++) {
       const prev = CHANNELS[i - 1];
       if (prev === HELD) continue;
       const next = sentIdx(`NAMES ${CHANNELS[i]}`);
-      for (const numeric of ['366', '324', '315']) {
+      for (const numeric of ['366', '324']) {
         const got = gotIdx(numeric, prev);
         expect(got, `${numeric} ${prev}`).toBeGreaterThanOrEqual(0);
         expect(got, `${numeric} ${prev} before NAMES ${CHANNELS[i]}`).toBeLessThan(next);
@@ -163,11 +181,12 @@ describe('engine restore pacing', () => {
     }
 
     // The fallback: the held channel's step ends at the deadline, not before —
-    // and the steps that were answered did not wait for it.
+    // and the steps that were answered did not wait for it. One clock on both
+    // sides, and a timer never fires early, so the lower bound is exact.
     const afterHeld = CHANNELS[CHANNELS.indexOf(HELD) + 1];
     expect(Math.max(gotIdx('331', HELD), gotIdx('332', HELD))).toBe(-1);
     const heldWait = sentAt(`NAMES ${afterHeld}`) - sentAt(`NAMES ${HELD}`);
-    expect(heldWait).toBeGreaterThanOrEqual(DEADLINE_MS - 50);
+    expect(heldWait).toBeGreaterThanOrEqual(DEADLINE_MS - 5);
     expect(heldWait).toBeLessThan(DEADLINE_MS + 1000);
     for (let i = 1; i < CHANNELS.length; i++) {
       if (CHANNELS[i - 1] === HELD) continue;
@@ -175,12 +194,14 @@ describe('engine restore pacing', () => {
       expect(gap, `gap before ${CHANNELS[i]}`).toBeLessThan(DEADLINE_MS / 2);
     }
 
-    // The invariant an ircd's flood control judges: never more than one
-    // channel's four requests unanswered at the server. (The held channel's
-    // TOPIC is unanswered by construction, so that channel is left out.)
+    // The invariant an ircd's flood control judges: never more than four of
+    // our restore lines unanswered at the server. Not implied by the gate
+    // above — the WHO is outside it, held to one in flight by irc-framework's
+    // own queue — so it is pinned here. (The held channel's TOPIC is unanswered
+    // by construction, so that channel is left out.)
     let outstanding = 0;
     let peak = 0;
-    for (const w of since) {
+    for (const w of wire) {
       const m = /^(?:\S+ (?:366|331|332|324|315) \S+ |(?:NAMES|TOPIC|MODE|WHO) )(#p\d)\b/.exec(
         w.line,
       );

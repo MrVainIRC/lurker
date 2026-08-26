@@ -168,23 +168,16 @@ const RESTORE_QUIET_MS = 10_000;
 // deadline is the fallback for a reply that never comes — a server that skips
 // a numeric, or a channel the engine still counts us in and the server does
 // not — so one silent channel costs one wait, not the whole restore.
-// Overridable so a test of the fallback does not have to sit through it.
+// LURKER_RESTORE_STEP_DEADLINE_MS overrides it, read per step, so a test of the
+// fallback does not have to sit through it.
 const RESTORE_STEP_DEADLINE_MS = 10_000;
-function restoreStepDeadlineMs(): number {
-  const n = Number(process.env.LURKER_RESTORE_STEP_DEADLINE_MS);
-  return Number.isFinite(n) && n > 0 ? n : RESTORE_STEP_DEADLINE_MS;
-}
-// The terminal reply of each request a restore step makes, and the errors
-// that say no reply is coming for the channel at all.
-type RestoreReply = 'names' | 'topic' | 'mode' | 'who';
-const RESTORE_REPLY_OF: Record<string, RestoreReply | 'all'> = {
+// The terminal reply of each request a restore step makes.
+type RestoreReply = 'names' | 'topic' | 'mode';
+const RESTORE_REPLY_OF: Record<string, RestoreReply> = {
   '366': 'names', // RPL_ENDOFNAMES
   '331': 'topic', // RPL_NOTOPIC
   '332': 'topic', // RPL_TOPIC
   '324': 'mode', // RPL_CHANNELMODEIS
-  '315': 'who', // RPL_ENDOFWHO — the WHO the NAMES reply triggers (see 'userlist')
-  '403': 'all', // ERR_NOSUCHCHANNEL
-  '442': 'all', // ERR_NOTONCHANNEL
 };
 // How long a link-loss re-attach waits for the engine to say what it holds
 // before treating the session as gone and taking the ordinary reconnect ladder.
@@ -1148,9 +1141,9 @@ export class IrcConnection {
         });
       }
       // A reply to the restore step in flight is what releases the next
-      // channel's requests. Before the denylist: 366 and 315 are exactly the
-      // kind of line the server buffer never shows.
-      if (this.restoreStep) this.noteRestoreReply(rawCommand, msg?.params?.[1]);
+      // channel's requests. Before the denylist: 366 is exactly the kind of
+      // line the server buffer never shows.
+      this.noteRestoreReply(rawCommand, msg?.params?.[1]);
       if (isServerBufferDeniedNumeric(rawCommand)) return;
       if (
         RESTORE_QUIET_NUMERICS.has(rawCommand) &&
@@ -4084,52 +4077,61 @@ export class IrcConnection {
     this.restoreUnattended = false;
     this.restoredCallbacks = [];
     this.restoreQueue = [];
+    this.endRestoreStep();
+    this.restoreQuiet.clear();
+  }
+
+  private endRestoreStep(): void {
     if (this.restoreTimer) {
       clearTimeout(this.restoreTimer);
       this.restoreTimer = null;
     }
-    this.restoreQuiet.clear();
     this.restoreStep = null;
   }
 
   // One channel in flight. The next channel's three requests go out when this
-  // one's replies are all in — NAMES → 366, TOPIC → 331/332, MODE → 324, and
-  // the WHO the NAMES reply triggers ('userlist') → 315 — or when the step
-  // deadline passes. Closed-loop rather than a fixed interval because the
-  // interval was a guess at one ircd's flood budget, and wrong: solanum
-  // (Libera) lets a registered client past its grace period send 5 lines and
-  // then 2 per second, and kills at 20 unprocessed — so 4 lines per channel
-  // every 400 ms was "Excess Flood" by the seventh channel on every restart.
-  // Gated on replies, the server's queue never holds more than these four
-  // lines of ours, on any ircd, and a server that throttles simply sets the
-  // pace. (irc-framework already serialises WHO behind its 315, so one channel
-  // at a time is also the only order the WHOs could go out in.)
+  // one's replies are all in — NAMES → 366, TOPIC → 331/332, MODE → 324 — or
+  // when the step deadline passes. Closed-loop rather than a fixed interval
+  // because the interval was a guess at one ircd's flood budget, and wrong:
+  // solanum (Libera) lets a registered client past its grace period send 5
+  // lines and then 2 per second, and kills at 20 unprocessed — so 4 lines per
+  // channel every 400 ms was "Excess Flood" by the seventh channel on every
+  // restart. Gated on replies, the server's queue never holds more than four
+  // lines of ours on any ircd — these three plus the WHO the NAMES reply
+  // triggers ('userlist'), which irc-framework already serialises behind its
+  // 315 (`who_queue`) — and a server that throttles simply sets the pace. The
+  // WHO is deliberately NOT part of the gate: irc-framework's queue never
+  // recovers from a 315 that does not come, and a step waiting on it would
+  // turn that one lost reply into a deadline wait for every channel after it.
   private drainRestoreQueue(): void {
-    if (this.restoreTimer) {
-      clearTimeout(this.restoreTimer);
-      this.restoreTimer = null;
-    }
-    this.restoreStep = null;
+    this.endRestoreStep();
     // Skip what we are no longer in (a backlog KICK may have arrived in between).
     let name = this.restoreQueue.shift();
     while (name !== undefined && !this.channels.has(name.toLowerCase())) {
       name = this.restoreQueue.shift();
     }
     if (name === undefined) return;
-    const key = name.toLowerCase();
-    this.restoreQuiet.set(key, {
+    this.restoreQuiet.set(name.toLowerCase(), {
       until: Date.now() + RESTORE_QUIET_MS,
       mode: true,
       topic: true,
     });
-    this.restoreStep = { key, owed: new Set(['names', 'topic', 'mode', 'who']) };
+    // Keyed by the network's own fold: the replies echo the channel as the
+    // server spells it, which on an rfc1459 network is not a toLowerCase away.
+    this.restoreStep = {
+      key: foldTargetFor(this.network.id, name),
+      owed: new Set(['names', 'topic', 'mode']),
+    };
     this.rawQuiet('NAMES', name);
     this.rawQuiet('TOPIC', name);
     this.rawQuiet('MODE', name);
-    this.restoreTimer = setTimeout(() => {
-      this.restoreTimer = null;
-      if (!this.disposed && this.state === 'connected') this.drainRestoreQueue();
-    }, restoreStepDeadlineMs());
+    this.restoreTimer = setTimeout(
+      () => {
+        this.restoreTimer = null;
+        if (!this.disposed && this.state === 'connected') this.drainRestoreQueue();
+      },
+      Math.max(1, reconnectEnvInt('LURKER_RESTORE_STEP_DEADLINE_MS', RESTORE_STEP_DEADLINE_MS)),
+    );
   }
 
   // A server line naming the in-flight step's channel: retire the reply it is,
@@ -4137,11 +4139,15 @@ export class IrcConnection {
   // nothing at all.
   private noteRestoreReply(numeric: string, channel: unknown): void {
     const step = this.restoreStep;
-    if (!step || typeof channel !== 'string' || channel.toLowerCase() !== step.key) return;
-    const reply = RESTORE_REPLY_OF[numeric];
-    if (!reply) return;
-    if (reply === 'all') step.owed.clear();
-    else step.owed.delete(reply);
+    if (!step || typeof channel !== 'string') return;
+    if (foldTargetFor(this.network.id, channel) !== step.key) return;
+    if (numeric === '403' || numeric === '442') {
+      step.owed.clear();
+    } else {
+      const reply = RESTORE_REPLY_OF[numeric];
+      if (!reply) return;
+      step.owed.delete(reply);
+    }
     if (step.owed.size === 0 && !this.disposed && this.state === 'connected') {
       this.drainRestoreQueue();
     }

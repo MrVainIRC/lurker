@@ -74,7 +74,7 @@ export class FakeIrcd extends EventEmitter {
   readonly registrations: Array<{ nick: string; at: number }> = [];
   readonly topics = new Map<string, string>();
   // Test hook: return true to swallow a client command — no reply of any kind —
-  // so a test can hold a specific reply back and release it with answer().
+  // for a test of what the client does when a reply never comes.
   hold: ((cmd: string, params: string[], c: FakeClient) => boolean) | null = null;
   private msgidCounter = 0;
   private server!: net.Server;
@@ -260,8 +260,11 @@ export class FakeIrcd extends EventEmitter {
     return this.clients.filter((c) => c.channels.has(lower) && !c.socket.destroyed);
   }
 
+  // Every line this server sends is also emitted as 'sent' (line, client), so a
+  // test can log both directions of a conversation in causal order.
   private raw(c: FakeClient, line: string): void {
     if (!c.socket.destroyed) c.socket.write(line + '\r\n');
+    this.emit('sent', line, c);
   }
 
   private num(c: FakeClient, code: string, ...params: string[]): void {
@@ -272,12 +275,6 @@ export class FakeIrcd extends EventEmitter {
       c,
       `:${this.serverName} ${code} ${nick}${head}${last !== undefined ? ' :' + last : ''}`,
     );
-  }
-
-  // Send a numeric to a client by nick — for a reply a test held back.
-  answer(nick: string, code: string, ...params: string[]): void {
-    const c = this.client(nick);
-    if (c) this.num(c, code, ...params);
   }
 
   // Prefix a relayed line with tags the client negotiated.
