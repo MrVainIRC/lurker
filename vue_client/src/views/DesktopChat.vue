@@ -110,6 +110,13 @@
         </button>
       </div>
       <div class="topic-meta">
+        <img
+          v-if="channelAvatar"
+          class="channel-avatar"
+          :src="channelAvatar"
+          alt=""
+          aria-hidden="true"
+        />
         <span v-if="isVirtual || active" class="buffer">{{ bufferLabel }}</span>
         <template v-if="active && topic">
           <!-- A channel topic is user prose: auto-link it and open the full
@@ -377,6 +384,20 @@ const dccTitle = computed(() =>
   dcc.pendingCount > 0 ? `DCC transfers — ${dcc.pendingCount} awaiting approval` : 'DCC transfers',
 );
 const whois = useWhoisStore();
+
+const channelAvatar = computed(() => {
+  const a = active.value;
+  if (!a || !isChannel.value) return null;
+  const rows = networks.states[a.networkId]?.metadata || {};
+  const target = Object.keys(rows).find((key) => key.toLowerCase() === a.target.toLowerCase());
+  const avatar = target ? rows[target].find((entry) => entry.key === 'avatar')?.value : '';
+  try {
+    const url = new URL((avatar || '').replace(/\{size\}/g, '128'));
+    return url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+});
 
 // Not reactive()-wrapped: the chip's fields stay refs so the template can read
 // them as `hlChip.show.value`, which keeps this identical to MobileChat's use.
@@ -876,6 +897,13 @@ useChatBootstrap({ onJump: onJumpToMessage });
 }
 .topic .buffer {
   color: var(--accent);
+}
+.channel-avatar {
+  width: 1.4em;
+  height: 1.4em;
+  flex: 0 0 auto;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
 }
 .topic .topic-text {
   color: var(--fg-muted);

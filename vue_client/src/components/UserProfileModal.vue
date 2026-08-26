@@ -31,6 +31,24 @@
     </template>
 
     <div class="body">
+      <section v-if="profileMetadata.length" class="section metadata-section">
+        <img v-if="profileAvatar" class="profile-avatar" :src="profileAvatar" alt="" />
+        <dl>
+          <template v-for="entry in profileMetadata" :key="entry.key">
+            <dt>{{ entry.key }}</dt>
+            <dd>
+              <a
+                v-if="isUrlKey(entry.key) && safeMetadataUrl(entry.value)"
+                :href="safeMetadataUrl(entry.value) ?? undefined"
+                target="_blank"
+                rel="noreferrer"
+                >{{ entry.value }}</a
+              >
+              <template v-else>{{ entry.value }}</template>
+            </dd>
+          </template>
+        </dl>
+      </section>
       <!-- Identity + activity merged into one headerless table; the status pills
            sit under the table (below Channels), then the note section follows. -->
       <section v-if="hasDetails" class="section">
@@ -183,6 +201,29 @@ const contextMenu = useContextMenu();
 const networks = useNetworksStore();
 const buffers = useBuffersStore();
 const ignoreOpen = ref(false);
+
+const profileMetadata = computed(() => {
+  const rows = networks.states[props.networkId]?.metadata || {};
+  const target = Object.keys(rows).find((key) => key.toLowerCase() === props.nick.toLowerCase());
+  return target ? rows[target] : [];
+});
+const profileAvatar = computed(() => {
+  const value = profileMetadata.value.find((entry) => entry.key === 'avatar')?.value || '';
+  return safeMetadataUrl(value);
+});
+
+function safeMetadataUrl(value: string): string | null {
+  try {
+    const url = new URL(value.replace(/\{size\}/g, '128'));
+    return url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function isUrlKey(key: string): boolean {
+  return key === 'url' || key === 'homepage' || key === 'avatar';
+}
 
 const isRelay = computed(() => relayBots.isRelay(props.networkId, props.nick));
 
@@ -354,15 +395,16 @@ const statusLine = computed<'not-found' | 'waiting' | null>(() => {
 const hasDetails = computed(
   () =>
     !!(
-      whois.value &&
-      (whois.value.real_name ||
-        hostmask.value ||
-        actualHost.value ||
-        whois.value.account ||
-        whois.value.server ||
-        idleLabel.value ||
-        signonLabel.value ||
-        channelsList.value.length)
+      profileMetadata.value.length > 0 ||
+      (whois.value &&
+        (whois.value.real_name ||
+          hostmask.value ||
+          actualHost.value ||
+          whois.value.account ||
+          whois.value.server ||
+          idleLabel.value ||
+          signonLabel.value ||
+          channelsList.value.length))
     ),
 );
 

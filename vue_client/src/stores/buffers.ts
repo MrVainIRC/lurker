@@ -158,6 +158,7 @@ export interface BufferMember {
   // means we never learned. Both falsy states render as nothing today — the
   // distinction is kept so a later WHOX backfill can merge without clobbering.
   account?: string | null;
+  bot?: boolean;
 }
 
 export interface TypingEntry {
@@ -187,6 +188,11 @@ export interface BufferMessage {
   body?: string;
   createdAt?: string;
   [key: string]: unknown;
+}
+
+export interface ReactionEntry {
+  actor: string;
+  reaction: string;
 }
 
 // What a buffer *is*, so capabilities (sendable, input, nicklist, server
@@ -248,6 +254,7 @@ export interface Buffer {
   // hydrate (reattachToLive → applyLatestReplace) clears the flag.
   unseeded: boolean;
   modes?: string;
+  replyTo?: { msgid: string; nick: string; text: string } | null;
 }
 
 function makeBuffer(networkId: number | string | null, target: string): Buffer {
@@ -314,6 +321,7 @@ function makeBuffer(networkId: number | string | null, target: string): Buffer {
     // A brand-new buffer created locally (e.g. before any frame arrives) is not
     // a server shell; replaceBacklog sets this true when a shell frame lands.
     unseeded: false,
+    replyTo: null,
   };
 }
 
@@ -633,6 +641,56 @@ export const useBuffersStore = defineStore('buffers', {
         delete buf.typing[speakerKey];
       }
       return true;
+    },
+    applyReaction(event: {
+      networkId: number;
+      target: string;
+      msgid: string;
+      actor: string;
+      reaction: string;
+      removed?: boolean;
+    }) {
+      const buf = this.findByTarget(event.networkId, event.target);
+      if (!buf) return;
+      const message = buf.messages.find((m) => m.msgid === event.msgid) as
+        | (BufferMessage & { reactions?: ReactionEntry[] })
+        | undefined;
+      if (!message) return;
+      const reactions = [...(message.reactions || [])];
+      const idx = reactions.findIndex(
+        (r) => r.actor === event.actor && r.reaction === event.reaction,
+      );
+      if (event.removed) {
+        if (idx >= 0) reactions.splice(idx, 1);
+      } else if (idx < 0) {
+        reactions.push({ actor: event.actor, reaction: event.reaction });
+      }
+      message.reactions = reactions;
+    },
+    applyRedaction(event: {
+      networkId: number;
+      target: string;
+      msgid: string;
+      reason?: string | null;
+    }) {
+      const buf = this.findByTarget(event.networkId, event.target);
+      if (!buf) return;
+      const message = buf.messages.find((m) => m.msgid === event.msgid);
+      if (!message) return;
+      message.text = null;
+      message.redacted = true;
+      message.redactionReason = event.reason || undefined;
+    },
+    setReply(networkId: number, target: string, message: BufferMessage | null) {
+      const buf = this.findByTarget(networkId, target);
+      if (!buf) return;
+      buf.replyTo = message?.msgid
+        ? {
+            msgid: String(message.msgid),
+            nick: String(message.nick || ''),
+            text: String(message.text || ''),
+          }
+        : null;
     },
     replaceBacklog(
       networkId: number | string,

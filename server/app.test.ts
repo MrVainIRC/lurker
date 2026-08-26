@@ -17,6 +17,7 @@ const ctx = setupTestDb('app-gating');
 afterAll(() => ctx.cleanup());
 afterEach(() => {
   delete process.env.LURKER_EDITION;
+  delete process.env.PUBLIC_BASE_PATH;
 });
 
 async function buildFor(edition: 'standalone' | 'node'): Promise<Express> {
@@ -26,7 +27,20 @@ async function buildFor(edition: 'standalone' | 'node'): Promise<Express> {
   return buildApp(TEST_SESSION_SECRET);
 }
 
+async function buildForBasePath(basePath: string): Promise<Express> {
+  process.env.PUBLIC_BASE_PATH = basePath;
+  return buildFor('standalone');
+}
+
 describe('buildApp route gating by edition', () => {
+  it('mounts the HTTP application under the configured base path', async () => {
+    const app = await buildForBasePath('/irc/web/');
+
+    expect((await testRequest(app).get('/irc/web/api/health')).status).toBe(200);
+    expect((await testRequest(app).get('/api/health')).status).toBe(404);
+    expect((await testRequest(app).get('/irc/web/api/api-tokens')).status).toBe(401);
+  });
+
   describe('node edition', () => {
     it('does not mount /api/api-tokens', async () => {
       const app = await buildFor('node');

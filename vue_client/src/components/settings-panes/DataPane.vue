@@ -42,7 +42,7 @@
           }}<span v-if="readyJob.includeMessages"> with message history</span>{{ expiryNote }}.
         </p>
         <div class="actions">
-          <a class="link" :href="`/api/exports/${readyJob.id}/download`">download .lurk</a>
+          <a class="link" :href="appPath(`/api/exports/${readyJob.id}/download`)">download .lurk</a>
           <button class="link" @click="onStart">rebuild</button>
         </div>
       </div>
@@ -96,6 +96,7 @@ import { useRouter } from 'vue-router';
 import { api, apiMultipart } from '../../api.js';
 import { resetSession } from '../../composables/useSessionReset.js';
 import { useDataExportStore } from '../../stores/dataExport.js';
+import { appPath } from '../../utils/paths.js';
 
 interface ExportPreview {
   settingsOnly: Record<string, number>;

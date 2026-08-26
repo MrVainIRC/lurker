@@ -15,6 +15,7 @@
       >
         <span class="prefix">{{ prefixOf(m) }}</span>
         <span class="nick" :style="nickStyle(m)" :title="nickOf(m)">{{ nickOf(m) }}</span>
+        <span v-if="m.bot" class="bot-badge" title="Bot">bot</span>
         <button
           type="button"
           class="row-actions"
@@ -276,6 +277,14 @@ li.mode-\+ .prefix {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--accent);
+}
+.bot-badge {
+  flex: 0 0 auto;
+  padding: 0 var(--space-1);
+  color: var(--fg-muted);
+  font-weight: 600;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
 }
 /* Away nicks lose all per-user color and render in a flat muted gray. The
    rule overrides the inline nickStyle (which is suppressed for away anyway)

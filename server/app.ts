@@ -9,6 +9,7 @@
 
 import express from 'express';
 import type { Express, ErrorRequestHandler } from 'express';
+import { Router } from 'express';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import path from 'path';
@@ -39,6 +40,7 @@ import { requireApiAuth } from './middleware/apiAuth.js';
 import { isNodeMode } from './utils/edition.js';
 import { previewsEnabled } from './utils/previews.js';
 import { allowedBrowserOrigins } from './utils/corsOrigins.js';
+import { basePath, publicBasePath } from './utils/basePath.js';
 
 const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
   console.error('[lurker] error:', err);
@@ -54,6 +56,8 @@ const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
  */
 export function buildApp(sessionSecret: string): Express {
   const app = express();
+  const apiRouter = Router();
+  const base = publicBasePath();
 
   // CORS_ORIGIN is a comma-separated allowlist, normalized to URL origins (see
   // utils/corsOrigins). The WS upgrade origin check reads the same source, so the
@@ -71,19 +75,19 @@ export function buildApp(sessionSecret: string): Express {
   app.use(express.json({ limit: '1mb' }));
   app.use(cookieParser(sessionSecret));
 
-  app.use('/api/auth', authRouter);
-  app.use('/api/networks', networksRouter);
-  app.use('/api/network-presets', networkPresetsRouter);
-  app.use('/api/settings', settingsRouter);
-  app.use('/api/highlight-rules', highlightRulesRouter);
-  app.use('/api/highlights', highlightsRouter);
-  app.use('/api/bookmarks', bookmarksRouter);
-  app.use('/api/search', searchRouter);
-  app.use('/api/themes', themesRouter);
-  app.use('/api/push', pushRouter);
-  app.use('/api/admin', adminRouter);
-  app.use('/api/uploads', uploadsRouter);
-  app.use('/api/uploaders', uploadersRouter);
+  apiRouter.use('/auth', authRouter);
+  apiRouter.use('/networks', networksRouter);
+  apiRouter.use('/network-presets', networkPresetsRouter);
+  apiRouter.use('/settings', settingsRouter);
+  apiRouter.use('/highlight-rules', highlightRulesRouter);
+  apiRouter.use('/highlights', highlightsRouter);
+  apiRouter.use('/bookmarks', bookmarksRouter);
+  apiRouter.use('/search', searchRouter);
+  apiRouter.use('/themes', themesRouter);
+  apiRouter.use('/push', pushRouter);
+  apiRouter.use('/admin', adminRouter);
+  apiRouter.use('/uploads', uploadsRouter);
+  apiRouter.use('/uploaders', uploadersRouter);
   // Public (no-auth) serving of local-driver files. Off /api by design: the URL
   // is opened by anyone the uploader shares it with, protected only by its
   // non-guessable key. Mounted before the SPA fallback so it wins the route.
@@ -96,20 +100,25 @@ export function buildApp(sessionSecret: string): Express {
     // IRC — including ones read by other clients we can't rewrite — still resolves.
     // The two-segment path can't match the new mount's single-segment '/:key', so
     // order between them doesn't matter.
-    app.use('/uploads/local', localUploadsRouter);
-    app.use('/uploads', localUploadsRouter);
+    app.use(basePath('/uploads/local'), localUploadsRouter);
+    app.use(basePath('/uploads'), localUploadsRouter);
   }
-  app.use('/api/dcc', dccRouter);
-  app.use('/api/drafts', draftsRouter);
-  app.use('/api/exports', exportsRouter);
-  app.use('/api/imports', importRouter);
-  app.use('/api/config', configRouter);
+  apiRouter.use('/dcc', dccRouter);
+  apiRouter.use('/drafts', draftsRouter);
+  apiRouter.use('/exports', exportsRouter);
+  apiRouter.use('/imports', importRouter);
+  apiRouter.use('/config', configRouter);
   // ⚠ Not mounted at all when the feature is off, so both endpoints 404 rather than existing
   // and refusing. The in-route and resolver guards stay as defence in depth — this is the outer
   // one, and it's what makes "off" mean the surface isn't there.
   if (previewsEnabled()) {
-    app.use('/api/link-preview', linkPreviewRouter);
+    apiRouter.use('/link-preview', linkPreviewRouter);
   }
+
+  apiRouter.get('/health', (_req, res) => {
+    res.json({ status: 'ok', time: new Date().toISOString() });
+  });
+  app.use(basePath('/api'), apiRouter);
 
   // The HTTP API-token feature and the MCP server are the two ends of the same
   // bearer-token model: /api/api-tokens (session-cookie auth) mints the tokens,
@@ -119,19 +128,15 @@ export function buildApp(sessionSecret: string): Express {
   // the tokens unusable there. Disable both in node edition (A7); A3 hides the
   // matching UI. Standalone keeps them fully featured.
   if (!isNodeMode()) {
-    app.use('/api/api-tokens', apiTokensRouter);
-    app.use('/mcp', requireApiAuth, mcpRouter);
+    apiRouter.use('/api-tokens', apiTokensRouter);
+    app.use(basePath('/mcp'), requireApiAuth, mcpRouter);
   }
 
   // Orchestrator-only control surface. Mounted exclusively in node edition so a
   // standalone self-hosted instance never exposes it at all.
   if (isNodeMode()) {
-    app.use('/api/node', nodeRouter);
+    apiRouter.use('/node', nodeRouter);
   }
-
-  app.get('/api/health', (_req, res) => {
-    res.json({ status: 'ok', time: new Date().toISOString() });
-  });
 
   // SPA fallback for client-side routes. `mcp` joins `api`/`ws` in the exclusion
   // so that in node edition — where /mcp isn't mounted — a stray GET /mcp 404s
@@ -145,8 +150,12 @@ export function buildApp(sessionSecret: string): Express {
   // reports a confusing module-type refusal instead of a plain 404 — and the
   // client can't cleanly tell "chunk is gone" from "page is fine" (#571).
   const clientDist = path.join(import.meta.dirname, '../vue_client/dist');
-  app.use(express.static(clientDist));
-  app.get(/^\/(?!api|ws|mcp|assets).*/, (_req, res, next) => {
+  app.use(basePath('/'), express.static(clientDist));
+  const escapedBase = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const fallbackPattern = base
+    ? new RegExp(`^${escapedBase}/(?!api(?:/|$)|ws(?:/|$)|mcp(?:/|$)|assets(?:/|$)).*`)
+    : /^\/(?!api(?:\/|$)|ws(?:\/|$)|mcp(?:\/|$)|assets(?:\/|$)).*/;
+  app.get(fallbackPattern, (_req, res, next) => {
     res.sendFile(path.join(clientDist, 'index.html'), (err) => {
       if (err) next();
     });

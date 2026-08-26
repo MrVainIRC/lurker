@@ -38,6 +38,9 @@ interface MessageRow {
   from_ignored: number;
   mirrored: number;
   msgid: string | null;
+  reply_to_msgid: string | null;
+  redacted: number;
+  redaction_reason: string | null;
   // 0/1 from the computed `bookmarked` column — see BOOKMARKED_COL. Optional
   // because it exists only on the SELECTs that ask for it.
   bookmarked?: number;
@@ -74,6 +77,10 @@ export interface MessageEvent {
   // IRCv3 server-assigned message id (#450). Only set when the network supplied
   // one — absent (not null) otherwise, so untagged backlogs don't grow a field.
   msgid?: string;
+  replyTo?: string;
+  redacted?: true;
+  redactionReason?: string;
+  reactions?: MessageReaction[];
   // Whether the owning user has saved this line. Absent (not `false`) when they
   // haven't, on the same reasoning as `msgid`: almost no row is bookmarked, and
   // a false on every row is pure wire weight. See BOOKMARKED_COL.
@@ -103,11 +110,17 @@ export interface MessageInput {
   fromIgnored?: boolean;
   mirrored?: boolean;
   msgid?: string | null;
+  replyTo?: string | null;
   // Server-buffer notability (#470). Defaults to notable (true); pass false for
   // Lurker's own connection-status notices so they render in the server buffer
   // but don't mark it unread. Read by countServerBufferUnread (the :server: unread
   // count) and countHighlightsNewer (which excludes notable=0 lines from highlights).
   notable?: boolean;
+}
+
+export interface MessageReaction {
+  actor: string;
+  reaction: string;
 }
 
 /** Buffer summary row for MCP list_buffers. */
@@ -128,9 +141,9 @@ export interface MaxIdByBufferRow {
 // Non-striped types pass through with alt=0; the value is meaningless for them
 // and the client never reads it.
 const insertStmt = db.prepare(`
-  INSERT INTO messages (network_id, buffer_id, target, time, type, nick, text, kind, self, extra, matched_rule_id, userhost, from_ignored, mirrored, notable, msgid, alt)
+  INSERT INTO messages (network_id, buffer_id, target, time, type, nick, text, kind, self, extra, matched_rule_id, userhost, from_ignored, mirrored, notable, msgid, reply_to_msgid, alt)
   VALUES (
-    @networkId, @bufferId, @target, @time, @type, @nick, @text, @kind, @self, @extra, @matchedRuleId, @userhost, @fromIgnored, @mirrored, @notable, @msgid,
+    @networkId, @bufferId, @target, @time, @type, @nick, @text, @kind, @self, @extra, @matchedRuleId, @userhost, @fromIgnored, @mirrored, @notable, @msgid, @replyTo,
     CASE WHEN @type IN ('message', 'action', 'notice')
          THEN 1 - COALESCE(
            (SELECT alt FROM messages
@@ -178,6 +191,7 @@ export function insertMessage(row: MessageInput): {
     // `||` not `??`: an empty-string msgid would be stored and indexed
     // (msgid IS NOT NULL) yet never surfaced — rowToEvent reads truthily.
     msgid: row.msgid || null,
+    replyTo: row.replyTo || null,
   });
   const id = result.lastInsertRowid;
   const altRow = altByIdStmt.get(id) as { alt: number } | undefined;
@@ -233,6 +247,21 @@ function rowToEvent(row: MessageRow): MessageEvent {
     mirrored: row.mirrored === 1,
   };
   if (row.msgid) event.msgid = row.msgid;
+  if (row.reply_to_msgid) event.replyTo = row.reply_to_msgid;
+  if (row.redacted) {
+    event.redacted = true;
+    if (row.redaction_reason) event.redactionReason = row.redaction_reason;
+  }
+  if (row.msgid) {
+    const reactions = db
+      .prepare(
+        `SELECT actor, reaction FROM message_reactions
+         WHERE network_id = ? AND buffer_id = ? AND message_msgid = ?
+         ORDER BY created_at, actor, reaction`,
+      )
+      .all(row.network_id, row.buffer_id, row.msgid) as MessageReaction[];
+    if (reactions.length) event.reactions = reactions;
+  }
   if (row.extra) {
     try {
       Object.assign(event, JSON.parse(row.extra));
@@ -759,6 +788,57 @@ const hasMsgidStmt = db.prepare(
 export function hasMessageWithMsgid(networkId: number, msgid: string): boolean {
   if (!networkId || !msgid) return false;
   return !!hasMsgidStmt.get(networkId, msgid);
+}
+
+const reactionInsertStmt = db.prepare(`
+  INSERT OR IGNORE INTO message_reactions
+    (network_id, buffer_id, message_msgid, actor, reaction)
+  VALUES (?, ?, ?, ?, ?)
+`);
+const reactionDeleteStmt = db.prepare(`
+  DELETE FROM message_reactions
+   WHERE network_id = ? AND buffer_id = ? AND message_msgid = ?
+     AND actor = ? AND reaction = ?
+`);
+
+export function setMessageReaction(
+  networkId: number,
+  target: string,
+  msgid: string,
+  actor: string,
+  reaction: string,
+  present: boolean,
+): boolean {
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  if (!bufferId || !msgid || !actor || !reaction) return false;
+  const message = db
+    .prepare('SELECT 1 FROM messages WHERE network_id = ? AND buffer_id = ? AND msgid = ?')
+    .get(networkId, bufferId, msgid);
+  if (!message) return false;
+  if (present) reactionInsertStmt.run(networkId, bufferId, msgid, actor, reaction);
+  else reactionDeleteStmt.run(networkId, bufferId, msgid, actor, reaction);
+  // Treat an already-present reaction and an already-removed reaction as
+  // successful no-ops. This keeps the operation idempotent for retries while
+  // still rejecting references to messages that are not in this buffer.
+  return true;
+}
+
+export function redactMessage(
+  networkId: number,
+  target: string,
+  msgid: string,
+  reason: string | null,
+): boolean {
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  if (!bufferId || !msgid) return false;
+  const result = db
+    .prepare(
+      `UPDATE messages
+          SET redacted = 1, redaction_reason = ?, text = NULL
+        WHERE network_id = ? AND buffer_id = ? AND msgid = ?`,
+    )
+    .run(reason || null, networkId, bufferId, msgid);
+  return result.changes > 0;
 }
 
 // The msgid-less version of the same question, for networks that don't tag

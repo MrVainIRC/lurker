@@ -49,6 +49,11 @@ export interface NetworkState {
   // else null/absent. Drives the composer's multiline-aware SPLIT/FLOOD hint
   // and upload-as-.txt gate. Refreshed by the snapshot pushed on connect. (#381)
   multilineLimits?: MultilineLimits | null;
+  networkIcon?: string | null;
+  negotiatedFeatures?: Record<string, boolean>;
+  capabilities?: { enabled: string[]; available: Record<string, string> };
+  isupport?: Record<string, string | null>;
+  metadata?: Record<string, Array<{ key: string; value: string; visibility: string }>>;
 }
 
 export interface ActiveBuffer {
@@ -214,7 +219,19 @@ export const useNetworksStore = defineStore('networks', {
     },
     applySnapshot(networks: NetworkState[]) {
       const map: Record<number | string, NetworkState> = {};
-      for (const snap of networks) map[snap.networkId] = snap;
+      for (const snap of networks) {
+        const metadata: NetworkState['metadata'] = {};
+        for (const row of (snap as any).metadata || []) {
+          const target = typeof row.target === 'string' ? row.target : '';
+          if (!target || typeof row.key !== 'string' || typeof row.value !== 'string') continue;
+          (metadata[target] ||= []).push({
+            key: row.key,
+            value: row.value,
+            visibility: row.visibility || '*',
+          });
+        }
+        map[snap.networkId] = { ...snap, metadata };
+      }
       this.states = map;
     },
     applyState(event: any) {
@@ -224,6 +241,39 @@ export const useNetworksStore = defineStore('networks', {
         state: event.state,
         nick: event.nick || existing.nick,
       };
+    },
+    applyFeatures(event: any) {
+      const id = Number(event.networkId);
+      const current = this.states[id] || { networkId: id, channels: [] };
+      this.states[id] = {
+        ...current,
+        negotiatedFeatures: event.negotiatedFeatures || {},
+        capabilities: event.capabilities || { enabled: [], available: {} },
+        isupport: event.isupport || {},
+        networkIcon: event.networkIcon || event.isupport?.icon || null,
+      };
+    },
+    applyMetadata(event: any) {
+      const id = Number(event.networkId);
+      const current = this.states[id] || { networkId: id, channels: [] };
+      const target = typeof event.target === 'string' ? event.target : '';
+      if (!target || typeof event.key !== 'string') return;
+      const metadata = { ...current.metadata };
+      const entries = [...(metadata[target] || [])];
+      const index = entries.findIndex((entry) => entry.key === event.key);
+      if (event.value == null) {
+        if (index >= 0) entries.splice(index, 1);
+      } else {
+        const next = {
+          key: event.key,
+          value: String(event.value),
+          visibility: event.visibility || '*',
+        };
+        if (index >= 0) entries[index] = next;
+        else entries.push(next);
+      }
+      metadata[target] = entries;
+      this.states[id] = { ...current, metadata };
     },
     applyOwnNick(event: any) {
       const existing = this.states[event.networkId];

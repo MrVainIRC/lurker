@@ -35,6 +35,7 @@
           </span>
           <span class="name">{{ net.name }}</span>
           <span class="host">{{ net.host }}</span>
+          <NetworkMetadataEditor :network-id="net.id" />
           <!-- The admin restricted this instance to a list of networks and this
                one isn't on it (#298). Nothing has been deleted — it simply can't
                connect — so say so, rather than letting the user keep clicking
@@ -55,6 +56,7 @@ import { ref, watch } from 'vue';
 import draggable from 'vuedraggable';
 import { useNetworksStore } from '../../stores/networks.js';
 import type { Network } from '../../stores/networks.js';
+import NetworkMetadataEditor from '../NetworkMetadataEditor.vue';
 
 const networks = useNetworksStore();
 

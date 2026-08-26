@@ -10,7 +10,8 @@
       Signed in as <strong>{{ identity }}</strong>
     </p>
     <p v-if="config.isNode" class="section-desc">
-      Manage your subscription and payment details on the <a href="/billing">billing</a> page.
+      Manage your subscription and payment details on the
+      <a :href="appPath('/billing')">billing</a> page.
     </p>
     <p v-else class="section-desc">
       You can sign in with a passkey, a password, or both. Removing your last sign-in method would
@@ -108,6 +109,7 @@
 import { ref, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '../../stores/auth.js';
+import { appPath } from '../../utils/paths.js';
 import { useConfigStore } from '../../stores/config.js';
 import { formatRelative } from '../../utils/timestamp.js';
 
@@ -281,7 +283,7 @@ async function signOut() {
     // already-loaded app on screen, so the user never appears to sign out.
     // Use replace(), not assign(): sign-out should leave no history entry that
     // Back/bfcache could use to flash the signed-in app back onto the screen.
-    window.location.replace('/');
+    window.location.replace(appPath('/'));
   } else {
     router.replace('/login');
   }

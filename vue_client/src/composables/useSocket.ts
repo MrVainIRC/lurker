@@ -34,6 +34,7 @@ import { useToastsStore } from '../stores/toasts.js';
 import { downloadTextFile } from '../utils/download.js';
 import { notifyForEvent, playSound } from './useHighlightNotifier.js';
 import { isChannelTarget } from '../../../shared/channels.js';
+import { webSocketPath } from '../utils/paths.js';
 
 export interface AckResult {
   ok: boolean;
@@ -170,7 +171,7 @@ function armLivenessProbe(): void {
 
 function wsUrl(): string {
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  const base = `${proto}://${window.location.host}/ws`;
+  const base = `${proto}://${window.location.host}${webSocketPath()}`;
   return lastSeenEventId > 0 ? `${base}?since=${lastSeenEventId}` : base;
 }
 
@@ -216,6 +217,27 @@ function applyEvent(event: any): void {
       notifyForEvent(event);
       break;
     }
+    case 'reaction':
+      buffers.applyReaction(event);
+      break;
+    case 'redaction':
+      buffers.applyRedaction(event);
+      break;
+    case 'features':
+      networks.applyFeatures(event);
+      break;
+    case 'metadata':
+      networks.applyMetadata(event);
+      break;
+    case 'standard-reply':
+      useToastsStore().push({
+        kind: event.severity === 'fail' ? 'error' : event.severity === 'warn' ? 'warn' : 'info',
+        title: `${event.command || 'IRC'} ${event.code || ''}`.trim(),
+        body: event.text || 'The server returned a structured response.',
+        networkId: event.networkId,
+        target: event.target,
+      });
+      break;
     case 'notice':
       if (!buffers.pushMessage(event)) break;
       notifyForEvent(event);
@@ -599,7 +621,15 @@ function applySnapshot(snapshot: any[], globalIgnores: any[] = []): void {
       const normalized = ch.members.map((m: any) =>
         typeof m === 'string'
           ? { nick: m, modes: [], away: false }
-          : { nick: m.nick, modes: m.modes || [], away: !!m.away },
+          : {
+              nick: m.nick,
+              modes: m.modes || [],
+              away: !!m.away,
+              user: m.user ?? null,
+              host: m.host ?? null,
+              account: m.account,
+              bot: !!m.bot,
+            },
       );
       buffers.setMembers(net.networkId, ch.name, normalized);
       buffers.setTopic(net.networkId, ch.name, ch.topic);

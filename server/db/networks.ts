@@ -51,6 +51,7 @@ export interface Network {
    *  (buffers.networkCasemapping normalizes, unknown → null = legacy fold)
    *  and at the sole writer (refoldNetworkBuffers takes Casemapping). */
   casemapping: string | null;
+  network_icon?: string | null;
   created_at: string;
 }
 
@@ -191,6 +192,10 @@ export function deleteNetwork(id: number, userId: number): void {
   // CASEMAPPING surviving the row would fold the newcomer's targets with the
   // dead network's rule.
   invalidateCasemappingCache(id);
+}
+
+export function updateNetworkIcon(networkId: number, icon: string | null): void {
+  db.prepare('UPDATE networks SET network_icon = ? WHERE id = ?').run(icon, networkId);
 }
 
 // The at-rest backfill that wraps any plaintext secret columns once a key is

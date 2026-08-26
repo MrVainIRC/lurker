@@ -2,38 +2,38 @@
   "name": "Lurker",
   "short_name": "Lurker",
   "description": "Self-hosted IRC client",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": "__LURKER_BASE_PATH__/",
+  "scope": "__LURKER_BASE_PATH__/",
   "display": "standalone",
   "background_color": "#0b0b0b",
   "theme_color": "#0b0b0b",
   "icons": [
     {
-      "src": "/lurker-icon.svg",
+      "src": "__LURKER_BASE_PATH__/lurker-icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any"
     },
     {
-      "src": "/lurker-icon-192.png",
+      "src": "__LURKER_BASE_PATH__/lurker-icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/lurker-icon-512.png",
+      "src": "__LURKER_BASE_PATH__/lurker-icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/lurker-icon-maskable-192.png",
+      "src": "__LURKER_BASE_PATH__/lurker-icon-maskable-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "maskable"
     },
     {
-      "src": "/lurker-icon-maskable-512.png",
+      "src": "__LURKER_BASE_PATH__/lurker-icon-maskable-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"

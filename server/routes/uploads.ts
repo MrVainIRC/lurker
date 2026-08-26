@@ -46,6 +46,7 @@ import {
   setUploadFavorite,
 } from '../db/uploadHistory.js';
 import { reportUploadSoon } from '../services/moderationReport.js';
+import { basePath, publicBasePath } from '../utils/basePath.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -97,8 +98,26 @@ function absolutizeUrl(url: string, storesRemotely: boolean, req: Request): stri
         'PUBLIC_BASE_URL to this instance’s public origin for stable links.',
     );
   }
-  const base = (configured || requestOrigin(req)).replace(/\/+$/, '');
-  return base ? base + url : url;
+  let publicPrefix = requestOrigin(req);
+  let configuredIncludesPath = false;
+  if (configured) {
+    try {
+      const parsed = new URL(configured);
+      // PUBLIC_BASE_URL may be either an origin or the complete public URL
+      // including the deployment path. A non-root configured pathname already
+      // contains that path and must not receive PUBLIC_BASE_PATH twice.
+      configuredIncludesPath =
+        parsed.pathname !== '/' && parsed.pathname.replace(/\/+$/, '') === publicBasePath();
+      publicPrefix = `${parsed.origin}${configuredIncludesPath ? parsed.pathname.replace(/\/+$/, '') : publicBasePath()}`;
+    } catch {
+      // An invalid PUBLIC_BASE_URL is handled like an unset value; the request
+      // origin remains a safe, usable fallback for this upload.
+    }
+  } else {
+    publicPrefix += publicBasePath();
+  }
+  const mountedPath = configuredIncludesPath ? url : basePath(url);
+  return publicPrefix ? `${publicPrefix.replace(/\/+$/, '')}${mountedPath}` : mountedPath;
 }
 
 // Map a driver error onto an HTTP status. PROVIDER_AUTH deliberately does NOT
@@ -539,7 +558,8 @@ router.get('/', (req: Request, res: Response) => {
       const can_delete = Boolean(has_ref) && configDeletable(uploader_config_id);
       // Prefer a remote CDN thumbnail; otherwise fall back to the local
       // BLOB-serving route when an inline thumbnail exists.
-      const thumb = thumbnail_url || (has_thumbnail ? `/api/uploads/${r.id}/thumb` : null);
+      const thumb =
+        thumbnail_url || (has_thumbnail ? basePath(`/api/uploads/${r.id}/thumb`) : null);
       return { ...item, favorite, can_delete, ...(thumb ? { thumbnail_url: thumb } : {}) };
     }),
     providers: driverIds,

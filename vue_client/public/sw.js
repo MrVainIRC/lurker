@@ -5,6 +5,12 @@
 // The server has already gated by presence (no push fires when any of the
 // user's clients are visible), so this worker just renders whatever arrives.
 
+const BASE_PATH = __LURKER_BASE_PATH__;
+function appPath(path) {
+  if (!BASE_PATH) return path;
+  return `${BASE_PATH}${path === '/' ? '/' : path}`;
+}
+
 self.addEventListener('install', (event) => {
   self.skipWaiting();
 });
@@ -80,8 +86,8 @@ self.addEventListener('push', (event) => {
         body,
         tag,
         data,
-        icon: '/lurker-icon-192.png',
-        badge: '/lurker-icon-192.png',
+        icon: appPath('/lurker-icon-192.png'),
+        badge: appPath('/lurker-icon-192.png'),
       }),
       syncAppBadge(data),
     ]),
@@ -112,13 +118,13 @@ self.addEventListener('notificationclick', (event) => {
         const msg = messageId != null ? `?msg=${encodeURIComponent(String(messageId))}` : '';
         let url;
         if (bufferId != null) {
-          url = `/buffer/${encodeURIComponent(String(bufferId))}${msg}`;
+          url = appPath(`/buffer/${encodeURIComponent(String(bufferId))}${msg}`);
         } else {
           const params = new URLSearchParams();
           if (networkId != null) params.set('net', String(networkId));
           if (target != null) params.set('buf', String(target));
           if (messageId != null) params.set('msg', String(messageId));
-          url = `/?${params.toString()}`;
+          url = `${appPath('/')}?${params.toString()}`;
         }
         await self.clients.openWindow(url);
       }

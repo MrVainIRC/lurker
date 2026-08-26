@@ -9,11 +9,15 @@ import {
   hasConversationForTarget,
   hasMessageWithMsgid,
   hasRecentMessageLike,
+  setMessageReaction,
+  redactMessage,
 } from '../db/messages.js';
 import { renameBuffer as renameDmBuffer } from '../db/renameBuffer.js';
 import { refoldNetworkBuffers } from '../db/refoldBuffers.js';
 import { normalizeCasemapping } from '../db/casemapping.js';
 import type { Network } from '../db/networks.js';
+import { updateNetworkIcon } from '../db/networks.js';
+import { applyIrcMetadata, listIrcMetadataForNetwork } from '../db/ircMetadata.js';
 import {
   isClosed as isBufferClosed,
   getBuffer,
@@ -190,6 +194,13 @@ const NON_PERSISTED_TYPES = new Set([
   // CTCP request/reply notices are transient status, surfaced via
   // publishEphemeral — never persisted (#263).
   'ctcp',
+  'reaction',
+  'redaction',
+  'features',
+  'standard-reply',
+  'metadata',
+  'setname',
+  'bot',
   // Incremental nicklist patch (host/account). Like 'names' it describes
   // current membership state, not history — a replayed one would be wrong.
   'member-update',
@@ -307,6 +318,7 @@ interface ChannelMember {
   // lets a future WHOX backfill (#508 follow-up) write a correct merge rule
   // instead of clobbering fresher data — see irssi's nickrec->account guard.
   account?: string | null;
+  bot?: boolean;
 }
 
 interface ChannelState {
@@ -479,6 +491,7 @@ function memberSnapshot(m: ChannelMember): ChannelMember {
     user: m.user || null,
     host: m.host || null,
     account: m.account,
+    bot: !!m.bot,
   };
 }
 
@@ -666,6 +679,7 @@ export class IrcConnection {
   // it could never run out. Only 'registered' clears it.
   private saslFailureStreak: number;
   private readonly reconnectGate: ReconnectGate | undefined;
+  private metadataSubscriptionSent = false;
   // Engine mode: a newer process took this connection over. The manager drops
   // us from its map so a later /connect builds a fresh IrcConnection instead of
   // finding this corpse and doing nothing.
@@ -741,6 +755,12 @@ export class IrcConnection {
     // and batch, so all three are requested. (#381)
     this.client.requestCap('batch');
     this.client.requestCap('draft/multiline');
+    // Modern interaction extensions. Metadata is intentionally requested only
+    // in its draft namespace; metadata-notify is mutually exclusive with it.
+    this.client.requestCap('standard-replies');
+    this.client.requestCap('labeled-response');
+    this.client.requestCap('draft/metadata-2');
+    this.client.requestCap('draft/message-redaction');
     this.state = 'disconnected';
     this.channels = new Map();
     this.joinedFoldedCache = null;
@@ -841,6 +861,103 @@ export class IrcConnection {
     this.publish({ type: 'away-state', target: this.serverTarget(), away });
   }
 
+  private supportsCap(capability: string): boolean {
+    return (this.client.network?.cap?.enabled || []).includes(capability);
+  }
+
+  publishFeatures(): void {
+    const cap = this.client.network?.cap;
+    const enabled = [...(cap?.enabled || [])];
+    const available: Record<string, string> = {};
+    for (const [name, value] of cap?.available || []) {
+      if (typeof value === 'string') available[name] = value;
+    }
+    const options = this.client.network?.options || {};
+    const icon = typeof options['DRAFT/ICON'] === 'string' ? options['DRAFT/ICON'] : null;
+    if (icon && /^https:\/\//i.test(icon)) updateNetworkIcon(this.network.id, icon);
+    this.publishEphemeral({
+      type: 'features',
+      target: this.serverTarget(),
+      negotiatedFeatures: {
+        messageTags: this.supportsCap('message-tags'),
+        reply: this.supportsCap('message-tags'),
+        reactions: this.supportsCap('message-tags'),
+        redaction: this.supportsCap('draft/message-redaction'),
+        metadata: this.supportsCap('draft/metadata-2') && this.supportsCap('batch'),
+        labeledResponse:
+          this.supportsCap('labeled-response') &&
+          this.supportsCap('batch') &&
+          this.supportsCap('message-tags'),
+        setname: this.supportsCap('setname'),
+        standardReplies: this.supportsCap('standard-replies'),
+        botMode: typeof options.BOT === 'string' && options.BOT.length > 0,
+        networkIcon:
+          typeof options['DRAFT/ICON'] === 'string' && /^https:\/\//i.test(options['DRAFT/ICON']),
+      },
+      capabilities: { enabled, available },
+      networkIcon: icon || this.network.network_icon || null,
+      isupport: {
+        casemapping: options.CASEMAPPING || null,
+        bot: options.BOT || null,
+        network: options.NETWORK || null,
+        icon: options['DRAFT/ICON'] || null,
+      },
+    });
+  }
+
+  private eventTargetForRaw(target: string): string | null {
+    if (!target) return null;
+    if (isChannelTarget(target)) return target;
+    if (target.toLowerCase() === this.currentNick.toLowerCase()) return null;
+    return this.canonicalDmTarget(target);
+  }
+
+  private standardReplyTarget(params: string[]): string {
+    const target = params.find((param) => isChannelTarget(param));
+    return target && isChannelTarget(target) ? target : this.serverTarget();
+  }
+
+  private handleMetadataMessage(params: string[]): void {
+    const target = params[0];
+    const key = params[1];
+    const visibility = params[2] || '*';
+    const value = params.length > 3 ? params[3] : null;
+    this.handleMetadataValue(target, key, value, visibility);
+  }
+
+  private handleMetadataValue(
+    target: string,
+    key: string,
+    value: string | null,
+    visibility = '*',
+  ): void {
+    if (!target || !key || !/^[a-z0-9_./-]+$/.test(key)) return;
+    this.publishEphemeral({
+      type: 'metadata',
+      target: isChannelTarget(target) ? target : this.canonicalDmTarget(target),
+      metadataTarget: target,
+      key,
+      visibility,
+      value,
+    });
+    applyIrcMetadata(this.network.id, target, key, value, visibility);
+  }
+
+  private subscribeMetadata(): void {
+    if (this.metadataSubscriptionSent) return;
+    if (!this.supportsCap('draft/metadata-2') || !this.supportsCap('batch')) return;
+    const raw = this.client.network?.cap?.available?.get('draft/metadata-2');
+    const tokens = typeof raw === 'string' ? raw.split(',') : [];
+    const maxSubsToken = tokens.find((token) => token.startsWith('max-subs='));
+    const parsedMax = maxSubsToken ? Number(maxSubsToken.slice('max-subs='.length)) : NaN;
+    const maxSubs = Number.isFinite(parsedMax) ? Math.max(0, Math.floor(parsedMax)) : 7;
+    const keys = ['avatar', 'display-name', 'pronouns', 'status', 'homepage', 'url', 'color'];
+    if (maxSubs === 0) return;
+    this.sendMetadata('*', 'SUB', ...keys.slice(0, maxSubs));
+    for (const channel of this.channels.values()) this.sendMetadata(channel.name, 'SYNC');
+    this.metadataSubscriptionSent = true;
+  }
+
   shouldPersist(event: IrcEvent): boolean {
     if (!event.target) return false;
     return !NON_PERSISTED_TYPES.has(event.type);
@@ -934,6 +1051,7 @@ export class IrcConnection {
         mirrored: event.mirrored as boolean | undefined,
         notable: event.notable as boolean | undefined,
         msgid: event.msgid as string | undefined,
+        replyTo: event.replyTo as string | undefined,
       });
       enriched.id = id;
       enriched.alt = alt;
@@ -1052,6 +1170,55 @@ export class IrcConnection {
         return;
       }
       const rawCommand = (msg?.command || '').toString();
+      if (rawCommand === 'REDACT' && msg.params.length >= 2) {
+        const rawTarget = msg.params[0];
+        const senderNick = String(msg.prefix || '').split('!')[0];
+        const target =
+          !isChannelTarget(rawTarget) && rawTarget.toLowerCase() === this.currentNick.toLowerCase()
+            ? this.canonicalDmTarget(senderNick)
+            : this.eventTargetForRaw(rawTarget);
+        const msgid = msg.params[1];
+        const reason = msg.params.length > 2 ? msg.params[2] || null : null;
+        if (target && msgid) {
+          redactMessage(this.network.id, target, msgid, reason);
+          this.publishEphemeral({
+            type: 'redaction',
+            target,
+            msgid,
+            reason,
+          });
+        }
+      } else if (rawCommand === 'SETNAME' && msg.params.length >= 1) {
+        const nick = String(msg.prefix || '').split('!')[0] || this.currentNick;
+        const realname = msg.params[msg.params.length - 1] || '';
+        this.publishEphemeral({ type: 'setname', target: this.serverTarget(), nick, realname });
+      } else if (rawCommand === 'METADATA' && msg.params.length >= 3) {
+        this.handleMetadataMessage(msg.params);
+      } else if (rawCommand === '761' && msg.params.length >= 4) {
+        const target = msg.params[1];
+        const key = msg.params[2];
+        const visibility = msg.params[3] || '*';
+        const value = msg.params.length > 4 ? msg.params[msg.params.length - 1] : null;
+        if (target && key) this.handleMetadataValue(target, key, value, visibility);
+      } else if (rawCommand === '766' && msg.params.length >= 3) {
+        const target = msg.params[1];
+        const key = msg.params[2];
+        if (target && key) this.handleMetadataValue(target, key, null, '*');
+      } else if (
+        (rawCommand === 'FAIL' || rawCommand === 'WARN' || rawCommand === 'NOTE') &&
+        msg.params.length >= 3
+      ) {
+        this.publishEphemeral({
+          type: 'standard-reply',
+          target: this.standardReplyTarget(msg.params),
+          severity: rawCommand.toLowerCase(),
+          command: msg.params[1] || '',
+          code: msg.params[2] || '',
+          params: msg.params.slice(3),
+          label: msg.tags?.['label'] || null,
+          text: msg.params[msg.params.length - 1] || '',
+        });
+      }
       // draft/multiline BATCH start: the logical message's msgid/@time ride
       // THIS line per the spec, and irc-framework drops them when it reduces
       // the batch to {id,type,params} — stash them for accumulateMultiline.
@@ -1475,6 +1642,8 @@ export class IrcConnection {
       // (harmless — they're just booleans, and trackDmPeer's per-add path
       // also checks useMonitor before sending).
       const opts = this.client.network?.options || {};
+      this.publishFeatures();
+      this.subscribeMetadata();
       const limit = Number(opts.MONITOR) || 0;
       if (limit === 0 || this.useMonitor) return;
       this.useMonitor = true;
@@ -1839,6 +2008,7 @@ export class IrcConnection {
       // IRCv3 server message id (#450) — the future react/reply anchor. Tag
       // keys arrive lowercased; draft/msgid covers pre-ratification servers.
       const msgid = tags?.msgid || tags?.['draft/msgid'] || undefined;
+      const replyTo = tags?.['+reply'] || undefined;
       const targetIsChannel = isChannelTarget(eventTarget);
       const type =
         eventType === 'action' ? 'action' : eventType === 'notice' ? 'notice' : 'message';
@@ -1883,6 +2053,7 @@ export class IrcConnection {
           userhost: buildUserhost(event),
           time: event.time,
           msgid,
+          replyTo,
         });
         // Parity with the optimistic path it replaces: no closed-buffer notice
         // mirror, no trackDmPeer/markPeerEvent for ourselves.
@@ -2005,6 +2176,7 @@ export class IrcConnection {
         userhost: buildUserhost(event),
         time: event.time,
         msgid,
+        replyTo,
         ...(e2eFlag ? { e2e: true } : {}),
       }) as EnrichedEvent | undefined;
       // If a notice's home buffer is one the user has closed, the wsHub fan-out
@@ -2676,7 +2848,13 @@ export class IrcConnection {
       // whatever we already learned.
       const prev = new Map<
         string,
-        { away: boolean; user: string | null; host: string | null; account?: string | null }
+        {
+          away: boolean;
+          user: string | null;
+          host: string | null;
+          account?: string | null;
+          bot?: boolean;
+        }
       >();
       for (const [k, v] of ch.members)
         prev.set(k, {
@@ -2684,6 +2862,7 @@ export class IrcConnection {
           user: v.user || null,
           host: v.host || null,
           account: v.account,
+          bot: v.bot,
         });
       ch.members.clear();
       for (const u of eventUsers) {
@@ -2699,6 +2878,7 @@ export class IrcConnection {
           // NAMES never carries an account, so this is carry-forward only —
           // same reasoning as user/host above (#508).
           account: carry.account,
+          bot: !!u.bot || !!carry.bot,
         });
       }
       this.publish({
@@ -2793,6 +2973,10 @@ export class IrcConnection {
         }
         if (u.hostname && m.host !== (u.hostname as string)) {
           m.host = u.hostname as string;
+          changed = true;
+        }
+        if (typeof u.bot === 'boolean' && m.bot !== u.bot) {
+          m.bot = u.bot;
           changed = true;
         }
       }
@@ -3090,9 +3274,38 @@ export class IrcConnection {
       // echo-message our own TAGMSGs reflect back, and a server relaying a
       // case-variant nick must not show us our own typing indicator.
       const isSelf = !!eventNick && !!me && eventNick.toLowerCase() === me.toLowerCase();
-      if (isSelf) return;
       const tags = event.tags as Record<string, string> | undefined;
       const typing = tags && tags['+typing'];
+      const replyTo = tags?.['+reply'];
+      const reaction = tags?.['+draft/react'];
+      const unreaction = tags?.['+draft/unreact'];
+      if (replyTo && (reaction !== undefined || unreaction !== undefined)) {
+        const eventNick = event.nick as string | undefined;
+        const targetIsChannel = isChannelTarget(event.target as string | undefined);
+        const target = targetIsChannel
+          ? (event.target as string)
+          : this.canonicalDmTarget(
+              eventNick && !this.isSelfNick(eventNick)
+                ? eventNick
+                : (event.target as string) || eventNick || '',
+            );
+        const actor = String(event.account || eventNick || '').trim();
+        const value = reaction !== undefined ? reaction : unreaction;
+        if (target && actor && typeof value === 'string' && value.length <= 64) {
+          const removed = unreaction !== undefined;
+          setMessageReaction(this.network.id, target, replyTo, actor, value, !removed);
+          this.publishEphemeral({
+            type: 'reaction',
+            target,
+            msgid: replyTo,
+            actor,
+            reaction: value,
+            removed,
+          });
+        }
+        return;
+      }
+      if (isSelf) return;
       if (!typing) return;
       const eventTarget = event.target as string | undefined;
       const targetIsChannel = isChannelTarget(eventTarget);
@@ -3867,6 +4080,7 @@ export class IrcConnection {
     this.terminalDisconnect = null;
     this.pendingSaslFailure = null;
     this.pendingServerBan = null;
+    this.metadataSubscriptionSent = false;
     const { sasl_password, sasl_account, nick } = this.network;
     const account = sasl_password
       ? { account: sasl_account || nick, password: sasl_password }
@@ -3912,6 +4126,7 @@ export class IrcConnection {
       // REQs caps the server advertises, and the send path keeps the
       // optimistic publish until the cap is actually ACKed.
       enable_echomessage: true,
+      enable_setname: true,
       // Source-bind outbound IRC when LURKER_OUTGOING_ADDR is set, so the
       // network's RFC 1413 callback lands on the built-in identd rather than the
       // host's (outgoingAddr → irc-framework outgoing_addr → socket localAddress).
@@ -4186,10 +4401,10 @@ export class IrcConnection {
   part(channel: string, reason?: string): void {
     this.client.part(channel, reason);
   }
-  say(target: string, text: string): void {
+  say(target: string, text: string, tags?: Record<string, string>): void {
     if (isDmTargetName(target)) this.trackDmPeer(target);
     this.noteUserSend(target);
-    this.client.say(target, text);
+    this.client.say(target, text, tags);
     // Arm AFTER the send, and never let a DB hiccup in arming break delivery of
     // the user's actual message.
     try {
@@ -4209,6 +4424,56 @@ export class IrcConnection {
     // service or bot doesn't spin up presence tracking for it.
     this.noteUserSend(target);
     this.client.notice(target, text);
+  }
+
+  private sendCommand(command: string, params: string[]): void {
+    const safe = params.map((param) => String(param).replace(/[\r\n\0]/g, ' '));
+    const last = safe.length - 1;
+    const rendered = safe.map((param, index) =>
+      index === last && (param.startsWith(':') || /\s/.test(param))
+        ? `:${param.replace(/^:/, '')}`
+        : param,
+    );
+    const line = [command, ...rendered].join(' ');
+    if (this.supportsCap('labeled-response') && this.supportsCap('message-tags')) {
+      const label = randomBytes(8).toString('hex');
+      this.client.raw(`@label=${label} ${line}`);
+    } else {
+      this.client.raw(line);
+    }
+  }
+
+  sendReaction(target: string, msgid: string, reaction: string, removed: boolean): boolean {
+    if (!this.supportsCap('message-tags') || !msgid || reaction.length > 64) return false;
+    if (!reaction) return false;
+    if (this.unsendableTargets.has(target.toLowerCase())) return false;
+    this.client.tagmsg(target, {
+      '+reply': msgid,
+      [removed ? '+draft/unreact' : '+draft/react']: reaction,
+    });
+    return true;
+  }
+
+  sendRedaction(target: string, msgid: string, reason?: string): boolean {
+    if (!this.supportsCap('draft/message-redaction') || !msgid) return false;
+    this.sendCommand('REDACT', reason ? [target, msgid, reason] : [target, msgid]);
+    return true;
+  }
+
+  sendMetadata(target: string, command: string, ...params: string[]): boolean {
+    if (!this.supportsCap('draft/metadata-2') || !this.supportsCap('batch')) return false;
+    const normalizedCommand = command.toUpperCase();
+    if (!['GET', 'LIST', 'SET', 'CLEAR', 'SUB', 'UNSUB', 'SYNC'].includes(normalizedCommand)) {
+      return false;
+    }
+    this.sendCommand('METADATA', [target, normalizedCommand, ...params]);
+    return true;
+  }
+
+  sendSetname(realname: string): boolean {
+    if (!this.supportsCap('setname')) return false;
+    this.sendCommand('SETNAME', [realname]);
+    return true;
   }
 
   // --- CTCP (#263) -----------------------------------------------------------
@@ -6070,6 +6335,12 @@ export class IrcConnection {
       // the wire. Computed post-registration, which is when this snapshot is
       // pushed (setState('connected') fires after CAP). (#381)
       multilineLimits: this.multilineLimits(),
+      networkIcon:
+        typeof this.client.network?.options?.['DRAFT/ICON'] === 'string' &&
+        /^https:\/\//i.test(this.client.network.options['DRAFT/ICON'])
+          ? this.client.network.options['DRAFT/ICON']
+          : this.network.network_icon || null,
+      negotiatedFeatures: this.featureSnapshot(),
       away: a.since
         ? {
             active: a.active,
@@ -6098,6 +6369,27 @@ export class IrcConnection {
           })
           .map((row) => [row.nick.toLowerCase(), row]),
       ),
+      metadata: listIrcMetadataForNetwork(this.network.id),
+    };
+  }
+
+  private featureSnapshot(): Record<string, boolean> {
+    const options = this.client.network?.options || {};
+    return {
+      messageTags: this.supportsCap('message-tags'),
+      reply: this.supportsCap('message-tags'),
+      reactions: this.supportsCap('message-tags'),
+      redaction: this.supportsCap('draft/message-redaction'),
+      metadata: this.supportsCap('draft/metadata-2') && this.supportsCap('batch'),
+      labeledResponse:
+        this.supportsCap('labeled-response') &&
+        this.supportsCap('batch') &&
+        this.supportsCap('message-tags'),
+      setname: this.supportsCap('setname'),
+      standardReplies: this.supportsCap('standard-replies'),
+      botMode: typeof options.BOT === 'string' && options.BOT.length > 0,
+      networkIcon:
+        typeof options['DRAFT/ICON'] === 'string' && /^https:\/\//i.test(options['DRAFT/ICON']),
     };
   }
 }

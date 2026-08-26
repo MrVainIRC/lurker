@@ -61,6 +61,7 @@ import { startIgnoreSweeper, stopIgnoreSweeper } from './services/ignoreSweeper.
 import { sweepTempUploads } from './routes/uploads.js';
 import { startEventLoopMonitor, stopEventLoopMonitor } from './services/eventLoopMonitor.js';
 import * as systemMessages from './db/systemMessages.js';
+import { webSocketPath } from './utils/basePath.js';
 
 // Wired here rather than inside processGuards (which must stay import-free —
 // see its header): both records target the DB-backed system log, which only
@@ -137,7 +138,7 @@ warnRetiredPreviewEnv();
 
 const app = buildApp(SESSION_SECRET);
 const server = http.createServer(app);
-attachWsHub(server, SESSION_SECRET);
+attachWsHub(server, SESSION_SECRET, webSocketPath());
 
 purgeExpiredSessions();
 setInterval(purgeExpiredSessions, 60 * 60 * 1000).unref();

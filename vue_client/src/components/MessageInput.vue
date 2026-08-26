@@ -28,6 +28,12 @@
         >&gt;</span
       ><template v-else>&gt;</template></span
     >
+    <div v-if="buffer?.replyTo" class="reply-banner">
+      Replying to <strong>{{ buffer.replyTo.nick || 'message' }}</strong
+      >:
+      {{ buffer.replyTo.text || 'original message unavailable' }}
+      <button type="button" title="Cancel reply" @click="clearReply">×</button>
+    </div>
     <!-- `:value` + `@input` rather than `v-model`, with compositionend/change
          as backstop copies of the same handler — the full rationale lives in
          the "IME composition" note in the script block. -->
@@ -418,6 +424,11 @@ const isServer = computed(() => active.value?.target?.startsWith(':server:'));
 // honest (disabled composer, no optimistic bubble).
 const isPaused = computed(() => auth.isPaused);
 const sendable = computed(() => !!active.value && !isServer.value && !isPaused.value);
+
+function clearReply(): void {
+  const a = active.value;
+  if (a) buffers.setReply(a.networkId, a.target, null);
+}
 // `sendable` gates network sends (PRIVMSG, typing). The system buffer takes
 // commands with no network, so it's never `sendable` — gate the composer's
 // enabled state on this instead, which also lights up for the system buffer
@@ -2285,7 +2296,14 @@ async function submit() {
   // the typed `||…||` form (commitInput is given `raw`), so up-arrow
   // round-trips the editable text rather than raw control codes.
   const wireText = applySpoilerMarkup(escapedSlash ? raw.slice(1) : raw);
-  const pending = socketSendWithAck({ type: 'send', networkId, target, text: wireText });
+  const replyTo = buffers.findByTarget(networkId, target)?.replyTo?.msgid;
+  const pending = socketSendWithAck({
+    type: 'send',
+    networkId,
+    target,
+    text: wireText,
+    ...(replyTo ? { replyTo } : {}),
+  });
   if (!pending) {
     // Socket isn't open — don't clear the input, don't pollute history. The
     // user can edit and retry, or wait for the auto-reconnect.
@@ -2296,6 +2314,7 @@ async function submit() {
   typingTarget = null;
   clearInactivityTimer();
   commitInput(raw, networkId, target, { isChatMessage: true });
+  if (replyTo) buffers.setReply(networkId, target, null);
   const result = await pending;
   if (!result.ok) {
     toastSendFailure(result.error ?? 'unknown', raw);
@@ -3794,6 +3813,22 @@ function handleCommand(line: string, networkId: number | null, target: string): 
 }
 .prompt .away {
   color: var(--warn);
+}
+.reply-banner {
+  flex: 0 1 22em;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reply-banner button {
+  padding: 0 var(--space-1);
+  color: inherit;
+  font: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
 }
 /* The `>` glyph doubles as the recall-menu toggle (issue #204). It stays a
    bare glyph visually; the tap target is enlarged by a pseudo-element so the

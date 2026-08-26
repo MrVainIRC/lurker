@@ -20,7 +20,7 @@ import {
   deleteBuffer,
   listAutojoinChannels,
 } from '../db/buffers.js';
-import { hasMessageForTarget } from '../db/messages.js';
+import { hasMessageForTarget, setMessageReaction } from '../db/messages.js';
 import { DCC_ACTIVE_STATES, getDccTransfer, updateDccTransferState } from '../db/dccTransfers.js';
 import { findUserById } from '../db/users.js';
 import { isNetworkHostAllowed } from './networkPolicy.js';
@@ -589,7 +589,7 @@ class IrcManager extends EventEmitter {
   // text as a single self-message event — so the sender saw one bubble while
   // peers saw N. Splitting on our side and publishing per chunk keeps the
   // local view symmetric with what was actually transmitted.
-  send(userId: number, networkId: number, target: string, text: string): boolean {
+  send(userId: number, networkId: number, target: string, text: string, replyTo?: string): boolean {
     // writableConnection, not getConnection: a network in reconnect backoff still
     // has a connection object, and every line written to it is silently dropped.
     // Reporting success there persisted a self row and fanned it out to every
@@ -675,7 +675,7 @@ class IrcManager extends EventEmitter {
     // E2E branch above is exempt: its echo is ciphertext, so the plaintext self
     // row can only come from here.
     const adoptEcho = conn.echoActive();
-    if (hasInteriorNewline(text) && conn.supportsMultiline()) {
+    if (hasInteriorNewline(text) && conn.supportsMultiline() && !replyTo) {
       const nick = conn.client.user?.nick;
       const echoes = conn.sendMultiline(target, text);
       if (!adoptEcho) {
@@ -687,7 +687,7 @@ class IrcManager extends EventEmitter {
     }
     const chunks = splitSay(text);
     for (const chunk of chunks) {
-      conn.say(target, chunk);
+      conn.say(target, chunk, replyTo ? { '+reply': replyTo } : undefined);
       if (adoptEcho) continue;
       conn.publish({
         type: 'message',
@@ -773,6 +773,55 @@ class IrcManager extends EventEmitter {
       });
     }
     return true;
+  }
+
+  reaction(
+    userId: number,
+    networkId: number,
+    target: string,
+    msgid: string,
+    reaction: string,
+    removed: boolean,
+  ): boolean {
+    const conn = this.writableConnection(userId, networkId);
+    if (!conn || !msgid || reaction.length > 64) return false;
+    if (!conn.sendReaction(target, msgid, reaction, removed)) return false;
+    const actor = conn.client.user?.nick || 'unknown';
+    if (!conn.echoActive()) {
+      setMessageReaction(networkId, target, msgid, actor, reaction, !removed);
+      conn.publishEphemeral({ type: 'reaction', target, msgid, actor, reaction, removed });
+    }
+    return true;
+  }
+
+  redact(
+    userId: number,
+    networkId: number,
+    target: string,
+    msgid: string,
+    reason?: string,
+  ): boolean {
+    const conn = this.writableConnection(userId, networkId);
+    if (!conn) return false;
+    return conn.sendRedaction(target, msgid, reason);
+  }
+
+  metadata(
+    userId: number,
+    networkId: number,
+    target: string,
+    command: string,
+    params: string[],
+  ): boolean {
+    const conn = this.writableConnection(userId, networkId);
+    if (!conn) return false;
+    return conn.sendMetadata(target, command, ...params);
+  }
+
+  setname(userId: number, networkId: number, realname: string): boolean {
+    const conn = this.writableConnection(userId, networkId);
+    if (!conn || realname.length > 255) return false;
+    return conn.sendSetname(realname);
   }
 
   typing(userId: number, networkId: number, target: string, state: string): boolean {
@@ -1019,6 +1068,8 @@ class IrcManager extends EventEmitter {
           away: null,
           channels: [],
           peerPresence: {},
+          networkIcon: net.network_icon || null,
+          negotiatedFeatures: {},
         }),
       );
     }

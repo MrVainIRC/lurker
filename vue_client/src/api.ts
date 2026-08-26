@@ -1,6 +1,13 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
+import {
+  appPath,
+  basePath as CLIENT_BASE_PATH,
+  withBasePath,
+  withoutBasePath,
+} from './utils/paths.js';
+
 /** An Error thrown by `api()` / `apiMultipart()` on a non-2xx response. */
 export interface ApiError extends Error {
   status?: number;
@@ -31,6 +38,7 @@ const AUTH_RECOVERY_FLAG = 'lurker:authRecoveryAttempted';
 // NOT a stale session — bouncing would eject an invite/sign-in visitor to
 // `/login?next=/` before their page can even mount.
 function isPublicPath(pathname: string): boolean {
+  pathname = withoutBasePath(pathname, CLIENT_BASE_PATH);
   return pathname === '/login' || pathname.startsWith('/invite/');
 }
 
@@ -67,7 +75,7 @@ function bounceToLoginOnAuthFailure(url: string, status: number): void {
   } catch {
     /* ignore — best effort */
   }
-  window.location.assign('/');
+  window.location.assign(appPath('/'));
 }
 
 // Clear the one-shot marker so a LATER session loss can recover again. The bar
@@ -94,7 +102,8 @@ export async function api<T = any>(
   url: string,
   { method = 'GET', body, headers, signal }: ApiRequestOptions = {},
 ): Promise<T> {
-  const res = await fetch(url, {
+  const requestUrl = withBasePath(url, CLIENT_BASE_PATH);
+  const res = await fetch(requestUrl, {
     method,
     signal,
     credentials: 'include',
@@ -137,9 +146,10 @@ export function apiMultipart<T = any>(
   formData: FormData,
   { onProgress }: MultipartOptions = {},
 ): Promise<T> {
+  const requestUrl = withBasePath(url, CLIENT_BASE_PATH);
   return new Promise<T>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', url, true);
+    xhr.open('POST', requestUrl, true);
     xhr.withCredentials = true;
     xhr.responseType = 'text';
     xhr.upload.addEventListener('progress', (e) => {

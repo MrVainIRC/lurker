@@ -115,7 +115,8 @@
                 :show-prefix="showModePrefix"
                 interactive
                 @click.stop.prevent="onNickMenu($event, row.m?.nick, row.m)"
-            /></span>
+              /><span v-if="isBot(row.m)" class="bot-badge">bot</span></span
+            >
           </div>
           <span class="body" :class="bodyClass(row.m)">
             <span
@@ -123,8 +124,9 @@
               class="relay-via"
               :title="'Relayed via ' + row.m.relayBot"
               >[{{ relayLabel(row.m) }}]</span
+            ><span v-if="row.m?.redacted" class="message-redacted">[message redacted]</span
             ><MessageBody
-              v-if="previewBody(row.m)"
+              v-else-if="previewBody(row.m)"
               :text="row.m?.text"
               :segments="textSegments(row.m)"
               :self-color="selfColor"
@@ -141,6 +143,12 @@
               @nick-click="onMentionMenu"
             />
           </span>
+          <MessageAnnotations
+            v-if="row.m && buffer?.networkId != null"
+            :message="row.m"
+            :network-id="buffer.networkId"
+            :target="buffer.target"
+          />
           <span class="time">{{ row.continuationTime ? '' : time(row.m?.time) }}</span>
         </template>
         <template v-else>
@@ -155,7 +163,8 @@
                 :modes="authorModes(row.m)"
                 :show-prefix="showModePrefix"
                 interactive
-                @click.stop.prevent="onNickMenu($event, row.m?.nick, row.m)" /></template
+                @click.stop.prevent="onNickMenu($event, row.m?.nick, row.m)"
+              /><span v-if="isBot(row.m)" class="bot-badge">bot</span></template
             ><template v-else>{{ row.continuationAuthor ? '' : prefixText(row.m) }}</template></span
           >
           <span class="body" :class="bodyClass(row.m)">
@@ -164,13 +173,14 @@
               class="relay-via"
               :title="'Relayed via ' + row.m.relayBot"
               >[{{ relayLabel(row.m) }}]</span
+            ><span v-if="row.m?.redacted" class="message-redacted">[message redacted]</span
             ><!-- ⚠⚠ FIRST in the chain, and RenderSegments is now the `v-else-if` behind it.
                  MessageBody is a strictly narrower case (message|action, previews live, text
                  that could hold a link) than `hasInlineText`, so the order is what makes the
                  two mutually exclusive — reversed, every previewable message would render its
                  body twice. It has to be a branch of THIS chain rather than a sibling: see the
                  note where MessageAttachments used to sit, a few branches down. --><MessageBody
-              v-if="previewBody(row.m)"
+              v-else-if="previewBody(row.m)"
               :text="row.m?.text"
               :segments="textSegments(row.m)"
               :self-color="selfColor"
@@ -303,6 +313,12 @@
                  They now render inside MessageBody, which IS the chain's first branch, so the
                  hazard is gone rather than avoided. -->
           </span>
+          <MessageAnnotations
+            v-if="row.m && buffer?.networkId != null"
+            :message="row.m"
+            :network-id="buffer.networkId"
+            :target="buffer.target"
+          />
         </template>
         <div
           v-if="hoverActions && eligibleForActions(row.m)"
@@ -377,6 +393,7 @@ import NickRef from './NickRef.vue';
 import LinkedText from './LinkedText.vue';
 import RenderSegments from './RenderSegments.vue';
 import MessageBody from './MessageBody.vue';
+import MessageAnnotations from './MessageAnnotations.vue';
 import { previewRevision } from '../composables/useLinkPreview.js';
 import { useConfigStore } from '../stores/config.js';
 import IgnoreModal from './IgnoreModal.vue';
@@ -403,6 +420,11 @@ interface ChatMessage {
   type: string;
   nick?: string;
   text?: string;
+  msgid?: string;
+  replyTo?: string;
+  redacted?: boolean;
+  redactionReason?: string | null;
+  reactions?: Array<{ actor: string; reaction: string }>;
   time?: string;
   self?: boolean;
   alt?: boolean;
@@ -715,6 +737,10 @@ const actionContext: MessageContext = {
   },
   onReply: (msg) => {
     if (msg.nick) addressNick(msg.nick);
+    const b = buffer.value;
+    if (b?.networkId != null && msg.msgid) {
+      buffers.setReply(b.networkId, b.target, msg as any);
+    }
   },
   onIgnore: (msg) => {
     const { user, host } = parseUserHost(msg.userhost);
@@ -816,6 +842,13 @@ function authorModes(m: ChatMessage | undefined): string[] | undefined {
   const b = buffer.value;
   if (!b || !isChannelTarget(b.target)) return undefined;
   return nickMember(m.nick)?.modes;
+}
+
+function isBot(m: ChatMessage | undefined): boolean {
+  if (!m?.nick) return false;
+  return !!buffer.value?.members?.find(
+    (member) => member.nick.toLowerCase() === m.nick?.toLowerCase() && member.bot,
+  );
 }
 
 function nickIsSelf(member: MemberLike | string): boolean {
@@ -2361,6 +2394,21 @@ watch(
   },
 );
 </script>
+
+<style scoped>
+.bot-badge {
+  margin-left: var(--space-1);
+  padding: 0 var(--space-1);
+  color: var(--fg-muted);
+  font-weight: 600;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.message-redacted {
+  color: var(--fg-muted);
+  font-style: italic;
+}
+</style>
 
 <style scoped>
 /* WeeChat-style 3-column layout: time | nick | body, with column 2 sized to

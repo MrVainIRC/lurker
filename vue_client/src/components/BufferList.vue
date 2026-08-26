@@ -165,6 +165,13 @@
             "
           >
             <span class="indicator" :class="stateClass(net.id)"></span>
+            <img
+              v-if="networkIcon(net.id)"
+              class="network-icon"
+              :src="networkIcon(net.id) || undefined"
+              alt=""
+              aria-hidden="true"
+            />
             <span class="name">{{ net.name }}</span>
             <span
               v-if="serverHighlights(net.id) > 0 && showHighlightBadge"
@@ -408,6 +415,11 @@ function openAdmin(): void {
 
 function isNetworkConnected(net: Network): boolean {
   return networks.states[net.id]?.state === 'connected';
+}
+
+function networkIcon(networkId: number): string | null {
+  const icon = networks.states[networkId]?.networkIcon;
+  return typeof icon === 'string' && /^https:\/\//i.test(icon) ? icon : null;
 }
 
 // LURKER system buffer (#355): a real top-of-list row. Its status light tracks
@@ -1417,6 +1429,13 @@ onBeforeUnmount(() => {
   padding: var(--space-6);
   color: var(--fg-muted);
   font-style: italic;
+}
+.network-icon {
+  width: 1.1em;
+  height: 1.1em;
+  flex: 0 0 auto;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
 }
 
 /* Separator between the pinned section and the auto-sorted section. The

@@ -6,6 +6,7 @@ import { useAuthStore } from './stores/auth.js';
 import { useConfigStore } from './stores/config.js';
 import { useToastsStore } from './stores/toasts.js';
 import { isChunkLoadError, safeSessionStorage, shouldReloadFor } from './lib/chunkReload.js';
+import { appPath, basePath } from './utils/paths.js';
 
 // ONE lazy loader shared by the three chat routes below. Declaring
 // `() => import(...)` three times would make three distinct async wrappers, and
@@ -71,7 +72,7 @@ const routes: RouteRecordRaw[] = [
 ];
 
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHistory(basePath || undefined),
   routes,
 });
 
@@ -106,7 +107,7 @@ router.onError((err, to) => {
   const path = to?.fullPath;
   if (!path) return;
   if (shouldReloadFor(path, Date.now(), safeSessionStorage())) {
-    window.location.assign(path);
+    window.location.assign(appPath(path));
     return;
   }
   // Already tried reloading for this path — the chunk is genuinely unavailable,

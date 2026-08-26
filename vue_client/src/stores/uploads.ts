@@ -5,6 +5,7 @@ import { ref } from 'vue';
 import { defineStore } from 'pinia';
 import { mimeMatchesKind, type UploadKind } from '../../../shared/uploadKinds.js';
 import { api, apiMultipart } from '../api.js';
+import { appPath } from '../utils/paths.js';
 import { makeClientId } from '../utils/clientId.js';
 
 // "Insert URL into MessageInput" needs to reach across the component tree.
@@ -249,7 +250,8 @@ export const useUploadsStore = defineStore('uploads', {
           const mime: string | null = result.mime ?? (file.type || null);
           const isImage = typeof mime === 'string' && mime.startsWith('image/');
           const thumbnail_url =
-            result.thumbnail_url || (isImage ? `/api/uploads/${result.id}/thumb` : undefined);
+            result.thumbnail_url ||
+            (isImage ? appPath(`/api/uploads/${result.id}/thumb`) : undefined);
           const row: UploadItem = {
             id: result.id,
             url: result.url,

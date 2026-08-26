@@ -3,6 +3,7 @@
 
 import { defineStore } from 'pinia';
 import { socketSend } from '../composables/useSocket.js';
+import { appPath } from '../utils/paths.js';
 
 // Idle-typing debounce before a buffer's draft is flushed to the server.
 // Short enough that a typical pause between sentences is plenty to persist
@@ -185,7 +186,7 @@ export const useDraftStore = defineStore('drafts', {
         // and the server JSON.parses it. Same-origin in production, so cookies
         // ride along normally.
         const blob = new Blob([JSON.stringify({ drafts })], { type: 'text/plain;charset=UTF-8' });
-        return navigator.sendBeacon('/api/drafts/flush', blob);
+        return navigator.sendBeacon(appPath('/api/drafts/flush'), blob);
       } catch (_) {
         return false;
       }

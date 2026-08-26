@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { api } from '../api.js';
+import { appPath } from '../utils/paths.js';
 
 type SWMessageListener = (data: unknown) => void;
 
@@ -30,7 +31,7 @@ export async function registerSW(): Promise<ServiceWorkerRegistration | null> {
   if (!isSupported()) return null;
   if (registrationPromise) return registrationPromise;
   registrationPromise = navigator.serviceWorker
-    .register('/sw.js')
+    .register(appPath('/sw.js'), { scope: appPath('/') })
     .then(async () => {
       const reg = await navigator.serviceWorker.ready;
       navigator.serviceWorker.addEventListener('message', onSWMessage);

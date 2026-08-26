@@ -5,6 +5,7 @@ import type { ContextMenuItem } from './useContextMenu.js';
 import { useBookmarksStore } from '../stores/bookmarks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { useContextMenu } from './useContextMenu.js';
+import { useNetworksStore } from '../stores/networks.js';
 
 export interface MessageLike {
   id?: number | null;
@@ -22,6 +23,7 @@ export interface MessageLike {
   // buffers(id), as it rides on the server's message events — the direct
   // answer, when the row came from the server rather than being minted here.
   bufferId?: number;
+  msgid?: string;
 }
 
 export interface MessageContext {
@@ -74,6 +76,7 @@ export function useMessageActions(): MessageActionsAPI {
   const bookmarks = useBookmarksStore();
   const buffers = useBuffersStore();
   const menu = useContextMenu();
+  const networks = useNetworksStore();
 
   // Absolute permalink to one message, or null when the line can't have one.
   // The buffer route addresses by server id (#744), so this needs the message's
@@ -122,9 +125,16 @@ export function useMessageActions(): MessageActionsAPI {
 
     // Reply and Ignore both address another user: pointless on your own line,
     // and the server uses the hostmask for delivery, not ignore filtering.
+    const networkId = message.networkId ?? message.network_id;
+    const featureState = networkId == null ? null : networks.states[networkId];
     const addressable = !message.self && !!message.nick;
+    const replyable =
+      addressable &&
+      !!message.msgid &&
+      !!featureState?.negotiatedFeatures?.reply &&
+      !!featureState?.negotiatedFeatures?.messageTags;
 
-    if (addressable) {
+    if (replyable) {
       actions.push({ key: 'reply', label: `Reply to ${message.nick}`, icon: 'fa-solid fa-reply' });
     }
 
@@ -150,7 +160,6 @@ export function useMessageActions(): MessageActionsAPI {
     // their own id sequence (`systemLineToEvent`), so system line #42 and
     // message #42 coexist; asking `isSaved(42)` for the former would light up
     // "Remove bookmark" on a line nobody ever saved.
-    const networkId = message.networkId ?? message.network_id;
     if (message.id != null && networkId != null) {
       const saved = bookmarks.isSaved(message.id);
       actions.push({

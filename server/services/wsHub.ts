@@ -109,6 +109,7 @@ import { defaultsAsObject } from './settingsRegistry.js';
 import { SESSION_COOKIE, loadBearerSession } from '../middleware/auth.js';
 import { PROTOCOL_VERSION, MIN_PROTOCOL_VERSION } from '../protocol.js';
 import { isAllowedBrowserOrigin } from '../utils/corsOrigins.js';
+import { webSocketPath } from '../utils/basePath.js';
 import { callVerb } from './verbRegistry.js';
 
 // WebSocket extended with per-socket bookkeeping fields.
@@ -324,6 +325,10 @@ const PAUSED_BLOCKED_TYPES = new Set([
   'typing',
   'e2e',
   'ctcp',
+  'react',
+  'redact',
+  'metadata',
+  'setname',
 ]);
 
 // Options bag for fanOut.
@@ -1732,7 +1737,11 @@ export function authenticateUpgrade(req: IncomingMessage, sessionSecret: string)
   return loadBearerSession(req.headers.authorization)?.user ?? null;
 }
 
-export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
+export function attachWsHub(
+  httpServer: HttpServer,
+  sessionSecret: string,
+  upgradePath = webSocketPath(),
+) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_MESSAGE_BYTES });
   // Per-user pending auto-away timers. Set when a user goes from 1→0 sockets;
   // cleared on 0→1 or when the timer fires.
@@ -2285,7 +2294,14 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
   });
 
   httpServer.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) => {
-    if (!req.url || !req.url.startsWith('/ws')) return;
+    if (!req.url) return;
+    let upgradeUrl: URL;
+    try {
+      upgradeUrl = new URL(req.url, 'http://localhost');
+    } catch {
+      return;
+    }
+    if (upgradeUrl.pathname !== upgradePath) return;
     // #574: reject a cross-site browser upgrade before we touch auth or the DB.
     // Native clients send no Origin and pass; same-origin/allowlisted pass.
     if (!isAllowedUpgradeOrigin(req)) {
@@ -2724,6 +2740,7 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
               networkId: msg.networkId,
               target: msg.target,
               text: msg.text,
+              replyTo: typeof msg.replyTo === 'string' ? msg.replyTo : undefined,
             },
           ) as { ok: boolean; error?: string };
         } catch (err) {
@@ -2767,6 +2784,78 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
             error: result.ok ? undefined : result.error,
           });
         }
+        break;
+      }
+      case 'react':
+      case 'unreact': {
+        const networkId = Number(msg.networkId);
+        const target = typeof msg.target === 'string' ? msg.target : '';
+        const msgid = typeof msg.msgid === 'string' ? msg.msgid : '';
+        const reaction = typeof msg.reaction === 'string' ? msg.reaction : '';
+        const result = ircManager.reaction(
+          userId,
+          networkId,
+          target,
+          msgid,
+          reaction,
+          msg.type === 'unreact',
+        );
+        if (msg.clientId) {
+          send(ws, {
+            kind: 'send-result',
+            clientId: msg.clientId,
+            ok: result,
+            error: result ? undefined : 'unsupported',
+          });
+        }
+        break;
+      }
+      case 'redact': {
+        const networkId = Number(msg.networkId);
+        const ok = ircManager.redact(
+          userId,
+          networkId,
+          typeof msg.target === 'string' ? msg.target : '',
+          typeof msg.msgid === 'string' ? msg.msgid : '',
+          typeof msg.reason === 'string' ? msg.reason : undefined,
+        );
+        if (msg.clientId)
+          send(ws, {
+            kind: 'send-result',
+            clientId: msg.clientId,
+            ok,
+            error: ok ? undefined : 'unsupported',
+          });
+        break;
+      }
+      case 'metadata': {
+        const networkId = Number(msg.networkId);
+        const target = typeof msg.target === 'string' ? msg.target : '*';
+        const command = typeof msg.command === 'string' ? msg.command : '';
+        const params = Array.isArray(msg.params)
+          ? msg.params.filter((p): p is string => typeof p === 'string').slice(0, 64)
+          : [];
+        const ok = ircManager.metadata(userId, networkId, target, command, params);
+        if (msg.clientId)
+          send(ws, {
+            kind: 'send-result',
+            clientId: msg.clientId,
+            ok,
+            error: ok ? undefined : 'unsupported',
+          });
+        break;
+      }
+      case 'setname': {
+        const networkId = Number(msg.networkId);
+        const realname = typeof msg.realname === 'string' ? msg.realname : '';
+        const ok = ircManager.setname(userId, networkId, realname);
+        if (msg.clientId)
+          send(ws, {
+            kind: 'send-result',
+            clientId: msg.clientId,
+            ok,
+            error: ok ? undefined : 'unsupported',
+          });
         break;
       }
       case 'e2e': {

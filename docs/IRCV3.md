@@ -76,9 +76,7 @@ only works if timestamps are trustworthy.
   identically across every device you're signed in on.
   <br>`server/services/ircConnection.ts:1533`
 - **`msgid`** — every message gets the server's stable identifier, stored and
-  indexed. Nothing user-facing depends on it today: it's deliberate groundwork, since
-  reactions and threaded replies are both anchored on a message ID and can't be built
-  without one.
+  indexed. Replies, reactions, and redactions use it as their durable anchor.
   <br>`server/services/ircConnection.ts:1528`
 
 ### Multi-line messages stay one message
@@ -210,6 +208,14 @@ attaching to Lurker.
 | `monitor`                               |   ✅   |    —    |
 | `extended-monitor`                      |   ✅   |    —    |
 | `whox`                                  |   ✅   |    —    |
+| `+reply`                                |   ✅   |    —    |
+| `+draft/react`, `+draft/unreact`        |   ✅   |    —    |
+| `draft/message-redaction`               |   ✅   |    —    |
+| `standard-replies`                      |   ✅   |    —    |
+| `labeled-response`                      |   ✅   |    —    |
+| `setname`                               |   ✅   |    —    |
+| `draft/metadata-2`                      |   ✅   |    —    |
+| `BOT` / `draft/ICON` (ISUPPORT)         |   ✅   |    —    |
 | `znc.in/self-message`                   |   —    |   ✅    |
 | `soju.im/bouncer-networks` (+`-notify`) |   —    |   ✅    |
 
@@ -225,45 +231,49 @@ nothing in Lurker reads them yet. We'd rather say so than count them.
 
 ---
 
-## Not supported yet
+## Related capabilities and explicit non-goals
 
 Kept deliberately, as a roadmap. Ordered by what we think it would actually buy
 you, not by spec number.
 
-### High value — natural fits for features Lurker already has
+### Explicit non-goals
 
-| Capability                      | What it would give you                                                                                                                                                                                                                                                                                                                                                             |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `+draft/react`                  | Emoji reactions on messages. Lurker already stores the `msgid` that reactions anchor to, so the hard part is done.                                                                                                                                                                                                                                                                 |
-| `+draft/reply`                  | Threaded replies, anchored on the same stored `msgid`.                                                                                                                                                                                                                                                                                                                             |
-| `draft/read-marker`             | Read state shared with an attached IRC client. Lurker already tracks read position server-side per user and pushes it to every first-party client, so web and mobile agree — but that state is invisible over the bouncer, which replays a fixed-size burst per buffer rather than resuming from where you left off. This is the cap that would close that gap in both directions. |
-| `draft/chathistory` (as client) | Backfill missed history from an upstream bouncer or a network that stores it. Note the asymmetry: Lurker _serves_ chathistory downstream but doesn't consume it upstream, so gaps from a Lurker outage can't currently be filled in.                                                                                                                                               |
-| `standard-replies`              | Machine-readable `FAIL`/`WARN`/`NOTE` errors, so command failures render as real explanations instead of raw numerics.                                                                                                                                                                                                                                                             |
-| `draft/message-redaction`       | When someone deletes a message, it disappears from your view too, rather than persisting forever in Lurker's history.                                                                                                                                                                                                                                                              |
+`draft/read-marker` and upstream `draft/chathistory` remain intentionally out of
+scope: Lurker owns its persistent IRC connection and history and does not add
+bouncer synchronization here.
+
+### Reference extensions
+
+| Capability                                   | What it would give you                                                                                                 |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `+reply` / `+draft/react` / `+draft/unreact` | Replies and reactions are anchored on the stored IRC `msgid`; reaction state is normalized and persisted.              |
+| `standard-replies`                           | Machine-readable `FAIL`/`WARN`/`NOTE` errors, so command failures render as real explanations instead of raw numerics. |
+| `draft/message-redaction`                    | Redaction is persisted and removes message text after reload.                                                          |
 
 ### Moderate value
 
-| Capability                   | What it would give you                                                                                                                                                           |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `labeled-response`           | Reliable correlation of a command with its reply, which makes command results attributable even when several are in flight.                                                      |
-| `setname`                    | Change your realname without reconnecting. Lurker doesn't request this today.                                                                                                    |
-| `bot-mode`                   | Visually distinguish bots from people in the nicklist and message list.                                                                                                          |
-| `draft/metadata`             | Server-side profile data — avatars being the obvious use.                                                                                                                        |
-| `draft/account-registration` | Register a network account during onboarding, instead of sending someone off to `/msg NickServ`.                                                                                 |
-| `draft/pre-away`             | Set away state before registration finishes, closing the brief window on reconnect where you appear present but aren't.                                                          |
-| `utf8only`                   | Skip encoding guesswork on networks that guarantee UTF-8.                                                                                                                        |
-| `draft/channel-rename`       | Follow a channel rename without a part/join cycle.                                                                                                                               |
-| `sts`                        | Automatic upgrade to TLS and downgrade protection. Lower priority than it sounds — Lurker connects with TLS directly — but it would harden a misconfigured plaintext connection. |
+| Capability                          | What it would give you                                                                                                                                                           |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `labeled-response`                  | `METADATA`, `REDACT`, and `SETNAME` carry labels when the capability is negotiated.                                                                                              |
+| `setname`                           | Change your realname without reconnecting.                                                                                                                                       |
+| `bot-mode`                          | `BOT` ISUPPORT is parsed by irc-framework and bot users are marked in the nicklist.                                                                                              |
+| `draft/metadata-2`                  | Generic server-side user/channel metadata with subscriptions and persistence.                                                                                                    |
+| `draft/network-icon` (`draft/ICON`) | HTTPS network icons from ISUPPORT are cached and displayed in the network list.                                                                                                  |
+| `draft/account-registration`        | Register a network account during onboarding, instead of sending someone off to `/msg NickServ`.                                                                                 |
+| `draft/pre-away`                    | Set away state before registration finishes, closing the brief window on reconnect where you appear present but aren't.                                                          |
+| `utf8only`                          | Skip encoding guesswork on networks that guarantee UTF-8.                                                                                                                        |
+| `draft/channel-rename`              | Follow a channel rename without a part/join cycle.                                                                                                                               |
+| `sts`                               | Automatic upgrade to TLS and downgrade protection. Lower priority than it sounds — Lurker connects with TLS directly — but it would harden a misconfigured plaintext connection. |
 
 ### Low value or not applicable
 
-| Capability                                                                                                                    | Why it's not a priority                                                                                                |
-| ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `starttls`                                                                                                                    | Superseded in practice by connecting with TLS directly, which Lurker does.                                             |
-| `websockets`                                                                                                                  | Lurker connects to networks over TCP from the server; browser WebSocket transport isn't relevant to that path.         |
-| `webirc`                                                                                                                      | Designed for gateways relaying many users, and requires per-network operator trust. Lurker's connections are per-user. |
-| `no-implicit-names`                                                                                                           | A join-time optimisation for very large channels; little benefit at Lurker's scale.                                    |
-| `account-extban`, `draft/oper-tag`, `draft/network-icon`, `draft/extended-isupport`, `client-batch`, `+draft/channel-context` | Narrow or largely server-side; no user-visible feature blocked on them today.                                          |
+| Capability                                                                                              | Why it's not a priority                                                                                                |
+| ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `starttls`                                                                                              | Superseded in practice by connecting with TLS directly, which Lurker does.                                             |
+| `websockets`                                                                                            | Lurker connects to networks over TCP from the server; browser WebSocket transport isn't relevant to that path.         |
+| `webirc`                                                                                                | Designed for gateways relaying many users, and requires per-network operator trust. Lurker's connections are per-user. |
+| `no-implicit-names`                                                                                     | A join-time optimisation for very large channels; little benefit at Lurker's scale.                                    |
+| `account-extban`, `draft/oper-tag`, `draft/extended-isupport`, `client-batch`, `+draft/channel-context` | Narrow or largely server-side; no user-visible feature blocked on them today.                                          |
 
 ---
 

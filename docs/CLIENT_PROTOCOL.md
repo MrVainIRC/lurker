@@ -444,7 +444,8 @@ Common fields on every **persisted** event (`db/messages.ts` `rowToEvent` +
   userhost, alt, mirrored, dm,
   matched, matchedRuleId,             // highlight decoration
   fromIgnored, notifyAlways, notify,
-  msgid?,                             // IRCv3 server message id, when supplied
+  msgid?, replyTo?,                   // IRCv3 msgid and +reply parent
+  reactions?, redacted?,              // normalized reactions / redaction state
   bookmarked? }                       // true when you've saved this line
 ```
 
@@ -457,10 +458,9 @@ time. Rows persisted before this existed carry receive time. Because a bouncer
 upstream can replay old messages live, `time` is **not** guaranteed monotonic
 with respect to `id` — order and dedupe by `id`, always (§9.3).
 
-**`msgid`** is the server-assigned IRCv3 message id (`message-tags` networks;
-own sends learn theirs via `echo-message`). Absent — not null — on rows from
-untagged networks and on optimistic self echoes. It is the future anchor for
-react/reply; today it is informational only.
+**`msgid`** is the server-assigned IRCv3 message id. `replyTo` is a network- and
+buffer-scoped parent reference. `reactions` contains `{actor, reaction}` rows;
+`redacted:true` means the text has been removed persistently.
 
 **`bookmarked`** is `true` when the account reading the row has saved it, and
 **absent — not `false`** otherwise, so unsaved rows (nearly all of them) cost
@@ -550,13 +550,17 @@ and rename-proof.
 
 ### Sending ⏸
 
-| `type`   | Fields                                             | Notes                                                                            |
-| -------- | -------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `send`   | `networkId, target, text, clientId?`               | PRIVMSG. Ack via `send-result` iff `clientId` present                            |
-| `action` | `networkId, target, text, clientId?`               | CTCP ACTION (`/me`)                                                              |
-| `notice` | `networkId, target, text, clientId?`               | NOTICE                                                                           |
-| `raw`    | `networkId, line`                                  | Raw IRC line — the escape hatch for `/mode`, `/kick`, `/whois`, unknown commands |
-| `ctcp`   | `networkId, target, ctcpType, args, issuingTarget` | CTCP request (`/ping`, `/version` at a user)                                     |
+| `type`              | Fields                                             | Notes                                                                               |
+| ------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `send`              | `networkId, target, text, replyTo?, clientId?`     | PRIVMSG with `+reply` when negotiated. Ack via `send-result` iff `clientId` present |
+| `action`            | `networkId, target, text, clientId?`               | CTCP ACTION (`/me`)                                                                 |
+| `notice`            | `networkId, target, text, clientId?`               | NOTICE                                                                              |
+| `raw`               | `networkId, line`                                  | Raw IRC line — the escape hatch for `/mode`, `/kick`, `/whois`, unknown commands    |
+| `ctcp`              | `networkId, target, ctcpType, args, issuingTarget` | CTCP request (`/ping`, `/version` at a user)                                        |
+| `react` / `unreact` | `networkId, target, msgid, reaction, clientId?`    | `TAGMSG` with `+reply` and the corresponding reaction tag                           |
+| `redact`            | `networkId, target, msgid, reason?, clientId?`     | `REDACT`, only when `draft/message-redaction` is negotiated                         |
+| `metadata`          | `networkId, target, command, params[], clientId?`  | `METADATA`, only with `draft/metadata-2` and `batch`                                |
+| `setname`           | `networkId, realname, clientId?`                   | `SETNAME`, only when negotiated                                                     |
 
 **Ack contract:** include a client-generated `clientId` on `send`/`action`/
 `notice` and the server replies `{kind:'send-result', clientId, ok, error?}`.
@@ -641,6 +645,7 @@ a v1 client.
 | `backlog-complete`                                                                                                               | —                                                                                                                                                                                                                                                                                                                                                                                                           | Last frame of the burst; absence is proof (§4.3)                                                                                                          |
 | `backlog`                                                                                                                        | `networkId, target, bufferId, events[], mode, reset?, hasMoreOlder, joined, lastReadId, unread, highlights, highlightsCapped, clearedBeforeId, clearedAt, speakers?, inputHistory?` — **`mode ∈ replace\|append\|shell` is how you merge it (§8); `reset` is legacy**                                                                                                                                       | Burst, `open-buffer` reply, resume gap                                                                                                                    |
 | `irc`                                                                                                                            | A decorated `MessageEvent` (§5.3) with `kind` clobbered to `'irc'`; persisted events carry `bufferId`                                                                                                                                                                                                                                                                                                       | Every live IRC-side event                                                                                                                                 |
+| `features`                                                                                                                       | `networkId, negotiatedFeatures, capabilities, isupport, networkIcon?`                                                                                                                                                                                                                                                                                                                                       | Capability/ISUPPORT state changes                                                                                                                         |
 | `history`                                                                                                                        | `networkId, target, bufferId, mode, token, events[], speakers, hasMoreOlder, hasMoreNewer, hasMore, before/afterId/anchorId/anchorMissing` (per mode)                                                                                                                                                                                                                                                       | Reply to `history`                                                                                                                                        |
 | `read-state`                                                                                                                     | see §5.4                                                                                                                                                                                                                                                                                                                                                                                                    | After every countable event / mark-read                                                                                                                   |
 | `send-result`                                                                                                                    | `clientId, ok, error?`                                                                                                                                                                                                                                                                                                                                                                                      | Ack for `send`/`action`/`notice`                                                                                                                          |
@@ -700,6 +705,11 @@ Also the `type` of rows inside `backlog`/`history` `events[]`. **P** = persisted
 | `chghost`                     | P   | `newIdent, newHost` — render only; the nicklist patch rides `member-update`   |
 | `e2e`                         | E   | RPE2E status, `level` + `text`                                                |
 | `chanlist-start/progress/end` | E   | `/LIST` refresh progress                                                      |
+| `reaction`                    | E   | `target, msgid, actor, reaction, removed` — normalized reaction delta         |
+| `redaction`                   | E   | `target, msgid, reason?` — text is removed persistently                       |
+| `metadata`                    | E   | `target, key, visibility, value                                               | null` — generic metadata delta |
+| `standard-reply`              | E   | `severity, command, code, params, label?, text`                               |
+| `features`                    | E   | negotiated feature gates, capabilities, ISUPPORT, and optional network icon   |
 
 \*`system` rows persist in their own table with their own id sequence — see §4.4.
 

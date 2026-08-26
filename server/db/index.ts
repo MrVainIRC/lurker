@@ -90,6 +90,7 @@ function migrate() {
       realname TEXT,
       server_password TEXT,
       autoconnect INTEGER NOT NULL DEFAULT 1,
+      network_icon TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
@@ -140,6 +141,34 @@ function migrate() {
       extra TEXT,
       FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS message_reactions (
+      network_id INTEGER NOT NULL,
+      buffer_id INTEGER NOT NULL,
+      message_msgid TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      reaction TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY (network_id, buffer_id, message_msgid, actor, reaction),
+      FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE,
+      FOREIGN KEY (buffer_id) REFERENCES buffers(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_reactions_message
+      ON message_reactions(network_id, buffer_id, message_msgid);
+
+    CREATE TABLE IF NOT EXISTS irc_metadata (
+      network_id INTEGER NOT NULL,
+      target TEXT NOT NULL,
+      target_folded TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      visibility TEXT NOT NULL DEFAULT '*',
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY (network_id, target_folded, key),
+      FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_irc_metadata_network_target
+      ON irc_metadata(network_id, target_folded);
     -- The per-buffer index lives further down as idx_messages_unread, because it
     -- needs columns (type, from_ignored, notable) this CREATE TABLE predates and
     -- ensureColumn adds later. It supersedes the old idx_messages_buffer, which
@@ -1050,6 +1079,7 @@ ensureColumn('networks', 'position', 'INTEGER NOT NULL DEFAULT 0');
 // legacy Unicode-lowercase rule until then (db/casemapping.ts). A change is
 // what triggers the per-network re-fold (db/refoldBuffers.ts).
 ensureColumn('networks', 'casemapping', 'TEXT');
+ensureColumn('networks', 'network_icon', 'TEXT');
 ensureColumn('users', 'password_hash', 'TEXT');
 ensureColumn('users', 'last_seen_at', 'TEXT');
 // Account access state, orthogonal to role. A paused account keeps all its data
@@ -1144,6 +1174,29 @@ ensureColumn('messages', 'msgid', 'TEXT');
 db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_msgid
          ON messages(network_id, msgid)
          WHERE msgid IS NOT NULL`);
+
+// IRCv3 reply and message-redaction state. These are columns rather than
+// opaque extras because both relations must survive reloads and are queried by
+// msgid; old rows remain valid with NULL/0 defaults.
+ensureColumn('messages', 'reply_to_msgid', 'TEXT');
+ensureColumn('messages', 'redacted', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('messages', 'redaction_reason', 'TEXT');
+db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_reply_to
+         ON messages(network_id, reply_to_msgid)
+         WHERE reply_to_msgid IS NOT NULL`);
+db.exec(`CREATE TABLE IF NOT EXISTS message_reactions (
+  network_id INTEGER NOT NULL,
+  buffer_id INTEGER NOT NULL,
+  message_msgid TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  reaction TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (network_id, buffer_id, message_msgid, actor, reaction),
+  FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE,
+  FOREIGN KEY (buffer_id) REFERENCES buffers(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_message_reactions_message
+  ON message_reactions(network_id, buffer_id, message_msgid)`);
 
 // Sender matched the network owner's ignore list at insert time. Stamped on
 // the row so countNewer/countHighlightsNewer can exclude ignored senders
@@ -1287,7 +1340,7 @@ ensureColumn('push_subscriptions', 'transport', "TEXT NOT NULL DEFAULT 'webpush'
 // Schema versioning lets us retire one-shot recovery blocks once every
 // production DB has run through them. Bump SCHEMA_VERSION when adding a new
 // recovery block, and delete blocks for versions far enough in the past.
-const SCHEMA_VERSION = 20;
+const SCHEMA_VERSION = 21;
 const schemaVersionRow = db
   .prepare(`SELECT value FROM app_meta WHERE key = 'schema_version'`)
   .get() as { value: string } | undefined;

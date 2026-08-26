@@ -1,0 +1,135 @@
+<!--
+  Copyright (c) 2026 Brad Root
+  SPDX-License-Identifier: MPL-2.0
+-->
+
+<template>
+  <div v-if="features.metadata || features.setname" class="metadata-editor">
+    <strong>Profile</strong>
+    <div v-if="features.metadata" class="metadata-fields">
+      <label v-for="key in metadataKeys" :key="key">
+        <span>{{ key }}</span>
+        <input v-model="values[key]" :placeholder="metadataValue(key)" />
+      </label>
+    </div>
+    <label v-if="features.setname">
+      <span>Real name</span>
+      <input v-model="realname" placeholder="Real name" />
+    </label>
+    <button type="button" @click="save">Save profile</button>
+    <span v-if="message" class="save-message">{{ message }}</span>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, reactive, ref, watch } from 'vue';
+import { useNetworksStore } from '../stores/networks.js';
+import { socketSend } from '../composables/useSocket.js';
+
+const props = defineProps<{ networkId: number }>();
+const networks = useNetworksStore();
+const metadataKeys = ['avatar', 'display-name', 'pronouns', 'status', 'homepage', 'color'];
+const values = reactive<Record<string, string>>(
+  Object.fromEntries(metadataKeys.map((key) => [key, ''])),
+);
+const realname = ref('');
+const message = ref('');
+const network = computed(() => networks.networkById(props.networkId));
+const features = computed(() => networks.states[props.networkId]?.negotiatedFeatures || {});
+const ownMetadata = computed(() => {
+  const state = networks.states[props.networkId];
+  const nick = state?.nick || '';
+  const rows = state?.metadata || {};
+  const target = Object.keys(rows).find((key) => key.toLowerCase() === nick.toLowerCase());
+  return target ? rows[target] : [];
+});
+
+function metadataValue(key: string): string {
+  return ownMetadata.value.find((entry) => entry.key === key)?.value || '';
+}
+
+watch(
+  ownMetadata,
+  () => {
+    for (const key of metadataKeys) values[key] = metadataValue(key);
+  },
+  { immediate: true },
+);
+
+watch(
+  network,
+  (value) => {
+    if (!realname.value && typeof value?.realname === 'string') realname.value = value.realname;
+  },
+  { immediate: true },
+);
+
+function save(): void {
+  let sent = 0;
+  if (features.value.metadata) {
+    for (const key of metadataKeys) {
+      const value = values[key].trim();
+      const command = value ? 'SET' : 'CLEAR';
+      const params = value ? [key, value] : [key];
+      if (
+        socketSend({
+          type: 'metadata',
+          networkId: props.networkId,
+          target: '*',
+          command,
+          params,
+        })
+      )
+        sent += 1;
+    }
+  }
+  if (
+    features.value.setname &&
+    socketSend({ type: 'setname', networkId: props.networkId, realname: realname.value })
+  )
+    sent += 1;
+  message.value = sent ? 'Profile update sent.' : 'This network does not support profile updates.';
+}
+</script>
+
+<style scoped>
+.metadata-editor {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4) 0;
+  border-top: 1px solid var(--border);
+}
+.metadata-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12em, 1fr));
+  gap: var(--space-3);
+}
+.metadata-editor label {
+  display: grid;
+  gap: var(--space-1);
+  color: var(--fg-muted);
+}
+.metadata-editor input {
+  min-width: 0;
+  padding: var(--space-2);
+  color: var(--fg);
+  font: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.metadata-editor button {
+  justify-self: start;
+  padding: var(--space-2) var(--space-4);
+  color: var(--accent);
+  font: inherit;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.save-message {
+  color: var(--fg-muted);
+}
+</style>

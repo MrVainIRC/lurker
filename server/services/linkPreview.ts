@@ -41,6 +41,7 @@ import {
   type PreviewRecord,
 } from '../db/linkPreviews.js';
 import { mintProxyToken, mintPosterToken } from './mediaProxyToken.js';
+import { basePath } from '../utils/basePath.js';
 import { isEmbeddableOrigin } from './linkEmbed.js';
 import { decoderResolve, type DecoderMeta, type DecoderPoster } from './previewClient.js';
 // ⚠ `publicByteUrl` from `previewCache/publicUrl.js` for the historical cycle reason
@@ -400,7 +401,7 @@ export function toDescriptor(record: PreviewRecord): PreviewDescriptor {
     // cached until that request streams through and populates the cache.
     const proxied =
       publicByteUrl(record.imageUrl) ??
-      `/api/link-preview/media/${mintProxyToken(record.imageUrl)}`;
+      basePath(`/api/link-preview/media/${mintProxyToken(record.imageUrl)}`);
     // For direct media the bytes ARE the content (`src`); for a page they're
     // decoration on a card (`thumb`). Same proxy, different slot, so a client
     // never has to re-derive which one it's looking at from `kind`.
@@ -426,7 +427,7 @@ export function toDescriptor(record: PreviewRecord): PreviewDescriptor {
     // ⚠ A SIGNED token, not the bare key. The key is an unsalted hash a client can compute
     // for any URL; the token is the capability that keeps the poster route from serving the
     // shared byte cache to anyone who asks — see mintPosterToken.
-    d.thumb = `/api/link-preview/poster/${mintPosterToken(record.posterKey)}`;
+    d.thumb = basePath(`/api/link-preview/poster/${mintPosterToken(record.posterKey)}`);
     // For these rows the stored dimensions ARE the poster's — see PreviewRecord.posterKey.
     if (record.imageWidth) d.thumbWidth = record.imageWidth;
     if (record.imageHeight) d.thumbHeight = record.imageHeight;
