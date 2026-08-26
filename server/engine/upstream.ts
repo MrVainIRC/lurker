@@ -45,6 +45,11 @@ import {
 
 export interface UpstreamOptions {
   id: string;
+  // The app instance (Lurker database) this session belongs to. The id already
+  // carries it, but the engine checks this field on every operation rather than
+  // trusting the string: an app that minted a colliding id still cannot reach
+  // another instance's socket.
+  instance: string;
   host: string;
   port: number;
   tls: boolean;

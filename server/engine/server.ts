@@ -56,6 +56,9 @@ class AppLink implements FrameSink {
   // The app process's generation (hello.app.startedAt). Newer wins a contested
   // connection; an older process is refused rather than allowed to steal.
   generation = 0;
+  // The Lurker database this app speaks for (hello.instance). Every session the
+  // link touches must belong to it.
+  instance = '';
   lastSeen = Date.now();
 
   constructor(
@@ -139,6 +142,7 @@ export class EngineServer {
   // link currently claims. A session another process owns is not offered.
   private heldFor(link: AppLink): string[] {
     return [...this.upstreams.values()]
+      .filter((u) => u.opts.instance === link.instance)
       .filter((u) => u.state === 'open' && u.registered && !u.closing)
       .filter((u) => ![...this.links].some((l) => l !== link && l.claimed.has(u)))
       .map((u) => u.id);
@@ -257,7 +261,17 @@ export class EngineServer {
         link.socket.destroy();
         return;
       }
+      // Fail CLOSED. An app that sends no instance would otherwise share an id
+      // space with every other app on this engine, which is exactly the
+      // collision this field exists to prevent.
+      if (typeof frame.instance !== 'string' || !frame.instance) {
+        this.log(`refused link ${link.peer}: hello without an instance`);
+        link.fail('hello needs an instance');
+        link.socket.destroy();
+        return;
+      }
       link.authed = true;
+      link.instance = frame.instance;
       link.generation = Number(frame.app?.startedAt) || 0;
       link.send({
         op: 'hello',
@@ -291,6 +305,15 @@ export class EngineServer {
       case 'close': {
         const u = this.upstreams.get(frame.id);
         if (!u) return link.fail('unknown connection', frame.id);
+        // Another instance's session is not this app's to read, write, end or
+        // adopt. Said plainly rather than hidden behind 'unknown connection':
+        // anyone who gets this far already holds the engine secret, so there is
+        // no attacker to withhold it from — while the case that actually
+        // produces it is two Lurker instances misconfigured onto one engine,
+        // and that operator needs to be told exactly what is wrong.
+        if (u.opts.instance !== link.instance) {
+          return link.fail('connection id belongs to another instance', frame.id);
+        }
         // Only the link that holds the claim may drive the socket: a process
         // that was taken over is on its way out and must not get a line onto a
         // connection it no longer owns. Two exceptions. An `ack` from anyone is
@@ -338,6 +361,15 @@ export class EngineServer {
       );
     }
     let u = this.upstreams.get(id);
+    // Belt and braces over the `<instance>:…` id prefix. If a session under this
+    // id belongs to someone else's database, this app does not get to attach to
+    // it, take it over, or close it out of the way and dial its own in its
+    // place — any of which would put one person's socket behind another
+    // person's session. Refuse, loudly, and leave the held socket alone.
+    if (u && u.opts.instance !== link.instance) {
+      this.log(`${id}: refused ${link.peer} — held for another instance`);
+      return link.fail('connection id belongs to another instance', id);
+    }
     if (u && (u.closing || u.state === 'closed')) {
       // A socket on its way out (the app asked to close it and the FIN hasn't
       // round-tripped) is not one to attach to: this CONNECT is the app coming
@@ -420,6 +452,7 @@ export class EngineServer {
     u = new EngineUpstream(
       {
         id,
+        instance: link.instance,
         host: frame.host,
         port,
         tls: !!frame.tls,

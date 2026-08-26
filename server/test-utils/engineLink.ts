@@ -10,6 +10,8 @@ import { once } from 'node:events';
 import { FrameReader, PROTOCOL_MAJOR, encodeFrame } from '../engine/protocol.js';
 import type { AppToEngine, EngineToApp } from '../engine/protocol.js';
 
+export const TEST_INSTANCE = 'test-instance-a';
+
 export class TestLink {
   readonly frames: EngineToApp[] = [];
   hello: Extract<EngineToApp, { op: 'hello' }> | null = null;
@@ -47,13 +49,16 @@ export class TestLink {
   static async connect(
     port: number,
     secret: string,
-    opts: { protocol?: number; version?: string } = {},
+    opts: { protocol?: number; version?: string; instance?: string } = {},
   ): Promise<TestLink> {
     const link = await TestLink.open(port);
     link.send({
       op: 'hello',
       protocol: opts.protocol ?? PROTOCOL_MAJOR,
       secret,
+      // One default instance, so the ordinary tests all speak for the same
+      // "database"; the cross-instance cases pass their own.
+      instance: opts.instance ?? TEST_INSTANCE,
       app: { version: opts.version ?? 'test' },
     });
     await link.waitFor((f) => f.op === 'hello' || f.op === 'error');

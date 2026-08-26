@@ -13,7 +13,7 @@ import { PROTOCOL_MAJOR } from './protocol.js';
 import type { EngineToApp } from './protocol.js';
 import { MAX_BURST_BYTES } from './upstream.js';
 import { FakeIrcd } from '../test-utils/fakeIrcd.js';
-import { TestLink } from '../test-utils/engineLink.js';
+import { TestLink, TEST_INSTANCE } from '../test-utils/engineLink.js';
 import { createIdentdServer } from '../services/identd.js';
 
 const SECRET = 'spike-secret';
@@ -791,6 +791,7 @@ describe('third review round', () => {
       op: 'hello',
       protocol: PROTOCOL_MAJOR,
       secret: SECRET,
+      instance: TEST_INSTANCE,
       app: { version: 'old', startedAt: 1000 },
     });
     await older.waitFor((f) => f.op === 'hello');
@@ -801,6 +802,7 @@ describe('third review round', () => {
       op: 'hello',
       protocol: PROTOCOL_MAJOR,
       secret: SECRET,
+      instance: TEST_INSTANCE,
       app: { version: 'new', startedAt: 2000 },
     });
     await newer.waitFor((f) => f.op === 'hello');
@@ -899,5 +901,81 @@ describe('orphan reaper', () => {
     } finally {
       await own.shutdown('done', 200);
     }
+  });
+});
+
+// The failure this partition exists to prevent is IRCCloud's July 2020 log
+// exposure: two connection servers minted colliding ids in one id space, and a
+// backlog fetch by id returned both users' logs. Lurker's ids are
+// `<instance>:<userId>:<networkId>` where the last two are rowids from ONE
+// Lurker database, so two Lurker instances on one engine would both mint
+// `…:1:1` for unrelated people. `matchesDial` does not save you: two users on
+// the same popular network dial the identical host/port/tls.
+describe('instance isolation', () => {
+  const OTHER = 'test-instance-b';
+
+  it('refuses a hello with no instance at all', async () => {
+    const l = await TestLink.open(enginePort);
+    links.push(l);
+    l.send({
+      op: 'hello',
+      protocol: PROTOCOL_MAJOR,
+      secret: SECRET,
+      app: { version: 'no-instance' },
+    } as never);
+    const f = await l.waitFor((x) => x.op === 'hello' || x.op === 'error');
+    expect(f.op).toBe('error');
+    expect((f as { message: string }).message).toMatch(/instance/);
+  });
+
+  it('does not let another instance attach to, write to, or close a held session', async () => {
+    // Same id AND the same dial parameters — the collision matchesDial cannot see.
+    const id = `${TEST_INSTANCE}:1:1`;
+    const a = await link();
+    await register(a, id, 'ownernick');
+    a.send({ op: 'write', id, line: 'JOIN #secret' });
+    await a.waitForLine(id, /JOIN #secret/);
+    ackAll(a, id);
+    a.kill();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(engine.held()).toContain(id);
+
+    const intruder = await TestLink.connect(enginePort, SECRET, { instance: OTHER });
+    links.push(intruder);
+    // It is not even told the session exists.
+    expect(intruder.hello?.held).not.toContain(id);
+
+    // Attaching to it is refused outright — not silently closed and redialed,
+    // which would hand the intruder a socket under the owner's id.
+    intruder.send(connectFrame(id));
+    const err = await intruder.waitFor((f) => f.op === 'error' || f.op === 'attached');
+    expect(err.op).toBe('error');
+    expect((err as { message: string }).message).toMatch(/another instance/);
+    expect(engine.held()).toContain(id);
+
+    // Driving it is refused too — every op, not just attach. waitForNew,
+    // because the refusal above is already sitting in `frames`.
+    for (const op of ['write', 'ack', 'detach', 'close'] as const) {
+      intruder.send(
+        op === 'write'
+          ? { op, id, line: 'PRIVMSG #secret :hello' }
+          : op === 'ack'
+            ? { op, id, seq: 1 }
+            : { op, id },
+      );
+      const f = await intruder.waitForNew((x) => x.op === 'error', 3000);
+      expect((f as { message: string }).message).toMatch(/another instance/);
+    }
+    expect(engine.held()).toContain(id);
+
+    // And the owner still gets its own session back, intact.
+    const owner = await link();
+    expect(owner.hello?.held).toContain(id);
+    owner.send(connectFrame(id));
+    const att = await owner.waitFor<Attached>((f) => f.op === 'attached');
+    expect(att.nick).toBe('ownernick');
+    expect(att.channels).toEqual(['#secret']);
+    owner.send({ op: 'close', id });
+    await gone(engine, id);
   });
 });

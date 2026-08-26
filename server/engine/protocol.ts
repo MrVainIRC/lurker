@@ -58,7 +58,21 @@ export type AppToEngine =
   // `startedAt` is the app process's generation: when two processes overlap
   // (a rolling deploy), a connection goes to the NEWER one and an older one is
   // refused rather than allowed to steal it back.
-  | { op: 'hello'; protocol: number; secret: string; app: { version: string; startedAt?: number } }
+  // `instance` identifies the Lurker DATABASE this app speaks for, and it is
+  // required. Connection ids are `<instance>:<userId>:<networkId>`, and userId
+  // and networkId are rowids from that database — so two Lurker instances
+  // pointed at one engine would otherwise both mint `1:1` for unrelated people.
+  // `matchesDial` would not catch it either: two users on the same popular
+  // network dial the identical host/port/tls. That is how IRCCloud leaked logs
+  // between accounts in July 2020 (two servers, one id space). The engine
+  // partitions every session by this value and refuses a hello without one.
+  | {
+      op: 'hello';
+      protocol: number;
+      secret: string;
+      instance: string;
+      app: { version: string; startedAt?: number };
+    }
   // Link liveness, both directions: the engine answers `pong`; the app sends
   // `ping` on a timer and drops a link that answers nothing for a while.
   | { op: 'ping' }
