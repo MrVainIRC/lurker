@@ -179,6 +179,18 @@ const RESTORE_REPLY_OF: Record<string, RestoreReply> = {
   '332': 'topic', // RPL_TOPIC
   '324': 'mode', // RPL_CHANNELMODEIS
 };
+// On a restore, a channel with MORE than this many members does not get the
+// eager away-sync WHO (see the 'userlist' handler). That WHO's reply is one
+// verbose 352 line PER MEMBER — the heaviest thing a restore does, and what a
+// big-channel reconnect turns into an [event-loop] stall — while NAMES packs
+// many nicks per 353 line. In a channel this large per-member away dots matter
+// least, and away-notify keeps active members' state live regardless; the only
+// loss is that a member who was silently away before the reconnect reads as
+// present until they next move. Read live (LURKER_RESTORE_WHO_MAX_MEMBERS; 0
+// disables the restore WHO entirely). NOT a functional cap — a user /who and
+// every fresh interactive join still WHO in full; this only trims the eager
+// sync on the reconnect burst.
+const RESTORE_WHO_MAX_MEMBERS = 500;
 // How long a link-loss re-attach waits for the engine to say what it holds
 // before treating the session as gone and taking the ordinary reconnect ladder.
 const ENGINE_REATTACH_WAIT_MS = 10_000;
@@ -2730,13 +2742,31 @@ export class IrcConnection {
       // channel. away-notify keeps it live after this initial sync. Mark it so
       // the 'wholist' handler consumes the reply silently instead of echoing
       // every member to the server buffer (#342).
-      try {
-        c.who(eventChannel);
-        // Mark only after a successful send: if c.who() throws, a stale flag
-        // would silently suppress a later user-typed /who for this channel.
-        this.autoWhoTargets.add(eventChannel.toLowerCase());
-      } catch (_) {
-        /* ignore */
+      //
+      // Exception: on a RESTORE, a very large channel's away-sync WHO is skipped
+      // (RESTORE_WHO_MAX_MEMBERS) — its 352-per-member reply is the heaviest part
+      // of the reconnect burst. restoreQuiet marks exactly the channels
+      // drainRestoreQueue just requested, so this never touches a fresh
+      // interactive join (which WHOs in full, any size).
+      const rq = this.restoreQuiet.get(eventChannel.toLowerCase());
+      const inRestore = !!rq && Date.now() < rq.until;
+      const whoMax = reconnectEnvInt('LURKER_RESTORE_WHO_MAX_MEMBERS', RESTORE_WHO_MAX_MEMBERS);
+      if (inRestore && ch.members.size > whoMax) {
+        // Diagnostic only (docker logs), never a server-buffer row: on a big
+        // multi-network restore this can fire per channel.
+        console.log(
+          `[irc] restore: skipped away-sync WHO for ${eventChannel} (${ch.members.size} members > ${whoMax}) ` +
+            `on network ${this.network.id}; away-notify keeps it live`,
+        );
+      } else {
+        try {
+          c.who(eventChannel);
+          // Mark only after a successful send: if c.who() throws, a stale flag
+          // would silently suppress a later user-typed /who for this channel.
+          this.autoWhoTargets.add(eventChannel.toLowerCase());
+        } catch (_) {
+          /* ignore */
+        }
       }
       const ms = Date.now() - tHandler;
       if (IRC_HANDLER_WARN_MS > 0 && ms >= IRC_HANDLER_WARN_MS) {
