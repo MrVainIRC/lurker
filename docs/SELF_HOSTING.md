@@ -530,12 +530,16 @@ Known limitations (shared-connection bouncer semantics): replies to one attached
 
 _Available from 2.1.4._ Every Lurker upgrade restarts the container, and the container holds your IRC connections — so every upgrade has meant a reconnect: re-register, re-identify, rejoin, and a `Quit`/`Join` for everyone in your channels. The **engine** ends that. It is a second container that holds the IRC sockets and nothing else, and the ordinary upgrade never recreates it.
 
+**Switching an instance you already run?** [Switching to the IRC engine](/MIGRATION_ENGINE) walks the whole thing through once, in order, including moving identd and proving it works. This section is the reference.
+
 Enable it with the overlay:
 
 ```bash
 echo "LURKER_ENGINE_SECRET=$(openssl rand -hex 32)" >> .env
 docker compose -f docker-compose.yml -f docker-compose.engine.yml up -d
 ```
+
+⚠ **If you keep a `docker-compose.override.yml`, name it too** — `-f docker-compose.yml -f docker-compose.engine.yml -f docker-compose.override.yml`. Compose merges the override automatically only while resolving files by default; the moment you pass `-f` you get exactly the files you list, and an unnamed override is silently dropped along with whatever lives in it (your reverse-proxy network, a `113:113` mapping, secrets). The same applies to the `COMPOSE_FILE` tip below.
 
 That first `up -d` recreates `lurker` with the new setting and drops IRC one last time. From then on:
 
@@ -544,7 +548,7 @@ docker compose -f docker-compose.yml -f docker-compose.engine.yml pull
 docker compose -f docker-compose.yml -f docker-compose.engine.yml up -d
 ```
 
-replaces only the app. Your connections stay up — same nick, same channels, nothing re-registers — and whatever was said while the app was down is delivered when it comes back. The web UI reconnects on its own, as it does after any restart. (Tip: put `COMPOSE_FILE=docker-compose.yml:docker-compose.engine.yml` in `.env` and the commands go back to plain `pull` / `up -d`; remember that line when you turn the engine off again, below.)
+replaces only the app. Your connections stay up — same nick, same channels, nothing re-registers — and whatever was said while the app was down is delivered when it comes back. The web UI reconnects on its own, as it does after any restart. (Tip: put `COMPOSE_FILE=docker-compose.yml:docker-compose.engine.yml` in `.env` — appending `:docker-compose.override.yml` if you keep one, per the warning above — and the commands go back to plain `pull` / `up -d`; remember that line when you turn the engine off again, below.)
 
 Without the overlay nothing changes: the app dials IRC itself exactly as before. `LURKER_ENGINE_URL` is the whole switch.
 
