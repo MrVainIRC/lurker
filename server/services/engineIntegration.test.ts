@@ -398,6 +398,48 @@ describe('IrcConnection through the engine', () => {
     expect(conn.isChannelJoined('#stay')).toBe(true);
   }, 20000);
 
+  // The window Copilot's review on #829 pointed at: reconcileEngine checks the
+  // link is ready at the top of its loop, but the link can die inside it. A
+  // bare send() would drop the close on the floor and the paused account would
+  // stay on IRC until something else happened to reconcile again.
+  //
+  // simulateLoss() destroys the socket synchronously while `state` is still
+  // 'ready', which is exactly that window, and nothing here calls initAll(), so
+  // no second reconcile on the next 'ready' can paper over a lost close.
+  it('a reconcile close issued as the link dies is queued, not lost', async () => {
+    const conn = ircManager.getConnection(userId, network.id)!;
+    expect(conn.state).toBe('connected');
+    // Detach, so the engine holds the socket with no live transport in the way.
+    ircManager.shutdown();
+    await until(() => engine.held().includes(engineId), 5000, 'engine holds the detached socket');
+
+    setUserPaused(userId, true);
+    try {
+      EngineLink.resetForTests();
+      const link = EngineLink.shared();
+      link.start();
+      await until(() => link.state === 'ready', 5000, 'link ready');
+      expect(link.held).toContain(engineId);
+
+      link.simulateLoss();
+      expect(link.state).toBe('ready'); // the control: still inside the window
+      ircManager.reconcileEngine();
+
+      await until(() => link.state === 'ready', 8000, 'link back');
+      await until(
+        () => !engine.held().includes(engineId),
+        8000,
+        'the queued close reached the engine',
+      );
+      await until(() => ircd.client('lurk') === undefined, 5000, 'ircd saw it go');
+    } finally {
+      setUserPaused(userId, false);
+    }
+    // Leave a live connection behind for the last test.
+    const fresh = ircManager.startNetwork(userId, network.id)!;
+    await until(() => fresh.state === 'connected', 8000, 'fresh connection for the next test');
+  }, 30000);
+
   it('ircManager.shutdown() detaches; dispose still QUITs', async () => {
     ircManager.shutdown();
     await new Promise((r) => setTimeout(r, 50));

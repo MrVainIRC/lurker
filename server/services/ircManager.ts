@@ -234,7 +234,13 @@ class IrcManager extends EventEmitter {
         this.startNetwork(userId, networkId);
       } else {
         console.warn(`[lurker] engine holds ${id} but ${gate.reason} — closing it`);
-        link.send({ op: 'close', id });
+        // requestClose, not a bare send: the link can drop between the check at
+        // the top of this loop and here, and a policy close that silently
+        // evaporates leaves a paused account on IRC. The queue is also what
+        // makes this decision stick — EngineLink flushes pending closes before
+        // it emits 'ready', i.e. before anything can decide those sockets are
+        // worth adopting.
+        link.requestClose(id);
       }
     }
   }
