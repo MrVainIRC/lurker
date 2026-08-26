@@ -626,7 +626,12 @@ describe('review findings', () => {
     await l.waitForNew((f) => f.op === 'open' && f.id === id);
     l.send({ op: 'write', id, line: 'NICK reclose2' });
     l.send({ op: 'write', id, line: 'USER reclose2 0 * :r' });
-    await l.waitForLine(id, / 001 reclose2 /);
+    // Wait for the END of the burst, not 001. `held()` reports a session only
+    // once it is REGISTERED, and the engine sets that on 376/422 — so asserting
+    // anywhere between 001 and 376 is a race, and one that only loses under the
+    // event-loop pressure of a full-suite run. The engine sets burstDone before
+    // it flushes the line, so seeing 376 here is ordering, not timing.
+    await l.waitForLine(id, / 376 reclose2 /);
     expect(engine.held()).toContain(id);
     // The old socket's death was silent for this link.
     expect(l.frames.some((f) => f.op === 'closed' && f.id === id)).toBe(false);
