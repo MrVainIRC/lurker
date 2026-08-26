@@ -15,7 +15,7 @@ Lurker is a beautiful self-hosted IRC client with a retro aesthetic and modern c
 
 - **Always-on and multi-user.** Each invited user connects to their own set of IRC networks, and Lurker stays connected when they're away. Admins can restrict which networks users can connect to, and make channel recommendations for newcomers.
 - **Fully working search.** Search your message history, filter by nick, channel, or network; and jump to any message instantly, no matter how old it is.
-- **Modern conveniences.** Peer presence, automatic nick regain, join/part summarization, tab nickname completion, message drafts, saved messages, user notes, and more.
+- **Modern conveniences.** Peer presence, automatic nick regain, join/part summarization, smart nickname completion, message drafts, saved messages, user notes, and more.
 - **Image uploads.** Paste an image into the input box, and Lurker optimizes it, sanitizes it, and uploads it to local storage, S3, Zipline, Chibisafe, or external services like x0.at or catbox.moe.
 - **Customizable UI.** The beautiful retro terminal-style PWA interface has 40+ settings to customize it how you want.
 - **Native Apps.** Lurker has official native apps [for iOS](https://github.com/amiantos/lurker-ios) (in beta) and Android (coming soon). There's also third party clients like [Spooky](https://github.com/JawshTheDark/lurker-android-upstream) (Android) and [Scully](https://github.com/JawshTheDark/scully) (PC).
