@@ -171,9 +171,12 @@ const RESTORE_QUIET_MS = 10_000;
 // LURKER_RESTORE_STEP_DEADLINE_MS overrides it, read per step, so a test of the
 // fallback does not have to sit through it.
 const RESTORE_STEP_DEADLINE_MS = 10_000;
-// The terminal reply of each request a restore step makes.
+// The terminal reply of each request a restore step makes. Indexed by an
+// arbitrary numeric, so the value is `| undefined` — that is what makes the
+// `if (!reply) return` guard in noteRestoreReply type-honest for the numerics
+// that are not in the map (e.g. the 329 that follows 324).
 type RestoreReply = 'names' | 'topic' | 'mode';
-const RESTORE_REPLY_OF: Record<string, RestoreReply> = {
+const RESTORE_REPLY_OF: Record<string, RestoreReply | undefined> = {
   '366': 'names', // RPL_ENDOFNAMES
   '331': 'topic', // RPL_NOTOPIC
   '332': 'topic', // RPL_TOPIC
@@ -4135,9 +4138,11 @@ export class IrcConnection {
   // turn that one lost reply into a deadline wait for every channel after it.
   private drainRestoreQueue(): void {
     this.endRestoreStep();
-    // Skip what we are no longer in (a backlog KICK may have arrived in between).
+    // Skip what we are no longer in (a backlog KICK may have arrived in
+    // between). isChannelJoined, not a raw toLowerCase probe — membership folds
+    // through the network's CASEMAPPING (this file's #707 rule).
     let name = this.restoreQueue.shift();
-    while (name !== undefined && !this.channels.has(name.toLowerCase())) {
+    while (name !== undefined && !this.isChannelJoined(name)) {
       name = this.restoreQueue.shift();
     }
     if (name === undefined) return;

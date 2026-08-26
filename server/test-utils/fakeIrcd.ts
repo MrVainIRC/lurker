@@ -260,10 +260,13 @@ export class FakeIrcd extends EventEmitter {
     return this.clients.filter((c) => c.channels.has(lower) && !c.socket.destroyed);
   }
 
-  // Every line this server sends is also emitted as 'sent' (line, client), so a
-  // test can log both directions of a conversation in causal order.
+  // Every line this server actually writes is also emitted as 'sent' (line,
+  // client), so a test can log both directions of a conversation in causal
+  // order. Only on a real write — a line dropped to a destroyed socket never
+  // went on the wire and must not show up in a wire log.
   private raw(c: FakeClient, line: string): void {
-    if (!c.socket.destroyed) c.socket.write(line + '\r\n');
+    if (c.socket.destroyed) return;
+    c.socket.write(line + '\r\n');
     this.emit('sent', line, c);
   }
 

@@ -92,13 +92,15 @@ describe('engine restore WHO size-gate', () => {
     await until(() => conn.state === 'connected', 5000, 'connected');
     for (const ch of CHANNELS) conn.join(ch);
     await until(() => CHANNELS.every((ch) => conn.isChannelJoined(ch)), 5000, 'joins');
-    // A normal join DID WHO (the gate is restore-only) — proves the ircd/route work.
-    for (const ch of CHANNELS) {
-      expect(
-        sentBy('gate').some((l) => l === `WHO ${ch}`),
-        `initial WHO ${ch}`,
-      ).toBe(true);
-    }
+    // A normal join DID WHO (the gate is restore-only) — proves the ircd/route
+    // work. Waited, not asserted immediately: irc-framework serialises WHO
+    // behind each 315, so later channels' WHOs trail the joins (and this also
+    // ensures no initial WHO is still queued when we snapshot below).
+    await until(
+      () => CHANNELS.every((ch) => sentBy('gate').includes(`WHO ${ch}`)),
+      5000,
+      'initial WHOs',
+    );
 
     const sentBefore = sentBy('gate').length;
     conn.detach();
