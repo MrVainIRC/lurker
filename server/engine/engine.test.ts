@@ -11,6 +11,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { EngineServer } from './server.js';
 import { PROTOCOL_MAJOR } from './protocol.js';
 import type { EngineToApp } from './protocol.js';
+import { MAX_BURST_BYTES } from './upstream.js';
 import { FakeIrcd } from '../test-utils/fakeIrcd.js';
 import { TestLink } from '../test-utils/engineLink.js';
 import { createIdentdServer } from '../services/identd.js';
@@ -259,6 +260,48 @@ describe('attach after the app is gone', () => {
       await gone(engine, id);
     } finally {
       await noMotd.close();
+    }
+  });
+
+  // The sibling of the 422 case: the cap that stops a long MOTD growing the
+  // burst forever must not take the terminator with it. Without it the replay
+  // opens a MOTD it never closes, and irc-framework only emits 'motd' — the one
+  // thing that renders the block, since 372/375/376 are on the app's numeric
+  // denylist — on 376/422.
+  it('keeps the burst terminator when a long MOTD fills the cap', async () => {
+    // ~85 KiB of MOTD against a 64 KiB cap.
+    const padLines = 80;
+    const bigMotd = await FakeIrcd.start({ motdPadLines: padLines });
+    try {
+      const id = `bigmotd:${++counter}`;
+      const a = await link();
+      a.send(connectFrame(id, { port: bigMotd.port }));
+      await a.waitFor((f) => f.op === 'open');
+      a.send({ op: 'write', id, line: 'NICK bigmotd' });
+      a.send({ op: 'write', id, line: 'USER bigmotd 0 * :b' });
+      await a.waitForLine(id, / 376 /);
+      ackAll(a, id);
+      a.kill();
+      const b = await link();
+      b.send(connectFrame(id, { port: bigMotd.port }));
+      const att = await b.waitFor<Attached>((f) => f.op === 'attached');
+      // The control: the cap really did engage, so the terminator surviving is
+      // not just "everything fit".
+      const motd = att.replay.filter((x) => / 372 /.test(x));
+      expect(motd.length).toBeGreaterThan(0);
+      expect(motd.length).toBeLessThan(padLines + 1);
+      expect(att.replay.join('\n').length).toBeGreaterThan(MAX_BURST_BYTES / 2);
+      // What survives is a PREFIX, not a subset with the long lines punched
+      // out: the pad lines are numbered, and the ones we kept run 0..n-1.
+      const kept = motd.map((x) => x.match(/:- (\d{4}) /)?.[1]).filter((x) => x !== undefined);
+      expect(kept).toEqual(kept.map((_, i) => String(i).padStart(4, '0')));
+      // And the prefix still ends where a consumer expects it to.
+      expect(att.replay.at(-1)).toMatch(/ 376 /);
+      expect(att.nick).toBe('bigmotd');
+      b.send({ op: 'close', id });
+      await gone(engine, id);
+    } finally {
+      await bigMotd.close();
     }
   });
 

@@ -172,14 +172,21 @@ export function parseHostPort(
 ): { host: string; port: number } {
   const s = raw.trim();
   if (!s) return { ...defaults };
+  // Every shape that names a port checks it the same way. Letting `70000` or
+  // `[::1]:70000` through when `host:70000` throws only defers the failure to
+  // listen()/connect(), which reports it as an opaque ERR_SOCKET_BAD_PORT with
+  // no mention of the setting that carried it.
+  const checkPort = (text: string): number => {
+    const n = Number(text);
+    if (!Number.isInteger(n) || n <= 0 || n > 65535) {
+      throw new Error(`invalid port in "${raw}"`);
+    }
+    return n;
+  };
   const v6 = /^\[([^\]]+)\](?::(\d+))?$/.exec(s);
-  if (v6) return { host: v6[1], port: v6[2] ? Number(v6[2]) : defaults.port };
-  if (/^\d+$/.test(s)) return { host: defaults.host, port: Number(s) };
+  if (v6) return { host: v6[1], port: v6[2] ? checkPort(v6[2]) : defaults.port };
+  if (/^\d+$/.test(s)) return { host: defaults.host, port: checkPort(s) };
   const colon = s.lastIndexOf(':');
   if (colon < 0) return { host: s, port: defaults.port };
-  const port = Number(s.slice(colon + 1));
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-    throw new Error(`invalid port in "${raw}"`);
-  }
-  return { host: s.slice(0, colon) || defaults.host, port };
+  return { host: s.slice(0, colon) || defaults.host, port: checkPort(s.slice(colon + 1)) };
 }

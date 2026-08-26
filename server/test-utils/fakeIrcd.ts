@@ -30,6 +30,11 @@ export interface FakeIrcdOptions {
   caps?: string[];
   // false → 422 instead of a MOTD.
   motd?: boolean;
+  // Pad the MOTD with this many extra numbered 372 lines. Their lengths vary
+  // (every tenth is short), so a consumer that caps the MOTD by testing each
+  // line against its remaining headroom keeps the short ones after skipping a
+  // long one — which is how a truncated-with-holes bug shows itself.
+  motdPadLines?: number;
   // Rename every client to this DURING registration (between 005 and the MOTD),
   // the way nick enforcement or a SANICK would.
   burstNickTo?: string;
@@ -467,6 +472,13 @@ export class FakeIrcd extends EventEmitter {
     } else {
       this.num(c, '375', `- ${this.serverName} Message of the day -`);
       this.num(c, '372', '- welcome to the fake');
+      for (let i = 0; i < (this.opts.motdPadLines ?? 0); i++) {
+        this.num(
+          c,
+          '372',
+          `- ${String(i).padStart(4, '0')} ${'pad '.repeat(i % 10 === 9 ? 8 : 255)}`,
+        );
+      }
       this.num(c, '376', 'End of /MOTD command.');
     }
     this.emit('registered', c);

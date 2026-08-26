@@ -72,8 +72,12 @@ export interface AttachedPayload {
   unattended: boolean;
 }
 
-// Inbound IRC lines are at most 8191 bytes including tags. Anything past this
-// is not an IRC server, so the socket is dropped rather than buffered.
+// IRCv3 caps a line at 8191 bytes including tags. This guard is deliberately
+// double that: the engine relays bytes rather than policing them, and a server
+// a little over the line is the app's problem to parse, not the engine's to
+// disconnect over. What it exists to stop is a peer that is not an IRC server
+// at all streaming an unbounded "line" into the buffer. Well under the 256 KiB
+// frame cap (MAX_FRAME_BYTES), so anything relayed here fits on the wire.
 const MAX_IRC_LINE = 16 * 1024;
 
 // The recorded registration burst stops growing here. Registration itself
@@ -121,6 +125,8 @@ export class EngineUpstream extends EventEmitter {
   private identdId: number | null = null;
   private burst: string[] = [];
   private burstBytes = 0;
+  // Latched once a line didn't fit, so the burst is a contiguous prefix.
+  private burstFull = false;
   private burstDone = false;
   // The seq of the last burst line; a replay covers everything up to it.
   private burstEndSeq = 0;
@@ -299,7 +305,7 @@ export class EngineUpstream extends EventEmitter {
     if (!this.burstDone) {
       // Own channel movement is state, replayed from the channel set; recording
       // the line too would replay a JOIN the tracked set may since have undone.
-      if (!ownState) this.recordBurst(line);
+      if (!ownState) this.recordBurst(line, command === '376' || command === '422');
       if (command === '376' || command === '422') {
         this.burstDone = true;
         this.nickAtBurstEnd = this.nick;
@@ -311,9 +317,23 @@ export class EngineUpstream extends EventEmitter {
     this.flush();
   }
 
-  private recordBurst(line: string): void {
+  // The cap LATCHES. Testing each line against the remaining headroom on its
+  // own would keep taking short lines after a long one was skipped, and the
+  // replay would be a subset of the registration with holes punched in it
+  // rather than a prefix of it. A truncated burst is a thing irc-framework can
+  // walk; a burst missing its middle is not.
+  //
+  // `force` is the single exception, for the line that ends the burst. Dropping
+  // that would replay a MOTD that starts and never finishes — irc-framework
+  // emits 'motd' only on 376/422, and that event is the one thing that renders
+  // the block, since 372/375/376 are on the app's numeric denylist. It is one
+  // short line, and it is what makes the truncation well-formed.
+  private recordBurst(line: string, force = false): void {
     const bytes = Buffer.byteLength(line, 'utf8') + 2;
-    if (this.burstBytes + bytes > MAX_BURST_BYTES) return;
+    if (this.burstFull || this.burstBytes + bytes > MAX_BURST_BYTES) {
+      this.burstFull = true;
+      if (!force) return;
+    }
     this.burst.push(line);
     this.burstBytes += bytes;
   }

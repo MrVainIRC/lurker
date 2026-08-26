@@ -36,8 +36,14 @@ describe('parseHostPort', () => {
     expect(parseHostPort('[::1]:9000', d)).toEqual({ host: '::1', port: 9000 });
     expect(parseHostPort('[::1]', d)).toEqual({ host: '::1', port: 8016 });
   });
-  it('rejects a bad port', () => {
+  it('rejects a bad port in every shape that names one', () => {
     expect(() => parseHostPort('host:70000', d)).toThrow(/invalid port/);
     expect(() => parseHostPort('host:abc', d)).toThrow(/invalid port/);
+    // The bare-port and [v6]:port forms validate too — deferring these to
+    // listen()/connect() turns a typo into an opaque ERR_SOCKET_BAD_PORT.
+    expect(() => parseHostPort('70000', d)).toThrow(/invalid port/);
+    expect(() => parseHostPort('0', d)).toThrow(/invalid port/);
+    expect(() => parseHostPort('[::1]:70000', d)).toThrow(/invalid port/);
+    expect(() => parseHostPort('[::1]:0', d)).toThrow(/invalid port/);
   });
 });
