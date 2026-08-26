@@ -35,7 +35,6 @@ export interface MessageContext {
   onOpenReact?(message: MessageLike): void;
   onOpenUnreact?(message: MessageLike): void;
   onReact?(message: MessageLike, reaction: string): void;
-  onCustomReact?(message: MessageLike): void;
   onUnreact?(message: MessageLike, reaction: string): void;
   onRedact?(message: MessageLike): void;
   onEdit?(message: MessageLike): void;
@@ -378,7 +377,15 @@ export function useMessageActions(): MessageActionsAPI {
         onClick: () => ctx.onReact?.(message, reaction),
       })),
       { divider: true },
-      { label: 'Custom reaction…', onClick: () => ctx.onCustomReact?.(message) },
+      {
+        label: 'Custom reaction…',
+        input: {
+          placeholder: 'Custom reaction…',
+          ariaLabel: 'Custom reaction',
+          maxLength: 64,
+          onSubmit: (reaction) => ctx.onReact?.(message, reaction),
+        },
+      },
     ];
   }
 

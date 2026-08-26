@@ -350,11 +350,6 @@
     :network-id="ignoreTarget.networkId || null"
     @close="ignoreTarget = null"
   />
-  <MessageReactionModal
-    v-if="customReactionTarget"
-    @submit="submitCustomReaction"
-    @close="customReactionTarget = null"
-  />
 </template>
 
 <script setup lang="ts">
@@ -418,7 +413,6 @@ import {
 } from '../composables/useComposerOverlay.js';
 import { setViewedBuffer } from '../composables/useViewedBuffer.js';
 import { isChannelTarget } from '../../../shared/channels.js';
-import MessageReactionModal from './MessageReactionModal.vue';
 
 // Extended BufferMessage fields accessed in the template and script
 // (beyond the core BufferMessage definition which uses [key: string]: unknown).
@@ -717,7 +711,6 @@ function rowClass(row: RenderRow) {
 // need to know which view they live in (mirrors MemberList's pattern).
 const messageActions = useMessageActions();
 const ignoreTarget = ref<IgnoreTarget | null>(null);
-const customReactionTarget = ref<ChatMessage | null>(null);
 
 function eligibleForActions(m: ChatMessage | undefined | null): boolean {
   if (!m || m.id == null) return false;
@@ -774,9 +767,6 @@ const actionContext: MessageContext = {
       reaction,
     });
   },
-  onCustomReact: (msg) => {
-    customReactionTarget.value = msg as ChatMessage;
-  },
   onUnreact: (msg, reaction) => {
     const b = buffer.value;
     if (b?.networkId == null || !msg.msgid) return;
@@ -805,12 +795,6 @@ const actionContext: MessageContext = {
     }
   },
 };
-
-function submitCustomReaction(reaction: string): void {
-  const target = customReactionTarget.value;
-  customReactionTarget.value = null;
-  if (target) actionContext.onReact?.(target, reaction);
-}
 
 function actionsFor(m: ChatMessage | undefined | null): MessageAction[] {
   if (!m) return [];

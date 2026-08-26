@@ -205,7 +205,6 @@ describe('useMessageActions', () => {
       const ctx: MessageContext = {
         ...makeCtx(),
         onReact: vi.fn<(message: MessageLike, reaction: string) => void>(),
-        onCustomReact: vi.fn<(message: MessageLike) => void>(),
         onUnreact: vi.fn<(message: MessageLike, reaction: string) => void>(),
         onEdit: vi.fn<(message: MessageLike) => void>(),
         onRedact: vi.fn<(message: MessageLike) => void>(),
@@ -222,7 +221,9 @@ describe('useMessageActions', () => {
       const react = more.find((item) => item.label === 'React');
       const unreact = more.find((item) => item.label === 'Unreact');
       expect(react?.layout).toBe('grid');
-      expect(react?.children?.map((item) => item.label)).toContain('Custom reaction…');
+      const custom = react?.children?.find((item) => item.label === 'Custom reaction…');
+      custom?.input?.onSubmit('well done');
+      expect(ctx.onReact).toHaveBeenCalledWith(message, 'well done');
       expect(unreact?.children?.map((item) => item.label)).toEqual(['🔥']);
       expect(more.map((item) => item.label)).toContain('Edit');
       expect(more.map((item) => item.label)).toContain('Redact message');

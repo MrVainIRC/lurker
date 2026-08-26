@@ -5,13 +5,13 @@
 
 <!--
   The shared composer popover behind NickPicker (`@`), ChannelPicker (`#`) and
-  HistoryPicker (`>`). It owns every mechanic those three used to reimplement
+  the desktop EmojiPicker (`:`). It owns every mechanic those three used to reimplement
   (issue #212):
 
     - a position:fixed panel anchored just above the input bar, riding above the
       iOS soft keyboard via visualViewport (resize/scroll re-anchoring)
     - outside-tap dismissal (a document pointerdown, excluding the panel and any
-      `ignore` elements — an anchor or a toggle button) plus Escape-to-close
+      `ignore` elements — usually the input anchor) plus Escape-to-close
     - the iOS focus-preservation contract: `@mousedown.prevent` on the panel and
       every row so focus never leaves the textarea, acting on `click` (end of
       touch) with a plain <div role=button> rather than a focusable <button>.
@@ -66,8 +66,7 @@ const props = withDefaults(
     // should keep the panel open.
     anchor?: HTMLElement | null;
     // Elements whose taps must NOT dismiss the panel, besides the panel itself:
-    // the anchor (nick/channel keep open while typing) or the toggle button
-    // (history — its own click handler owns open/close).
+    // the anchor (nick/channel/emoji keep open while typing).
     ignore?: readonly (HTMLElement | null)[];
     // Render bottom-up so the primary candidate sits at the bottom, nearest the
     // input bar and under the user's eye.

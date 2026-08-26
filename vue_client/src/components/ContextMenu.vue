@@ -189,6 +189,24 @@ onBeforeUnmount(() => {
   height: auto;
   padding: var(--space-3) var(--space-4);
 }
+.context-menu.grid :deep(.input-item) {
+  grid-column: 1 / -1;
+  padding: var(--space-2) var(--space-1);
+}
+.context-menu.grid :deep(.menu-input) {
+  width: 100%;
+  min-width: 16rem;
+  padding: var(--space-3) var(--space-4);
+  color: var(--fg);
+  font: inherit;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+.context-menu.grid :deep(.menu-input:focus) {
+  border-color: var(--accent);
+}
 .item {
   display: flex;
   align-items: center;

@@ -7,6 +7,19 @@
   <template v-for="(item, i) in items" :key="i">
     <div v-if="item.divider" class="divider" role="separator"></div>
     <div v-else-if="item.heading" class="heading" role="presentation">{{ item.heading }}</div>
+    <div v-else-if="item.input" class="input-item" role="none" @click.stop>
+      <input
+        type="text"
+        class="menu-input"
+        :placeholder="item.input.placeholder"
+        :aria-label="item.input.ariaLabel || item.input.placeholder || 'Menu input'"
+        :maxlength="item.input.maxLength"
+        autocomplete="off"
+        spellcheck="false"
+        autofocus
+        @keydown.enter.prevent="submitInput(item, $event)"
+      />
+    </div>
     <div v-else-if="item.children?.length" class="branch" @mouseenter="openBranch(i)">
       <button
         type="button"
@@ -62,6 +75,15 @@ function openBranch(index: number): void {
 function toggleBranch(index: number): void {
   openIndex.value = openIndex.value === index ? null : index;
 }
+
+function submitInput(item: ContextMenuItem, event: KeyboardEvent): void {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement)) return;
+  const value = input.value.trim();
+  if (!value) return;
+  item.input?.onSubmit(value);
+  emit('select', item);
+}
 </script>
 
 <style scoped>
@@ -109,6 +131,24 @@ function toggleBranch(index: number): void {
   width: auto;
   height: auto;
   padding: var(--space-3) var(--space-4);
+}
+.input-item {
+  grid-column: 1 / -1;
+  padding: var(--space-2) var(--space-1);
+}
+.menu-input {
+  width: 100%;
+  min-width: 16rem;
+  padding: var(--space-3) var(--space-4);
+  color: var(--fg);
+  font: inherit;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+.menu-input:focus {
+  border-color: var(--accent);
 }
 .item {
   display: flex;

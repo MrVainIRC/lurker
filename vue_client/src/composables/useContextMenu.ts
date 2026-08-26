@@ -12,7 +12,8 @@ import { reactive } from 'vue';
 //   { label, onClick, icon?, disabled?, divider?, layout?, children? }
 // `icon` is a Font Awesome class string (e.g. 'fa-solid fa-thumbtack'); the
 // menu renders it as `<i class="…">`. A `divider: true` item is rendered as a
-// separator line; other fields ignored.
+// separator line; `layout` styles a nested submenu and `input` renders an
+// inline text field.
 
 export interface ContextMenuItem {
   label?: string;
@@ -25,8 +26,17 @@ export interface ContextMenuItem {
   heading?: string;
   /** Optional layout hint for a nested submenu, such as an emoji grid. */
   layout?: 'grid';
+  /** Optional inline text input rendered inside the menu. */
+  input?: ContextMenuInput;
   /** Nested items rendered as a fly-out submenu. */
   children?: ContextMenuItem[];
+}
+
+export interface ContextMenuInput {
+  placeholder?: string;
+  ariaLabel?: string;
+  maxLength?: number;
+  onSubmit(value: string): void;
 }
 
 export type ContextMenuLayout = 'grid';
