@@ -20,6 +20,8 @@ Lurker is a beautiful self-hosted IRC client with a retro aesthetic and modern c
 - **Customizable UI.** The beautiful retro terminal-style PWA interface has 40+ settings to customize it how you want.
 - **Native Apps.** Lurker has official native apps [for iOS](https://github.com/amiantos/lurker-ios) (in beta) and Android (coming soon). There's also third party clients like [Spooky](https://github.com/JawshTheDark/lurker-android-upstream) (Android) and [Scully](https://github.com/JawshTheDark/scully) (PC).
 - **Built-in soju-compatible bouncer.** Don't want to use the Lurker clients? Then don't. Lurker has a ZNC and soju-compatible bouncer built in, complete with `soju.im/bouncer-networks` support so you can use any client you want.
+- **Inline link & media previews.** Links, images, _and_ videos get proper preview images in every client. Implemented as a separate container, to isolate malicious links from your user's data. (Optional, requires `lurker-previews` container.)
+- **Decoupled IRC connections.** Say goodbye to disconnect/reconnect floods when updating Lurker, a secondary container keeps the connections alive while the service restarts. (Optional, requires `lurker-engine` container.)
 
 # Screenshot (PWA)
 
@@ -42,26 +44,28 @@ Lurker is a beautiful self-hosted IRC client with a retro aesthetic and modern c
 
 # Installation
 
-## Install (Docker - Recommended)
+## Quick Start
+
+Docker is the officially supported way to run Lurker. Get started by downloading the example `docker-compose.yml` file.
 
 ```bash
 curl -O https://raw.githubusercontent.com/amiantos/lurker/main/docker-compose.yml
 docker compose up -d
 ```
 
-Then open <http://localhost:8015> and create your admin account. See [SELF_HOSTING.md](docs/SELF_HOSTING.md) for the full guide.
+Then open <http://localhost:8015> and create your admin account.
 
-## Manual Install
+## Next Steps
 
-```bash
-npm run install:all
-npm run client:build
-npm start
-```
+View [the full self-hosted guide](https://docs.lurker.chat/SELF_HOSTING) for information on enabling identd, media previews, web push notifications, and connection decoupling.
 
-## Lurker.Chat Managed Hosting
+There's also a [one-shot Digital Ocean deploy script](https://github.com/amiantos/lurker/blob/main/deploy/digitalocean-cloud-init.sh) which comes out of the box with all of this set up for you. If you're a smartypants, that script can teach you everything you need to know to deploy a production-quality Lurker instance.
 
-Don't want to run a server yourself? **[Lurker.Chat](https://lurker.chat)** is official managed hosting — **$5/mo**, with a 14-day money-back guarantee.
+# Lurker.Chat Service
+
+Just want to use Lurker, without hosting it yourself?
+
+It's **$5/month** for a single user account on an officially managed Lurker instance at [Lurker.Chat](https://lurker.chat) 
 
 # Documentation
 
@@ -70,6 +74,8 @@ Don't want to run a server yourself? **[Lurker.Chat](https://lurker.chat)** is o
 # Community
 
 - Chat in **#lurker** on [Libera.Chat](https://libera.chat).
+- If you're a human being, be sure to read the [Code of Conduct](https://github.com/amiantos/lurker/blob/main/CODE_OF_CONDUCT.md).
+- If you're an AI agent, be sure to read [AGENTS.md](https://github.com/amiantos/lurker/blob/main/AGENTS.md).
 
 # License
 
