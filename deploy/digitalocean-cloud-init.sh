@@ -285,42 +285,17 @@ deploy() {
 
   local compose_files="docker-compose.yml:docker-compose.caddy.yml"
 
-  # ── Does the app we are about to run actually support the engine? ──────────
+  # The IRC engine, always — see the note at the top. Fetched (not generated) so
+  # a later `pull` + `up -d` keeps whatever the overlay grows, and layered before
+  # the identd overlay below, which adds a port to the service this one defines.
   #
-  # `latest` is the most recent RELEASE, and the engine lands in the repo before
-  # it lands in a release. A droplet deployed in that window would otherwise get
-  # an app that ignores LURKER_ENGINE_URL entirely: no error, no log line, IRC
-  # dialled from the app container as always — and identd sitting on a
-  # `lurker-engine` that holds no sockets, which BREAKS ident instead of merely
-  # not helping it. Silent, and worse than the old behaviour.
-  #
-  # So ask the image. It is pulled here rather than at `up -d` and the answer
-  # picks the topology, which also means this script needs no edit when the
-  # engine reaches `latest` — the next deploy simply starts using it.
-  local app_image use_engine="false"
-  app_image="$(sed -n 's|^[[:space:]]*image:[[:space:]]*\(ghcr\.io/amiantos/lurker:.*\)$|\1|p' \
-    docker-compose.yml | head -1)"
-  log "Checking whether ${app_image} supports the IRC engine..."
-  docker pull -q "$app_image" >/dev/null 2>&1 || true
-  if docker run --rm --entrypoint sh "$app_image" \
-      -c 'test -f /app/server/services/engineLink.ts' >/dev/null 2>&1; then
-    use_engine="true"
-    log "It does — IRC will run in the engine container."
-  else
-    log "⚠ ${app_image} predates the IRC engine. Deploying WITHOUT it: the app"
-    log "  dials IRC itself, and identd stays on the app container where the"
-    log "  sockets are. Re-run this script after the next Lurker release to"
-    log "  switch over — nothing here needs editing."
-  fi
-
-  # Fetched (not generated) so a later `pull` + `up -d` keeps whatever the
-  # overlay grows, and layered before the identd overlay below, which adds a
-  # port to the service this one defines.
-  if [ "$use_engine" = "true" ]; then
-    log "Fetching the IRC engine overlay."
-    curl -fsSL -o docker-compose.engine.yml "$REPO_RAW/docker-compose.engine.yml"
-    compose_files="${compose_files}:docker-compose.engine.yml"
-  fi
+  # ⚠ This assumes the app image has engine support, i.e. Lurker >= 2.1.4. It
+  # does not check: an older image would ignore LURKER_ENGINE_URL silently and
+  # leave identd answering from a container holding no sockets. `latest` is
+  # 2.1.4+, so the only way to land there is to pin an older image on purpose.
+  log "Fetching the IRC engine overlay."
+  curl -fsSL -o docker-compose.engine.yml "$REPO_RAW/docker-compose.engine.yml"
+  compose_files="${compose_files}:docker-compose.engine.yml"
 
   # The link-preview decoder: its own overlay (a second container on a private
   # bridge) plus the script that contains its egress. Both are fetched here so
@@ -340,28 +315,13 @@ deploy() {
   # overlay already forwards to `lurker-engine`. Caddy's `ports: !reset []`
   # applies to `lurker` and never touches this service, so unlike the pre-engine
   # version this overlay no longer has to be ordered after Caddy to survive.
-  if [ "$ENABLE_IDENTD" = "true" ] && [ "$use_engine" = "true" ]; then
+  if [ "$ENABLE_IDENTD" = "true" ]; then
     log "identd enabled — publishing :113 on the engine."
     cat > docker-compose.identd.yml <<'YAML'
 services:
   lurker-engine:
     ports:
       - '113:113'
-YAML
-    compose_files="${compose_files}:docker-compose.identd.yml"
-  elif [ "$ENABLE_IDENTD" = "true" ]; then
-    # No engine: identd belongs on the app, which is holding the sockets. This
-    # overlay must stay ordered after Caddy, whose `ports: !reset []` on
-    # `lurker` would otherwise drop the mapping.
-    log "identd enabled — publishing :113 on the app (no engine on this image)."
-    cat > docker-compose.identd.yml <<'YAML'
-services:
-  lurker:
-    ports:
-      - '113:113'
-    environment:
-      - LURKER_IDENTD_ENABLED=true
-      - LURKER_IDENTD_PORT=113
 YAML
     compose_files="${compose_files}:docker-compose.identd.yml"
   fi
@@ -385,32 +345,31 @@ ADMIN_EMAIL=${ADMIN_EMAIL}
 COMPOSE_FILE=${compose_files}
 EOF
 
-  if [ "$use_engine" = "true" ]; then
-    # ⚠ Preserve an existing engine secret across a re-run of this script. A new
-    # value changes `lurker-engine`'s environment, which makes Compose recreate
-    # it — dropping every IRC connection, i.e. exactly what the engine is for.
-    local engine_secret=""
-    if [ -f .env.bak ]; then
-      engine_secret="$(sed -n 's/^LURKER_ENGINE_SECRET=//p' .env.bak | head -1)"
-    fi
-    if [ -z "$engine_secret" ]; then
-      engine_secret="$(openssl rand -hex 32 2>/dev/null ||
-        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-      log "Generated a new engine secret."
-    else
-      log "Reusing the engine secret already in .env."
-    fi
-    cat >> .env <<EOF
+  # ⚠ Preserve an existing engine secret across a re-run of this script. A new
+  # value changes `lurker-engine`'s environment, which makes Compose recreate it
+  # — dropping every IRC connection, i.e. exactly what the engine is for.
+  local engine_secret=""
+  if [ -f .env.bak ]; then
+    engine_secret="$(sed -n 's/^LURKER_ENGINE_SECRET=//p' .env.bak | head -1)"
+  fi
+  if [ -z "$engine_secret" ]; then
+    engine_secret="$(openssl rand -hex 32 2>/dev/null ||
+      head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    log "Generated a new engine secret."
+  else
+    log "Reusing the engine secret already in .env."
+  fi
+  cat >> .env <<EOF
 LURKER_ENGINE_SECRET=${engine_secret}
 EOF
-    # The engine overlay forwards these to `lurker-engine`; the overlay
-    # generated above publishes the port.
-    if [ "$ENABLE_IDENTD" = "true" ]; then
-      cat >> .env <<EOF
+
+  # The engine overlay forwards these to `lurker-engine`; the overlay generated
+  # above publishes the port.
+  if [ "$ENABLE_IDENTD" = "true" ]; then
+    cat >> .env <<EOF
 LURKER_IDENTD_ENABLED=true
 LURKER_IDENTD_PORT=113
 EOF
-    fi
   fi
 
   rm -f .env.bak
@@ -494,12 +453,10 @@ log "${PUBLIC_IP} if you haven't already — Caddy retries Let's Encrypt"
 log "until it resolves, then https://${LURKER_DOMAIN} serves over HTTPS."
 log "Passkeys and web push are pre-configured; once you've created your"
 log "admin account, opt in per device from Lurker's settings."
-if [ -f "${INSTALL_DIR}/docker-compose.engine.yml" ]; then
 log "IRC runs through the engine container, so future upgrades —"
 log "  cd ${INSTALL_DIR} && docker compose pull && docker compose up -d"
 log "replace Lurker without dropping your IRC connections. Check what it holds:"
 log "  docker compose exec lurker node -e \"require('http').get('http://lurker-engine:8016/healthz',r=>r.pipe(process.stdout))\""
-fi
 if [ "$ENABLE_IDENTD" = "true" ]; then
   log "Built-in identd is running on :113 — connect to a network and check that"
   log "your ident shows up verified (no leading ~) via /whois on yourself."
