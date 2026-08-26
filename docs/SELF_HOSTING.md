@@ -579,6 +579,10 @@ COMPOSE_FILE=docker-compose.yml docker compose up -d --remove-orphans
 
 **Buffering while the app is down.** The engine keeps what arrives per connection (4 MiB by default, 256 MiB in total; `LURKER_ENGINE_BUFFER_BYTES` / `LURKER_ENGINE_BUFFER_TOTAL_BYTES`, digits, at least 65536). Past that the oldest lines go, and the app notes where the hole is in the network's server buffer when it comes back. Deploys take seconds; the buffer covers hours of normal traffic.
 
+**One engine, more than one Lurker.** Sessions are keyed to the Lurker database that opened them, not just to a user and network number — those are row ids, and two separate Lurker databases both number their first user and first network `1`. Each Lurker generates an identity for itself the first time it talks to an engine and keeps it in its own database, so two of them on one engine cannot see, attach to, drive or close each other's connections, and neither is told the other's exist. The engine refuses an app that does not identify itself at all rather than letting it share an id space with everyone else.
+
+That makes the arrangement safe, not tuned: the buffer budget (`LURKER_ENGINE_BUFFER_TOTAL_BYTES`) is shared across everything the engine holds, and so is `:113` — one identd answers for every connection on that host, which is fine when the connections are yours and not what you want between strangers. **Keep the engine on a private network either way.** `LURKER_ENGINE_SECRET` is the only thing standing between the internet and every connection the engine holds, and the overlay deliberately publishes no port.
+
 **Health.** `curl http://lurker-engine:8016/healthz` from inside the compose network answers `{"ok":true,"held":N}` with the number of connections it is holding; the overlay uses the same probe as the service's healthcheck. `LURKER_ENGINE_IMAGE` overrides the image reference — a locally built image, or a pinned release.
 
 ---
