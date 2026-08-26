@@ -21,6 +21,7 @@
 import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import { FrameReader, PROTOCOL_MAJOR, encodeFrame, parseHostPort } from '../engine/protocol.js';
+import { instanceId } from '../db/instanceId.js';
 import type { AppToEngine, EngineToApp } from '../engine/protocol.js';
 import { APP_VERSION } from '../utils/userAgent.js';
 
@@ -29,8 +30,19 @@ const PROCESS_STARTED_AT = Date.now();
 
 // The id the engine knows a network's socket by. One definition, so the two
 // sides of every comparison agree.
+// `<instance>:<userId>:<networkId>`. The instance prefix is not decoration: the
+// two rowids are unique within ONE Lurker database and collide freely across
+// two, so without it a second Lurker on the same engine mints the same id for a
+// different person's connection. Every caller goes through this function, which
+// is the point — none of them can forget the prefix.
 export function engineConnectionId(userId: number, networkId: number): string {
-  return `${userId}:${networkId}`;
+  return `${instanceId()}:${userId}:${networkId}`;
+}
+
+// Does this id belong to us? Used where an id comes back FROM the engine rather
+// than being minted here.
+export function isOurConnectionId(id: string): boolean {
+  return id.startsWith(`${instanceId()}:`);
 }
 
 let urlWarned = false;
@@ -311,6 +323,7 @@ export class EngineLink extends EventEmitter {
           op: 'hello',
           protocol: PROTOCOL_MAJOR,
           secret: this.opts.secret,
+          instance: instanceId(),
           app: { version: APP_VERSION, startedAt: PROCESS_STARTED_AT },
         }),
       );

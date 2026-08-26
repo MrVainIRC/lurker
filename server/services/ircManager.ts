@@ -3,7 +3,12 @@
 
 import { EventEmitter } from 'events';
 import { IrcConnection } from './ircConnection.js';
-import { EngineLink, engineConfigured, engineConnectionId } from './engineLink.js';
+import {
+  EngineLink,
+  engineConfigured,
+  engineConnectionId,
+  isOurConnectionId,
+} from './engineLink.js';
 import * as systemLog from './systemLog.js';
 import connectScheduler from './connectScheduler.js';
 import { listNetworksForUser, getNetwork } from '../db/networks.js';
@@ -218,7 +223,15 @@ class IrcManager extends EventEmitter {
     const link = EngineLink.shared();
     if (link.state !== 'ready') return;
     for (const id of link.held) {
-      const m = /^(\d+):(\d+)$/.exec(id);
+      // The engine only offers us our own instance's sessions, but this is
+      // where a foreign id would do its damage — parsed into someone else's
+      // rowids and adopted as ours — so check the prefix here too rather than
+      // trusting the other side to have filtered.
+      if (!isOurConnectionId(id)) {
+        console.warn(`[lurker] engine offered ${id}, which is not this instance's — ignoring`);
+        continue;
+      }
+      const m = /^[0-9a-f]+:(\d+):(\d+)$/.exec(id);
       if (!m) continue;
       const userId = Number(m[1]);
       const networkId = Number(m[2]);

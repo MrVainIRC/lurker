@@ -7,6 +7,9 @@
 // registered comes up on the live nick with the live caps, in the live channels,
 // with the backlog delivered after the replay, and the network sees nothing.
 
+// MUST be first: the engine link reads this instance's id from the database
+// (it namespaces every connection id), so importing it opens one.
+import '../test-utils/isolateDb.js';
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import IRC from 'irc-framework';
 import type { Client, ConnectOptions } from 'irc-framework';

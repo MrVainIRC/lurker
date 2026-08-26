@@ -29,7 +29,12 @@ import { IrcConnection } from './ircConnection.js';
 import ircManager from './ircManager.js';
 import { EngineServer } from '../engine/server.js';
 import { FakeIrcd } from '../test-utils/fakeIrcd.js';
-import { EngineLink, engineConfigured } from './engineLink.js';
+import {
+  EngineLink,
+  engineConfigured,
+  engineConnectionId,
+  isOurConnectionId,
+} from './engineLink.js';
 
 const SECRET = 'integration-secret';
 
@@ -105,7 +110,7 @@ beforeAll(async () => {
     // the client sent — so "the connect commands ran" is a wire fact.
     connect_commands: 'PING connectcmd',
   })!;
-  engineId = `${userId}:${network.id}`;
+  engineId = engineConnectionId(userId, network.id);
   ircManager.on('event', (e: Ev) => managerEvents.push(e));
 });
 
@@ -439,6 +444,37 @@ describe('IrcConnection through the engine', () => {
     const fresh = ircManager.startNetwork(userId, network.id)!;
     await until(() => fresh.state === 'connected', 8000, 'fresh connection for the next test');
   }, 30000);
+
+  // The app half of the instance partition. The engine refuses cross-instance
+  // work (server/engine/engine.test.ts), but the id has to carry the namespace
+  // in the first place, and reconciliation has to refuse to parse a foreign one
+  // into this database's rowids.
+  it('namespaces connection ids by instance and never adopts a foreign one', async () => {
+    // Not `1:1` — the bare rowid pair every other Lurker would also mint.
+    expect(engineId).toMatch(/^[0-9a-f]{32}:\d+:\d+$/);
+    expect(engineId.endsWith(`:${userId}:${network.id}`)).toBe(true);
+    expect(isOurConnectionId(engineId)).toBe(true);
+
+    // Same rowids, different database.
+    const foreign = `${'f'.repeat(32)}:${userId}:${network.id}`;
+    expect(isOurConnectionId(foreign)).toBe(false);
+
+    // A foreign id in the held list must not be parsed into our rowids and
+    // adopted (or closed) as though it named one of our networks.
+    const link = EngineLink.shared();
+    const heldSet = (link as unknown as { heldSet: Set<string> }).heldSet;
+    heldSet.add(foreign);
+    try {
+      const before = ircManager.getConnection(userId, network.id);
+      ircManager.reconcileEngine();
+      // Untouched: not adopted, and still on the engine's books as far as we
+      // are concerned — we simply have no business with it.
+      expect(ircManager.getConnection(userId, network.id)).toBe(before);
+      expect(heldSet.has(foreign)).toBe(true);
+    } finally {
+      heldSet.delete(foreign);
+    }
+  });
 
   it('ircManager.shutdown() detaches; dispose still QUITs', async () => {
     ircManager.shutdown();
