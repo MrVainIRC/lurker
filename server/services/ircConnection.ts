@@ -2,8 +2,14 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import IRC, { ircLineParser } from 'irc-framework';
-import type { Client as IrcClient } from 'irc-framework';
-import { insertMessage, hasMessageForTarget, hasConversationForTarget } from '../db/messages.js';
+import type { Client as IrcClient, ConnectOptions } from 'irc-framework';
+import {
+  insertMessage,
+  hasMessageForTarget,
+  hasConversationForTarget,
+  hasMessageWithMsgid,
+  hasRecentMessageLike,
+} from '../db/messages.js';
 import { renameBuffer as renameDmBuffer } from '../db/renameBuffer.js';
 import { refoldNetworkBuffers } from '../db/refoldBuffers.js';
 import { normalizeCasemapping } from '../db/casemapping.js';
@@ -43,6 +49,9 @@ import { deriveIdent } from '../../shared/ident.js';
 import { classifyModeChange, modeLetter } from '../../shared/modes.js';
 import type { ModeChange } from '../../shared/modes.js';
 import { registerIdent, unregisterIdent, isIdentdEnabled, isOidentdFileEnabled } from './identd.js';
+import { EngineLink, engineConfigured, engineConnectionId } from './engineLink.js';
+import { ENGINE_CLOSE, EngineTransport, engineCloseCode } from './engineTransport.js';
+import type { EnginePhase, EnginePhaseInfo } from './engineTransport.js';
 import { MESSAGE_MAX_BYTES, partitionMultiline, reassembleMultiline } from './messageSplit.js';
 import type { MultilineLimits } from './messageSplit.js';
 import { e2eManager } from './e2e/manager.js';
@@ -146,6 +155,24 @@ export type ReconnectGate = () => { ok: true } | { ok: false; reason: string };
 // nothing ever registers and the count runs out. Worst case is a bounded 3
 // attempts spread over the backoff ladder, which is not a hammer.
 const MAX_CONSECUTIVE_SASL_FAILURES = 3;
+
+// Replies to the state requests a restore makes for each channel (MODE → 324
+// (+329), TOPIC → 331 or 332 (+333)). A real join is volunteered these; a
+// synthesised one has to ask, and the server-buffer renderer would print each
+// answer as a line of history on every app restart. Kept quiet per channel for a
+// short window after the restore — see RESTORE_QUIET_MS.
+const RESTORE_QUIET_NUMERICS = new Set(['221', '324', '329', '331', '332', '333']);
+const RESTORE_QUIET_MS = 10_000;
+// The per-channel state requests after a restore go out paced, not as one
+// burst: three lines per channel for forty channels in one tick is exactly
+// the flood the JOIN coalescing elsewhere exists to avoid.
+const RESTORE_REQUEST_INTERVAL_MS = 400;
+// How long a link-loss re-attach waits for the engine to say what it holds
+// before treating the session as gone and taking the ordinary reconnect ladder.
+const ENGINE_REATTACH_WAIT_MS = 10_000;
+// System-buffer line for a shutdown detach, in place of "Disconnected" — which
+// is exactly what did not happen.
+const DETACHED_LOG = 'Detached — the engine is keeping this connection open for the next start';
 
 const NON_PERSISTED_TYPES = new Set([
   'state',
@@ -639,19 +666,56 @@ export class IrcConnection {
   // it could never run out. Only 'registered' clears it.
   private saslFailureStreak: number;
   private readonly reconnectGate: ReconnectGate | undefined;
+  // Engine mode: a newer process took this connection over. The manager drops
+  // us from its map so a later /connect builds a fresh IrcConnection instead of
+  // finding this corpse and doing nothing.
+  private readonly onTakenOver: (() => void) | undefined;
+  // Engine mode (services/engineTransport.ts): the IRC socket lives in the
+  // engine process and this Client is attached to it over a link.
+  //
+  // restoring: true while a re-attach replays the recorded session into this
+  //   fresh Client. publish() drops anything that would persist (the burst's
+  //   MOTD, the "Connected as" notice, the synthesised own-JOIN rows), and the
+  //   'registered' handler skips the side effects only a real connect wants.
+  // engineTransport: the live transport, for detach() at shutdown.
+  // engineSocketAlive: set by 'socket close' when what closed was the LINK
+  //   (or a takeover), not the IRC socket — 'close' then re-attaches instead of
+  //   running the disconnect path.
+  restoring: boolean;
+  // True from the engine's `attached` until its `live`: the backlog it held
+  // while we were away is being delivered. Hand-over is at-least-once — a line
+  // the previous process persisted but had not acked comes again — so in this
+  // window a msgid we already have is skipped rather than written twice.
+  catchingUp: boolean;
+  // The engine finished registering this socket with no app attached (the
+  // previous one died between NICK/USER and 001): nothing ever ran the
+  // post-registration steps, so the restore runs them.
+  restoreUnattended: boolean;
+  private restoredCallbacks: Array<() => void>;
+  private restoreQueue: string[];
+  private restoreTimer: ReturnType<typeof setTimeout> | null;
+  private engineTransport: EngineTransport | null;
+  private engineSocketAlive: boolean;
+  // folded channel → the state replies still owed from the restore's own
+  // requests (MODE → 324/329, TOPIC → 331/332/333; '*' → our umode 221), kept
+  // out of the server buffer until they arrive or the deadline passes.
+  private restoreQuiet: Map<string, { until: number; mode: boolean; topic: boolean }>;
 
   constructor({
     network,
     onEvent,
     reconnectGate,
+    onTakenOver,
   }: {
     network: Network;
     onEvent: (event: EnrichedEvent) => void;
     reconnectGate?: ReconnectGate;
+    onTakenOver?: () => void;
   }) {
     this.network = network;
     this.onEvent = onEvent;
     this.reconnectGate = reconnectGate;
+    this.onTakenOver = onTakenOver;
     // ALL CTCP handling lives in our 'ctcp request' handler (VERSION/PING/TIME/
     // SOURCE/CLIENTINFO, rate-limited + surfaced), so irc-framework's built-in
     // VERSION auto-reply is disabled with `version: false`. That MUST go in the
@@ -739,6 +803,15 @@ export class IrcConnection {
     this.pendingSaslFailure = null;
     this.pendingServerBan = null;
     this.saslFailureStreak = 0;
+    this.restoring = false;
+    this.catchingUp = false;
+    this.restoreUnattended = false;
+    this.restoredCallbacks = [];
+    this.restoreQueue = [];
+    this.restoreTimer = null;
+    this.engineTransport = null;
+    this.engineSocketAlive = false;
+    this.restoreQuiet = new Map();
     this.bind();
   }
 
@@ -802,6 +875,11 @@ export class IrcConnection {
   // that stand in for publish stay assignable.
   publish(event: IrcEvent): EnrichedEvent | void {
     if (this.disposed) return;
+    // A replayed session is not new history: nothing it would persist is
+    // wanted, while the control events (state, channel-joined, own-nick) are
+    // exactly what a re-attached process needs.
+    if (this.restoring && this.shouldPersist(event)) return;
+    if (this.catchingUp && this.shouldPersist(event) && this.alreadyPersisted(event)) return;
     event = this.normalizeChannelTarget(event);
     const time = normalizeEventTime(event.time);
     const enriched: EnrichedEvent = {
@@ -882,10 +960,22 @@ export class IrcConnection {
     });
   }
 
-  setState(state: string, extra: Record<string, unknown> = {}): void {
+  // `opts.log`: false skips the system-buffer line for this transition (the
+  // state event still goes to clients); a string replaces its text. Neither
+  // reaches the wire.
+  setState(
+    state: string,
+    extra: Record<string, unknown> = {},
+    opts: { log?: boolean | string } = {},
+  ): void {
     const changed = this.state !== state;
     this.state = state;
     this.publish({ type: 'state', state, ...extra });
+    if (opts.log === false) return;
+    if (typeof opts.log === 'string') {
+      if (changed) this.logNet(opts.log, 'info');
+      return;
+    }
     // Only log on a real transition. A disconnect fires both 'socket close' and
     // 'close', each calling setState('disconnected'); without this guard the
     // system buffer gets two "Disconnected" lines per network (#355). The state
@@ -1035,6 +1125,12 @@ export class IrcConnection {
         });
       }
       if (isServerBufferDeniedNumeric(rawCommand)) return;
+      if (
+        RESTORE_QUIET_NUMERICS.has(rawCommand) &&
+        this.isRestoreQuiet(rawCommand, rawCommand === '221' ? '*' : msg?.params?.[1])
+      ) {
+        return;
+      }
       // formatUnknownNumeric only renders 3-digit numerics (it strips the
       // leading recipient-nick param), so PRIVMSG/JOIN/NOTICE/etc. naturally
       // fall through and never pollute the server buffer.
@@ -1187,7 +1283,11 @@ export class IrcConnection {
       } catch (e) {
         console.warn('[presence] hydrate failed:', (e as Error)?.message || e);
       }
-      this.setState('connected', { nick: registeredNick });
+      // On a restore the 001 being replayed carries the nick the socket
+      // REGISTERED with, which the NICK line right behind it may change; the
+      // engine hook already logged "Re-attached … as <live nick>", so this
+      // transition goes to clients only.
+      this.setState('connected', { nick: registeredNick }, { log: !this.restoring });
       // Defer the MONITOR + handshake until ISUPPORT tells us the server
       // supports it (same pattern the nick-regain watch uses). 005 always
       // follows 001, so the 'server options' handler trips shortly after.
@@ -1237,7 +1337,10 @@ export class IrcConnection {
       // after, the socket-reconnect path runs clearAwayAll({autoSet:true}) and
       // clears it cleanly; if not, staying away across an IRC blip is the
       // correct behavior.
-      if (this.awayState.active && this.awayState.message) {
+      // Not on a restore: the socket already carries the away state (this
+      // process set it before it went away), and the 306 the re-assert draws
+      // would land as a server-buffer row on every restart.
+      if (this.awayState.active && this.awayState.message && !this.restoring) {
         try {
           this.client.raw('AWAY :' + this.awayState.message);
         } catch (_) {
@@ -1248,7 +1351,9 @@ export class IrcConnection {
       // IRC lines fired after 001. `WAIT <seconds>` pauses before the next
       // command (e.g. waiting for NickServ identify to take effect before
       // joining +r channels). Re-runs on every reconnect by design.
-      this.runConnectCommands();
+      // Not on a re-attach: the socket already ran them (NickServ is already
+      // satisfied, and a WAIT-delayed JOIN would join what we are in).
+      if (!this.restoring) this.runConnectCommands();
     });
     c.on('close', () => {
       // Final safety net (clean disconnect/dispose may not always emit
@@ -1270,6 +1375,7 @@ export class IrcConnection {
       this.ctcpLimiter = new RateLimiter();
       this.stopLagPinger();
       this.cancelPendingConnectCommands();
+      this.resetRestoreState();
       this.lagMs = null;
       // Next socket starts a fresh fallback ladder from the configured nick.
       this.preRegistered = true;
@@ -1292,6 +1398,15 @@ export class IrcConnection {
       // fires. This covers any clean-close path that somehow skipped it;
       // markAllPeersOffline is idempotent and disposed-guarded, so the double
       // call is a no-op.
+      if (this.engineSocketAlive) {
+        // The IRC socket is alive in the engine; only our side ended. Go
+        // straight back to CONNECT (the engine answers ATTACH if it still holds
+        // the socket, and dials if it doesn't — the normal handlers take either)
+        // unless this was a takeover, which is someone else's connection now.
+        this.engineSocketAlive = false;
+        this.reattachSoon();
+        return;
+      }
       this.markAllPeersOffline();
       this.setState('disconnected');
       // Decide, now that we know WHEN the socket died, whether a SASL rejection
@@ -1364,7 +1479,9 @@ export class IrcConnection {
       if (limit === 0 || this.useMonitor) return;
       this.useMonitor = true;
       this.monitorLimit = limit;
-      this.logNet(`MONITOR (IRCv3 presence) supported, watch limit ${limit}`);
+      if (!this.restoring) {
+        this.logNet(`MONITOR (IRCv3 presence) supported, watch limit ${limit}`);
+      }
       if (this.pendingRegainSetup && this.regainNick) {
         this.pendingRegainSetup = false;
         try {
@@ -1443,6 +1560,31 @@ export class IrcConnection {
     // surfacing it to the server buffer the user just sees a red dot and no
     // log line.
     c.on('socket close', (err: Record<string, unknown>) => {
+      const engineCode = engineCloseCode(err);
+      if (
+        engineCode === ENGINE_CLOSE.LINK_LOST ||
+        engineCode === ENGINE_CLOSE.TAKEN_OVER ||
+        engineCode === ENGINE_CLOSE.DETACHED
+      ) {
+        // Not the IRC socket. Our link to the engine dropped (the socket is
+        // still held; 'close' re-attaches), a newer app process claimed the
+        // connection (it lives on, elsewhere), or we let go on purpose at
+        // shutdown (the next process picks it up). Nothing about the network
+        // changed: no presence sweep — which would fire a "came online" push
+        // for every favorited peer on the next attach — and no error row.
+        this.engineSocketAlive = true;
+        if (engineCode === ENGINE_CLOSE.TAKEN_OVER) {
+          this.intentionalDisconnect = true;
+          this.setState('disconnected');
+          this.logNet('Another Lurker process took over this connection', 'warn');
+          this.onTakenOver?.();
+        } else if (engineCode === ENGINE_CLOSE.DETACHED) {
+          this.setState('disconnected', {}, { log: DETACHED_LOG });
+        } else {
+          this.setState('reconnecting');
+        }
+        return;
+      }
       this.setState('disconnected');
       // Our socket to this network just dropped — from our vantage point every
       // peer we track here is now unreachable, so mark them all offline. This is
@@ -1481,7 +1623,11 @@ export class IrcConnection {
     // The 'reconnecting' state + notice are now emitted by our own controller
     // (scheduleReconnectIfWarranted), not the library: irc-framework's
     // auto_reconnect is disabled, so it never fires a 'reconnecting' event.
-    c.on('connecting', () => this.setState('connecting'));
+    // On an attach the state still transitions (clients need the dot), but
+    // "Connecting…" in the system buffer would describe a connect that isn't
+    // happening; the manager already said "Attaching…" and the engine hook
+    // says "Re-attached" when it lands.
+    c.on('connecting', () => this.setState('connecting', {}, { log: !this.engineHoldsUs() }));
 
     // Diagnostic: irc-framework fires 'ping timeout' when it hasn't seen data
     // from the server for `ping_timeout` seconds (120s default) — then it QUITs
@@ -1533,6 +1679,9 @@ export class IrcConnection {
         // answers :113 from this map, and the oidentd shared-daemon mode renders
         // the same map to a config file. Skip only when neither is on.
         if (!isIdentdEnabled() && !isOidentdFileEnabled()) return;
+        // In engine mode the engine holds the socket and registered the ident
+        // when it dialed; this process serves no identd.
+        if (engineConfigured()) return;
         // The full 4-tuple identifies the connection to the identd server; the
         // ports alone are ambiguous (see identd.ts). Both addresses and ports
         // are already populated at TCP connect.
@@ -2010,6 +2159,29 @@ export class IrcConnection {
         // already 'online'. (It WILL fire if state is 'offline' or null.)
         // The away-notify 'back' event is the authoritative back signal.
         this.markPeerEvent(eventNick, 'online');
+      }
+      if (eventNick === c.user.nick && this.restoring) {
+        // A synthesised JOIN from the engine's replay. autojoin is lowered only
+        // by a part, a kick or a close (db/buffers.ts) — so a channel the socket
+        // is still in whose row says autojoin=0 means the user left it while
+        // the app (or its link) was away and the PART never went out. This is
+        // that PART, late. Otherwise it is state, not intent: the row's flag
+        // stays whatever it was.
+        const row = getBuffer(this.network.user_id, this.network.id, eventChannel);
+        if (
+          row &&
+          (!row.autojoin || isBufferClosed(this.network.user_id, this.network.id, eventChannel))
+        ) {
+          this.channels.delete(eventChannel.toLowerCase());
+          try {
+            c.raw('PART', eventChannel);
+          } catch (_) {
+            /* ignore */
+          }
+          return;
+        }
+        this.publish({ type: 'channel-joined', target: eventChannel });
+        return;
       }
       if (eventNick === c.user.nick) {
         // The ECHO is the only signal the join actually landed on the channel
@@ -3699,20 +3871,10 @@ export class IrcConnection {
     const account = sasl_password
       ? { account: sasl_account || nick, password: sasl_password }
       : undefined;
-    const proto = this.network.tls ? ' (TLS)' : '';
-    const connectingNotice: IrcEvent = {
-      type: 'notice',
-      target: this.serverTarget(),
-      nick: 'lurker',
-      notable: false, // #470: status line — not counted as unread (see MessageInput.notable)
-      text: `Connecting to ${this.network.host}:${this.network.port}${proto}…`,
-    };
-    // On an auto-reconnect attempt (reconnectAttempt has advanced past 0), don't
-    // persist this per-attempt status line — a long outage would otherwise write
-    // one row per retry forever (see scheduleReconnectIfWarranted). The initial
-    // and manual connects (attempt 0) still persist their one "Connecting…" line.
-    if (this.reconnectAttempt > 0) this.publishEphemeral(connectingNotice);
-    else this.publish(connectingNotice);
+    // In engine mode the notice waits for the engine to say it is dialing — a
+    // CONNECT it answers with ATTACH connects nothing (see onEnginePhase).
+    if (!engineConfigured()) this.announceConnecting();
+    this.resetRestoreState();
     this.client.connect({
       host: this.network.host,
       port: this.network.port,
@@ -3754,6 +3916,262 @@ export class IrcConnection {
       // network's RFC 1413 callback lands on the built-in identd rather than the
       // host's (outgoingAddr → irc-framework outgoing_addr → socket localAddress).
       outgoing_addr: outgoingAddr(),
+      ...this.engineConnectOptions(),
+    });
+  }
+
+  private announceConnecting(): void {
+    const proto = this.network.tls ? ' (TLS)' : '';
+    const connectingNotice: IrcEvent = {
+      type: 'notice',
+      target: this.serverTarget(),
+      nick: 'lurker',
+      notable: false, // #470: status line — not counted as unread (see MessageInput.notable)
+      text: `Connecting to ${this.network.host}:${this.network.port}${proto}…`,
+    };
+    // On an auto-reconnect attempt (reconnectAttempt has advanced past 0), don't
+    // persist this per-attempt status line — a long outage would otherwise write
+    // one row per retry forever (see scheduleReconnectIfWarranted). The initial
+    // and manual connects (attempt 0) still persist their one "Connecting…" line.
+    if (this.reconnectAttempt > 0) this.publishEphemeral(connectingNotice);
+    else this.publish(connectingNotice);
+  }
+
+  // Engine mode: route this Client through the engine-backed transport. The id
+  // is what the engine knows the socket by across app restarts; the ident rides
+  // along because identd is answered where the socket is, and the ident comes
+  // from the account (#643), which the engine never sees.
+  private engineConnectOptions(): Partial<ConnectOptions> {
+    if (!engineConfigured()) return {};
+    const account = findUserById(this.network.user_id);
+    return {
+      transport: EngineTransport,
+      engineConnId: engineConnectionId(this.network.user_id, this.network.id),
+      engineIdent: deriveIdent({
+        nodeMode: isNodeMode(),
+        accountUsername: account?.username || '',
+        accountIdent: account?.ident || null,
+      }),
+      engineHooks: {
+        onTransport: (t) => {
+          this.engineTransport = t as EngineTransport;
+        },
+        onPhase: (phase, info) => this.onEnginePhase(phase as EnginePhase, info as EnginePhaseInfo),
+      },
+    };
+  }
+
+  private onEnginePhase(phase: EnginePhase, info: EnginePhaseInfo): void {
+    switch (phase) {
+      case 'dialing':
+        this.resetRestoreState();
+        this.announceConnecting();
+        break;
+      case 'attached': {
+        this.resetRestoreState();
+        this.restoring = true;
+        this.catchingUp = true;
+        this.restoreUnattended = !!info.unattended;
+        // The engine's channel set is the truth about the socket. Anything we
+        // still think we are in but the engine doesn't (kicked or parted while
+        // this process was cut off) is gone — and must not get NAMES/TOPIC
+        // requests whose replies would resurrect it.
+        const live = new Set((info.channels ?? []).map((c) => c.toLowerCase()));
+        for (const [key, ch] of this.channels) {
+          if (live.has(key)) continue;
+          this.channels.delete(key);
+          this.joinedFoldedCache = null;
+          this.publish({ type: 'channel-parted', target: ch.name });
+        }
+        const away = info.detachedForMs
+          ? ` (app was away ${Math.round(info.detachedForMs / 1000)}s)`
+          : '';
+        const how = info.unattended ? ' — it registered on its own while no app was attached' : '';
+        this.logNet(
+          `Re-attached to the engine-held connection as ${info.nick ?? '?'}${away}${how}`,
+        );
+        break;
+      }
+      case 'restored': {
+        this.restoring = false;
+        // A synthesised JOIN gets none of what a real one is volunteered — no
+        // 353/366, no 332, and the join handler's MODE is skipped on a restore —
+        // so ask, one channel at a time (RESTORE_REQUEST_INTERVAL_MS), keeping
+        // each channel's replies out of the server buffer until they arrive.
+        // Our umodes were set after the burst ended (the post-MOTD `MODE nick
+        // +i`), so they are not in the replay either.
+        this.restoreQuiet.set('*', {
+          until: Date.now() + RESTORE_QUIET_MS,
+          mode: true,
+          topic: false,
+        });
+        this.rawQuiet('MODE', this.currentNick);
+        this.restoreQueue = [...this.channels.values()].map((ch) => ch.name);
+        this.drainRestoreQueue();
+        // A socket the engine registered on its own never had its
+        // post-registration steps: the connect commands run now, and the
+        // manager's rejoin (onceRestored, at `live`) covers the autojoin list.
+        if (this.restoreUnattended) this.runConnectCommands();
+        break;
+      }
+      case 'gap': {
+        const g = info.gap;
+        if (!g) break;
+        const dropped = g.lastDroppedSeq - g.firstDroppedSeq + 1;
+        this.publish({
+          type: 'notice',
+          target: this.serverTarget(),
+          nick: 'lurker',
+          notable: false, // status line, like the reconnect notices
+          text: `Lurker was away longer than the engine's buffer covers — ${dropped} line${dropped === 1 ? '' : 's'} received before ${new Date(g.at).toISOString()} could not be kept.`,
+        });
+        break;
+      }
+      case 'live':
+        this.catchingUp = false;
+        // Only now is the picture complete: the replay said which channels the
+        // socket is in, and the backlog said why (a KICK from one of them is a
+        // backlog line, and it is what lowers that channel's autojoin).
+        for (const cb of this.restoredCallbacks.splice(0)) {
+          try {
+            cb();
+          } catch (e) {
+            console.warn('[engine] restored callback failed:', (e as Error)?.message || e);
+          }
+        }
+        break;
+    }
+  }
+
+  // Run once the current restore has finished — replay AND backlog — or at
+  // once if none is in progress. The manager's rejoin pass hangs off this.
+  onceRestored(cb: () => void): void {
+    if (this.restoring || this.catchingUp) this.restoredCallbacks.push(cb);
+    else cb();
+  }
+
+  private resetRestoreState(): void {
+    this.restoring = false;
+    this.catchingUp = false;
+    this.restoreUnattended = false;
+    this.restoredCallbacks = [];
+    this.restoreQueue = [];
+    if (this.restoreTimer) {
+      clearTimeout(this.restoreTimer);
+      this.restoreTimer = null;
+    }
+    this.restoreQuiet.clear();
+  }
+
+  private drainRestoreQueue(): void {
+    const name = this.restoreQueue.shift();
+    if (name === undefined) return;
+    // Still in it? (A backlog KICK may have arrived in between.)
+    if (this.channels.has(name.toLowerCase())) {
+      this.restoreQuiet.set(name.toLowerCase(), {
+        until: Date.now() + RESTORE_QUIET_MS,
+        mode: true,
+        topic: true,
+      });
+      this.rawQuiet('NAMES', name);
+      this.rawQuiet('TOPIC', name);
+      this.rawQuiet('MODE', name);
+    }
+    if (this.restoreQueue.length === 0) return;
+    this.restoreTimer = setTimeout(() => {
+      this.restoreTimer = null;
+      if (!this.disposed && this.state === 'connected') this.drainRestoreQueue();
+    }, RESTORE_REQUEST_INTERVAL_MS);
+  }
+
+  private rawQuiet(command: string, arg: string): void {
+    try {
+      this.client.raw(command, arg);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  // Is this numeric the reply to a request the restore made for this channel
+  // (or, for 221, for us)? If so it is not history. Each reply retires its
+  // half of the entry, so a user's own /topic or /mode a moment later renders.
+  private isRestoreQuiet(numeric: string, channel: unknown): boolean {
+    if (typeof channel !== 'string' || this.restoreQuiet.size === 0) return false;
+    const key = channel.toLowerCase();
+    const entry = this.restoreQuiet.get(key);
+    if (!entry) return false;
+    if (Date.now() >= entry.until) {
+      this.restoreQuiet.delete(key);
+      return false;
+    }
+    const isMode = numeric === '324' || numeric === '329' || numeric === '221';
+    const isTopic = numeric === '331' || numeric === '332' || numeric === '333';
+    if (isMode && entry.mode) {
+      // 324 is followed by 329 on most servers; 221 stands alone.
+      if (numeric === '329' || numeric === '221') entry.mode = false;
+      return true;
+    }
+    if (isTopic && entry.topic) {
+      // 332 is followed by 333; 331 stands alone.
+      if (numeric === '331' || numeric === '333') entry.topic = false;
+      return true;
+    }
+    if (!entry.mode && !entry.topic) this.restoreQuiet.delete(key);
+    return false;
+  }
+
+  // Catch-up dedupe: has this line already been written by the process that
+  // was attached before us? By msgid where the network provides one; otherwise
+  // by the same target/kind/sender/text within a few seconds of the same time.
+  private alreadyPersisted(event: IrcEvent): boolean {
+    if (typeof event.msgid === 'string') {
+      return hasMessageWithMsgid(this.network.id, event.msgid);
+    }
+    const target = event.target as string;
+    const type = event.type;
+    if (!target || !type) return false;
+    const time = normalizeEventTime(event.time);
+    return hasRecentMessageLike(
+      this.network.id,
+      target,
+      type,
+      (event.nick as string | undefined) ?? null,
+      (event.text as string | undefined) ?? null,
+      time,
+    );
+  }
+
+  // Engine mode shutdown: leave the IRC socket in the engine for the next app
+  // process and end only our side. QUIT is deliberately NOT sent.
+  detach(): void {
+    this.intentionalDisconnect = true;
+    this.clearReconnectTimer();
+    const t = this.engineTransport;
+    if (t && t.isConnected()) t.detach();
+    else this.setState('disconnected', {}, { log: DETACHED_LOG });
+  }
+
+  // Engine mode: does the engine currently report holding this connection? True
+  // means a CONNECT will be an attach, not a dial.
+  private engineHoldsUs(): boolean {
+    if (!engineConfigured()) return false;
+    return EngineLink.shared().holds(engineConnectionId(this.network.user_id, this.network.id));
+  }
+
+  // After an engine-link loss. Wait for the link to say what it holds: held →
+  // CONNECT now, which the engine answers with ATTACH (not a dial, so not
+  // throttled). Not held — the engine itself restarted and the session really is
+  // gone — → this is a real reconnect and takes the ordinary ladder: backoff,
+  // the per-host stagger (#236), the policy gate (#616), and its persisted
+  // "Reconnecting…" row. A link that never comes back ends up there too.
+  private reattachSoon(): void {
+    if (this.disposed || this.intentionalDisconnect || this.reconnectTimer != null) return;
+    const link = EngineLink.shared();
+    const id = engineConnectionId(this.network.user_id, this.network.id);
+    void link.whenReady(ENGINE_REATTACH_WAIT_MS).then((r) => {
+      if (this.disposed || this.intentionalDisconnect || this.reconnectTimer != null) return;
+      if (r === 'ready' && link.holds(id)) this.connect();
+      else this.scheduleReconnectIfWarranted();
     });
   }
 

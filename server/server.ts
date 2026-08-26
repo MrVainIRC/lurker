@@ -13,6 +13,12 @@ import http from 'http';
 
 import { buildApp } from './app.js';
 import ircManager from './services/ircManager.js';
+import {
+  EngineLink,
+  engineConfigured,
+  startEngineLink,
+  stopEngineLink,
+} from './services/engineLink.js';
 import { attachWsHub } from './services/wsHub.js';
 import './services/verbs/index.js';
 import { getNodeSecret } from './middleware/nodeAuth.js';
@@ -106,7 +112,22 @@ if (isNodeMode() && !nodeUploadConfigured()) {
     '[lurker] node edition is active but LURKER_NODE_UPLOAD_URL / LURKER_NODE_UPLOAD_API_KEY are unset — image and text uploads will fail (400) until they are configured',
   );
 }
-if (isNodeMode() && !isIdentdEnabled() && !isOidentdFileEnabled()) {
+// Engine mode (LURKER_ENGINE_URL): the IRC sockets live in a separate process
+// that survives this one. Start the link now; NOT awaited, so a down engine
+// can't hold the HTTP listener hostage — connections simply wait for it. A
+// refusal (wrong secret, protocol major) turns engine mode off for this run,
+// loudly, whenever it happens; identd then has to start here after all.
+if (engineConfigured()) {
+  void startEngineLink();
+  EngineLink.shared().once('refused', () => {
+    console.warn(
+      '[lurker] engine refused — starting the ident services in this process instead. Note that :113 is normally published on the engine container, so they may not be reachable until the engine is fixed.',
+    );
+    startIdentServices();
+  });
+}
+
+if (isNodeMode() && !engineConfigured() && !isIdentdEnabled() && !isOidentdFileEnabled()) {
   console.warn(
     '[lurker] node edition is active but neither LURKER_IDENTD_ENABLED nor LURKER_OIDENTD_FILE is set — IRC networks cannot attribute individual users; they will appear with an unverified ~ident behind the cell IP',
   );
@@ -145,23 +166,22 @@ startEventLoopMonitor();
 // Built-in identd (opt-in via LURKER_IDENTD_ENABLED). A multi-user gateway
 // needs it so IRC networks can attribute each user behind the shared IP; bind
 // it before connections register their idents.
-if (isIdentdEnabled()) {
-  startIdentd(identdPort(), identdBindHost());
-}
-
-// Alternative ident delivery: instead of binding :113 ourselves, maintain an
-// oidentd config file for a host-installed ident daemon (opt-in via
-// LURKER_OIDENTD_FILE). Write the initial (empty) file before initAll connects
-// networks, so a stale file from a prior run can't serve dead mappings. The two
-// modes are independent; running both is usually a misconfiguration, so warn.
-if (isOidentdFileEnabled()) {
-  if (isIdentdEnabled()) {
-    console.warn(
-      '[lurker] both LURKER_IDENTD_ENABLED and LURKER_OIDENTD_FILE are set — Lurker will bind :113 AND maintain the oidentd file; running both is usually unintended, pick one',
-    );
+// In engine mode the engine answers :113 (the socket 4-tuples are its), so
+// both ident modes are its to run; the same variables on this process are
+// ignored rather than fought over — unless the engine refuses us later, in
+// which case they start here then (see the 'refused' hook above).
+function startIdentServices(): void {
+  if (isIdentdEnabled()) startIdentd(identdPort(), identdBindHost());
+  if (isOidentdFileEnabled()) {
+    if (isIdentdEnabled()) {
+      console.warn(
+        '[lurker] both LURKER_IDENTD_ENABLED and LURKER_OIDENTD_FILE are set — Lurker will bind :113 AND maintain the oidentd file; running both is usually unintended, pick one',
+      );
+    }
+    initOidentdFile();
   }
-  initOidentdFile();
 }
+if (!engineConfigured()) startIdentServices();
 
 // Parse any native push credentials now, so a misconfiguration is a failed boot
 // with a name attached rather than a silent non-delivery. Unset is normal and
@@ -247,6 +267,7 @@ function shutdown(signal: string): void {
   stopIgnoreSweeper();
   stopEventLoopMonitor();
   ircManager.shutdown();
+  stopEngineLink();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 5000).unref();
 }
