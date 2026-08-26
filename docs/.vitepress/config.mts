@@ -54,6 +54,7 @@ export default defineConfig({
           text: 'Self-Hosting & Operations',
           items: [
             { text: 'Self-Hosting Lurker', link: '/SELF_HOSTING' },
+            { text: 'Switching to the IRC engine', link: '/MIGRATION_ENGINE' },
             { text: 'Deploy on DigitalOcean', link: '/digitalocean' },
           ],
         },
