@@ -49,7 +49,17 @@ export function loadEngineConfig(env: NodeJS.ProcessEnv = process.env): EngineCo
       'LURKER_ENGINE_SECRET is required — the app authenticates to the engine with it; set the same value on both',
     );
   }
-  const listen = parseHostPort(env.LURKER_ENGINE_LISTEN || '', { host: '0.0.0.0', port: 8016 });
+  // Loopback by DEFAULT. The engine's secret is the only thing between a
+  // reachable engine and every connection it holds, so the safe default is the
+  // one that cannot be reached from another host at all — the ordinary
+  // self-host runs the engine beside the app.
+  //
+  // ⚠ Containers do not share a network namespace, so an engine in its own
+  // container must be told to bind wider or its sibling app cannot reach it:
+  // docker-compose.engine.yml sets LURKER_ENGINE_LISTEN for exactly that, and
+  // publishes no port. Widening this default to save that one line would
+  // silently expose every bare-metal engine instead.
+  const listen = parseHostPort(env.LURKER_ENGINE_LISTEN || '', { host: '127.0.0.1', port: 8016 });
   const bufferBytes = envBytes('LURKER_ENGINE_BUFFER_BYTES', 4 * MiB);
   const bufferTotalBytes = envBytes('LURKER_ENGINE_BUFFER_TOTAL_BYTES', 256 * MiB);
   return {
