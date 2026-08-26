@@ -17,17 +17,16 @@
         >{{ promptLabelNoModes }}<span v-if="promptModes" class="modes">{{ promptModes }}</span
         ><span v-if="awayLabel" class="away">&nbsp;{{ awayLabel }}</span
         >&nbsp;</template
-      ><span
+      ><button
         v-if="multilineAvailable"
+        type="button"
         class="prompt-break"
-        role="button"
-        tabindex="0"
         title="Insert line break"
         aria-label="Insert line break"
         @mousedown.prevent
         @click="insertMultilineBreak"
-        @keydown.enter.prevent="insertMultilineBreak"
-        >↵</span
+      >
+        ↵</button
       ><span
         v-if="hasHistory"
         ref="promptBtnEl"
@@ -389,6 +388,7 @@ const text = computed({
     onInput();
   },
 });
+const editingMsgid = ref<string | null>(null);
 // Firefox (desktop + mobile) doesn't support CSS `field-sizing: content` (#336),
 // so the native content-driven grow leaves the composer stuck at rows="1". Wire
 // a JS measure-and-set fallback ONLY where it's needed — Chrome/Safari keep the
@@ -1852,6 +1852,7 @@ function onInput() {
 }
 
 watch(active, (newActive, oldActive) => {
+  editingMsgid.value = null;
   resetCompletion();
   closePicker();
   closeStrip();
@@ -1945,11 +1946,16 @@ function insertUrlAtCaret(url: string): void {
 function insertMultilineBreak(): void {
   if (!multilineAvailable.value) return;
   const el = inputEl.value;
-  const current = text.value;
-  const start = el?.selectionStart ?? current.length;
-  const end = el?.selectionEnd ?? current.length;
-  const next = `${current.slice(0, start)}\n${current.slice(end)}`;
-  text.value = next;
+  if (!el) return;
+  // Mutate the textarea first. Updating only the computed draft can race the
+  // controlled :value binding and leave the visible caret/value unchanged.
+  // setRangeText preserves the selection, then the normal DOM→draft sync
+  // records exactly the same edit as a keystroke.
+  el.focus();
+  const start = el.selectionStart ?? el.value.length;
+  const end = el.selectionEnd ?? el.value.length;
+  el.setRangeText('\n', start, end, 'end');
+  syncModelFromDom();
   closeStrip();
   closeEmojiStrip();
   closeEmojiPicker();
@@ -1977,13 +1983,16 @@ onMounted(() => {
     onPickFile,
     onPickCamera,
     onAddress: addressInComposer,
-    onEdit: (value) => {
-      if (!sendable.value) return;
-      text.value = value;
+    onEdit: (request) => {
+      const a = active.value;
+      if (!sendable.value || !a || a.networkId !== request.networkId || a.target !== request.target)
+        return;
+      editingMsgid.value = request.msgid;
+      text.value = request.text;
       nextTick(() => {
         const input = inputEl.value;
         input?.focus();
-        input?.setSelectionRange(value.length, value.length);
+        input?.setSelectionRange(request.text.length, request.text.length);
       });
     },
   });
@@ -2311,7 +2320,8 @@ async function submit() {
   // `//foo` escapes the slash and sends literal `/foo` as a normal message.
   // History keeps the typed `//foo` form so up-arrow round-trips identically.
   const escapedSlash = raw.startsWith('//');
-  if (raw.startsWith('/') && !escapedSlash) {
+  const editOf = editingMsgid.value;
+  if (raw.startsWith('/') && !escapedSlash && !editOf) {
     // Slash commands cover a lot of ground (joins, raws, /me, etc.). Treat
     // /me with the same ACK path as a normal send since it visibly fans out
     // as a chat message; the rest stay best-effort but at least bail out
@@ -2345,6 +2355,7 @@ async function submit() {
     target,
     text: wireText,
     ...(replyTo ? { replyTo } : {}),
+    ...(editOf ? { editOf } : {}),
   });
   if (!pending) {
     // Socket isn't open — don't clear the input, don't pollute history. The
@@ -2361,6 +2372,8 @@ async function submit() {
   if (!result.ok) {
     toastSendFailure(result.error ?? 'unknown', raw);
     restoreFailedSend(networkId, target, raw);
+  } else if (editOf) {
+    editingMsgid.value = null;
   }
 }
 
@@ -3860,11 +3873,17 @@ function handleCommand(line: string, networkId: number | null, target: string): 
 .prompt-break {
   position: relative;
   display: inline-block;
-  margin-right: var(--space-1);
+  margin: 0 var(--space-3) 0 0;
+  padding: 0;
   color: var(--fg-muted);
   font: inherit;
+  line-height: inherit;
+  background: none;
+  border: 0;
   cursor: pointer;
   touch-action: manipulation;
+  transform: scale(1.2);
+  transform-origin: center;
 }
 .prompt-break:hover,
 .prompt-break:focus-visible {

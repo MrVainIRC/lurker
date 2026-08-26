@@ -334,21 +334,10 @@
             :class="{ active: a.active }"
             :title="a.label"
             :aria-label="a.label"
-            @click.stop="runAction(a.key, row.m)"
+            @click.stop="runAction(a.key, row.m, $event)"
             @contextmenu.stop.prevent
           >
             <i :class="a.icon"></i>
-          </button>
-          <button
-            v-if="moreActionsFor(row.m).length"
-            type="button"
-            class="row-action"
-            title="More message actions"
-            aria-label="More message actions"
-            @click.stop="openMoreActions($event, row.m)"
-            @contextmenu.stop.prevent
-          >
-            <i class="fa-solid fa-ellipsis"></i>
           </button>
         </div>
       </div>
@@ -423,7 +412,11 @@ import { useMemberActions } from '../composables/useMemberActions.js';
 import type { MemberContext, MemberLike } from '../composables/useMemberActions.js';
 import { useContextMenu, type ContextMenuItem } from '../composables/useContextMenu.js';
 import { useWhoisStore } from '../stores/whois.js';
-import { addressNick, editMessage } from '../composables/useComposerOverlay.js';
+import {
+  addressNick,
+  editMessage,
+  type EditMessageRequest,
+} from '../composables/useComposerOverlay.js';
 import { setViewedBuffer } from '../composables/useViewedBuffer.js';
 import { isChannelTarget } from '../../../shared/channels.js';
 import MessageReactionModal from './MessageReactionModal.vue';
@@ -769,6 +762,8 @@ const actionContext: MessageContext = {
       networkId: buffer.value?.networkId ?? undefined,
     };
   },
+  onOpenReact: (msg) => openReactionMenu(null, msg as ChatMessage, false),
+  onOpenUnreact: (msg) => openReactionMenu(null, msg as ChatMessage, true),
   onReact: (msg, reaction) => {
     const b = buffer.value;
     if (b?.networkId == null || !msg.msgid) return;
@@ -800,7 +795,15 @@ const actionContext: MessageContext = {
     socketSend({ type: 'redact', networkId: b.networkId, target: b.target, msgid: msg.msgid });
   },
   onEdit: (msg) => {
-    if (typeof msg.text === 'string' && msg.text.length) editMessage(msg.text);
+    const b = buffer.value;
+    if (typeof msg.text === 'string' && msg.text.length && b?.networkId != null && msg.msgid) {
+      editMessage({
+        text: msg.text,
+        msgid: msg.msgid,
+        networkId: b.networkId,
+        target: b.target,
+      } satisfies EditMessageRequest);
+    }
   },
 };
 
@@ -816,22 +819,28 @@ function actionsFor(m: ChatMessage | undefined | null): MessageAction[] {
   return messageActions.buildActions(m as any);
 }
 
-function runAction(key: MessageActionKey, m: ChatMessage | undefined | null): void {
+function openReactionMenu(
+  e: MouseEvent | null,
+  m: ChatMessage | undefined | null,
+  unreact: boolean,
+): void {
   if (!m) return;
+  const items = unreact
+    ? messageActions.buildUnreactionItems(m as any, actionContext)
+    : messageActions.buildReactionItems(m as any, actionContext);
+  if (!items.length) return;
+  const x = e?.clientX ?? contextMenu.state.x;
+  const y = e?.clientY ?? contextMenu.state.y;
+  const trigger = (e?.currentTarget as Element | null) ?? contextMenu.state.triggerEl;
+  contextMenu.open(items, x, y, trigger);
+}
+
+function runAction(key: MessageActionKey, m: ChatMessage | undefined | null, e: MouseEvent): void {
+  if (!m) return;
+  if (key === 'react') return openReactionMenu(e, m, false);
+  if (key === 'unreact') return openReactionMenu(e, m, true);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   messageActions.run(key, m as any, actionContext);
-}
-
-function moreActionsFor(m: ChatMessage | undefined | null): ContextMenuItem[] {
-  if (!m) return [];
-  return messageActions.buildMoreItems(m as any, actionContext);
-}
-
-function openMoreActions(e: MouseEvent, m: ChatMessage | undefined | null): void {
-  if (!m) return;
-  const items = moreActionsFor(m);
-  if (!items.length) return;
-  contextMenu.open(items, e.clientX, e.clientY, e.currentTarget as Element);
 }
 
 // Click/tap → message action menu (#392). The entry point whenever the hover

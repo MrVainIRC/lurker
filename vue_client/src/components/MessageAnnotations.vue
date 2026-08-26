@@ -31,33 +31,10 @@
       {{ entry.reaction }} {{ entry.actors.length }}
     </button>
   </div>
-  <button
-    v-if="canReact && message.msgid"
-    type="button"
-    class="reaction-add"
-    title="Add reaction"
-    aria-label="Add reaction"
-    :aria-expanded="emojiPickerOpen"
-    @click.stop="emojiPickerOpen = !emojiPickerOpen"
-  >
-    <i class="fa-regular fa-face-smile"></i>
-  </button>
-  <div v-if="emojiPickerOpen" class="emoji-picker" role="group" aria-label="Choose reaction">
-    <button
-      v-for="emoji in emojiChoices"
-      :key="emoji"
-      type="button"
-      class="emoji-choice"
-      :aria-label="`React with ${emoji}`"
-      @click.stop="chooseReaction(emoji)"
-    >
-      {{ emoji }}
-    </button>
-  </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed } from 'vue';
 import { useBuffersStore, type BufferMessage, type ReactionEntry } from '../stores/buffers.js';
 import { useNetworksStore } from '../stores/networks.js';
 import { socketSend } from '../composables/useSocket.js';
@@ -76,38 +53,6 @@ const props = defineProps<{
 
 const buffers = useBuffersStore();
 const networks = useNetworksStore();
-const emojiPickerOpen = ref(false);
-const emojiChoices = [
-  '😀',
-  '😃',
-  '😄',
-  '😁',
-  '😆',
-  '😂',
-  '🙂',
-  '😉',
-  '😊',
-  '😍',
-  '🥰',
-  '😎',
-  '🤔',
-  '😮',
-  '😢',
-  '😭',
-  '😡',
-  '👍',
-  '👎',
-  '❤️',
-  '🎉',
-  '🚀',
-  '👀',
-  '🙏',
-  '🔥',
-  '💯',
-  '✅',
-  '❌',
-  '🤝',
-];
 const buffer = computed(() => buffers.findByTarget(props.networkId, props.target));
 const features = computed(() => networks.states[props.networkId]?.negotiatedFeatures || {});
 const canReact = computed(() => !!features.value.reactions && !!features.value.messageTags);
@@ -146,11 +91,6 @@ function toggle(reaction: string, removed: boolean): void {
   });
 }
 
-function chooseReaction(reaction: string): void {
-  emojiPickerOpen.value = false;
-  toggle(reaction, false);
-}
-
 function jumpToParent(): void {
   const id = parent.value?.id;
   if (id == null) return;
@@ -163,9 +103,7 @@ function jumpToParent(): void {
 
 <style scoped>
 .reply-reference,
-.reaction,
-.reaction-add,
-.redact-action {
+.reaction {
   font: inherit;
   border: 0;
   cursor: pointer;
@@ -194,8 +132,7 @@ function jumpToParent(): void {
   gap: var(--space-1);
   margin-top: var(--space-1);
 }
-.reaction,
-.reaction-add {
+.reaction {
   padding: 0 var(--space-2);
   color: var(--fg-muted);
   background: var(--bg-soft);
@@ -205,38 +142,5 @@ function jumpToParent(): void {
 .reaction.mine {
   color: var(--accent);
   border-color: var(--accent);
-}
-.reaction-add,
-.redact-action {
-  margin-left: var(--space-1);
-  color: var(--fg-muted);
-  background: transparent;
-}
-.redact-action:hover,
-.reaction-add:hover {
-  color: var(--fg);
-}
-.emoji-picker {
-  display: grid;
-  grid-template-columns: repeat(10, max-content);
-  gap: var(--space-1);
-  margin-top: var(--space-1);
-  padding: var(--space-2);
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-.emoji-choice {
-  width: 2em;
-  height: 2em;
-  padding: 0;
-  background: transparent;
-  border: 0;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
-.emoji-choice:hover,
-.emoji-choice:focus-visible {
-  background: var(--bg-hover, var(--bg));
 }
 </style>

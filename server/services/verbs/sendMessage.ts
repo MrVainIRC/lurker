@@ -28,6 +28,10 @@ registerVerb({
         type: 'string',
         description: 'Optional IRCv3 +reply msgid to attach to the PRIVMSG.',
       },
+      editOf: {
+        type: 'string',
+        description: 'Optional IRCv3 draft/edit msgid identifying the message to modify.',
+      },
     },
     required: ['networkId', 'target', 'text'],
     additionalProperties: false,
@@ -37,8 +41,9 @@ registerVerb({
     const target = typeof input.target === 'string' ? input.target : '';
     const text = typeof input.text === 'string' ? input.text : '';
     const replyTo = typeof input.replyTo === 'string' ? input.replyTo : undefined;
+    const editOf = typeof input.editOf === 'string' ? input.editOf : undefined;
     if (!target || !text) return { ok: false, error: 'empty-target-or-text' };
-    const ok = ircManager.send(ctx.userId, networkId, target, text, replyTo);
+    const ok = ircManager.send(ctx.userId, networkId, target, text, replyTo, editOf);
     return ok ? { ok: true } : { ok: false, error: 'not-connected' };
   },
 });

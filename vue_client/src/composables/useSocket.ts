@@ -223,6 +223,9 @@ function applyEvent(event: any): void {
     case 'redaction':
       buffers.applyRedaction(event);
       break;
+    case 'message-edit':
+      buffers.applyMessageEdit(event);
+      break;
     case 'features':
       networks.applyFeatures(event);
       break;

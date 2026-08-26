@@ -681,6 +681,15 @@ export const useBuffersStore = defineStore('buffers', {
       message.redacted = true;
       message.redactionReason = event.reason || undefined;
     },
+    applyMessageEdit(event: { networkId: number; target: string; msgid: string; text: string }) {
+      const buf = this.findByTarget(event.networkId, event.target);
+      if (!buf) return;
+      const message = buf.messages.find((m) => m.msgid === event.msgid);
+      if (!message) return;
+      message.text = event.text;
+      message.redacted = false;
+      message.redactionReason = undefined;
+    },
     setReply(networkId: number, target: string, message: BufferMessage | null) {
       const buf = this.findByTarget(networkId, target);
       if (!buf) return;

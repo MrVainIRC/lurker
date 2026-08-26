@@ -11,6 +11,7 @@ import {
   hasRecentMessageLike,
   setMessageReaction,
   redactMessage,
+  editMessage as updateMessageText,
 } from '../db/messages.js';
 import { renameBuffer as renameDmBuffer } from '../db/renameBuffer.js';
 import { refoldNetworkBuffers } from '../db/refoldBuffers.js';
@@ -196,6 +197,7 @@ const NON_PERSISTED_TYPES = new Set([
   'ctcp',
   'reaction',
   'redaction',
+  'message-edit',
   'features',
   'standard-reply',
   'metadata',
@@ -761,6 +763,7 @@ export class IrcConnection {
     this.client.requestCap('labeled-response');
     this.client.requestCap('draft/metadata-2');
     this.client.requestCap('draft/message-redaction');
+    this.client.requestCap('draft/editmsg');
     this.state = 'disconnected';
     this.channels = new Map();
     this.joinedFoldedCache = null;
@@ -865,6 +868,10 @@ export class IrcConnection {
     return (this.client.network?.cap?.enabled || []).includes(capability);
   }
 
+  supportsDraftEdit(): boolean {
+    return this.supportsCap('draft/editmsg');
+  }
+
   publishFeatures(): void {
     const cap = this.client.network?.cap;
     const enabled = [...(cap?.enabled || [])];
@@ -883,6 +890,7 @@ export class IrcConnection {
         reply: this.supportsCap('message-tags'),
         reactions: this.supportsCap('message-tags'),
         redaction: this.supportsCap('draft/message-redaction'),
+        edit: this.supportsCap('draft/editmsg'),
         metadata: this.supportsCap('draft/metadata-2') && this.supportsCap('batch'),
         labeledResponse:
           this.supportsCap('labeled-response') &&
@@ -2009,6 +2017,7 @@ export class IrcConnection {
       // keys arrive lowercased; draft/msgid covers pre-ratification servers.
       const msgid = tags?.msgid || tags?.['draft/msgid'] || undefined;
       const replyTo = tags?.['+reply'] || undefined;
+      const editOf = tags?.['+draft/edit'] || tags?.['draft/edit'] || undefined;
       const targetIsChannel = isChannelTarget(eventTarget);
       const type =
         eventType === 'action' ? 'action' : eventType === 'notice' ? 'notice' : 'message';
@@ -2023,6 +2032,20 @@ export class IrcConnection {
       if (eventNick && me && eventNick.toLowerCase() === me.toLowerCase()) {
         if (!this.echoActive()) return;
         if (!eventTarget || typeof eventMessage !== 'string') return;
+        if (editOf) {
+          const editTarget = targetIsChannel ? eventTarget : this.canonicalDmTarget(eventTarget);
+          if (updateMessageText(this.network.id, editTarget, editOf, eventNick, eventMessage)) {
+            this.publishEphemeral({
+              type: 'message-edit',
+              target: editTarget,
+              msgid: editOf,
+              text: eventMessage,
+              nick: eventNick,
+              time: event.time,
+            });
+          }
+          return;
+        }
         // Our own E2E ciphertext coming back: the optimistic PLAINTEXT row
         // (self, e2e) was already published at send time. Recognized by
         // CONTENT (the exact lines ircManager's E2E branch registered when it
@@ -2101,6 +2124,23 @@ export class IrcConnection {
       } else target = eventNick as string;
 
       const nick = eventNick || eventHostname || 'server';
+
+      // A draft edit is a new PRIVMSG carrying the original msgid in a tag. It
+      // changes the persisted row in place and never creates a second message.
+      // The sender check in updateMessageText is the final authorization gate.
+      if (editOf && typeof eventMessage === 'string') {
+        if (updateMessageText(this.network.id, target, editOf, nick, eventMessage)) {
+          this.publishEphemeral({
+            type: 'message-edit',
+            target,
+            msgid: editOf,
+            text: eventMessage,
+            nick,
+            time: event.time,
+          });
+        }
+        return;
+      }
 
       // RPE2E: a `+RPE2E01` chunk on an encryption channel is decrypted to its
       // plaintext (rendered with the flag) before persistence. A
@@ -3279,6 +3319,35 @@ export class IrcConnection {
       const replyTo = tags?.['+reply'];
       const reaction = tags?.['+draft/react'];
       const unreaction = tags?.['+draft/unreact'];
+      const editOf = tags?.['+draft/edit'];
+      const editText = tags?.['+draft/edit-text'];
+      if (editOf && typeof editText === 'string') {
+        // Without echo-message the manager already applied and fanned out the
+        // local edit; a server that reflects client-only TAGMSGs must not make
+        // every tab process that same edit a second time.
+        if (isSelf && !this.echoActive()) return;
+        const eventTarget = event.target as string | undefined;
+        const targetIsChannel = isChannelTarget(eventTarget);
+        const target = targetIsChannel
+          ? eventTarget
+          : this.canonicalDmTarget(isSelf ? eventTarget || '' : eventNick || '');
+        const editor = String(eventNick || '').trim();
+        if (
+          target &&
+          editor &&
+          updateMessageText(this.network.id, target, editOf, editor, editText)
+        ) {
+          this.publishEphemeral({
+            type: 'message-edit',
+            target,
+            msgid: editOf,
+            text: editText,
+            nick: eventNick,
+            time: event.time,
+          });
+        }
+        return;
+      }
       if (replyTo && (reaction !== undefined || unreaction !== undefined)) {
         const eventNick = event.nick as string | undefined;
         const targetIsChannel = isChannelTarget(event.target as string | undefined);
@@ -4450,6 +4519,15 @@ export class IrcConnection {
     this.client.tagmsg(target, {
       '+reply': msgid,
       [removed ? '+draft/unreact' : '+draft/react']: reaction,
+    });
+    return true;
+  }
+
+  sendEdit(target: string, msgid: string, text: string): boolean {
+    if (!this.supportsDraftEdit() || !msgid || !text) return false;
+    this.client.tagmsg(target, {
+      '+draft/edit': msgid,
+      '+draft/edit-text': text,
     });
     return true;
   }
@@ -6380,6 +6458,7 @@ export class IrcConnection {
       reply: this.supportsCap('message-tags'),
       reactions: this.supportsCap('message-tags'),
       redaction: this.supportsCap('draft/message-redaction'),
+      edit: this.supportsCap('draft/editmsg'),
       metadata: this.supportsCap('draft/metadata-2') && this.supportsCap('batch'),
       labeledResponse:
         this.supportsCap('labeled-response') &&

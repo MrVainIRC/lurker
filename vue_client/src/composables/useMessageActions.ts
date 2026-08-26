@@ -32,6 +32,8 @@ export interface MessageContext {
   networkId: number;
   onReply(message: MessageLike): void;
   onIgnore(message: MessageLike): void;
+  onOpenReact?(message: MessageLike): void;
+  onOpenUnreact?(message: MessageLike): void;
   onReact?(message: MessageLike, reaction: string): void;
   onCustomReact?(message: MessageLike): void;
   onUnreact?(message: MessageLike, reaction: string): void;
@@ -39,7 +41,16 @@ export interface MessageContext {
   onEdit?(message: MessageLike): void;
 }
 
-export type MessageActionKey = 'reply' | 'copy' | 'link' | 'save' | 'ignore';
+export type MessageActionKey =
+  | 'reply'
+  | 'react'
+  | 'unreact'
+  | 'edit'
+  | 'redact'
+  | 'copy'
+  | 'link'
+  | 'save'
+  | 'ignore';
 
 export interface MessageAction {
   key: MessageActionKey;
@@ -57,6 +68,14 @@ export interface MessageActionsAPI {
   // The same actions rendered as ContextMenuItem[] for the right-click / tap
   // menu (#392). Derived from buildActions so the bar and the menu can't drift.
   buildItems(message: MessageLike | null | undefined, ctx: MessageContext): ContextMenuItem[];
+  buildReactionItems(
+    message: MessageLike | null | undefined,
+    ctx: MessageContext,
+  ): ContextMenuItem[];
+  buildUnreactionItems(
+    message: MessageLike | null | undefined,
+    ctx: MessageContext,
+  ): ContextMenuItem[];
   buildMoreItems(message: MessageLike | null | undefined, ctx: MessageContext): ContextMenuItem[];
   // Open the shared context menu at a viewport point for this message.
   openMenu(
@@ -85,6 +104,37 @@ export function useMessageActions(): MessageActionsAPI {
   const buffers = useBuffersStore();
   const menu = useContextMenu();
   const networks = useNetworksStore();
+  const commonReactions = [
+    '😀',
+    '😃',
+    '😄',
+    '😁',
+    '😆',
+    '😂',
+    '🙂',
+    '😉',
+    '😊',
+    '😍',
+    '🥰',
+    '😎',
+    '🤔',
+    '😮',
+    '😢',
+    '😭',
+    '😡',
+    '👍',
+    '👎',
+    '❤️',
+    '🎉',
+    '🚀',
+    '👀',
+    '🙏',
+    '🔥',
+    '💯',
+    '✅',
+    '❌',
+    '🤝',
+  ];
 
   // Absolute permalink to one message, or null when the line can't have one.
   // The buffer route addresses by server id (#744), so this needs the message's
@@ -135,6 +185,7 @@ export function useMessageActions(): MessageActionsAPI {
     // and the server uses the hostmask for delivery, not ignore filtering.
     const networkId = message.networkId ?? message.network_id;
     const featureState = networkId == null ? null : networks.states[networkId];
+    const features = featureState?.negotiatedFeatures;
     const addressable = !message.self && !!message.nick;
     const replyable =
       addressable &&
@@ -144,6 +195,23 @@ export function useMessageActions(): MessageActionsAPI {
 
     if (replyable) {
       actions.push({ key: 'reply', label: `Reply to ${message.nick}`, icon: 'fa-solid fa-reply' });
+    }
+
+    const reactionsEnabled = !!message.msgid && !!features?.reactions && !!features.messageTags;
+    if (reactionsEnabled) {
+      actions.push({ key: 'react', label: 'React', icon: 'fa-regular fa-face-smile' });
+      const actor = networks.states[networkId!]?.nick || '';
+      const hasOwnReaction = (message.reactions || []).some((reaction) => reaction.actor === actor);
+      if (hasOwnReaction) {
+        actions.push({ key: 'unreact', label: 'Unreact', icon: 'fa-regular fa-face-frown' });
+      }
+    }
+
+    if (message.self && message.text && message.msgid && features?.edit) {
+      actions.push({ key: 'edit', label: 'Edit', icon: 'fa-solid fa-pen' });
+    }
+    if (message.self && message.msgid && features?.redaction) {
+      actions.push({ key: 'redact', label: 'Redact message', icon: 'fa-solid fa-eraser' });
     }
 
     if (message.text) {
@@ -190,6 +258,18 @@ export function useMessageActions(): MessageActionsAPI {
       case 'reply':
         ctx.onReply(message);
         break;
+      case 'react':
+        ctx.onOpenReact?.(message);
+        break;
+      case 'unreact':
+        ctx.onOpenUnreact?.(message);
+        break;
+      case 'edit':
+        ctx.onEdit?.(message);
+        break;
+      case 'redact':
+        ctx.onRedact?.(message);
+        break;
       case 'copy':
         if (navigator.clipboard) {
           navigator.clipboard.writeText(String(message.text || '')).catch(() => {});
@@ -220,18 +300,24 @@ export function useMessageActions(): MessageActionsAPI {
     ctx: MessageContext,
   ): ContextMenuItem[] {
     if (!message) return [];
-    const items: ContextMenuItem[] = buildActions(message).map((a) => ({
-      label: a.label,
-      icon: a.icon,
-      onClick: () => run(a.key, message, ctx),
-    }));
-    const more = buildMoreItems(message, ctx);
-    if (more.length) {
-      items.push(
-        { divider: true },
-        { label: 'More actions', icon: 'fa-solid fa-ellipsis', children: more },
-      );
-    }
+    const items: ContextMenuItem[] = buildActions(message).map((a) => {
+      if (a.key === 'react' || a.key === 'unreact') {
+        const children =
+          a.key === 'react' ? buildReactionItems(message, ctx) : buildUnreactionItems(message, ctx);
+        return {
+          label: a.label,
+          icon: a.icon,
+          children: children.length
+            ? children
+            : [{ label: 'No reactions to remove', disabled: true }],
+        };
+      }
+      return {
+        label: a.label,
+        icon: a.icon,
+        onClick: () => run(a.key, message, ctx),
+      };
+    });
     return items;
   }
 
@@ -245,65 +331,26 @@ export function useMessageActions(): MessageActionsAPI {
     const items: ContextMenuItem[] = [];
 
     if (message.msgid && features?.reactions && features.messageTags && ctx.onReact) {
-      const choices = [
-        '😀',
-        '😂',
-        '😍',
-        '😮',
-        '😢',
-        '😡',
-        '👍',
-        '👎',
-        '❤️',
-        '🎉',
-        '🚀',
-        '👀',
-        '🙏',
-        '🔥',
-        '💯',
-        '✅',
-        '❌',
-        '🤝',
-      ];
       items.push({
         label: 'React',
         icon: 'fa-regular fa-face-smile',
-        children: [
-          ...choices.map((reaction) => ({
-            label: reaction,
-            onClick: () => ctx.onReact?.(message, reaction),
-          })),
-          { divider: true },
-          { label: 'Custom reaction…', onClick: () => ctx.onCustomReact?.(message) },
-        ],
+        children: buildReactionItems(message, ctx),
       });
-      const actor = networkId == null ? '' : networks.states[networkId]?.nick || '';
-      const own = [
-        ...new Set(
-          (message.reactions || [])
-            .filter((reaction) => reaction.actor === actor)
-            .map((reaction) => reaction.reaction),
-        ),
-      ];
+      const own = buildUnreactionItems(message, ctx);
       items.push({
         label: 'Unreact',
         icon: 'fa-regular fa-face-frown',
         disabled: own.length === 0,
-        children: own.length
-          ? own.map((reaction) => ({
-              label: reaction,
-              onClick: () => ctx.onUnreact?.(message, reaction),
-            }))
-          : [{ label: 'No reactions to remove', disabled: true }],
+        children: own.length ? own : [{ label: 'No reactions to remove', disabled: true }],
       });
     }
 
-    const hasEdit = !!message.self && !!message.text && !!ctx.onEdit;
+    const hasEdit = !!message.self && !!message.text && !!features?.edit && !!ctx.onEdit;
     const hasRedact = !!message.self && !!message.msgid && !!features?.redaction && !!ctx.onRedact;
     if (items.length && (hasEdit || hasRedact)) items.push({ divider: true });
     if (hasEdit) {
       items.push({
-        label: 'Edit & resend',
+        label: 'Edit',
         icon: 'fa-solid fa-pen',
         onClick: () => ctx.onEdit?.(message),
       });
@@ -316,6 +363,40 @@ export function useMessageActions(): MessageActionsAPI {
       });
     }
     return items;
+  }
+
+  function buildReactionItems(
+    message: MessageLike | null | undefined,
+    ctx: MessageContext,
+  ): ContextMenuItem[] {
+    if (!message?.msgid || !ctx.onReact) return [];
+    return [
+      ...commonReactions.map((reaction) => ({
+        label: reaction,
+        onClick: () => ctx.onReact?.(message, reaction),
+      })),
+      { divider: true },
+      { label: 'Custom reaction…', onClick: () => ctx.onCustomReact?.(message) },
+    ];
+  }
+
+  function buildUnreactionItems(
+    message: MessageLike | null | undefined,
+    ctx: MessageContext,
+  ): ContextMenuItem[] {
+    if (!message?.msgid || !ctx.onUnreact) return [];
+    const networkId = message.networkId ?? message.network_id;
+    const actor = networkId == null ? '' : networks.states[networkId]?.nick || '';
+    return [
+      ...new Set(
+        (message.reactions || [])
+          .filter((reaction) => reaction.actor === actor)
+          .map((reaction) => reaction.reaction),
+      ),
+    ].map((reaction) => ({
+      label: reaction,
+      onClick: () => ctx.onUnreact?.(message, reaction),
+    }));
   }
 
   function openMenu(
@@ -331,5 +412,13 @@ export function useMessageActions(): MessageActionsAPI {
     menu.open(items, x, y, triggerEl);
   }
 
-  return { buildActions, run, buildItems, buildMoreItems, openMenu };
+  return {
+    buildActions,
+    run,
+    buildItems,
+    buildReactionItems,
+    buildUnreactionItems,
+    buildMoreItems,
+    openMenu,
+  };
 }

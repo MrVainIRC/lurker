@@ -2741,6 +2741,7 @@ export function attachWsHub(
               target: msg.target,
               text: msg.text,
               replyTo: typeof msg.replyTo === 'string' ? msg.replyTo : undefined,
+              editOf: typeof msg.editOf === 'string' ? msg.editOf : undefined,
             },
           ) as { ok: boolean; error?: string };
         } catch (err) {

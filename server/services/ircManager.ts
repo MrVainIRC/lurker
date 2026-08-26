@@ -20,7 +20,11 @@ import {
   deleteBuffer,
   listAutojoinChannels,
 } from '../db/buffers.js';
-import { hasMessageForTarget, setMessageReaction } from '../db/messages.js';
+import {
+  editMessage as updateMessageText,
+  hasMessageForTarget,
+  setMessageReaction,
+} from '../db/messages.js';
 import { DCC_ACTIVE_STATES, getDccTransfer, updateDccTransferState } from '../db/dccTransfers.js';
 import { findUserById } from '../db/users.js';
 import { isNetworkHostAllowed } from './networkPolicy.js';
@@ -589,7 +593,14 @@ class IrcManager extends EventEmitter {
   // text as a single self-message event — so the sender saw one bubble while
   // peers saw N. Splitting on our side and publishing per chunk keeps the
   // local view symmetric with what was actually transmitted.
-  send(userId: number, networkId: number, target: string, text: string, replyTo?: string): boolean {
+  send(
+    userId: number,
+    networkId: number,
+    target: string,
+    text: string,
+    replyTo?: string,
+    editOf?: string,
+  ): boolean {
     // writableConnection, not getConnection: a network in reconnect backoff still
     // has a connection object, and every line written to it is silently dropped.
     // Reporting success there persisted a self row and fanned it out to every
@@ -604,6 +615,30 @@ class IrcManager extends EventEmitter {
     // below so a doomed send can't advance the ratchet or burn a rekey either.
     const conn = this.writableConnection(userId, networkId);
     if (!conn) return false;
+
+    // The message-modification draft is a TAGMSG carrying the original message
+    // id and replacement text. It is deliberately single-line and disabled on E2E channels:
+    // neither a split edit nor a cleartext edit inside an encrypted channel has
+    // unambiguous protocol semantics.
+    if (editOf) {
+      if (
+        !conn.supportsDraftEdit() ||
+        !conn.client.user?.nick ||
+        hasInteriorNewline(text) ||
+        splitSay(text).length !== 1 ||
+        (isChannelContext(target) &&
+          e2eManager.isChannelEnabled(userId, networkId, contextKey(target, '')))
+      ) {
+        return false;
+      }
+      const nick = conn.client.user.nick;
+      if (!updateMessageText(networkId, target, editOf, nick, text)) return false;
+      if (!conn.sendEdit(target, editOf, text)) return false;
+      if (!conn.echoActive()) {
+        conn.publish({ type: 'message-edit', target, msgid: editOf, text, nick, self: true });
+      }
+      return true;
+    }
 
     // RPE2E: on an encryption-enabled channel, transmit ciphertext chunks on the
     // wire but show the SENDER the readable plaintext locally (one bubble, lock

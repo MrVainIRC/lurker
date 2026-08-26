@@ -841,6 +841,29 @@ export function redactMessage(
   return result.changes > 0;
 }
 
+// IRCv3 draft edits address the original message by msgid. The sender check is
+// intentional: the server may relay a malformed or malicious edit tag, but a
+// client must never be able to rewrite somebody else's persisted message.
+export function editMessage(
+  networkId: number,
+  target: string,
+  msgid: string,
+  nick: string,
+  text: string,
+): boolean {
+  const bufferId = resolveBufferIdByNetwork(networkId, target);
+  if (!bufferId || !msgid || !nick) return false;
+  const result = db
+    .prepare(
+      `UPDATE messages
+          SET text = ?, redacted = 0, redaction_reason = NULL
+        WHERE network_id = ? AND buffer_id = ? AND msgid = ?
+          AND lower(nick) = lower(?)`,
+    )
+    .run(text, networkId, bufferId, msgid, nick);
+  return result.changes > 0;
+}
+
 // The msgid-less version of the same question, for networks that don't tag
 // messages (Libera, OFTC, ZNC…): the same target, sender, kind and text within
 // a short window of the same time. Only ever consulted in the catch-up window,

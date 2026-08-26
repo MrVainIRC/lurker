@@ -53,7 +53,14 @@ type NickSelectHandler = (nick: string) => void;
 type EmojiSelectHandler = (item: EmojiMatch) => void;
 type ColorApplyHandler = (fg: string | null, bg: string | null) => void;
 type VoidHandler = () => void;
-type EditHandler = (text: string) => void;
+export interface EditMessageRequest {
+  text: string;
+  msgid: string;
+  networkId: number;
+  target: string;
+}
+
+type EditHandler = (request: EditMessageRequest) => void;
 
 // Handlers MessageInput registers on mount. Defaults are no-ops so a pick
 // before registration is dropped silently rather than crashing.
@@ -170,8 +177,8 @@ export function selectNick(nick: string): void {
 export function addressNick(nick: string): void {
   onAddress(nick);
 }
-export function editMessage(text: string): void {
-  onEdit(text);
+export function editMessage(request: EditMessageRequest): void {
+  onEdit(request);
 }
 export function selectEmoji(item: EmojiMatch): void {
   onEmojiSelect(item);

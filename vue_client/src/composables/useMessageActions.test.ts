@@ -77,6 +77,35 @@ describe('useMessageActions', () => {
       expect(actions.map((a) => a.key)).toEqual(['copy', 'ignore']);
     });
 
+    it('puts reactions, edit, and redact on the main action list', () => {
+      const networks = useNetworksStore();
+      networks.applyFeatures({
+        networkId: 1,
+        negotiatedFeatures: {
+          reply: true,
+          messageTags: true,
+          reactions: true,
+          edit: true,
+          redaction: true,
+        },
+      });
+      networks.applyOwnNick({ networkId: 1, nick: 'me' });
+      const actions = useMessageActions().buildActions(
+        other({
+          self: true,
+          reactions: [{ actor: 'me', reaction: '🔥' }],
+        }),
+      );
+      expect(actions.map((a) => a.key)).toEqual([
+        'react',
+        'unreact',
+        'edit',
+        'redact',
+        'copy',
+        'save',
+      ]);
+    });
+
     it('does not label a system line saved when a real message shares its id', () => {
       // System lines have their own id sequence, so #42 here is NOT the #42 the
       // user bookmarked in a channel.
@@ -169,16 +198,17 @@ describe('useMessageActions', () => {
           messageTags: true,
           reactions: true,
           redaction: true,
+          edit: true,
         },
       });
       networks.applyOwnNick({ networkId: 1, nick: 'me' });
       const ctx: MessageContext = {
         ...makeCtx(),
-        onReact: vi.fn(),
-        onCustomReact: vi.fn(),
-        onUnreact: vi.fn(),
-        onEdit: vi.fn(),
-        onRedact: vi.fn(),
+        onReact: vi.fn<(message: MessageLike, reaction: string) => void>(),
+        onCustomReact: vi.fn<(message: MessageLike) => void>(),
+        onUnreact: vi.fn<(message: MessageLike, reaction: string) => void>(),
+        onEdit: vi.fn<(message: MessageLike) => void>(),
+        onRedact: vi.fn<(message: MessageLike) => void>(),
       };
       const message = other({
         self: true,
@@ -193,15 +223,34 @@ describe('useMessageActions', () => {
       const unreact = more.find((item) => item.label === 'Unreact');
       expect(react?.children?.map((item) => item.label)).toContain('Custom reaction…');
       expect(unreact?.children?.map((item) => item.label)).toEqual(['🔥']);
-      expect(more.map((item) => item.label)).toContain('Edit & resend');
+      expect(more.map((item) => item.label)).toContain('Edit');
       expect(more.map((item) => item.label)).toContain('Redact message');
+    });
+
+    it('builds the reaction tree directly into the regular menu', () => {
+      const networks = useNetworksStore();
+      networks.applyFeatures({
+        networkId: 1,
+        negotiatedFeatures: { messageTags: true, reactions: true },
+      });
+      const ctx: MessageContext = {
+        ...makeCtx(),
+        onReact: vi.fn<(message: MessageLike, reaction: string) => void>(),
+        onUnreact: vi.fn<(message: MessageLike, reaction: string) => void>(),
+      };
+      const items = useMessageActions().buildItems(
+        other({ reactions: [{ actor: 'me', reaction: '🔥' }] }),
+        ctx,
+      );
+      expect(items.find((item) => item.label === 'More actions')).toBeUndefined();
+      expect(items.find((item) => item.label === 'React')?.children?.length).toBeGreaterThan(20);
     });
 
     it('does not offer edit or redact for another user', () => {
       const ctx: MessageContext = {
         ...makeCtx(),
-        onEdit: vi.fn(),
-        onRedact: vi.fn(),
+        onEdit: vi.fn<(message: MessageLike) => void>(),
+        onRedact: vi.fn<(message: MessageLike) => void>(),
       };
       const more = useMessageActions().buildMoreItems(other(), ctx);
       expect(more).toEqual([]);
