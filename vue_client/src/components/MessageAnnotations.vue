@@ -36,10 +36,24 @@
     type="button"
     class="reaction-add"
     title="Add reaction"
-    @click.stop="toggle('👍', false)"
+    aria-label="Add reaction"
+    :aria-expanded="emojiPickerOpen"
+    @click.stop="emojiPickerOpen = !emojiPickerOpen"
   >
-    +
+    <i class="fa-regular fa-face-smile"></i>
   </button>
+  <div v-if="emojiPickerOpen" class="emoji-picker" role="group" aria-label="Choose reaction">
+    <button
+      v-for="emoji in emojiChoices"
+      :key="emoji"
+      type="button"
+      class="emoji-choice"
+      :aria-label="`React with ${emoji}`"
+      @click.stop="chooseReaction(emoji)"
+    >
+      {{ emoji }}
+    </button>
+  </div>
   <button
     v-if="canRedact && message.msgid && message.self"
     type="button"
@@ -52,7 +66,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useBuffersStore, type BufferMessage, type ReactionEntry } from '../stores/buffers.js';
 import { useNetworksStore } from '../stores/networks.js';
 import { socketSend } from '../composables/useSocket.js';
@@ -71,6 +85,38 @@ const props = defineProps<{
 
 const buffers = useBuffersStore();
 const networks = useNetworksStore();
+const emojiPickerOpen = ref(false);
+const emojiChoices = [
+  '😀',
+  '😃',
+  '😄',
+  '😁',
+  '😆',
+  '😂',
+  '🙂',
+  '😉',
+  '😊',
+  '😍',
+  '🥰',
+  '😎',
+  '🤔',
+  '😮',
+  '😢',
+  '😭',
+  '😡',
+  '👍',
+  '👎',
+  '❤️',
+  '🎉',
+  '🚀',
+  '👀',
+  '🙏',
+  '🔥',
+  '💯',
+  '✅',
+  '❌',
+  '🤝',
+];
 const buffer = computed(() => buffers.findByTarget(props.networkId, props.target));
 const features = computed(() => networks.states[props.networkId]?.negotiatedFeatures || {});
 const canReact = computed(() => !!features.value.reactions && !!features.value.messageTags);
@@ -108,6 +154,11 @@ function toggle(reaction: string, removed: boolean): void {
     msgid: props.message.msgid,
     reaction,
   });
+}
+
+function chooseReaction(reaction: string): void {
+  emojiPickerOpen.value = false;
+  toggle(reaction, false);
 }
 
 function redact(): void {
@@ -184,5 +235,28 @@ function jumpToParent(): void {
 .redact-action:hover,
 .reaction-add:hover {
   color: var(--fg);
+}
+.emoji-picker {
+  display: grid;
+  grid-template-columns: repeat(10, max-content);
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  padding: var(--space-2);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.emoji-choice {
+  width: 2em;
+  height: 2em;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.emoji-choice:hover,
+.emoji-choice:focus-visible {
+  background: var(--bg-hover, var(--bg));
 }
 </style>

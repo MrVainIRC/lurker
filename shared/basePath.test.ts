@@ -2,7 +2,14 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { describe, expect, it } from 'vitest';
-import { apiPath, assetPath, normalizeBasePath, webSocketPath, withBasePath } from './basePath.js';
+import {
+  apiPath,
+  assetPath,
+  normalizeBasePath,
+  webSocketPath,
+  withBasePath,
+  withoutBasePath,
+} from './basePath.js';
 
 describe('base path helpers', () => {
   it.each([
@@ -29,5 +36,13 @@ describe('base path helpers', () => {
     expect(apiPath('/health', '/irc/web')).toBe('/irc/web/api/health');
     expect(webSocketPath('/irc/web')).toBe('/irc/web/ws');
     expect(assetPath('assets/app.js', '/irc/web')).toBe('/irc/web/assets/app.js');
+  });
+
+  it.each([
+    ['', '/invite/token'],
+    ['/irc/client', '/irc/client/invite/token'],
+  ])('round-trips direct application navigation for %s', (base, expected) => {
+    expect(withBasePath('/invite/token', base)).toBe(expected);
+    expect(withoutBasePath(expected, base)).toBe('/invite/token');
   });
 });

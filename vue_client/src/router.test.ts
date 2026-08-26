@@ -6,8 +6,9 @@
 import { describe, it, expect } from 'vitest';
 import { defineComponent, h, onMounted } from 'vue';
 import { mount } from '@vue/test-utils';
-import { createRouter, createMemoryHistory, RouterView } from 'vue-router';
+import { createRouter, createMemoryHistory, createWebHistory, RouterView } from 'vue-router';
 import router from './router.js';
+import { withBasePath } from '../../shared/basePath.js';
 
 // Shape assertions run against the REAL route table, not a copy. An earlier
 // version of this file rebuilt the table by hand, which is how it managed to
@@ -50,6 +51,34 @@ describe('chat routes', () => {
   it('does not swallow other routes', () => {
     expect(router.resolve('/settings/appearance').name).toBe('settings');
     expect(router.resolve('/admin/users').name).toBe('admin');
+  });
+
+  it('resolves a direct invite URL below a public base path', async () => {
+    const original = window.location.pathname + window.location.search + window.location.hash;
+    const path = withBasePath('/invite/token-123', '/irc/client');
+    window.history.replaceState({}, '', path);
+    const local = createRouter({
+      history: createWebHistory('/irc/client'),
+      routes: [
+        {
+          path: '/invite/:token',
+          name: 'invite',
+          component: defineComponent({ render: () => h('div') }),
+        },
+      ],
+    });
+    const app = mount(defineComponent({ render: () => h(RouterView) }), {
+      global: { plugins: [local] },
+    });
+    try {
+      await local.isReady();
+      expect(local.currentRoute.value.name).toBe('invite');
+      expect(local.currentRoute.value.params.token).toBe('token-123');
+    } finally {
+      app.unmount();
+      window.history.replaceState({}, '', original);
+      local.removeRoute('invite');
+    }
   });
 
   it('routes every chat screen to the same component', () => {

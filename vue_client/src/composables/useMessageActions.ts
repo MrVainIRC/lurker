@@ -6,6 +6,7 @@ import { useBookmarksStore } from '../stores/bookmarks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { useContextMenu } from './useContextMenu.js';
 import { useNetworksStore } from '../stores/networks.js';
+import { appPath } from '../utils/paths.js';
 
 export interface MessageLike {
   id?: number | null;
@@ -116,7 +117,7 @@ export function useMessageActions(): MessageActionsAPI {
   function messageLink(message: MessageLike): string | null {
     const bufferId = linkBufferId(message);
     if (bufferId == null) return null;
-    return `${window.location.origin}/buffer/${bufferId}?msg=${message.id}`;
+    return `${window.location.origin}${appPath(`/buffer/${bufferId}?msg=${message.id}`)}`;
   }
 
   function buildActions(message: MessageLike | null | undefined): MessageAction[] {

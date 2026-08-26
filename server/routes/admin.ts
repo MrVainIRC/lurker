@@ -25,6 +25,7 @@ import { presenceDiagnostics } from '../services/wsHub.js';
 import { isIdentdEnabled, isOidentdFileEnabled } from '../services/identd.js';
 import { isNodeMode } from '../utils/edition.js';
 import { deriveIdent, isValidIdentOverride, MAX_IDENT_LENGTH } from '../../shared/ident.js';
+import { basePath } from '../utils/basePath.js';
 import adminUploadersRouter from './adminUploaders.js';
 import adminNetworksRouter from './adminNetworks.js';
 
@@ -50,7 +51,7 @@ function deriveInviteStatus(row: any): string {
 function publicInvite(row: any, { origin }: { origin: string }): Record<string, unknown> {
   return {
     token: row.token,
-    url: `${origin}/invite/${row.token}`,
+    url: `${origin}${basePath(`/invite/${row.token}`)}`,
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
     usedAt: row.usedAt,

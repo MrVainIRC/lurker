@@ -9,6 +9,7 @@ import { useMessageActions, type MessageContext, type MessageLike } from './useM
 import { useContextMenu } from './useContextMenu.js';
 import { useBookmarksStore } from '../stores/bookmarks.js';
 import { useBuffersStore } from '../stores/buffers.js';
+import { useNetworksStore } from '../stores/networks.js';
 
 function makeCtx(): MessageContext {
   return {
@@ -21,12 +22,28 @@ function makeCtx(): MessageContext {
 // A message from someone else, with text and a stable id — the case that yields
 // the full action set. Override individual fields per case.
 function other(over: Partial<MessageLike> = {}): MessageLike {
-  return { id: 42, networkId: 1, nick: 'bob', text: 'hi', self: false, ...over };
+  return {
+    id: 42,
+    networkId: 1,
+    nick: 'bob',
+    text: 'hi',
+    self: false,
+    msgid: 'msg-42',
+    ...over,
+  };
+}
+
+function enableReplies() {
+  useNetworksStore().applyFeatures({
+    networkId: 1,
+    negotiatedFeatures: { reply: true, messageTags: true },
+  });
 }
 
 describe('useMessageActions', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
+    enableReplies();
     // The context menu is a module-level singleton — reset between cases.
     useContextMenu().close();
   });
@@ -57,7 +74,7 @@ describe('useMessageActions', () => {
       // these (the ownership check joins through networks), so offering it
       // would be a button that silently does nothing.
       const actions = useMessageActions().buildActions(other({ networkId: null }));
-      expect(actions.map((a) => a.key)).toEqual(['reply', 'copy', 'ignore']);
+      expect(actions.map((a) => a.key)).toEqual(['copy', 'ignore']);
     });
 
     it('does not label a system line saved when a real message shares its id', () => {
@@ -146,6 +163,7 @@ describe('useMessageActions', () => {
 describe('copy link to message (#744)', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
+    enableReplies();
     useContextMenu().close();
   });
 

@@ -17,6 +17,7 @@ import { whenReady } from './deferredReady.js';
 import type { Router } from 'vue-router';
 import { useRouter } from 'vue-router';
 import type { JumpTarget } from './useJumpToMessage.js';
+import { basePath, withoutBasePath } from '../utils/paths.js';
 
 // The bus/notification payload is a jump target plus a `kind` discriminator
 // shared with the service-worker message channel; it IS what jump() consumes.
@@ -142,7 +143,7 @@ export function consumeColdStartJump(
   const noop = (): void => {};
   // new URLSearchParams(string) never throws, so no guard is needed.
   const params = new URLSearchParams(window.location.search);
-  const routeBufferId = bufferIdFromPath(window.location.pathname);
+  const routeBufferId = bufferIdFromPath(withoutBasePath(window.location.pathname, basePath));
   const net = params.get('net');
   const buf = params.get('buf');
   if (routeBufferId != null)

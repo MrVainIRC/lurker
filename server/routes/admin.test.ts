@@ -377,11 +377,14 @@ describe('POST /api/admin/users/:id/pause and /resume', () => {
 
 describe('invites', () => {
   it('admin can create, list, and delete pending invites', async () => {
-    const create = await adminAgent.post('/api/admin/invites').send({ expiresInDays: 3 });
+    const create = await adminAgent
+      .post('/api/admin/invites')
+      .set('Origin', 'https://lurker.example.com')
+      .send({ expiresInDays: 3 });
     expect(create.status).toBe(200);
     const token = create.body.invite.token as string;
     expect(create.body.invite.status).toBe('pending');
-    expect(create.body.invite.url).toContain(`/invite/${token}`);
+    expect(create.body.invite.url).toBe(`https://lurker.example.com/invite/${token}`);
 
     const list = await adminAgent.get('/api/admin/invites');
     expect(list.body.invites.find((i: { token: string }) => i.token === token)).toBeTruthy();
@@ -457,5 +460,22 @@ describe('invites', () => {
       .set('Origin', 'https://lurker.example.com')
       .send({});
     expect(res.body.invite.url.startsWith('https://lurker.example.com/invite/')).toBe(true);
+  });
+
+  it('prefixes invite urls with the configured public base path', async () => {
+    const previous = process.env.PUBLIC_BASE_PATH;
+    process.env.PUBLIC_BASE_PATH = '/irc/client';
+    try {
+      const res = await adminAgent
+        .post('/api/admin/invites')
+        .set('Origin', 'https://lurker.example.com')
+        .send({});
+      expect(res.body.invite.url).toMatch(
+        /^https:\/\/lurker\.example\.com\/irc\/client\/invite\/[A-Za-z0-9]+$/,
+      );
+    } finally {
+      if (previous === undefined) delete process.env.PUBLIC_BASE_PATH;
+      else process.env.PUBLIC_BASE_PATH = previous;
+    }
   });
 });

@@ -232,7 +232,8 @@ function applyEvent(event: any): void {
     case 'standard-reply':
       useToastsStore().push({
         kind: event.severity === 'fail' ? 'error' : event.severity === 'warn' ? 'warn' : 'info',
-        title: `${event.command || 'IRC'} ${event.code || ''}`.trim(),
+        title:
+          `${event.command || 'IRC'} ${event.code || ''}${event.label ? ` · ${event.label}` : ''}`.trim(),
         body: event.text || 'The server returned a structured response.',
         networkId: event.networkId,
         target: event.target,

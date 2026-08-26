@@ -19,6 +19,35 @@ That's it. Open <http://localhost:8015> in your browser and follow the first-run
 
 All persistent state lives in a `./data/` directory next to your `docker-compose.yml` — back that up to back up Lurker.
 
+## Serving Lurker below a path prefix
+
+Set `PUBLIC_BASE_PATH` when the reverse proxy serves the complete application
+below a path such as `/irc/client`:
+
+```yaml
+environment:
+  - PUBLIC_BASE_PATH=/irc/client
+```
+
+The prefix is applied centrally to application routes (`/`, `/invite`,
+`/buffer`, `/settings`, `/admin`, and `/system`), API and WebSocket endpoints,
+uploads, generated invite/permalink URLs, and PWA assets, manifests, and push
+navigation. Frontend links and redirects use Vue Router or the shared
+`appPath` helper; server-generated URLs use the server `basePath` helper. Do
+not add the deployment prefix to individual routes.
+
+The following root-relative paths are intentionally not application paths:
+
+- `/_cp/*` and `/billing` are hosted-edition control-plane routes served by the
+  reverse proxy on the same origin, not routes handled by the Lurker app.
+- URLs for upload providers, media decoders, and other external services remain
+  external URLs and are not rewritten.
+- The Vite development entry `/src/main.js` is a build-tool source entry; Vite
+  rewrites it for the configured base and it is not a runtime navigation URL.
+
+The same path rules apply at the root (unset `PUBLIC_BASE_PATH`) and at any
+non-deployment-specific prefix.
+
 ## First-run wizard
 
 The very first time you open the app it'll prompt you to create the initial admin user. You pick a username and a password (8+ characters). That user is automatically promoted to `admin`, which means they can:

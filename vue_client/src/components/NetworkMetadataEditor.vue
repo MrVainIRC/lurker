@@ -4,8 +4,20 @@
 -->
 
 <template>
-  <div v-if="features.metadata || features.setname" class="metadata-editor">
+  <div v-if="networks.states[networkId]" class="metadata-editor">
     <strong>Profile</strong>
+    <div class="feature-status" aria-label="IRCv3 features">
+      <span
+        v-for="entry in featureEntries"
+        :key="entry.key"
+        class="feature-chip"
+        :class="{ supported: entry.supported }"
+        :title="entry.supported ? 'Negotiated' : 'Not negotiated'"
+      >
+        <i :class="entry.supported ? 'fa-solid fa-check' : 'fa-solid fa-minus'"></i>
+        {{ entry.label }}
+      </span>
+    </div>
     <div v-if="features.metadata" class="metadata-fields">
       <label v-for="key in metadataKeys" :key="key">
         <span>{{ key }}</span>
@@ -16,7 +28,9 @@
       <span>Real name</span>
       <input v-model="realname" placeholder="Real name" />
     </label>
-    <button type="button" @click="save">Save profile</button>
+    <button v-if="features.metadata || features.setname" type="button" @click="save">
+      Save profile
+    </button>
     <span v-if="message" class="save-message">{{ message }}</span>
   </div>
 </template>
@@ -36,6 +50,24 @@ const realname = ref('');
 const message = ref('');
 const network = computed(() => networks.networkById(props.networkId));
 const features = computed(() => networks.states[props.networkId]?.negotiatedFeatures || {});
+const featureLabels: Record<string, string> = {
+  reply: 'Replies',
+  reactions: 'Reactions',
+  redaction: 'Redaction',
+  metadata: 'Metadata',
+  setname: 'SETNAME',
+  standardReplies: 'Structured errors',
+  labeledResponse: 'Labels',
+  botMode: 'Bot mode',
+  networkIcon: 'Network icon',
+};
+const featureEntries = computed(() =>
+  Object.entries(featureLabels).map(([key, label]) => ({
+    key,
+    label,
+    supported: !!features.value[key],
+  })),
+);
 const ownMetadata = computed(() => {
   const state = networks.states[props.networkId];
   const nick = state?.nick || '';
@@ -104,6 +136,22 @@ function save(): void {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(12em, 1fr));
   gap: var(--space-3);
+}
+.feature-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+.feature-chip {
+  padding: var(--space-1) var(--space-2);
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  opacity: 0.65;
+}
+.feature-chip.supported {
+  color: var(--accent);
+  opacity: 1;
 }
 .metadata-editor label {
   display: grid;
