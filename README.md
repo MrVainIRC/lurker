@@ -15,13 +15,13 @@ Lurker is a beautiful self-hosted IRC client with a retro aesthetic and modern c
 
 - **Always-on and multi-user.** Each invited user connects to their own set of IRC networks, and Lurker stays connected when they're away. Admins can restrict which networks users can connect to, and make channel recommendations for newcomers.
 - **Fully working search.** Search your message history, filter by nick, channel, or network; and jump to any message instantly, no matter how old it is.
-- **Modern conveniences.** Peer presence, automatic nick regain, join/part summarization, tab nickname completion, message drafts, saved messages, user notes, inline link and media previews, and more.
+- **Modern conveniences.** Peer presence, automatic nick regain, join/part summarization, tab nickname completion, message drafts, saved messages, user notes, and more.
 - **Image uploads.** Paste an image into the input box, and Lurker optimizes it, sanitizes it, and uploads it to local storage, S3, Zipline, Chibisafe, or external services like x0.at or catbox.moe.
 - **Customizable UI.** The beautiful retro terminal-style PWA interface has 40+ settings to customize it how you want.
 - **Native Apps.** Lurker has official native apps [for iOS](https://github.com/amiantos/lurker-ios) (in beta) and Android (coming soon). There's also third party clients like [Spooky](https://github.com/JawshTheDark/lurker-android-upstream) (Android) and [Scully](https://github.com/JawshTheDark/scully) (PC).
 - **Built-in soju-compatible bouncer.** Don't want to use the Lurker clients? Then don't. Lurker has a ZNC and soju-compatible bouncer built in, complete with `soju.im/bouncer-networks` support so you can use any client you want.
-- **Inline link & media previews.** Links, images, _and_ videos get proper preview images in every client. Implemented as a separate container, to isolate malicious links from your user's data. (Optional, requires `lurker-previews` container.)
-- **Decoupled IRC connections.** Say goodbye to disconnect/reconnect floods when updating Lurker, a secondary container keeps the connections alive while the service restarts. (Optional, requires `lurker-engine` container.)
+- **Inline link & media previews.** Links, images, _and_ videos get proper preview images in every client. Implemented as a separate container, to isolate malicious links from your users' data. (Optional, requires `lurker-previews` container.)
+- **Decoupled IRC connections.** Say goodbye to disconnect/reconnect floods when updating Lurker — a secondary container keeps the connections alive while the service restarts. (Optional, requires `lurker-engine` container.)
 
 # Screenshot (PWA)
 
@@ -59,13 +59,13 @@ Then open <http://localhost:8015> and create your admin account.
 
 View [the full self-hosted guide](https://docs.lurker.chat/SELF_HOSTING) for information on enabling identd, media previews, web push notifications, and connection decoupling.
 
-There's also a [one-shot Digital Ocean deploy script](https://github.com/amiantos/lurker/blob/main/deploy/digitalocean-cloud-init.sh) which comes out of the box with all of this set up for you. If you're a smartypants, that script can teach you everything you need to know to deploy a production-quality Lurker instance.
+There's also a [one-shot DigitalOcean deploy script](https://github.com/amiantos/lurker/blob/main/deploy/digitalocean-cloud-init.sh) which comes out of the box with all of this set up for you. If you're a smartypants, that script can teach you everything you need to know to deploy a production-quality Lurker instance.
 
 # Lurker.Chat Service
 
 Just want to use Lurker, without hosting it yourself?
 
-It's **$5/month** for a single user account on an officially managed Lurker instance at [Lurker.Chat](https://lurker.chat) 
+It's **$5/month** for a single user account on an officially managed Lurker instance at [Lurker.Chat](https://lurker.chat).
 
 # Documentation
 
