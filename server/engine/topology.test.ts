@@ -32,6 +32,24 @@ describe('engine topology artefacts', () => {
     expect(wf).not.toMatch(/git diff --quiet[^\n]*package\.json/);
   });
 
+  // The engine binds loopback unless told otherwise (server/engine/config.ts),
+  // which is the safe default for an engine beside the app on a host — and
+  // fatal in a container, where loopback is that container's own namespace and
+  // the `lurker` container cannot reach it. The overlay must therefore set the
+  // bind, and this pins the coupling from the other end: nothing else would
+  // fail if that line were dropped, until every connection did.
+  it('the compose overlay gives the engine a reachable bind', () => {
+    const overlay = fs.readFileSync(path.join(root, 'docker-compose.engine.yml'), 'utf8');
+    const m = /LURKER_ENGINE_LISTEN=\$\{LURKER_ENGINE_LISTEN:-([^}]+)\}/.exec(overlay);
+    expect(
+      m,
+      'the overlay should set LURKER_ENGINE_LISTEN for the engine container',
+    ).not.toBeNull();
+    expect(m![1]).not.toMatch(/^(127\.|::1|localhost)/);
+    // …and it still must not publish the port; the compose network is the boundary.
+    expect(overlay).not.toMatch(/^\s*ports:/m);
+  });
+
   // `${{ cond && 0 || 1 }}` always evaluates to 1 in a GitHub Actions
   // expression: 0 is falsy, so the `|| 1` branch wins. In the checkout step
   // that silently turns every release into a shallow clone, `git describe`

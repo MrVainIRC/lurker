@@ -81,6 +81,14 @@ services:
     # here — see above.)
     environment:
       - LURKER_ENGINE_SECRET=${LURKER_ENGINE_SECRET:?set LURKER_ENGINE_SECRET in .env (openssl rand -hex 32)}
+      # ⚠ REQUIRED here, and not a stray default. The engine binds 127.0.0.1
+      # unless told otherwise, which is right for an engine running beside the
+      # app on a host but wrong in a container: containers do not share a
+      # network namespace, so a loopback bind here is unreachable from the
+      # `lurker` container and every connection fails. Nothing is exposed by
+      # this — the service publishes no ports, so :8016 exists only on the
+      # compose network. Remove this line and the stack stops working.
+      - LURKER_ENGINE_LISTEN=${LURKER_ENGINE_LISTEN:-0.0.0.0:8016}
       # Ident — see the note above. Empty is the same as unset, so declaring
       # them costs nothing; the engine logs which mode it resolved at boot.
       - LURKER_IDENTD_ENABLED=${LURKER_IDENTD_ENABLED:-}

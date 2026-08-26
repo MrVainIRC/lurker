@@ -583,6 +583,8 @@ COMPOSE_FILE=docker-compose.yml docker compose up -d --remove-orphans
 
 That makes the arrangement safe, not tuned: the buffer budget (`LURKER_ENGINE_BUFFER_TOTAL_BYTES`) is shared across everything the engine holds, and so is `:113` — one identd answers for every connection on that host, which is fine when the connections are yours and not what you want between strangers. **Keep the engine on a private network either way.** `LURKER_ENGINE_SECRET` is the only thing standing between the internet and every connection the engine holds, and the overlay deliberately publishes no port.
 
+**Where the engine listens.** It binds `127.0.0.1:8016` unless told otherwise, so an engine nobody configured is not reachable from another machine. The overlay sets `LURKER_ENGINE_LISTEN=0.0.0.0:8016` because containers do not share a network namespace — a loopback bind inside `lurker-engine` is unreachable from `lurker` — and that is safe there precisely because no port is published: `:8016` exists only on the compose network. **Running without Docker**, app and engine on one host, the default already works; point `LURKER_ENGINE_URL` at `tcp://127.0.0.1:8016` rather than `localhost`, which can resolve to `::1` first and be refused. Putting the engine on a _different_ host means widening the bind yourself, and then the secret is doing real work over a real network — give it a private network or a tunnel, not the open internet.
+
 **Health.** `curl http://lurker-engine:8016/healthz` from inside the compose network answers `{"ok":true,"held":N}` with the number of connections it is holding; the overlay uses the same probe as the service's healthcheck. `LURKER_ENGINE_IMAGE` overrides the image reference — a locally built image, or a pinned release.
 
 ---
