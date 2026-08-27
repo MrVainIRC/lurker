@@ -114,8 +114,14 @@ function nickOf(m: BufferMember): string {
 function avatarOf(m: BufferMember): string | null {
   const networkId = buffer.value?.networkId;
   if (networkId == null) return null;
-  const rows = networks.states[networkId]?.metadata || {};
-  const target = Object.keys(rows).find((key) => key.toLowerCase() === m.nick.toLowerCase());
+  const state = networks.states[networkId];
+  const rows = state?.metadata || {};
+  // Own metadata is persisted under `*`, not the current nickname, so prefer
+  // that stable row for the current user and keep normal nick lookup for peers.
+  const isOwnNick = !!state?.nick && state.nick.toLowerCase() === m.nick.toLowerCase();
+  const target =
+    (isOwnNick && rows['*'] ? '*' : undefined) ||
+    Object.keys(rows).find((key) => key.toLowerCase() === m.nick.toLowerCase());
   const value = target ? rows[target].find((entry) => entry.key === 'avatar')?.value : '';
   if (!value) return null;
   try {

@@ -30,6 +30,8 @@ export const useNetworkPresetsStore = defineStore('networkPresets', {
           host: String(p.host),
           port: Number(p.port),
           tls: !!p.tls,
+          trustedCertificates: p.trustedCertificates !== false,
+          autoconnect: p.autoconnect !== false,
           saslLikelyRequired: !!p.saslLikelyRequired,
           recommendedChannels: Array.isArray(p.channels) ? (p.channels as string[]) : [],
           // Instance presets carry none of the netsplit browse metadata, and

@@ -103,6 +103,10 @@ function readInput(body: unknown, partial: boolean): InstanceNetworkInput | { er
   if (port !== undefined) input.port = port;
   const tls = bool(b, 'tls');
   if (tls !== undefined) input.tls = tls;
+  const trustedCertificates = bool(b, 'trustedCertificates');
+  if (trustedCertificates !== undefined) input.trustedCertificates = trustedCertificates;
+  const autoconnect = bool(b, 'autoconnect');
+  if (autoconnect !== undefined) input.autoconnect = autoconnect;
   const sasl = bool(b, 'saslLikelyRequired');
   if (sasl !== undefined) input.saslLikelyRequired = sasl;
   const enabled = bool(b, 'enabled');

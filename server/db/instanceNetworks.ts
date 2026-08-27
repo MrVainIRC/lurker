@@ -14,6 +14,8 @@ export interface InstanceNetworkRow {
   host: string;
   port: number;
   tls: number;
+  trusted_certificates: number;
+  autoconnect: number;
   sasl_likely_required: number;
   channels_json: string;
   enabled: number;
@@ -31,6 +33,8 @@ export interface InstanceNetwork {
   host: string;
   port: number;
   tls: boolean;
+  trustedCertificates: boolean;
+  autoconnect: boolean;
   saslLikelyRequired: boolean;
   channels: string[];
   enabled: boolean;
@@ -42,6 +46,8 @@ export interface InstanceNetworkInput {
   host: string;
   port?: number;
   tls?: boolean;
+  trustedCertificates?: boolean;
+  autoconnect?: boolean;
   saslLikelyRequired?: boolean;
   channels?: string[];
   enabled?: boolean;
@@ -66,6 +72,8 @@ export function toInstanceNetwork(row: InstanceNetworkRow): InstanceNetwork {
     host: row.host,
     port: row.port,
     tls: !!row.tls,
+    trustedCertificates: !!row.trusted_certificates,
+    autoconnect: !!row.autoconnect,
     saslLikelyRequired: !!row.sasl_likely_required,
     channels: parseChannels(row.channels_json),
     enabled: !!row.enabled,
@@ -105,14 +113,17 @@ export function createInstanceNetwork(input: InstanceNetworkInput): InstanceNetw
   const result = db
     .prepare(
       `INSERT INTO instance_network
-         (name, host, port, tls, sasl_likely_required, channels_json, enabled, position)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (name, host, port, tls, trusted_certificates, autoconnect,
+          sasl_likely_required, channels_json, enabled, position)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.name,
       input.host,
       input.port ?? 6697,
       input.tls === false ? 0 : 1,
+      input.trustedCertificates === false ? 0 : 1,
+      input.autoconnect === false ? 0 : 1,
       input.saslLikelyRequired ? 1 : 0,
       JSON.stringify(input.channels ?? []),
       input.enabled === false ? 0 : 1,
@@ -132,20 +143,25 @@ export function updateInstanceNetwork(
     host: patch.host ?? existing.host,
     port: patch.port ?? existing.port,
     tls: patch.tls ?? existing.tls,
+    trustedCertificates: patch.trustedCertificates ?? existing.trustedCertificates,
+    autoconnect: patch.autoconnect ?? existing.autoconnect,
     saslLikelyRequired: patch.saslLikelyRequired ?? existing.saslLikelyRequired,
     channels: patch.channels ?? existing.channels,
     enabled: patch.enabled ?? existing.enabled,
   };
   db.prepare(
     `UPDATE instance_network
-        SET name = ?, host = ?, port = ?, tls = ?, sasl_likely_required = ?,
-            channels_json = ?, enabled = ?, updated_at = datetime('now')
+        SET name = ?, host = ?, port = ?, tls = ?, trusted_certificates = ?,
+            autoconnect = ?, sasl_likely_required = ?, channels_json = ?,
+            enabled = ?, updated_at = datetime('now')
       WHERE id = ?`,
   ).run(
     merged.name,
     merged.host,
     merged.port,
     merged.tls ? 1 : 0,
+    merged.trustedCertificates ? 1 : 0,
+    merged.autoconnect ? 1 : 0,
     merged.saslLikelyRequired ? 1 : 0,
     JSON.stringify(merged.channels),
     merged.enabled ? 1 : 0,

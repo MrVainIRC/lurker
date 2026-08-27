@@ -954,6 +954,8 @@ function migrate() {
       host TEXT NOT NULL,
       port INTEGER NOT NULL DEFAULT 6697,
       tls INTEGER NOT NULL DEFAULT 1,
+      trusted_certificates INTEGER NOT NULL DEFAULT 1,
+      autoconnect INTEGER NOT NULL DEFAULT 1,
       sasl_likely_required INTEGER NOT NULL DEFAULT 0,
       channels_json TEXT NOT NULL DEFAULT '[]',
       enabled INTEGER NOT NULL DEFAULT 1,
@@ -1077,6 +1079,10 @@ ensureColumn('messages', 'userhost', 'TEXT');
 ensureColumn('networks', 'sasl_account', 'TEXT');
 ensureColumn('networks', 'sasl_password', 'TEXT');
 ensureColumn('networks', 'trusted_certificates', 'INTEGER NOT NULL DEFAULT 1');
+// Admin network presets carry the same connection defaults as the regular
+// network editor. Existing databases receive the safe defaults on boot.
+ensureColumn('instance_network', 'trusted_certificates', 'INTEGER NOT NULL DEFAULT 1');
+ensureColumn('instance_network', 'autoconnect', 'INTEGER NOT NULL DEFAULT 1');
 // Newline-delimited raw IRC commands fired after RPL_WELCOME, IRCCloud-style.
 // Supports `WAIT <seconds>` lines that pause before the next command.
 ensureColumn('networks', 'connect_commands', 'TEXT');

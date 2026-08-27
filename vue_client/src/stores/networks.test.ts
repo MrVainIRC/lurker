@@ -54,13 +54,11 @@ describe('IRC metadata targets', () => {
         state: 'disconnected',
         nick: 'Me',
         channels: [],
-        metadata: [
-          { target: 'Me', key: 'display-name', value: 'Saved name', visibility: 'public' },
-        ],
+        metadata: [{ target: '*', key: 'display-name', value: 'Saved name', visibility: 'public' }],
       },
     ]);
 
-    expect(networks.states[1]?.metadata?.Me).toEqual([
+    expect(networks.states[1]?.metadata?.['*']).toEqual([
       { key: 'display-name', value: 'Saved name', visibility: 'public' },
     ]);
   });

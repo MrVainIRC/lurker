@@ -37,6 +37,8 @@ export interface AdminNetworkPreset {
   host: string;
   port: number;
   tls: boolean;
+  trustedCertificates: boolean;
+  autoconnect: boolean;
   saslLikelyRequired: boolean;
   /** Recommended channels, pre-checked for users in the first-run flow. */
   channels: string[];

@@ -116,3 +116,46 @@ describe('notifyForEvent notify gate', () => {
     expect((push.mock.calls[0][0] as { body: string }).body).toBe('red and bold text');
   });
 });
+
+describe('playSound', () => {
+  it('loads public sound assets through the application path and plays a clone', async () => {
+    vi.resetModules();
+    const audios: Array<{
+      src: string;
+      preload: string;
+      volume: number;
+      cloneNode: () => unknown;
+      play: Mock<() => Promise<void>>;
+    }> = [];
+    const AudioMock = vi.fn<(src: string) => unknown>(function (src: string) {
+      const audio = {
+        src,
+        preload: '',
+        volume: 1,
+        cloneNode: () => {
+          const clone = {
+            src,
+            preload: '',
+            volume: 1,
+            cloneNode: () => clone,
+            play: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+          };
+          audios.push(clone);
+          return clone;
+        },
+        play: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+      };
+      audios.push(audio);
+      return audio;
+    });
+    vi.stubGlobal('Audio', AudioMock);
+
+    const { playSound } = await import('./useHighlightNotifier.js');
+    playSound('chime', 50);
+
+    expect(AudioMock).toHaveBeenCalledWith('/sounds/chime.mp3');
+    expect(audios[1]?.src).toBe('/sounds/chime.mp3');
+    expect(audios[1]?.volume).toBe(0.5);
+    expect(audios[1]?.play).toHaveBeenCalledOnce();
+  });
+});

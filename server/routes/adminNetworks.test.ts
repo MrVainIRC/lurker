@@ -73,10 +73,23 @@ describe('presets', () => {
       host: 'irc.corp.example',
       port: 6697,
       tls: true,
+      trustedCertificates: true,
+      autoconnect: true,
       saslLikelyRequired: false,
       enabled: true,
       channels: [],
     });
+  });
+
+  it('stores connection defaults for instance presets', async () => {
+    const res = await add({ trustedCertificates: false, autoconnect: false });
+    expect(res.body.preset).toMatchObject({ trustedCertificates: false, autoconnect: false });
+
+    const id = res.body.preset.id;
+    const patched = await adminAgent
+      .patch(`/api/admin/networks/${id}`)
+      .send({ trustedCertificates: true, autoconnect: true });
+    expect(patched.body.preset).toMatchObject({ trustedCertificates: true, autoconnect: true });
   });
 
   it('requires a name and a host', async () => {

@@ -21,6 +21,7 @@ import { useNetworksStore } from '../stores/networks.js';
 import { viewedBuffer } from './useViewedBuffer.js';
 import { META_SEPARATOR } from '../utils/metaLine.js';
 import { stripFormatting } from '../../../shared/textMatch.js';
+import { assetPath } from '../utils/paths.js';
 
 export interface NotifyEvent {
   self?: boolean;
@@ -48,7 +49,10 @@ const audioTemplates = new Map<string, HTMLAudioElement>();
 function getTemplate(choice: string): HTMLAudioElement {
   let el = audioTemplates.get(choice);
   if (!el) {
-    el = new Audio(`/sounds/${choice}.mp3`);
+    // Sounds are Vite public assets and must follow the same deployment prefix
+    // as the rest of the SPA. A root-relative URL works at `/` but 404s when
+    // Lurker is served below `/lurker` (or another base path).
+    el = new Audio(assetPath(`/sounds/${choice}.mp3`));
     el.preload = 'auto';
     audioTemplates.set(choice, el);
   }
@@ -170,7 +174,12 @@ export function playSound(choice: string, volume: unknown): void {
   // currentTime mid-play aborts the in-flight play() promise, and the
   // element's state machine races subsequent calls. cloneNode reuses the
   // browser's cached audio bytes but produces an independent state.
-  const el = getTemplate(choice || 'ping').cloneNode() as HTMLAudioElement;
+  const template = getTemplate(choice || 'ping');
+  const el = template.cloneNode() as HTMLAudioElement;
+  // Keep the source explicit on the clone. This is redundant in browsers that
+  // clone the Audio src attribute, but avoids a silent no-op in implementations
+  // that only copy the element shell.
+  el.src = template.src;
   el.volume = Math.max(0, Math.min(1, (Number(volume) || 0) / 100));
   const p = el.play();
   // Pre-user-gesture autoplay is blocked by the browser; swallow that one

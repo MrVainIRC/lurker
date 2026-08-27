@@ -106,3 +106,37 @@ describe('UserProfileModal — no such user', () => {
     expect(open('fartboy').find('button[title="Send DM"]').exists()).toBe(false);
   });
 });
+
+describe('UserProfileModal — own metadata', () => {
+  beforeEach(() => setActivePinia(createPinia()));
+
+  it('shows metadata stored under the stable self target', () => {
+    const networks = useNetworksStore();
+    networks.states[NET] = {
+      networkId: NET,
+      state: 'connected',
+      nick: 'Me',
+      channels: [],
+      metadata: {
+        '*': [
+          {
+            key: 'display-name',
+            value: 'My profile',
+            visibility: '*',
+          },
+          {
+            key: 'avatar',
+            value: 'https://cdn.example.test/avatar.png',
+            visibility: '*',
+          },
+        ],
+      },
+    };
+
+    const w = open('Me');
+    expect(w.text()).toContain('My profile');
+    expect(w.find('img.profile-avatar').attributes('src')).toBe(
+      'https://cdn.example.test/avatar.png',
+    );
+  });
+});

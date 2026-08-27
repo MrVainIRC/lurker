@@ -203,8 +203,14 @@ const buffers = useBuffersStore();
 const ignoreOpen = ref(false);
 
 const profileMetadata = computed(() => {
-  const rows = networks.states[props.networkId]?.metadata || {};
-  const target = Object.keys(rows).find((key) => key.toLowerCase() === props.nick.toLowerCase());
+  const state = networks.states[props.networkId];
+  const rows = state?.metadata || {};
+  // The server stores our own metadata under the stable `*` target so it
+  // survives nick changes. Other users remain keyed by their IRC nickname.
+  const isOwnNick = !!state?.nick && state.nick.toLowerCase() === props.nick.toLowerCase();
+  const target =
+    (isOwnNick && rows['*'] ? '*' : undefined) ||
+    Object.keys(rows).find((key) => key.toLowerCase() === props.nick.toLowerCase());
   return target ? rows[target] : [];
 });
 const profileAvatar = computed(() => {
@@ -516,6 +522,20 @@ function copyHostmask() {
   padding: 0 var(--card-pad-x) var(--space-7);
 }
 
+.metadata-section {
+  min-width: 0;
+}
+.profile-avatar {
+  display: block;
+  width: 8rem;
+  height: 8rem;
+  max-width: 100%;
+  max-height: 8rem;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-5);
+}
+
 /* Presence dot sits just left of the nick in the title. The class is applied to
    the dot itself now (no wrapping .presence label), so colour keys off it. */
 .dot {
@@ -568,7 +588,7 @@ dd {
   margin: 0;
   color: var(--fg);
   min-width: 0;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

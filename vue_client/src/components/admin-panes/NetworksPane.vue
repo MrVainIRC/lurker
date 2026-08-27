@@ -26,6 +26,8 @@
           <span class="row-host">
             {{ preset.host }}:{{ preset.port }}{{ preset.tls ? ' · TLS' : '' }}
             {{ preset.saslLikelyRequired ? ' · account required' : '' }}
+            {{ preset.autoconnect ? ' · connect on launch' : '' }}
+            {{ !preset.trustedCertificates ? ' · allow untrusted certs' : '' }}
           </span>
           <span v-if="preset.channels.length" class="row-channels">
             {{ preset.channels.join(', ') }}
@@ -81,6 +83,14 @@
         <input v-model="draft.saslLikelyRequired" type="checkbox" />
         <span>Requires an account (prompt users for SASL credentials)</span>
       </label>
+      <label class="check">
+        <input v-model="draft.autoconnect" type="checkbox" />
+        <span>Connect on launch</span>
+      </label>
+      <label class="check">
+        <input v-model="draft.allowUntrustedCertificates" type="checkbox" />
+        <span>Allow untrusted certificates</span>
+      </label>
       <button type="submit" class="btn-primary" :disabled="busy">Add network</button>
     </form>
 
@@ -119,6 +129,8 @@ const draft = reactive({
   port: 6697,
   tls: true,
   saslLikelyRequired: false,
+  autoconnect: true,
+  allowUntrustedCertificates: false,
   channels: '',
 });
 
@@ -147,6 +159,8 @@ async function add(): Promise<void> {
       host: draft.host.trim(),
       port: draft.port,
       tls: draft.tls,
+      trustedCertificates: !draft.allowUntrustedCertificates,
+      autoconnect: draft.autoconnect,
       saslLikelyRequired: draft.saslLikelyRequired,
       channels: draft.channels
         .split(/[,\s]+/)
@@ -159,6 +173,8 @@ async function add(): Promise<void> {
     draft.port = 6697;
     draft.tls = true;
     draft.saslLikelyRequired = false;
+    draft.autoconnect = true;
+    draft.allowUntrustedCertificates = false;
     draft.channels = '';
   });
 }

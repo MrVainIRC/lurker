@@ -182,6 +182,8 @@ const form = reactive({
   host: '',
   port: 6697,
   tls: true,
+  trusted_certificates: true,
+  autoconnect: true,
   nick: nickFromUsername(auth.user?.username),
   sasl_account: '',
   sasl_password: '',
@@ -222,6 +224,8 @@ function onPick(net: NetworkPreset): void {
   form.host = net.host;
   form.port = net.port;
   form.tls = net.tls;
+  form.trusted_certificates = net.trustedCertificates ?? true;
+  form.autoconnect = net.autoconnect ?? true;
   // Everything we can vouch for starts checked — the point of the flow is that
   // the happy path is one click. Channel choices are per-network, so both the
   // chips and anything hand-typed reset on a re-pick: a "#vim" meant for Libera
@@ -237,6 +241,8 @@ function onManual(): void {
   form.host = '';
   form.port = 6697;
   form.tls = true;
+  form.trusted_certificates = true;
+  form.autoconnect = true;
   selected.value = [];
   extra.value = '';
   step.value = 'setup';
@@ -260,6 +266,8 @@ async function submit(): Promise<void> {
       host: form.host,
       port: form.port,
       tls: form.tls,
+      trusted_certificates: form.trusted_certificates,
+      autoconnect: form.autoconnect,
       nick: form.nick,
       sasl_account: form.sasl_account,
       sasl_password: form.sasl_password,

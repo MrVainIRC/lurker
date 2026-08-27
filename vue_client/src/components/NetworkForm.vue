@@ -240,6 +240,8 @@ function onPick(net: NetworkPreset): void {
   form.host = net.host;
   form.port = net.port;
   form.tls = net.tls;
+  form.autoconnect = net.autoconnect ?? true;
+  form.trusted_certificates = net.trustedCertificates ?? true;
   // Always land the user in a channel rather than an empty server buffer: the
   // channels we can vouch for (#lurker, the network's own — #308), else #chat as
   // a common-enough lobby. The server splits this on commas, so a network with
@@ -257,6 +259,8 @@ function onManual(): void {
   form.host = '';
   form.port = 6697;
   form.tls = true;
+  form.autoconnect = true;
+  form.trusted_certificates = true;
   form.default_channel = LURKER_CHANNEL;
   step.value = 'form';
 }

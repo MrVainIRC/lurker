@@ -42,6 +42,9 @@ export interface BuiltinNetwork {
  * the picker merges them into one list instead of branching per row.
  */
 export interface NetworkPreset extends BuiltinNetwork {
+  /** Connection defaults supplied by an instance admin; absent on builtins. */
+  trustedCertificates?: boolean;
+  autoconnect?: boolean;
   /**
    * The admin's recommended channels for an instance preset — pre-checked in the
    * first-run flow. Plural, unlike a builtin's single `defaultChannel`: an admin
