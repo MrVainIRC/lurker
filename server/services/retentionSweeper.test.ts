@@ -183,6 +183,32 @@ describe('runRetentionTick', () => {
     expect(takeDirtyBuffers()).toContain(bufferId);
   });
 
+  it('a per-buffer override wins over the global — in both directions', async () => {
+    const { setBufferRetentionById } = await import('../db/bufferRetention.js');
+    const { markBufferDirty } = await import('../db/retention.js');
+    const { userId, ids, bufferId } = seedBuffer('ret-override', 12);
+
+    // Tighter than the (unlimited) global.
+    setBufferRetentionById(userId, bufferId, 5);
+    markBufferDirty(bufferId);
+    await runRetentionTick(OPTS);
+    expect(rowIds(bufferId)).toEqual(ids.slice(7));
+
+    // Looser than a tight global: override 0 = explicitly unlimited HERE, so
+    // the global of 3 must not touch this buffer.
+    setUserSetting(userId, 'data.retention.lines', 3);
+    setBufferRetentionById(userId, bufferId, 0);
+    markBufferDirty(bufferId);
+    await runRetentionTick(OPTS);
+    expect(rowIds(bufferId)).toEqual(ids.slice(7));
+
+    // Cleared override → the global governs again.
+    setBufferRetentionById(userId, bufferId, null);
+    markBufferDirty(bufferId);
+    await runRetentionTick(OPTS);
+    expect(rowIds(bufferId)).toEqual(ids.slice(9));
+  });
+
   it('the noise clock ages out old noise; chat, kicks, recent noise, bookmarks survive', async () => {
     const user = createUser('noise-mix');
     const net = createNetwork(user.id, {
@@ -369,6 +395,52 @@ describe('runRetentionTick', () => {
     await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
     expect(rowIds(fresh.bufferId)).toEqual([Number(fresh.id)]);
     expect(rowIds(replayed.bufferId)).not.toContain(Number(replayed.id));
+  });
+
+  it('the rewind watermark is the LARGEST cursor, not the smallest', async () => {
+    // Two users with different cursors; a replayed row for the high-cursor
+    // user timed BETWEEN them. A min-based watermark early-outs on it (time
+    // >= min) and the row evades the noise clock — the bug Copilot caught.
+    const { setNoiseCursor, getNoiseCursor } = await import('../db/retention.js');
+    const low = createUser('noise-wm-low');
+    const high = createUser('noise-wm-high');
+    const net = createNetwork(high.id, {
+      name: 'noise-wm',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'n',
+    });
+    setNoiseCursor(low.id, '2026-01-01T00:00:00.000Z');
+    setNoiseCursor(high.id, '2026-08-01T00:00:00.000Z');
+    insertMessage({
+      networkId: net!.id,
+      target: '#chan',
+      time: '2026-06-01T00:00:00.000Z',
+      type: 'quit',
+      nick: 'x',
+      text: null,
+      self: false,
+    });
+    expect(getNoiseCursor(high.id)).toBe('2026-06-01T00:00:00.000Z');
+  });
+
+  it('pass completion cannot clobber a concurrent cursor rewind', async () => {
+    // The pass writes its cutoff via compare-and-advance: if a replayed row
+    // rewound the cursor while the pass's deletes were in flight, the window
+    // [since, cutoff) never covered it, and a blind set would re-hide it.
+    const { setNoiseCursor, getNoiseCursor, advanceNoiseCursor, clearNoiseCursorForUser } =
+      await import('../db/retention.js');
+    const user = createUser('noise-cas');
+    setNoiseCursor(user.id, '2026-08-01T00:00:00.000Z');
+    // Cursor moved since the pass read it → the advance must be a no-op.
+    advanceNoiseCursor(user.id, '2026-08-10T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+    expect(getNoiseCursor(user.id)).toBe('2026-08-01T00:00:00.000Z');
+    // Unmoved → advances normally.
+    advanceNoiseCursor(user.id, '2026-08-01T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+    expect(getNoiseCursor(user.id)).toBe('2026-08-20T00:00:00.000Z');
+    clearNoiseCursorForUser(user.id);
+    expect(getNoiseCursor(user.id)).toBe('');
   });
 
   it('an in-flight export pauses the sweep without losing the dirty set', async () => {

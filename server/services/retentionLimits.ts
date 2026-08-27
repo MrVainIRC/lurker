@@ -21,6 +21,7 @@
 // so the sweeper and whatever a client is told can never disagree.
 
 import { getUserSettings } from '../db/settings.js';
+import { getBufferRetentionOverride } from '../db/bufferRetention.js';
 import { defaultsAsObject } from './settingsRegistry.js';
 import * as systemLog from './systemLog.js';
 
@@ -43,30 +44,48 @@ function parseCeilingEnv(
   unit: string,
   example: string,
   max: number,
+  overflow: 'clamp' | 'reject',
   consequence: string,
 ): number | null {
   const raw = (process.env[name] || '').trim();
   if (!raw) return null;
   const value = /^\d+$/.test(raw) ? Number(raw) : NaN;
-  // The upper bound is a sanity rail, not policy: an extra-digit typo that
-  // survived the regex would otherwise flow into date arithmetic downstream
-  // (an hours value past ~275,000 years makes new Date() throw, and the
-  // sweeper's circuit breaker would then stop ALL retention — the exact
-  // blast radius fail-open exists to prevent).
-  if (!Number.isFinite(value) || value > max) {
-    if (!warnedBadCeiling.has(name)) {
-      warnedBadCeiling.add(name);
-      const text =
-        `${name}="${raw}" is not a whole number of ${unit} (max ${max}); ignoring it. ` +
-        `${consequence} Use a bare integer, e.g. ${example}.`;
-      console.warn(`[lurker] ${text}`);
-      // Also into the system buffer: "the ceiling never took effect" is an
-      // operator-facing condition, and stdout is not an operator surface.
-      systemLog.log({ level: 'warn', scope: 'server', text });
-    }
+  if (!Number.isFinite(value)) {
+    warnCeilingOnce(
+      name,
+      `${name}="${raw}" is not a whole number of ${unit}; ignoring it. ${consequence} ` +
+        `Use a bare integer, e.g. ${example}.`,
+    );
     return null;
   }
+  // The upper bound is a sanity rail against extra-digit typos that survive
+  // the regex. What happens on overflow differs BY CONSEQUENCE, not taste:
+  // an hours value past ~275,000 years makes new Date() throw inside the
+  // sweeper and the circuit breaker then stops ALL retention, so hours must
+  // reject (fail open). A lines value has no date math — rejecting it would
+  // silently UNBOUND an instance whose oversized-but-working ceiling was
+  // enforcing before the rail existed, so lines clamp instead.
+  if (value > max) {
+    if (overflow === 'reject') {
+      warnCeilingOnce(
+        name,
+        `${name}="${raw}" exceeds the maximum of ${max} ${unit}; ignoring it. ${consequence} `,
+      );
+      return null;
+    }
+    warnCeilingOnce(name, `${name}="${raw}" exceeds the maximum of ${max} ${unit}; using ${max}.`);
+    return max;
+  }
   return value === 0 ? null : value;
+}
+
+function warnCeilingOnce(name: string, text: string): void {
+  if (warnedBadCeiling.has(name)) return;
+  warnedBadCeiling.add(name);
+  console.warn(`[lurker] ${text}`);
+  // Also into the system buffer: "the ceiling never took effect as written"
+  // is an operator-facing condition, and stdout is not an operator surface.
+  systemLog.log({ level: 'warn', scope: 'server', text });
 }
 
 /** The operator's per-buffer line ceiling, or null when none is declared. */
@@ -76,6 +95,7 @@ export function declaredRetentionCeilingLines(): number | null {
     'lines',
     'LURKER_MAX_RETENTION_LINES=100000',
     1_000_000_000,
+    'clamp',
     // Accurate for THIS var: an untouched user resolves to unlimited, so no
     // ceiling really does mean nothing is pruned by line count.
     'History is NOT bounded by an instance ceiling.',
@@ -89,6 +109,7 @@ export function declaredEventRetentionCeilingHours(): number | null {
     'hours',
     'LURKER_MAX_EVENT_RETENTION_HOURS=336',
     87_600,
+    'reject',
     // Deliberately different from the lines message: ignoring THIS ceiling
     // does not stop noise pruning — every untouched user still runs the
     // 168-hour registry default. Saying "not bounded" here misled the
@@ -99,14 +120,35 @@ export function declaredEventRetentionCeilingHours(): number | null {
 }
 
 /**
- * The effective per-buffer cap for this user, in lines — the number the
- * sweeper actually prunes to. 0 = unlimited. The user's stored value is read
- * with the registry default merged in (the uploadLimits pattern), so a second
- * hardcoded default here can't drift from the registry.
+ * The user's own global line cap, raw: 0 = unlimited, NO ceiling applied.
+ * Split out so the sweeper can resolve it once per user per tick and hand it
+ * back through effectiveRetentionLines for each of that user's buffers,
+ * instead of re-reading settings per buffer.
  */
-export function effectiveRetentionLines(userId: number): number {
+export function userRetentionLines(userId: number): number {
   const settings = { ...defaultsAsObject(), ...getUserSettings(userId) };
-  return clampToCeiling(settings['data.retention.lines'], declaredRetentionCeilingLines());
+  const n = Number(settings['data.retention.lines']);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+/**
+ * The effective cap for one buffer, in lines — the number the sweeper
+ * actually prunes to. 0 = unlimited. Resolution: the buffer's stored
+ * override (which may sit ABOVE the user's global — "keep everything here"
+ * is the point), else the user's global, and the result clamps to the
+ * operator ceiling — the ONE clamp site, per the header contract. Pass
+ * `preResolvedUserLines` (from userRetentionLines) on hot loops; omit it and
+ * this resolves the global itself.
+ */
+export function effectiveRetentionLines(
+  userId: number,
+  bufferId?: number,
+  preResolvedUserLines?: number,
+): number {
+  const globalLines = preResolvedUserLines ?? userRetentionLines(userId);
+  const override = bufferId === undefined ? null : getBufferRetentionOverride(userId, bufferId);
+  const chosen = override ?? globalLines;
+  return clampToCeiling(chosen, declaredRetentionCeilingLines());
 }
 
 /**

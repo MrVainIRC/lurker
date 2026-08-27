@@ -372,6 +372,14 @@ export const EXPORT_TABLES = Object.freeze({
     columns: ['user_id', 'buffer_id', 'notify_always', 'updated_at'],
   },
 
+  buffer_retention: {
+    mode: 'export',
+    scope: 'user_id',
+    section: 'data',
+    fkRekey: { user_id: 'users', buffer_id: 'buffers' },
+    columns: ['user_id', 'buffer_id', 'max_lines', 'updated_at'],
+  },
+
   user_drafts: {
     mode: 'export',
     scope: 'user_id',
@@ -695,6 +703,7 @@ export const IMPORT_ORDER = Object.freeze([
   'favorite_buffers',
   'nicklist_collapsed',
   'channel_notify_settings',
+  'buffer_retention',
   'user_drafts',
   'user_away_state',
   'input_history',

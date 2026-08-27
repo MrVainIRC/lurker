@@ -36,10 +36,14 @@ import {
   listUserIds,
   deleteNoiseBatch,
   getNoiseCursor,
-  setNoiseCursor,
+  advanceNoiseCursor,
 } from '../db/retention.js';
 import { listInflightJobs } from '../db/dataExports.js';
-import { effectiveRetentionLines, effectiveEventRetentionHours } from './retentionLimits.js';
+import {
+  effectiveRetentionLines,
+  userRetentionLines,
+  effectiveEventRetentionHours,
+} from './retentionLimits.js';
 import settingsService from './settingsService.js';
 import * as systemLog from './systemLog.js';
 
@@ -132,11 +136,14 @@ export async function runRetentionTick(
       await yieldToLoop();
       const ownerId = bufferOwnerId(bufferId);
       if (ownerId === undefined) continue; // buffer deleted; cascade got the rows
-      let cap = capByUser.get(ownerId);
-      if (cap === undefined) {
-        cap = effectiveRetentionLines(ownerId);
-        capByUser.set(ownerId, cap);
+      let globalLines = capByUser.get(ownerId);
+      if (globalLines === undefined) {
+        globalLines = userRetentionLines(ownerId);
+        capByUser.set(ownerId, globalLines);
       }
+      // Per-buffer: the settings read is cached above; only the override
+      // lookup (one PK probe) is paid per buffer.
+      const cap = effectiveRetentionLines(ownerId, bufferId, globalLines);
       result.buffersExamined++;
       if (cap <= 0) continue; // unlimited
 
@@ -209,7 +216,9 @@ export async function runRetentionTick(
         }
       }
       if (!userDone) break; // budget died mid-user; they stay at the head for next tick
-      setNoiseCursor(userId, cutoffIso);
+      // Compare-and-advance, not a blind set: an insert-side rewind can land
+      // during this user's awaits, and the pass's window never covered it.
+      advanceNoiseCursor(userId, sinceIso, cutoffIso);
       noisePendingUsers.shift();
     }
     if (noisePendingUsers.length === 0) {
