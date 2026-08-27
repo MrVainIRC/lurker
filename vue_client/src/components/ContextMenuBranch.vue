@@ -95,7 +95,11 @@ function submitInput(item: ContextMenuItem, event: KeyboardEvent): void {
   z-index: 1;
   top: calc(-1 * var(--space-2));
   left: calc(100% - var(--space-1));
-  min-width: 160px;
+  box-sizing: border-box;
+  min-width: min(160px, calc(100vw - 8px));
+  max-width: calc(100vw - 8px);
+  max-height: calc(100vh - 8px);
+  overflow: auto;
   width: max-content;
   padding: var(--space-2) var(--space-1);
   color: var(--fg);
@@ -134,11 +138,15 @@ function submitInput(item: ContextMenuItem, event: KeyboardEvent): void {
 }
 .input-item {
   grid-column: 1 / -1;
+  min-width: 0;
+  max-width: 100%;
   padding: var(--space-2) var(--space-1);
 }
 .menu-input {
   width: 100%;
-  min-width: 16rem;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   padding: var(--space-3) var(--space-4);
   color: var(--fg);
   font: inherit;
@@ -159,7 +167,7 @@ function submitInput(item: ContextMenuItem, event: KeyboardEvent): void {
   color: inherit;
   font: inherit;
   text-align: left;
-  white-space: nowrap;
+  white-space: normal;
   background: none;
   border: 0;
   border-radius: var(--radius-sm);

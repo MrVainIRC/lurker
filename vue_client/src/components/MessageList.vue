@@ -311,7 +311,7 @@
                  every event row from an edit site giving no hint the two were connected.
                  They now render inside MessageBody, which IS the chain's first branch, so the
                  hazard is gone rather than avoided. -->
-            ><MessageAnnotations
+            <MessageAnnotations
               v-if="row.m && buffer?.networkId != null"
               :message="row.m"
               :network-id="buffer.networkId"

@@ -26,8 +26,17 @@
         @mousedown.prevent
         @click="insertMultilineBreak"
       >
-        ↵
-      </button></span
+        ↵</button
+      ><span
+        v-if="hasHistory"
+        ref="promptBtnEl"
+        role="button"
+        class="prompt-recall"
+        title="recall a previous input"
+        @mousedown.prevent
+        @click="toggleHistory"
+        >&gt;</span
+      ><template v-else>&gt;</template></span
     >
     <div v-if="buffer?.replyTo" class="reply-banner">
       Replying to <strong>{{ buffer.replyTo.nick || 'message' }}</strong
@@ -123,6 +132,15 @@
       @select="onChannelPickerSelect"
       @close="closeChannelPicker"
     />
+    <HistoryPicker
+      ref="historyPickerEl"
+      :open="historyPickerOpen"
+      :entries="historyEntries"
+      :anchor="formEl"
+      :toggle-el="promptBtnEl"
+      @select="onHistorySelect"
+      @close="closeHistoryPicker"
+    />
     <!-- Desktop `:shortcode:` emoji panel (issue #348). The vertical-popover
          counterpart to the mobile emoji strip — refreshPicker opens this on
          desktop and the StatusBar strip on mobile. Opens on a bare `:` with a
@@ -209,6 +227,7 @@ import {
 import type { EmojiMatch } from '../utils/emojiData.js';
 import NickPicker from './NickPicker.vue';
 import ChannelPicker from './ChannelPicker.vue';
+import HistoryPicker from './HistoryPicker.vue';
 import EmojiPicker from './EmojiPicker.vue';
 import LongMessageUploadModal from './LongMessageUploadModal.vue';
 import { useSelfLabel } from '../composables/useSelfLabel.js';
@@ -303,6 +322,11 @@ const channelPickerQuery = ref('');
 const channelPickerEl = ref<InstanceType<typeof ChannelPicker> | null>(null);
 let channelPickerTokenStart = -1;
 let channelPickerTokenEnd = -1;
+// The prompt remains the pointer-driven counterpart to Up-arrow input history,
+// which is especially important on mobile where no arrow keys are available.
+const historyPickerOpen = ref(false);
+const historyPickerEl = ref<InstanceType<typeof HistoryPicker> | null>(null);
+const promptBtnEl = ref<HTMLElement | null>(null);
 // Suggestion-strip and colour-picker visibility / contents live in
 // useComposerOverlay so StatusBar can render them as overlays without prop
 // drilling. Token-span book-keeping (which slice of the draft a pick
@@ -389,6 +413,10 @@ if (!supportsFieldSizing) {
 const buffer = computed(() =>
   active.value ? buffers.byKey(`${active.value.networkId}::${active.value.target}`) : null,
 );
+const historyEntries = computed(() =>
+  active.value ? inputHistory.forBuffer(active.value.networkId, active.value.target) : [],
+);
+const hasHistory = computed(() => historyEntries.value.length > 0);
 const ownNick = computed(() => {
   const a = active.value;
   if (!a) return '';
@@ -1185,6 +1213,19 @@ function onKeydown(e: KeyboardEvent): void {
       return;
     }
   }
+  if (historyPickerOpen.value && historyPickerEl.value?.hasCandidates()) {
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      if (!e.altKey && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        historyPickerEl.value.moveActive(e.key === 'ArrowUp' ? -1 : 1);
+        return;
+      }
+    } else if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+      e.preventDefault();
+      historyPickerEl.value.confirmActive();
+      return;
+    }
+  }
   if (e.key === 'Enter') {
     // Textareas don't submit forms on Enter, so we trigger submission here.
     // Shift+Enter falls through to the default newline insert; the top-of-
@@ -1342,6 +1383,10 @@ function closeChannelPicker() {
   channelPickerTokenEnd = -1;
 }
 
+function closeHistoryPicker(): void {
+  historyPickerOpen.value = false;
+}
+
 function closeStrip() {
   setNickStrip(false);
   stripTokenStart = -1;
@@ -1359,6 +1404,29 @@ function closeEmojiPicker() {
   emojiPickerQuery.value = '';
   emojiTokenStart = -1;
   emojiTokenEnd = -1;
+}
+
+function toggleHistory(): void {
+  if (historyPickerOpen.value) {
+    closeHistoryPicker();
+    return;
+  }
+  if (!hasHistory.value) return;
+  closePicker();
+  closeStrip();
+  closeChannelPicker();
+  closeEmojiStrip();
+  closeEmojiPicker();
+  closeColorPicker();
+  historyPickerOpen.value = true;
+}
+
+function onHistorySelect(entry: string): void {
+  closeHistoryPicker();
+  resetCompletion();
+  resetHistoryNav();
+  setInputAndCaretEnd(entry);
+  queueMicrotask(() => inputEl.value?.focus());
 }
 
 // Open/refresh the emoji suggester for the shortcode under the caret. Async
@@ -1458,6 +1526,7 @@ async function maybeConvertShortcode() {
 }
 
 function refreshPicker() {
+  closeHistoryPicker();
   const el = inputEl.value;
   if (!el) {
     closePicker();
@@ -1710,6 +1779,7 @@ function onInput() {
   // Done before the sendable gate so this still fires on :server: buffers
   // where `/raw` history is just as relevant.
   if (historyIndex !== null) resetHistoryNav();
+  closeHistoryPicker();
   if (!sendable.value || !active.value) return;
   if (completion) resetCompletion();
   // Inline-convert a just-completed `:shortcode:`, then refresh the suggester
@@ -1758,6 +1828,7 @@ watch(active, (newActive, oldActive) => {
   closeEmojiStrip();
   closeEmojiPicker();
   closeColorPicker();
+  closeHistoryPicker();
   resetHistoryNav();
   // A switch between buffers swaps the draft text via the `text` computed,
   // but any unused split-confirm token doesn't transfer — a fresh buffer is
@@ -1811,6 +1882,7 @@ onBeforeUnmount(() => {
   closeEmojiStrip();
   closeEmojiPicker();
   closeColorPicker();
+  closeHistoryPicker();
   setUploadMenuOpen(false);
 });
 
@@ -2131,6 +2203,7 @@ async function submit() {
   closeEmojiStrip();
   closeEmojiPicker();
   closeColorPicker();
+  closeHistoryPicker();
   const raw = text.value;
   if (!raw.trim()) return;
 
@@ -3784,6 +3857,18 @@ function handleCommand(line: string, networkId: number | null, target: string): 
 .prompt-break:hover,
 .prompt-break:focus-visible {
   color: var(--fg);
+}
+/* The `>` prompt is also the mobile input-history toggle. Keep the visible
+   glyph compact while enlarging its hit target without changing row layout. */
+.prompt-recall {
+  position: relative;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.prompt-recall::before {
+  position: absolute;
+  inset: -10px -8px -10px -10px;
+  content: '';
 }
 .reply-banner {
   flex: 0 1 22em;

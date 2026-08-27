@@ -48,12 +48,10 @@ watch(
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const pad = 4;
-    let x = state.x;
-    let y = state.y;
-    if (x + rect.width + pad > window.innerWidth) x = window.innerWidth - rect.width - pad;
-    if (y + rect.height + pad > window.innerHeight) y = window.innerHeight - rect.height - pad;
-    if (x < pad) x = pad;
-    if (y < pad) y = pad;
+    const maxX = Math.max(pad, window.innerWidth - rect.width - pad);
+    const maxY = Math.max(pad, window.innerHeight - rect.height - pad);
+    const x = Math.min(Math.max(state.x, pad), maxX);
+    const y = Math.min(Math.max(state.y, pad), maxY);
     clamped.value = { x, y };
   },
 );
@@ -140,7 +138,11 @@ onBeforeUnmount(() => {
 .context-menu {
   position: fixed;
   z-index: var(--z-menu);
+  box-sizing: border-box;
   min-width: 160px;
+  max-width: calc(100vw - 8px);
+  max-height: calc(100vh - 8px);
+  overflow: auto;
   /* `width: auto` on a position:fixed element near the right edge gets
      shrink-wrapped to the available viewport space, which wraps long labels
      before the clamp watcher gets a chance to shift the menu left. `max-content`
@@ -163,7 +165,7 @@ onBeforeUnmount(() => {
 }
 .context-menu.grid {
   display: grid;
-  grid-template-columns: repeat(6, 2.25rem);
+  grid-template-columns: repeat(6, minmax(0, 2.25rem));
   gap: var(--space-1);
   min-width: 0;
   padding: var(--space-2);
@@ -195,7 +197,9 @@ onBeforeUnmount(() => {
 }
 .context-menu.grid :deep(.menu-input) {
   width: 100%;
-  min-width: 16rem;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   padding: var(--space-3) var(--space-4);
   color: var(--fg);
   font: inherit;
