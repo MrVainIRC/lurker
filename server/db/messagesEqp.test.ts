@@ -152,3 +152,38 @@ describe('search filter paths', () => {
     expect(detail).not.toMatch(/TEMP B-TREE/);
   });
 });
+
+// The retention sweep's two statements (db/retention.ts). Count-based
+// retention was chosen partly BECAUSE these ride idx_messages_buf_unread with
+// no new index; these pins are what make that a property rather than a hope.
+// The bookmark-exemption probe must stay a seek on the (user_id, message_id)
+// primary key — dropping the user_id term demotes it to a scan of the whole
+// bookmarks table per candidate row.
+describe('retention prune paths', () => {
+  it('the boundary probe walks the covering per-buffer index', () => {
+    const detail = plan(
+      `SELECT id FROM messages WHERE buffer_id = 1 ORDER BY id DESC LIMIT 1 OFFSET 999`,
+    );
+    expect(detail).toMatch(/USING COVERING INDEX idx_messages_buf_unread/);
+  });
+
+  it('the delete subselect stays covered, with a seekable bookmark probe', () => {
+    const detail = plan(
+      `DELETE FROM messages WHERE id IN (
+         SELECT m.id FROM messages m
+          WHERE m.buffer_id = 1 AND m.id < 500
+            AND NOT EXISTS (
+              SELECT 1 FROM user_bookmarks ub
+               WHERE ub.user_id = 1 AND ub.message_id = m.id
+            )
+          LIMIT 500
+       )`,
+    );
+    expect(detail).toMatch(
+      /USING COVERING INDEX idx_messages_buf_unread \(buffer_id=\? AND id<\?\)/,
+    );
+    expect(detail).toMatch(
+      /USING COVERING INDEX sqlite_autoindex_user_bookmarks_1 \(user_id=\? AND message_id=\?\)/,
+    );
+  });
+});

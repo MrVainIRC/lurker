@@ -7,6 +7,7 @@ import {
   resolveBufferIdByNetwork,
   resolveOrMintForInsert,
 } from './bufferResolve.js';
+import { markBufferDirty } from './retention.js';
 import { countsTowardPage } from '../../shared/eventFilter.js';
 import type { PageUnit } from '../../shared/eventFilter.js';
 import type { ModeChange } from '../../shared/modes.js';
@@ -180,6 +181,8 @@ export function insertMessage(row: MessageInput): {
     msgid: row.msgid || null,
   });
   const id = result.lastInsertRowid;
+  // Retention prunes lazily: the sweep only ever looks at buffers that grew.
+  markBufferDirty(bufferId);
   const altRow = altByIdStmt.get(id) as { alt: number } | undefined;
   // bufferId returned so the live publish path can stamp it onto the enriched
   // event without a second resolve — the wire's `irc` frames carry it.

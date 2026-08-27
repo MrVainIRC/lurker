@@ -30,6 +30,7 @@ import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import type { Statement, RunResult } from 'better-sqlite3';
 import db from '../db/index.js';
 import { EXPORT_TABLES, EXPORT_FORMAT_VERSION, IMPORT_ORDER } from '../db/exportSchema.js';
+import { seedAllBuffersDirty } from '../db/retention.js';
 import { isBuiltinThemeId, THEME_POINTER_KEYS } from '../../shared/themePresets.js';
 import themesService from './themesService.js';
 import { encryptSecret } from '../utils/secretCrypto.js';
@@ -754,6 +755,12 @@ export async function importFromZipFile(
       if (err instanceof ImportError) throw err;
       throw new ImportError('insert_failed', `import failed: ${(err as Error).message}`);
     }
+
+    // The message stream above bypasses insertMessage, so nothing marked the
+    // imported buffers for the retention sweeper — without this, an over-cap
+    // archive sits unexamined until the next restart or a live line lands in
+    // each buffer.
+    seedAllBuffersDirty();
 
     return { manifest, counts, thumbnailsAttached };
   } finally {
