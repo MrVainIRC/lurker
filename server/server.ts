@@ -27,6 +27,7 @@ import * as systemLog from './services/systemLog.js';
 import { purgeExpiredSessions } from './db/sessions.js';
 import { sweepExpiredPreviews } from './db/linkPreviews.js';
 import { sweepPreviewCache } from './services/previewCache/index.js';
+import { startRetentionSweeper } from './services/retentionSweeper.js';
 import { listGrandfatheredUsernames } from './db/users.js';
 import { backfillEncryptColumns } from './db/secretBackfill.js';
 import { assertPushCredentials } from './services/push/credentials.js';
@@ -155,6 +156,12 @@ setInterval(sweepExpiredPreviews, 60 * 60 * 1000).unref();
 // it swallows its own failures, like every other path in that module.
 void sweepPreviewCache();
 setInterval(() => void sweepPreviewCache(), 60 * 60 * 1000).unref();
+
+// History retention (RETENTION_PLAN.md). Self-scheduling rather than a fixed
+// interval — a tick that found a backlog comes back in seconds — and started
+// unconditionally: with no ceiling and no user opt-in every tick is a no-op
+// over an empty dirty set, which costs nothing.
+startRetentionSweeper();
 
 systemLog.log({ scope: 'server', text: `Lurker server starting up (edition: ${EDITION})` });
 

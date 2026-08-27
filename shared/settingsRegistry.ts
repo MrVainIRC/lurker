@@ -1777,6 +1777,29 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
       'devices. Must default to false: settingsService drops any row whose value ' +
       'equals the registry default, so a true default would be unstorable.',
   },
+
+  // ─── Data / retention ─────────────────────────────────────────────────
+  // How much stored history to keep, per buffer (RETENTION_PLAN.md). Rendered
+  // by the bespoke DataPane via an embedded RegistryPane. The min/max here are
+  // NOT the enforcement surface: the operator ceiling is the env var
+  // LURKER_MAX_RETENTION_LINES, and every enforcement path resolves through
+  // effectiveRetentionLines() (services/retentionLimits.ts), which clamps a
+  // stored value regardless of what a client managed to write.
+  {
+    key: 'data.retention.lines',
+    label: 'History limit (lines per buffer)',
+    category: 'data',
+    group: 'retention',
+    type: 'int',
+    min: 0,
+    max: 10_000_000,
+    default: 0,
+    description:
+      'Each buffer keeps at most this many lines; older lines are deleted ' +
+      'permanently. 0 keeps everything (up to any limit this server sets). ' +
+      'Bookmarked messages are never deleted. Export your data first if you ' +
+      'want an archive.',
+  },
 ]);
 
 const BY_KEY = new Map(REGISTRY.map((opt) => [opt.key, opt] as const));
@@ -1879,4 +1902,5 @@ export const GROUPS: Readonly<Record<string, string>> = Object.freeze({
   autocomplete: 'Autocomplete',
   formatting: 'Formatting',
   locale: 'Locale',
+  retention: 'Retention',
 });
