@@ -82,6 +82,22 @@ export function declaredRetentionCeilingLines(): number | null {
   );
 }
 
+export type CeilingState = 'set' | 'none' | 'invalid';
+
+/**
+ * How one ceiling env var actually resolved — for surfaces that must not let
+ * an operator misread fail-open. `declared…()` returns null for three
+ * different situations (unset, explicit 0, and set-but-unparseable), and the
+ * admin Storage pane once rendered all three as "unset", sending an operator
+ * whose value had a typo off to debug env propagation while history grew
+ * unbounded.
+ */
+export function ceilingState(name: string, resolved: number | null): CeilingState {
+  if (resolved != null) return 'set';
+  const raw = (process.env[name] || '').trim();
+  return raw === '' || raw === '0' ? 'none' : 'invalid';
+}
+
 /** The operator's noise-age ceiling in hours, or null when none is declared. */
 export function declaredEventRetentionCeilingHours(): number | null {
   return parseCeilingEnv(

@@ -17,6 +17,10 @@ let userAgent: Awaited<ReturnType<typeof createAuthedAgent>>;
 let aliceId: number;
 
 beforeAll(async () => {
+  // The ceilings assertions read live env; a deploy-adjacent shell exporting
+  // the operator knobs must not fail a correct test.
+  delete process.env.LURKER_MAX_RETENTION_LINES;
+  delete process.env.LURKER_MAX_EVENT_RETENTION_HOURS;
   const { createUser } = await import('../db/users.js');
   const { createNetwork } = await import('../db/networks.js');
   const { insertMessage } = await import('../db/messages.js');
@@ -51,13 +55,30 @@ describe('GET /api/admin/storage', () => {
     const res = await adminAgent.get('/api/admin/storage');
     expect(res.status).toBe(200);
     expect(res.body.database.fileBytes).toBeGreaterThan(0);
-    expect(res.body.ceilings).toEqual({ maxLines: null, maxEventHours: null });
-    expect(res.body.approxBytesPerRow).toBeGreaterThan(0);
+    expect(res.body.ceilings).toEqual({
+      maxLines: null,
+      maxLinesState: 'none',
+      maxEventHours: null,
+      maxEventHoursState: 'none',
+    });
+    // Too few rows for a meaningful per-instance ratio → no ≈ estimates.
+    expect(res.body.approxBytesPerRow).toBeNull();
     const alice = res.body.users.find((u: { id: number }) => u.id === aliceId);
     expect(alice.messageRows).toBe(20);
     // #chan plus the account's system buffer.
     expect(alice.buffers).toBeGreaterThanOrEqual(1);
     // Sorted heaviest-first: alice (20 rows) outranks the empty admin.
     expect(res.body.users[0].id).toBe(aliceId);
+  });
+
+  it('distinguishes an unparseable ceiling from an unset one, on ?refresh=1', async () => {
+    process.env.LURKER_MAX_RETENTION_LINES = '100,000';
+    try {
+      const res = await adminAgent.get('/api/admin/storage?refresh=1');
+      expect(res.body.ceilings.maxLines).toBeNull();
+      expect(res.body.ceilings.maxLinesState).toBe('invalid');
+    } finally {
+      delete process.env.LURKER_MAX_RETENTION_LINES;
+    }
   });
 });

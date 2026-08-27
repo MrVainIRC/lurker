@@ -12,10 +12,7 @@
 <template>
   <section id="admin-storage" class="settings-pane">
     <h2>storage</h2>
-    <p class="section-desc">
-      What message history costs on this instance. Sizes marked ≈ are estimated at
-      {{ stats?.approxBytesPerRow ?? 281 }} bytes per stored line (row + indexes + search index).
-    </p>
+    <p class="section-desc">What message history costs on this instance.</p>
 
     <p v-if="error" class="error inline">{{ error }}</p>
     <p v-else-if="!stats" class="muted small">Loading storage stats…</p>
@@ -23,76 +20,107 @@
     <template v-if="stats">
       <ul class="counts">
         <li>database file: {{ formatBytes(stats.database.fileBytes) }}</li>
-        <li v-if="stats.database.walBytes">
-          write-ahead log: {{ formatBytes(stats.database.walBytes) }}
-        </li>
+        <li>write-ahead log: {{ formatBytes(stats.database.walBytes) }}</li>
         <li>
           reclaimable free pages: {{ formatBytes(stats.database.reclaimableBytes) }}
           <span class="muted small">(reused by new writes before the file grows)</span>
         </li>
       </ul>
 
-      <p class="muted small">
-        Retention ceilings:
-        {{
-          stats.ceilings.maxLines != null
-            ? `${stats.ceilings.maxLines.toLocaleString()} lines per buffer`
-            : 'no line ceiling (LURKER_MAX_RETENTION_LINES unset)'
-        }}
-        ·
-        {{
-          stats.ceilings.maxEventHours != null
-            ? `event noise capped at ${stats.ceilings.maxEventHours}h`
-            : 'no event-noise ceiling (LURKER_MAX_EVENT_RETENTION_HOURS unset)'
-        }}
-      </p>
+      <!-- States, not null-guesses: "unset" and "declared but unparseable"
+           are different operator situations, and this pane is exactly where
+           someone comes to check a ceiling that isn't taking effect. -->
+      <p class="muted small">Line ceiling: {{ linesCeilingText }}</p>
+      <p class="muted small">Event-noise ceiling: {{ hoursCeilingText }}</p>
 
       <h3 class="subhead">per account</h3>
+      <p v-if="stats.approxBytesPerRow != null" class="muted small">
+        Sizes marked ≈ use this instance's measured average of
+        {{ stats.approxBytesPerRow }} bytes per stored line.
+      </p>
       <ul class="device-list">
         <li v-for="u in stats.users" :key="u.id" class="device storage-row">
           <span class="who">{{ u.username }}</span>
           <span class="muted small">
-            {{ u.messageRows.toLocaleString() }} lines · {{ u.buffers }} buffer(s) · ≈
-            {{ formatBytes(u.messageRows * stats.approxBytesPerRow) }}
+            {{ u.messageRows.toLocaleString() }} lines · {{ u.buffers }} buffer(s)
+            <template v-if="stats.approxBytesPerRow != null">
+              · ≈ {{ formatBytes(u.messageRows * stats.approxBytesPerRow) }}
+            </template>
           </span>
         </li>
       </ul>
-      <p class="muted small">
-        Refreshed {{ stats.generatedAt }} — cached for a minute server-side.
-      </p>
+      <div class="actions">
+        <span class="muted small">Refreshed {{ formatDateTime(stats.generatedAt) }}.</span>
+        <button class="link" :disabled="refreshing" @click="load(true)">
+          {{ refreshing ? 'refreshing…' : 'refresh now' }}
+        </button>
+      </div>
     </template>
   </section>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { api } from '../../api.js';
+import { formatBytes } from '../../utils/formatBytes.js';
+import { formatDateTime } from '../../utils/timestamp.js';
+
+type CeilingState = 'set' | 'none' | 'invalid';
 
 interface StorageStats {
   generatedAt: string;
-  approxBytesPerRow: number;
+  approxBytesPerRow: number | null;
   database: { fileBytes: number; walBytes: number; reclaimableBytes: number };
-  ceilings: { maxLines: number | null; maxEventHours: number | null };
+  ceilings: {
+    maxLines: number | null;
+    maxLinesState: CeilingState;
+    maxEventHours: number | null;
+    maxEventHoursState: CeilingState;
+  };
   users: Array<{ id: number; username: string; messageRows: number; buffers: number }>;
 }
 
 const stats = ref<StorageStats | null>(null);
 const error = ref('');
+const refreshing = ref(false);
 
-onMounted(async () => {
+async function load(force = false) {
+  refreshing.value = force;
+  error.value = '';
   try {
-    stats.value = await api('/api/admin/storage');
+    stats.value = await api(`/api/admin/storage${force ? '?refresh=1' : ''}`);
   } catch (e: any) {
     error.value = e.message || 'failed to load storage stats';
+  } finally {
+    refreshing.value = false;
   }
+}
+onMounted(() => load());
+
+const linesCeilingText = computed(() => {
+  const c = stats.value?.ceilings;
+  if (!c) return '';
+  if (c.maxLinesState === 'set' && c.maxLines != null) {
+    return `${c.maxLines.toLocaleString()} lines per buffer (LURKER_MAX_RETENTION_LINES)`;
+  }
+  if (c.maxLinesState === 'invalid') {
+    return 'LURKER_MAX_RETENTION_LINES is set but unparseable — NOT in effect, see the server log';
+  }
+  return 'none — history is unbounded for users who set no limit';
 });
 
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
+const hoursCeilingText = computed(() => {
+  const c = stats.value?.ceilings;
+  if (!c) return '';
+  if (c.maxEventHoursState === 'set' && c.maxEventHours != null) {
+    return `${c.maxEventHours} hours (LURKER_MAX_EVENT_RETENTION_HOURS)`;
+  }
+  if (c.maxEventHoursState === 'invalid') {
+    return 'LURKER_MAX_EVENT_RETENTION_HOURS is set but unparseable — NOT in effect, see the server log';
+  }
+  // Not "off": the per-user default (168h) keeps pruning without a ceiling.
+  return 'none — users default to pruning event noise after a week';
+});
 </script>
 
 <style src="../settings-panes/panes.css"></style>
@@ -111,5 +139,11 @@ function formatBytes(n: number): string {
 }
 .storage-row .who {
   color: var(--fg);
+}
+.actions {
+  display: flex;
+  gap: 1ch;
+  align-items: center;
+  padding-top: var(--space-3);
 }
 </style>

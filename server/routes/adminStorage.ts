@@ -7,29 +7,28 @@
 // farming buffers before any automated defense gets designed. Mounted under
 // routes/admin.ts, so requireAuth + requireAdmin are inherited.
 //
-// Costs one covering-index walk of the messages table per refresh (a
-// per-network COUNT on idx_messages_net, index-only, summed per user) — on
-// the 2M-row reference database that is on the order of 100ms of synchronous
-// work on the shared connection, so the payload is cached for a minute and
-// only an admin opening the pane ever pays it.
+// The heavy walk (every stored row, attributed per account) lives in
+// db/storageStats.ts, chunked with event-loop yields so no synchronous slice
+// scales with instance size. Results are cached for a minute and built
+// single-flight; `?refresh=1` busts the cache for the admin who just deleted
+// an account and wants to see the reclaim NOW.
 
 import fs from 'fs';
 import { Router } from 'express';
-import type { Request, Response } from 'express';
-import db, { DATABASE_FILE } from '../db/index.js';
+import type { Request, Response, NextFunction } from 'express';
+import { DATABASE_FILE } from '../db/index.js';
+import { collectStorageAttribution, reclaimableBytes } from '../db/storageStats.js';
 import {
   declaredRetentionCeilingLines,
   declaredEventRetentionCeilingHours,
+  ceilingState,
 } from '../services/retentionLimits.js';
 
 const router = Router();
 
-// Matches the measured all-in cost (row + indexes + FTS) on the reference
-// database; the UI multiplies rows by this and labels the result "≈".
-const APPROX_BYTES_PER_ROW = 281;
-
 const CACHE_TTL_MS = 60 * 1000;
 let cached: { at: number; payload: Record<string, unknown> } | null = null;
+let building: Promise<Record<string, unknown>> | null = null;
 
 function fileBytes(path: string): number {
   try {
@@ -39,64 +38,65 @@ function fileBytes(path: string): number {
   }
 }
 
-function buildPayload(): Record<string, unknown> {
-  const pageSize = db.pragma('page_size', { simple: true }) as number;
-  const freelist = db.pragma('freelist_count', { simple: true }) as number;
+// Only derive a bytes/row ratio once there's enough data for the division to
+// mean something — on a near-empty instance the fixed schema overhead would
+// dominate and "20 KB per line" is a lie. Null = the client omits ≈ sizes.
+const MIN_ROWS_FOR_RATIO = 10_000;
 
-  const users = db.prepare(`SELECT id, username FROM users ORDER BY id`).all() as Array<{
-    id: number;
-    username: string;
-  }>;
-  const networks = db.prepare(`SELECT id, user_id AS userId FROM networks`).all() as Array<{
-    id: number;
-    userId: number;
-  }>;
-  const countByNetwork = db.prepare(`SELECT COUNT(*) AS n FROM messages WHERE network_id = ?`);
-  const buffersByUser = new Map<number, number>(
-    (
-      db
-        .prepare(`SELECT user_id AS userId, COUNT(*) AS n FROM buffers GROUP BY user_id`)
-        .all() as Array<{ userId: number; n: number }>
-    ).map((r) => [r.userId, r.n]),
-  );
-
-  const rowsByUser = new Map<number, number>();
-  for (const net of networks) {
-    const n = (countByNetwork.get(net.id) as { n: number }).n;
-    rowsByUser.set(net.userId, (rowsByUser.get(net.userId) ?? 0) + n);
-  }
-
+async function buildPayload(): Promise<Record<string, unknown>> {
+  const { users, totalMessageRows } = await collectStorageAttribution();
+  const dbBytes = fileBytes(DATABASE_FILE);
+  const maxLines = declaredRetentionCeilingLines();
+  const maxEventHours = declaredEventRetentionCeilingHours();
   return {
     generatedAt: new Date().toISOString(),
-    approxBytesPerRow: APPROX_BYTES_PER_ROW,
+    // Derived from THIS instance's file and row count rather than a baked
+    // constant, so schema drift and unusual content self-calibrate. Slightly
+    // generous (the whole file, messages ≈ 95% of it) — the right direction
+    // for a number an operator provisions disk from.
+    approxBytesPerRow:
+      totalMessageRows >= MIN_ROWS_FOR_RATIO ? Math.round(dbBytes / totalMessageRows) : null,
     database: {
-      fileBytes: fileBytes(DATABASE_FILE),
+      fileBytes: dbBytes,
       walBytes: fileBytes(`${DATABASE_FILE}-wal`),
-      // Freed pages SQLite will reuse before growing the file — retention's
-      // deletes land here, which is why the file stops growing rather than
-      // shrinking (no VACUUM runs online, by design).
-      reclaimableBytes: freelist * pageSize,
+      reclaimableBytes: reclaimableBytes(),
     },
+    // States, not just values: `null` alone can't distinguish "unset" from
+    // "declared but unparseable (fail-open)", and this pane is exactly where
+    // an operator comes to check — see ceilingState.
     ceilings: {
-      maxLines: declaredRetentionCeilingLines(),
-      maxEventHours: declaredEventRetentionCeilingHours(),
+      maxLines,
+      maxLinesState: ceilingState('LURKER_MAX_RETENTION_LINES', maxLines),
+      maxEventHours,
+      maxEventHoursState: ceilingState('LURKER_MAX_EVENT_RETENTION_HOURS', maxEventHours),
     },
-    users: users
-      .map((u) => ({
-        id: u.id,
-        username: u.username,
-        messageRows: rowsByUser.get(u.id) ?? 0,
-        buffers: buffersByUser.get(u.id) ?? 0,
-      }))
-      .sort((a, b) => b.messageRows - a.messageRows),
+    users,
   };
 }
 
-router.get('/', (_req: Request, res: Response) => {
-  if (!cached || Date.now() - cached.at > CACHE_TTL_MS) {
-    cached = { at: Date.now(), payload: buildPayload() };
-  }
-  res.json(cached.payload);
+router.get('/', (req: Request, res: Response, next: NextFunction) => {
+  // Async work wrapped per the no-async-endpoint-handlers rule: the handler
+  // itself stays sync, the IIFE forwards failures to next().
+  void (async () => {
+    try {
+      const fresh = req.query.refresh === '1';
+      if (!fresh && cached && Date.now() - cached.at <= CACHE_TTL_MS) {
+        res.json(cached.payload);
+        return;
+      }
+      // Single-flight: two admins (or a refresh spam) share one walk.
+      if (!building) {
+        building = buildPayload().finally(() => {
+          building = null;
+        });
+      }
+      const payload = await building;
+      cached = { at: Date.now(), payload };
+      res.json(payload);
+    } catch (err) {
+      next(err);
+    }
+  })();
 });
 
 export default router;
