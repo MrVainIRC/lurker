@@ -157,7 +157,7 @@ setInterval(sweepExpiredPreviews, 60 * 60 * 1000).unref();
 void sweepPreviewCache();
 setInterval(() => void sweepPreviewCache(), 60 * 60 * 1000).unref();
 
-// History retention (RETENTION_PLAN.md). Self-scheduling rather than a fixed
+// History retention (lurker-dev/RETENTION_PLAN.md). Self-scheduling rather than a fixed
 // interval — a tick that found a backlog comes back in seconds — and started
 // unconditionally: with no ceiling and no user opt-in every tick is a no-op
 // over an empty dirty set, which costs nothing.

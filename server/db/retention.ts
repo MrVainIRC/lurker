@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
-// Storage side of history retention (RETENTION_PLAN.md): the dirty-buffer set
+// Storage side of history retention (lurker-dev/RETENTION_PLAN.md): the dirty-buffer set
 // that tells the sweeper where to look, and the two statements it runs. The
 // scheduling lives in services/retentionSweeper.ts; this module owns the SQL
 // so the statements sit next to the schema they depend on.
@@ -71,9 +71,10 @@ export function retentionBoundaryId(bufferId: number, capLines: number): number 
   return row?.id;
 }
 
-// One bounded bite of the over-cap tail, oldest rows first by construction
-// (everything below the boundary goes eventually; order within doesn't
-// matter). The NOT EXISTS is the bookmark exemption — a bookmarked row below
+// One bounded bite of the over-cap tail. Deliberately no ORDER BY in the
+// subselect: everything below the boundary goes eventually, so any qualifying
+// rows do, and ordering would only add sort work. The NOT EXISTS is the
+// bookmark exemption — a bookmarked row below
 // the boundary survives as an extra ABOVE the cap (later boundary probes walk
 // past it and it never becomes deletable). It is scoped by user_id, not just
 // message_id: user_bookmarks has no index on message_id alone, and a buffer

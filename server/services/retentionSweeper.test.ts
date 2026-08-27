@@ -157,22 +157,23 @@ describe('runRetentionTick', () => {
     expect(result.buffersExamined).toBe(0);
   });
 
-  it('lowering the cap in settings prunes without waiting for a new insert', async () => {
+  it('changing the cap in settings re-marks the user’s buffers without new traffic', async () => {
     const { wireRetentionSettingsListener } = await import('./retentionSweeper.js');
     const settingsService = (await import('./settingsService.js')).default;
-    const { userId, ids, bufferId } = seedBuffer('ret-setting', 12);
+    const { userId, bufferId } = seedBuffer('ret-setting', 12);
 
-    // Drain the seeding inserts and verify the buffer is clean and uncapped.
+    // Drain the seeding inserts so only the settings write can re-mark.
     await runRetentionTick(OPTS);
     expect(rowIds(bufferId)).toHaveLength(12);
 
     // The settings write alone must re-mark the user's buffers — the copy
     // promises deletion, not "deletion once the buffer next sees traffic".
+    // 1000 is the smallest nonzero value validate() accepts (minNonzero);
+    // the prune math itself is covered above with injected tiny caps.
     wireRetentionSettingsListener();
-    const updated = settingsService.update(userId, { 'data.retention.lines': 3 });
+    const updated = settingsService.update(userId, { 'data.retention.lines': 1000 });
     expect(updated.ok).toBe(true);
-    await runRetentionTick(OPTS);
-    expect(rowIds(bufferId)).toEqual(ids.slice(9));
+    expect(takeDirtyBuffers()).toContain(bufferId);
   });
 
   it('an in-flight export pauses the sweep without losing the dirty set', async () => {

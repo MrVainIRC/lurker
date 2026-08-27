@@ -50,6 +50,25 @@ describe('validate', () => {
     });
   });
 
+  describe('int minNonzero', () => {
+    // Retention is the live carrier of the field: 0 = unlimited is valid, a
+    // small live cap is a guarded footgun (pruning is irreversible).
+    const KEY = 'data.retention.lines';
+    it('the registry actually carries the field under test', () => {
+      const opt = getOption(KEY);
+      expect(opt?.type === 'int' ? opt.minNonzero : undefined).toBe(1000);
+    });
+    it('accepts 0 (off) and the floor itself', () => {
+      expect(validate(KEY, 0).ok).toBe(true);
+      expect(validate(KEY, 1000).ok).toBe(true);
+    });
+    it('rejects the hole between 0 and the floor', () => {
+      const out = validate(KEY, 50);
+      expect(out.ok).toBe(false);
+      expect(!out.ok && out.error).toMatch(/0 \(off\) or >= 1000/);
+    });
+  });
+
   describe('string / color', () => {
     it('accepts strings', () => {
       expect(validate(STRING_KEY, 'anything').ok).toBe(true);

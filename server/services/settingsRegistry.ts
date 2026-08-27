@@ -28,6 +28,8 @@ export function validate(key: string, raw: unknown): ValidateResult {
         return { ok: false, error: `${key} must be >= ${opt.min}` };
       if (typeof opt.max === 'number' && n > opt.max)
         return { ok: false, error: `${key} must be <= ${opt.max}` };
+      if (typeof opt.minNonzero === 'number' && n !== 0 && n < opt.minNonzero)
+        return { ok: false, error: `${key} must be 0 (off) or >= ${opt.minNonzero}` };
       return { ok: true, value: n };
     }
     case 'string':

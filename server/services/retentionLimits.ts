@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
-// THE per-buffer history cap, in one place (RETENTION_PLAN.md).
+// THE per-buffer history cap, in one place (lurker-dev/RETENTION_PLAN.md).
 //
 // Two values stack, and the effective cap is the smaller of the ones actually
 // set:
@@ -40,8 +40,11 @@ let warnedBadCeiling = false;
 export function declaredRetentionCeilingLines(): number | null {
   const raw = (process.env.LURKER_MAX_RETENTION_LINES || '').trim();
   if (!raw) return null;
-  const lines = Math.floor(Number(raw));
-  if (!Number.isFinite(lines) || lines < 0) {
+  // Strictly a bare decimal integer. Number() coercions like "1.9" → 1 or
+  // "1e5" → 100000 would silently enable pruning with a ceiling the operator
+  // never wrote, which is exactly what fail-open exists to prevent.
+  const lines = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isFinite(lines)) {
     if (!warnedBadCeiling) {
       warnedBadCeiling = true;
       const text =

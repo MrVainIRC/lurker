@@ -90,7 +90,7 @@
 
     <hr class="hl-sep" />
 
-    <!-- Registry-backed retention settings (RETENTION_PLAN.md). Enforcement is
+    <!-- Registry-backed retention settings (lurker-dev/RETENTION_PLAN.md). Enforcement is
          the server's sweeper; this just renders the knobs. -->
     <RegistryPane category-id="data" embedded :only="['retention']" />
   </section>

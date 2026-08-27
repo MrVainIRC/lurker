@@ -62,6 +62,15 @@ describe('declaredRetentionCeilingLines', () => {
     process.env.LURKER_MAX_RETENTION_LINES = '-5';
     expect(declaredRetentionCeilingLines()).toBeNull();
   });
+
+  it('Number() coercions are NOT accepted — bare decimal integers only', () => {
+    // "1.9" → 1 or "1e5" → 100000 would enable pruning with a ceiling the
+    // operator never wrote; both must fail open instead.
+    process.env.LURKER_MAX_RETENTION_LINES = '1.9';
+    expect(declaredRetentionCeilingLines()).toBeNull();
+    process.env.LURKER_MAX_RETENTION_LINES = '1e5';
+    expect(declaredRetentionCeilingLines()).toBeNull();
+  });
 });
 
 describe('effectiveRetentionLines', () => {
@@ -101,5 +110,15 @@ describe('effectiveRetentionLines', () => {
     process.env.LURKER_MAX_RETENTION_LINES = 'lots';
     setUserSetting(userId, 'data.retention.lines', 5000);
     expect(effectiveRetentionLines(userId)).toBe(5000);
+  });
+
+  it('the 1000-line floor is write-time only — a stored value enforces as stored', () => {
+    // minNonzero lives in validate(), the sole surface a user can write
+    // through. The resolver deliberately does NOT re-floor: no legacy rows
+    // can predate the floor (it shipped with the feature), and keeping the
+    // resolver literal lets tests inject tiny caps instead of looping
+    // thousands of rows per case.
+    setUserSetting(userId, 'data.retention.lines', 50);
+    expect(effectiveRetentionLines(userId)).toBe(50);
   });
 });

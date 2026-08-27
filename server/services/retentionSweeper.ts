@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
-// The background prune loop for history retention (RETENTION_PLAN.md §3.3).
+// The background prune loop for history retention (lurker-dev/RETENTION_PLAN.md §3.3).
 //
 // Shape: a self-rescheduling setTimeout chain (not setInterval — a tick that
 // found work reschedules itself sooner than one that didn't, TheLounge's

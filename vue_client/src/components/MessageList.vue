@@ -17,7 +17,7 @@
          leaving scrollTop near the top so maybeRequestHistory cascades. -->
     <!-- "no older", not "start of history": with retention the oldest stored
          line is usually not the first line ever said, and claiming it is
-         would be a lie the server can't even detect (RETENTION_PLAN.md). -->
+         would be a lie the server can't even detect (lurker-dev/RETENTION_PLAN.md). -->
     <div v-if="!buffer?.hasMoreOlder && messages.length" class="notice">— no older messages —</div>
     <!-- Exactly one of these renders when there are no message rows, so the
          pane is never silently blank: a fetch in flight (or pending — an
