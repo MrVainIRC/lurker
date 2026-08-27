@@ -780,6 +780,16 @@ connection-independent — offline networks still serve it.
 pipeline requests: keep a monotonically increasing token and drop any reply
 whose token you've superseded.
 
+**Stored history is NOT append-only.** Instances can enforce a retention
+policy (an operator ceiling and/or a per-user setting) that permanently
+deletes a buffer's oldest rows in the background. Do not treat a message id
+you once fetched as permanently fetchable: an `around` jump to it can come
+back `anchorMissing`, a `before` page can return fewer rows with
+`hasMoreOlder:false` earlier than history "should" end, and on the IRC
+bouncer surface an empty CHATHISTORY batch can mean pruned as well as
+never-existed. None of these are distinguishable from history that never
+existed — cache accordingly.
+
 ### `countBy` — what `limit` counts
 
 `limit` counts **stored rows**. If you consolidate presence noise — the web

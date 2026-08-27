@@ -168,10 +168,37 @@ const MAX_CONSECUTIVE_SASL_FAILURES = 3;
 // short window after the restore — see RESTORE_QUIET_MS.
 const RESTORE_QUIET_NUMERICS = new Set(['221', '324', '329', '331', '332', '333']);
 const RESTORE_QUIET_MS = 10_000;
-// The per-channel state requests after a restore go out paced, not as one
-// burst: three lines per channel for forty channels in one tick is exactly
-// the flood the JOIN coalescing elsewhere exists to avoid.
-const RESTORE_REQUEST_INTERVAL_MS = 400;
+// The per-channel state requests after a restore go out one channel at a time,
+// and the next channel waits for this one's replies (drainRestoreQueue). This
+// deadline is the fallback for a reply that never comes — a server that skips
+// a numeric, or a channel the engine still counts us in and the server does
+// not — so one silent channel costs one wait, not the whole restore.
+// LURKER_RESTORE_STEP_DEADLINE_MS overrides it, read per step, so a test of the
+// fallback does not have to sit through it.
+const RESTORE_STEP_DEADLINE_MS = 10_000;
+// The terminal reply of each request a restore step makes. Indexed by an
+// arbitrary numeric, so the value is `| undefined` — that is what makes the
+// `if (!reply) return` guard in noteRestoreReply type-honest for the numerics
+// that are not in the map (e.g. the 329 that follows 324).
+type RestoreReply = 'names' | 'topic' | 'mode';
+const RESTORE_REPLY_OF: Record<string, RestoreReply | undefined> = {
+  '366': 'names', // RPL_ENDOFNAMES
+  '331': 'topic', // RPL_NOTOPIC
+  '332': 'topic', // RPL_TOPIC
+  '324': 'mode', // RPL_CHANNELMODEIS
+};
+// On a restore, a channel with MORE than this many members does not get the
+// eager away-sync WHO (see the 'userlist' handler). That WHO's reply is one
+// verbose 352 line PER MEMBER — the heaviest thing a restore does, and what a
+// big-channel reconnect turns into an [event-loop] stall — while NAMES packs
+// many nicks per 353 line. In a channel this large per-member away dots matter
+// least, and away-notify keeps active members' state live regardless; the only
+// loss is that a member who was silently away before the reconnect reads as
+// present until they next move. Read live (LURKER_RESTORE_WHO_MAX_MEMBERS; 0
+// disables the restore WHO entirely). NOT a functional cap — a user /who and
+// every fresh interactive join still WHO in full; this only trims the eager
+// sync on the reconnect burst.
+const RESTORE_WHO_MAX_MEMBERS = 500;
 // How long a link-loss re-attach waits for the engine to say what it holds
 // before treating the session as gone and taking the ordinary reconnect ladder.
 const ENGINE_REATTACH_WAIT_MS = 10_000;
@@ -710,6 +737,9 @@ export class IrcConnection {
   private restoredCallbacks: Array<() => void>;
   private restoreQueue: string[];
   private restoreTimer: ReturnType<typeof setTimeout> | null;
+  // The restore step in flight: the folded channel and which of its replies
+  // are still owed. Null between steps and outside a restore.
+  private restoreStep: { key: string; owed: Set<RestoreReply> } | null;
   private engineTransport: EngineTransport | null;
   private engineSocketAlive: boolean;
   // folded channel → the state replies still owed from the restore's own
@@ -832,6 +862,7 @@ export class IrcConnection {
     this.restoredCallbacks = [];
     this.restoreQueue = [];
     this.restoreTimer = null;
+    this.restoreStep = null;
     this.engineTransport = null;
     this.engineSocketAlive = false;
     this.restoreQuiet = new Map();
@@ -1299,6 +1330,10 @@ export class IrcConnection {
           raw: { command: rawCommand, params: msg?.params ?? [] },
         });
       }
+      // A reply to the restore step in flight is what releases the next
+      // channel's requests. Before the denylist: 366 is exactly the kind of
+      // line the server buffer never shows.
+      this.noteRestoreReply(rawCommand, msg?.params?.[1]);
       if (isServerBufferDeniedNumeric(rawCommand)) return;
       if (
         RESTORE_QUIET_NUMERICS.has(rawCommand) &&
@@ -2930,13 +2965,31 @@ export class IrcConnection {
       // channel. away-notify keeps it live after this initial sync. Mark it so
       // the 'wholist' handler consumes the reply silently instead of echoing
       // every member to the server buffer (#342).
-      try {
-        c.who(eventChannel);
-        // Mark only after a successful send: if c.who() throws, a stale flag
-        // would silently suppress a later user-typed /who for this channel.
-        this.autoWhoTargets.add(eventChannel.toLowerCase());
-      } catch (_) {
-        /* ignore */
+      //
+      // Exception: on a RESTORE, a very large channel's away-sync WHO is skipped
+      // (RESTORE_WHO_MAX_MEMBERS) — its 352-per-member reply is the heaviest part
+      // of the reconnect burst. restoreQuiet marks exactly the channels
+      // drainRestoreQueue just requested, so this never touches a fresh
+      // interactive join (which WHOs in full, any size).
+      const rq = this.restoreQuiet.get(eventChannel.toLowerCase());
+      const inRestore = !!rq && Date.now() < rq.until;
+      const whoMax = reconnectEnvInt('LURKER_RESTORE_WHO_MAX_MEMBERS', RESTORE_WHO_MAX_MEMBERS);
+      if (inRestore && ch.members.size > whoMax) {
+        // Diagnostic only (docker logs), never a server-buffer row: on a big
+        // multi-network restore this can fire per channel.
+        console.log(
+          `[irc] restore: skipped away-sync WHO for ${eventChannel} (${ch.members.size} members > ${whoMax}) ` +
+            `on network ${this.network.id}; away-notify keeps it live`,
+        );
+      } else {
+        try {
+          c.who(eventChannel);
+          // Mark only after a successful send: if c.who() throws, a stale flag
+          // would silently suppress a later user-typed /who for this channel.
+          this.autoWhoTargets.add(eventChannel.toLowerCase());
+        } catch (_) {
+          /* ignore */
+        }
       }
       const ms = Date.now() - tHandler;
       if (IRC_HANDLER_WARN_MS > 0 && ms >= IRC_HANDLER_WARN_MS) {
@@ -4280,8 +4333,9 @@ export class IrcConnection {
         this.restoring = false;
         // A synthesised JOIN gets none of what a real one is volunteered — no
         // 353/366, no 332, and the join handler's MODE is skipped on a restore —
-        // so ask, one channel at a time (RESTORE_REQUEST_INTERVAL_MS), keeping
-        // each channel's replies out of the server buffer until they arrive.
+        // so ask, one channel at a time, each waiting for the last one's
+        // replies (drainRestoreQueue), keeping each channel's replies out of
+        // the server buffer until they arrive.
         // Our umodes were set after the burst ended (the post-MOTD `MODE nick
         // +i`), so they are not in the replay either.
         this.restoreQuiet.set('*', {
@@ -4340,32 +4394,82 @@ export class IrcConnection {
     this.restoreUnattended = false;
     this.restoredCallbacks = [];
     this.restoreQueue = [];
+    this.endRestoreStep();
+    this.restoreQuiet.clear();
+  }
+
+  private endRestoreStep(): void {
     if (this.restoreTimer) {
       clearTimeout(this.restoreTimer);
       this.restoreTimer = null;
     }
-    this.restoreQuiet.clear();
+    this.restoreStep = null;
   }
 
+  // One channel in flight. The next channel's three requests go out when this
+  // one's replies are all in — NAMES → 366, TOPIC → 331/332, MODE → 324 — or
+  // when the step deadline passes. Closed-loop rather than a fixed interval
+  // because the interval was a guess at one ircd's flood budget, and wrong:
+  // solanum (Libera) lets a registered client past its grace period send 5
+  // lines and then 2 per second, and kills at 20 unprocessed — so 4 lines per
+  // channel every 400 ms was "Excess Flood" by the seventh channel on every
+  // restart. Gated on replies, the server's queue never holds more than four
+  // lines of ours on any ircd — these three plus the WHO the NAMES reply
+  // triggers ('userlist'), which irc-framework already serialises behind its
+  // 315 (`who_queue`) — and a server that throttles simply sets the pace. The
+  // WHO is deliberately NOT part of the gate: irc-framework's queue never
+  // recovers from a 315 that does not come, and a step waiting on it would
+  // turn that one lost reply into a deadline wait for every channel after it.
   private drainRestoreQueue(): void {
-    const name = this.restoreQueue.shift();
-    if (name === undefined) return;
-    // Still in it? (A backlog KICK may have arrived in between.)
-    if (this.channels.has(name.toLowerCase())) {
-      this.restoreQuiet.set(name.toLowerCase(), {
-        until: Date.now() + RESTORE_QUIET_MS,
-        mode: true,
-        topic: true,
-      });
-      this.rawQuiet('NAMES', name);
-      this.rawQuiet('TOPIC', name);
-      this.rawQuiet('MODE', name);
+    this.endRestoreStep();
+    // Skip what we are no longer in (a backlog KICK may have arrived in
+    // between). isChannelJoined, not a raw toLowerCase probe — membership folds
+    // through the network's CASEMAPPING (this file's #707 rule).
+    let name = this.restoreQueue.shift();
+    while (name !== undefined && !this.isChannelJoined(name)) {
+      name = this.restoreQueue.shift();
     }
-    if (this.restoreQueue.length === 0) return;
-    this.restoreTimer = setTimeout(() => {
-      this.restoreTimer = null;
-      if (!this.disposed && this.state === 'connected') this.drainRestoreQueue();
-    }, RESTORE_REQUEST_INTERVAL_MS);
+    if (name === undefined) return;
+    this.restoreQuiet.set(name.toLowerCase(), {
+      until: Date.now() + RESTORE_QUIET_MS,
+      mode: true,
+      topic: true,
+    });
+    // Keyed by the network's own fold: the replies echo the channel as the
+    // server spells it, which on an rfc1459 network is not a toLowerCase away.
+    this.restoreStep = {
+      key: foldTargetFor(this.network.id, name),
+      owed: new Set(['names', 'topic', 'mode']),
+    };
+    this.rawQuiet('NAMES', name);
+    this.rawQuiet('TOPIC', name);
+    this.rawQuiet('MODE', name);
+    this.restoreTimer = setTimeout(
+      () => {
+        this.restoreTimer = null;
+        if (!this.disposed && this.state === 'connected') this.drainRestoreQueue();
+      },
+      Math.max(1, reconnectEnvInt('LURKER_RESTORE_STEP_DEADLINE_MS', RESTORE_STEP_DEADLINE_MS)),
+    );
+  }
+
+  // A server line naming the in-flight step's channel: retire the reply it is,
+  // and when nothing is owed, move on. 403/442 mean the channel will answer
+  // nothing at all.
+  private noteRestoreReply(numeric: string, channel: unknown): void {
+    const step = this.restoreStep;
+    if (!step || typeof channel !== 'string') return;
+    if (foldTargetFor(this.network.id, channel) !== step.key) return;
+    if (numeric === '403' || numeric === '442') {
+      step.owed.clear();
+    } else {
+      const reply = RESTORE_REPLY_OF[numeric];
+      if (!reply) return;
+      step.owed.delete(reply);
+    }
+    if (step.owed.size === 0 && !this.disposed && this.state === 'connected') {
+      this.drainRestoreQueue();
+    }
   }
 
   private rawQuiet(command: string, arg: string): void {

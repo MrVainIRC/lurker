@@ -15,7 +15,10 @@
          user's view during a history fetch, shifting scrollTop and either
          throwing off the prepend anchor math or (with browser anchoring)
          leaving scrollTop near the top so maybeRequestHistory cascades. -->
-    <div v-if="!buffer?.hasMoreOlder && messages.length" class="notice">— start of history —</div>
+    <!-- "no older", not "start of history": with retention the oldest stored
+         line is usually not the first line ever said, and claiming it is
+         would be a lie the server can't even detect (lurker-dev/RETENTION_PLAN.md). -->
+    <div v-if="!buffer?.hasMoreOlder && messages.length" class="notice">— no older messages —</div>
     <!-- Exactly one of these renders when there are no message rows, so the
          pane is never silently blank: a fetch in flight (or pending — an
          unhydrated shell awaiting the reconciler) says so, a hydrated-but-
@@ -2868,7 +2871,7 @@ watch(
 /* Boundary between read and unread messages. Pinned to the lastReadId
    snapshot taken on buffer activation; advances only after switch-away.
    Dashed border on either side of the label, warn-colored to differentiate
-   from the muted "start of history" notice. */
+   from the muted "no older messages" notice. */
 .unread-divider {
   color: var(--warn);
   font-style: normal;
