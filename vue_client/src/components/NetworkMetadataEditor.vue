@@ -90,7 +90,11 @@ watch(
   () => {
     for (const key of metadataKeys) {
       const value = metadataValue(key);
-      values[key] = value;
+      // Keep locally edited fields intact while another metadata key arrives
+      // from the server. Once a server update confirms this field, the input
+      // and its baseline converge to that authoritative value.
+      const unchangedSinceServer = values[key] === savedValues[key];
+      if (unchangedSinceServer) values[key] = value;
       savedValues[key] = value;
     }
   },
@@ -130,7 +134,6 @@ function save(): void {
         })
       ) {
         sent += 1;
-        savedValues[key] = value;
       }
     }
   }

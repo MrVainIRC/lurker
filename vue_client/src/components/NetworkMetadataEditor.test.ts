@@ -6,6 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
+import { nextTick } from 'vue';
 
 vi.mock('../composables/useSocket.js', () => ({
   socketSend: vi.fn<(payload: Record<string, unknown>) => boolean>(() => true),
@@ -95,5 +96,27 @@ describe('NetworkMetadataEditor', () => {
       command: 'SET',
       params: ['avatar', 'https://example.test/avatar.png'],
     });
+  });
+
+  it('does not overwrite a locally edited field when another server value arrives', async () => {
+    const networks = useNetworksStore();
+    networks.states[1] = {
+      networkId: 1,
+      state: 'connected',
+      nick: 'Me',
+      channels: [],
+      negotiatedFeatures: { metadata: true, setname: false },
+      metadata: {},
+    };
+    const wrapper = mount(NetworkMetadataEditor, { props: { networkId: 1 } });
+    await wrapper.findAll('input')[0].setValue('pending-avatar');
+
+    networks.states[1].metadata = {
+      '*': [{ key: 'status', value: 'online', visibility: '*' }],
+    };
+    await nextTick();
+
+    expect(wrapper.findAll('input')[0].element.value).toBe('pending-avatar');
+    expect(wrapper.findAll('input')[3].element.value).toBe('online');
   });
 });

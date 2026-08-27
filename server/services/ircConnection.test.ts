@@ -3985,15 +3985,16 @@ describe('IRCv3 draft/metadata-2', () => {
   }
 
   it('sends the draft SET form and uses SET without a value to remove one key', () => {
-    const { conn, raw } = makeConn('metadata-wire');
+    const { conn, raw, network } = makeConn('metadata-wire');
 
-    expect(conn.sendMetadata('*', 'SET', 'display-name', 'Me Vain')).toBe(true);
-    expect(conn.sendMetadata('*', 'SET', 'display-name')).toBe(true);
+    expect(conn.sendMetadata('*', 'SET', 'avatar', 'https://example.test/avatar.png')).toBe(true);
+    expect(conn.sendMetadata('*', 'SET', 'avatar')).toBe(true);
 
     expect(raw.mock.calls).toEqual([
-      ['METADATA * SET display-name :Me Vain'],
-      ['METADATA * SET display-name'],
+      ['METADATA * SET avatar https://example.test/avatar.png'],
+      ['METADATA * SET avatar'],
     ]);
+    expect(listIrcMetadataForNetwork(network.id)).toEqual([]);
   });
 
   it('does not send SETNAME without a realname parameter', () => {
@@ -4006,6 +4007,15 @@ describe('IRCv3 draft/metadata-2', () => {
     expect(conn.sendSetname('   ')).toBe(false);
     expect(conn.sendSetname('New Name')).toBe(true);
     expect(raw).toHaveBeenCalledWith('SETNAME :New Name');
+  });
+
+  it('requests the complete self profile in addition to subscribed metadata', () => {
+    const { conn, raw } = makeConn('metadata-profile-list');
+    const subscribe = (conn as unknown as { subscribeMetadata: () => void }).subscribeMetadata;
+
+    subscribe.call(conn);
+
+    expect(raw).toHaveBeenCalledWith('METADATA * LIST');
   });
 
   it('stores self metadata under the stable target and accepts server values with spaces', () => {
@@ -4055,5 +4065,27 @@ describe('IRCv3 draft/metadata-2', () => {
       line: ':irc.example.test 766 me * avatar :key not set',
     });
     expect(listIrcMetadataForNetwork(network.id)).toEqual([]);
+  });
+
+  it('does not surface an already-cleared key as a metadata error', () => {
+    const { conn, published } = makeConn('metadata-noop-error');
+
+    conn.client.emit('raw', {
+      from_server: true,
+      line: ':irc.example.test FAIL METADATA KEY_NOT_SET avatar :key not set',
+    });
+    expect(published).not.toHaveBeenCalled();
+
+    conn.client.emit('raw', {
+      from_server: true,
+      line: ':irc.example.test FAIL METADATA KEY_INVALID avatar :invalid key',
+    });
+    expect(published).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'standard-reply',
+        command: 'METADATA',
+        code: 'KEY_INVALID',
+      }),
+    );
   });
 });

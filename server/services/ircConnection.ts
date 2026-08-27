@@ -1006,8 +1006,12 @@ export class IrcConnection {
     // The server normally sends our own metadata in the registration burst,
     // but SYNC is the specified recovery path and is needed by servers that
     // defer that burst. It also makes the persisted profile converge after a
-    // reconnect instead of relying only on the local optimistic write.
+    // reconnect from the server's current state.
     this.sendMetadata('*', 'SYNC');
+    // SYNC is limited to subscribed keys. LIST is the authoritative fallback
+    // for the settings view, which exposes more fields than a server may allow
+    // in one subscription list.
+    this.sendMetadata('*', 'LIST');
     for (const channel of this.channels.values()) this.sendMetadata(channel.name, 'SYNC');
     this.metadataSubscriptionSent = true;
   }
@@ -1262,16 +1266,26 @@ export class IrcConnection {
         (rawCommand === 'FAIL' || rawCommand === 'WARN' || rawCommand === 'NOTE') &&
         msg.params.length >= 3
       ) {
-        this.publishEphemeral({
-          type: 'standard-reply',
-          target: this.standardReplyTarget(msg.params),
-          severity: rawCommand.toLowerCase(),
-          command: msg.params[1] || '',
-          code: msg.params[2] || '',
-          params: msg.params.slice(3),
-          label: msg.tags?.['label'] || null,
-          text: msg.params[msg.params.length - 1] || '',
-        });
+        // Metadata SET without a value is the specified way to remove one
+        // key. KEY_NOT_SET means that the requested removal was already in
+        // effect, so it is a harmless no-op rather than a user-facing error.
+        // Do not hide other metadata failures: permission, invalid-key and
+        // value errors still need to reach the client.
+        const harmlessMetadataNoop =
+          msg.params[1]?.toUpperCase() === 'METADATA' &&
+          msg.params[2]?.toUpperCase() === 'KEY_NOT_SET';
+        if (!harmlessMetadataNoop) {
+          this.publishEphemeral({
+            type: 'standard-reply',
+            target: this.standardReplyTarget(msg.params),
+            severity: rawCommand.toLowerCase(),
+            command: msg.params[1] || '',
+            code: msg.params[2] || '',
+            params: msg.params.slice(3),
+            label: msg.tags?.['label'] || null,
+            text: msg.params[msg.params.length - 1] || '',
+          });
+        }
       }
       // draft/multiline BATCH start: the logical message's msgid/@time ride
       // THIS line per the spec, and irc-framework drops them when it reduces
@@ -4676,22 +4690,9 @@ export class IrcConnection {
       return false;
     }
     this.sendCommand('METADATA', [target, normalizedCommand, ...params]);
-    // `METADATA * SET` changes our own profile. Some servers do not
-    // echo that change through METADATA, so update the persisted snapshot and
-    // connected clients immediately; an eventual server echo remains
-    // idempotent. The settings view can therefore retain values across a
-    // disconnect and reconnect even without a metadata-notify echo.
-    if (target === '*' && (normalizedCommand === 'SET' || normalizedCommand === 'CLEAR')) {
-      const key = params[0];
-      if (key && /^[a-z0-9_./-]+$/.test(key)) {
-        this.handleMetadataValue(
-          this.currentNick,
-          key,
-          normalizedCommand === 'SET' && params.length > 1 ? params[1] : null,
-          '*',
-        );
-      }
-    }
+    // Do not persist a local optimistic value here. The metadata-2 draft says
+    // clients should validate the server response before caching it; 761 and
+    // METADATA are handled above, while 766 removes a key after confirmation.
     return true;
   }
 
