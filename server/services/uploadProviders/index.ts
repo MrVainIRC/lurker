@@ -13,6 +13,7 @@ import * as local from './local.js';
 import * as zipline from './zipline.js';
 import * as chibisafe from './chibisafe.js';
 import * as s3 from './s3.js';
+import * as custom from './custom.js';
 import type { UploadDriver } from './types.js';
 
 export type {
@@ -32,6 +33,7 @@ const DRIVERS: Record<string, UploadDriver> = {
   [zipline.driver]: zipline,
   [chibisafe.driver]: chibisafe,
   [s3.driver]: s3,
+  [custom.driver]: custom,
 };
 
 export const driverIds = Object.keys(DRIVERS);

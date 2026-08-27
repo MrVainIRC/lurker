@@ -39,6 +39,8 @@
         v-if="openIndex === i"
         class="submenu"
         :class="{ grid: item.layout === 'grid' }"
+        :style="submenuStyle"
+        :ref="(el) => setSubmenuElement(i, el)"
         role="menu"
       >
         <ContextMenuBranch :items="item.children" @select="emit('select', $event)" />
@@ -59,7 +61,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { nextTick, ref } from 'vue';
 import type { ContextMenuItem } from '../composables/useContextMenu.js';
 
 defineOptions({ name: 'ContextMenuBranch' });
@@ -67,13 +69,52 @@ defineOptions({ name: 'ContextMenuBranch' });
 defineProps<{ items: ContextMenuItem[] }>();
 const emit = defineEmits<{ select: [item: ContextMenuItem] }>();
 const openIndex = ref<number | null>(null);
+const submenuEl = ref<HTMLElement | null>(null);
+const submenuStyle = ref<Record<string, string>>({ visibility: 'hidden' });
 
 function openBranch(index: number): void {
   openIndex.value = index;
+  submenuEl.value = null;
+  submenuStyle.value = { visibility: 'hidden' };
+  void nextTick(positionSubmenu);
 }
 
 function toggleBranch(index: number): void {
   openIndex.value = openIndex.value === index ? null : index;
+  submenuEl.value = null;
+  submenuStyle.value = { visibility: 'hidden' };
+  if (openIndex.value !== null) void nextTick(positionSubmenu);
+}
+
+function setSubmenuElement(index: number, value: unknown): void {
+  if (index !== openIndex.value) return;
+  submenuEl.value = value instanceof HTMLElement ? value : null;
+}
+
+async function positionSubmenu(): Promise<void> {
+  await nextTick();
+  const el = submenuEl.value;
+  const branch = el?.parentElement;
+  if (!el || !branch || openIndex.value === null) return;
+
+  const menuRect = el.getBoundingClientRect();
+  const branchRect = branch.getBoundingClientRect();
+  const pad = 4;
+  const gap = 4;
+  const rightX = branchRect.right - gap;
+  const leftX = branchRect.left + gap - menuRect.width;
+  const rightFits = rightX + menuRect.width <= window.innerWidth - pad;
+  const leftFits = leftX >= pad;
+  const preferredX = rightFits || !leftFits ? rightX : leftX;
+  const maxX = Math.max(pad, window.innerWidth - menuRect.width - pad);
+  const maxY = Math.max(pad, window.innerHeight - menuRect.height - pad);
+  const x = Math.min(Math.max(preferredX, pad), maxX);
+  const y = Math.min(Math.max(branchRect.top - 4, pad), maxY);
+  submenuStyle.value = {
+    left: `${x}px`,
+    top: `${y}px`,
+    visibility: 'visible',
+  };
 }
 
 function submitInput(item: ContextMenuItem, event: KeyboardEvent): void {
@@ -91,10 +132,8 @@ function submitInput(item: ContextMenuItem, event: KeyboardEvent): void {
   position: relative;
 }
 .submenu {
-  position: absolute;
+  position: fixed;
   z-index: 1;
-  top: calc(-1 * var(--space-2));
-  left: calc(100% - var(--space-1));
   box-sizing: border-box;
   min-width: min(160px, calc(100vw - 8px));
   max-width: calc(100vw - 8px);
@@ -110,14 +149,15 @@ function submitInput(item: ContextMenuItem, event: KeyboardEvent): void {
 }
 .submenu.grid {
   display: grid;
-  grid-template-columns: repeat(6, 2.25rem);
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: var(--space-1);
   min-width: 0;
+  width: min(16rem, calc(100vw - 8px));
   padding: var(--space-2);
 }
 .submenu.grid :deep(.item) {
   justify-content: center;
-  width: 2.25rem;
+  width: 100%;
   height: 2.25rem;
   padding: 0;
 }

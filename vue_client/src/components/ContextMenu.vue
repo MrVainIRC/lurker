@@ -165,14 +165,15 @@ onBeforeUnmount(() => {
 }
 .context-menu.grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 2.25rem));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: var(--space-1);
   min-width: 0;
+  width: min(16rem, calc(100vw - 8px));
   padding: var(--space-2);
 }
 .context-menu.grid :deep(.item) {
   justify-content: center;
-  width: 2.25rem;
+  width: 100%;
   height: 2.25rem;
   padding: 0;
 }

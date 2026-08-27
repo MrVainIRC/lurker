@@ -69,7 +69,9 @@ describe('GET /api/uploaders', () => {
     // (see the migrated-hoarder case below for why the list is the whole set).
     // x0 and local are zero-config singletons; hoarder is the seed-managed dropper.
     const creatable = res.body.drivers.filter((d: any) => d.creatable).map((d: any) => d.driver);
-    expect(creatable).toEqual(expect.arrayContaining(['catbox', 'zipline', 'chibisafe', 's3']));
+    expect(creatable).toEqual(
+      expect.arrayContaining(['catbox', 'zipline', 'chibisafe', 's3', 'custom']),
+    );
     expect(creatable).not.toContain('x0');
     expect(creatable).not.toContain('local');
     expect(creatable).not.toContain('hoarder');
@@ -115,6 +117,19 @@ describe('GET /api/uploaders', () => {
     const secret = s3.configSchema.find((f: any) => f.key === 'secret_access_key');
     expect(secret.type).toBe('secret');
     expect(secret.required).toBe(true);
+  });
+
+  it('describes the custom HTTP uploader for RustyPaste-style endpoints', async () => {
+    const res = await agent.get('/api/uploaders');
+    const custom = res.body.drivers.find((d: any) => d.driver === 'custom');
+    expect(custom.creatable).toBe(true);
+    expect(custom.configSchema.map((f: any) => f.key)).toEqual([
+      'url',
+      'file_field',
+      'auth_header',
+      'auth_token',
+    ]);
+    expect(custom.configSchema.find((f: any) => f.key === 'auth_token').type).toBe('secret');
   });
 
   it('an instance uploader is a name to pick, not a config to read', async () => {

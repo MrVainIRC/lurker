@@ -54,9 +54,9 @@ describe('useMessageActions', () => {
       expect(actions.map((a) => a.key)).toEqual(['reply', 'copy', 'save', 'ignore']);
     });
 
-    it('drops reply + ignore on your own line', () => {
+    it('keeps reply but drops ignore on your own line', () => {
       const actions = useMessageActions().buildActions(other({ self: true }));
-      expect(actions.map((a) => a.key)).toEqual(['copy', 'save']);
+      expect(actions.map((a) => a.key)).toEqual(['reply', 'copy', 'save']);
     });
 
     it('drops copy when there is no text', () => {
@@ -97,6 +97,7 @@ describe('useMessageActions', () => {
         }),
       );
       expect(actions.map((a) => a.key)).toEqual([
+        'reply',
         'react',
         'unreact',
         'edit',

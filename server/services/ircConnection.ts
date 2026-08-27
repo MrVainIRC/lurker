@@ -4545,6 +4545,22 @@ export class IrcConnection {
       return false;
     }
     this.sendCommand('METADATA', [target, normalizedCommand, ...params]);
+    // `METADATA * SET/CLEAR` changes our own profile. Some servers do not
+    // echo that change through METADATA, so update the persisted snapshot and
+    // connected clients immediately; an eventual server echo remains
+    // idempotent. The settings view can therefore retain values across a
+    // disconnect and reconnect even without a metadata-notify echo.
+    if (target === '*' && (normalizedCommand === 'SET' || normalizedCommand === 'CLEAR')) {
+      const key = params[0];
+      if (key && /^[a-z0-9_./-]+$/.test(key)) {
+        this.handleMetadataValue(
+          this.currentNick,
+          key,
+          normalizedCommand === 'SET' ? (params[1] ?? '') : null,
+          '*',
+        );
+      }
+    }
     return true;
   }
 

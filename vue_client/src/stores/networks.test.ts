@@ -45,6 +45,26 @@ describe('canDisconnect — which action a network state needs', () => {
 });
 
 describe('IRC metadata targets', () => {
+  it('hydrates persisted metadata for settings on an offline snapshot', () => {
+    setActivePinia(createPinia());
+    const networks = useNetworksStore();
+    networks.applySnapshot([
+      {
+        networkId: 1,
+        state: 'disconnected',
+        nick: 'Me',
+        channels: [],
+        metadata: [
+          { target: 'Me', key: 'display-name', value: 'Saved name', visibility: 'public' },
+        ],
+      },
+    ]);
+
+    expect(networks.states[1]?.metadata?.Me).toEqual([
+      { key: 'display-name', value: 'Saved name', visibility: 'public' },
+    ]);
+  });
+
   it('keeps DM metadata under the visible nick', () => {
     setActivePinia(createPinia());
     const networks = useNetworksStore();

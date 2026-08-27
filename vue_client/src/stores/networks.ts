@@ -56,6 +56,12 @@ export interface NetworkState {
   metadata?: Record<string, Array<{ key: string; value: string; visibility: string }>>;
 }
 
+// Wire snapshots carry metadata as flat rows; the store normalizes them into
+// the keyed shape above for consumers such as the profile settings editor.
+export type NetworkSnapshot = Omit<NetworkState, 'metadata'> & {
+  metadata?: Array<{ target: string; key: string; value: string; visibility?: string }>;
+};
+
 export interface ActiveBuffer {
   networkId: number;
   target: string;
@@ -217,7 +223,7 @@ export const useNetworksStore = defineStore('networks', {
     activateVirtual(key: string) {
       this.activeKey = key;
     },
-    applySnapshot(networks: NetworkState[]) {
+    applySnapshot(networks: NetworkSnapshot[]) {
       const map: Record<number | string, NetworkState> = {};
       for (const snap of networks) {
         const metadata: NetworkState['metadata'] = {};

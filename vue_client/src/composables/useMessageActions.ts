@@ -180,12 +180,14 @@ export function useMessageActions(): MessageActionsAPI {
     if (!message) return [];
     const actions: MessageAction[] = [];
 
-    // Reply and Ignore both address another user: pointless on your own line,
-    // and the server uses the hostmask for delivery, not ignore filtering.
+    // Replying to your own message is still useful for threading, while Ignore
+    // remains limited to another user. The server uses the hostmask for ignore
+    // filtering, so offering "Ignore me" would never be meaningful.
     const networkId = message.networkId ?? message.network_id;
     const featureState = networkId == null ? null : networks.states[networkId];
     const features = featureState?.negotiatedFeatures;
-    const addressable = !message.self && !!message.nick;
+    const addressable = !!message.nick;
+    const ignorable = !message.self && addressable;
     const replyable =
       addressable &&
       !!message.msgid &&
@@ -245,7 +247,7 @@ export function useMessageActions(): MessageActionsAPI {
       });
     }
 
-    if (addressable) {
+    if (ignorable) {
       actions.push({ key: 'ignore', label: `Ignore ${message.nick}…`, icon: 'fa-solid fa-ban' });
     }
 

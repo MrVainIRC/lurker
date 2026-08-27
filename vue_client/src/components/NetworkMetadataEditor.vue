@@ -72,7 +72,9 @@ const ownMetadata = computed(() => {
   const state = networks.states[props.networkId];
   const nick = state?.nick || '';
   const rows = state?.metadata || {};
-  const target = Object.keys(rows).find((key) => key.toLowerCase() === nick.toLowerCase());
+  const target =
+    Object.keys(rows).find((key) => key.toLowerCase() === nick.toLowerCase()) ||
+    (rows['*'] ? '*' : undefined);
   return target ? rows[target] : [];
 });
 
@@ -98,9 +100,12 @@ watch(
 
 function save(): void {
   let sent = 0;
+  // Snapshot all values before sending. A server echo can update ownMetadata
+  // between two commands and the watcher would otherwise replace the still
+  // unsent fields with their old values.
+  const pendingMetadata = metadataKeys.map((key) => ({ key, value: values[key].trim() }));
   if (features.value.metadata) {
-    for (const key of metadataKeys) {
-      const value = values[key].trim();
+    for (const { key, value } of pendingMetadata) {
       const command = value ? 'SET' : 'CLEAR';
       const params = value ? [key, value] : [key];
       if (

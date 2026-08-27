@@ -47,6 +47,7 @@ import {
   removeRelayBot as removeRelayBotRow,
 } from '../db/relayBots.js';
 import type { RelayBotResult } from '../db/relayBots.js';
+import { listIrcMetadataForNetwork } from '../db/ircMetadata.js';
 import { unfavoriteBuffer } from '../db/favoriteBuffers.js';
 import { splitSay, splitAction, hasInteriorNewline } from './messageSplit.js';
 import { e2eManager } from './e2e/manager.js';
@@ -1103,6 +1104,7 @@ class IrcManager extends EventEmitter {
           away: null,
           channels: [],
           peerPresence: {},
+          metadata: listIrcMetadataForNetwork(net.id),
           networkIcon: net.network_icon || null,
           negotiatedFeatures: {},
         }),

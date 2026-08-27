@@ -8,6 +8,7 @@ import * as dropper from './dropper.js';
 import * as zipline from './zipline.js';
 import * as chibisafe from './chibisafe.js';
 import * as s3 from './s3.js';
+import * as custom from './custom.js';
 import * as multipart from './multipart.js';
 import type { PostBufferResult } from './multipart.js';
 import { bufferSource } from './source.js';
@@ -161,6 +162,88 @@ describe('x0 provider', () => {
     await expect(
       x0.upload(src([1]), { filename: 'x.png', mime: 'image/png' }),
     ).rejects.toMatchObject({ code: 'PROVIDER_ERROR' });
+  });
+});
+
+describe('custom HTTP provider', () => {
+  it('POSTs the configured multipart field and raw auth token', async () => {
+    const cap = capturePost();
+    const result = await custom.upload(
+      src([1, 2, 3]),
+      { filename: 'note.txt', mime: 'text/plain' },
+      {
+        url: 'https://paste.example/upload',
+        file_field: 'file',
+        auth_header: 'Authorization',
+        auth_token: 'raw-token',
+      },
+    );
+    expect(cap.url).toBe('https://paste.example/upload');
+    expect(cap.headers!.Authorization).toBe('raw-token');
+    expect(cap.headers!['User-Agent']).toMatch(/^Lurker\//);
+    expect(filePart(cap, 'file')).toMatchObject({
+      filename: 'note.txt',
+      contentType: 'text/plain',
+    });
+    expect(result).toEqual({ url: 'https://example.test/abc.png' });
+  });
+
+  it('accepts a JSON URL response and optional custom field/header names', async () => {
+    const cap = capturePost();
+    postResponse = {
+      status: 200,
+      headers: {},
+      text: JSON.stringify({ url: 'https://paste.example/files/note.txt' }),
+    };
+    const result = await custom.upload(
+      src([1]),
+      { filename: 'note.txt', mime: 'text/plain' },
+      {
+        url: 'https://paste.example',
+        file_field: 'upload',
+        auth_header: 'X-Token',
+        auth_token: 't',
+      },
+    );
+    expect(cap.url).toBe('https://paste.example/');
+    expect(cap.headers!['X-Token']).toBe('t');
+    expect(filePart(cap, 'upload').filename).toBe('note.txt');
+    expect(result.url).toBe('https://paste.example/files/note.txt');
+  });
+
+  it('rejects unsafe configuration before making a request', async () => {
+    await expect(
+      custom.upload(src([1]), { filename: 'x.txt', mime: 'text/plain' }, { url: 'file:///tmp/x' }),
+    ).rejects.toMatchObject({ code: 'PROVIDER_CONFIG' });
+    await expect(
+      custom.upload(
+        src([1]),
+        { filename: 'x.txt', mime: 'text/plain' },
+        { url: 'https://paste.example', auth_header: 'X Bad' },
+      ),
+    ).rejects.toMatchObject({ code: 'PROVIDER_CONFIG' });
+    await expect(
+      custom.upload(
+        src([1]),
+        { filename: 'x.txt', mime: 'text/plain' },
+        { url: 'https://paste.example', file_field: 'file[name]' },
+      ),
+    ).rejects.toMatchObject({ code: 'PROVIDER_CONFIG' });
+  });
+
+  it('maps authentication failures separately from other provider failures', async () => {
+    vi.spyOn(multipart, 'postMultipart').mockResolvedValue({
+      status: 401,
+      headers: {},
+      text: 'unauthorized',
+    });
+    await expect(
+      custom.upload(
+        src([1]),
+        { filename: 'x.txt', mime: 'text/plain' },
+        { url: 'https://paste.example' },
+      ),
+    ).rejects.toMatchObject({ code: 'PROVIDER_AUTH' });
   });
 });
 

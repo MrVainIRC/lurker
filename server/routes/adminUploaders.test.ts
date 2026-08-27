@@ -107,6 +107,18 @@ describe('GET /api/admin/uploaders', () => {
     expect(byDriver.catbox.builtIn).toBe(true);
     expect(res.body.drivers.map((d: any) => d.driver)).toContain('catbox');
   });
+
+  it('offers the custom HTTP uploader in the admin driver catalog', async () => {
+    const res = await adminAgent.get('/api/admin/uploaders');
+    const custom = res.body.drivers.find((d: any) => d.driver === 'custom');
+    expect(custom.creatable).toBe(true);
+    expect(custom.configSchema.map((f: any) => f.key)).toEqual([
+      'url',
+      'file_field',
+      'auth_header',
+      'auth_token',
+    ]);
+  });
 });
 
 describe('creating and configuring an instance uploader', () => {

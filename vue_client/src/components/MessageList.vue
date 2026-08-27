@@ -739,7 +739,8 @@ const actionContext: MessageContext = {
     return buffer.value?.networkId ?? 0;
   },
   onReply: (msg) => {
-    if (msg.nick) addressNick(msg.nick);
+    // A self-reply needs the thread anchor but not an address to our own nick.
+    if (msg.nick && !msg.self) addressNick(msg.nick);
     const b = buffer.value;
     if (b?.networkId != null && msg.msgid) {
       buffers.setReply(b.networkId, b.target, msg as any);

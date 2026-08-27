@@ -2,23 +2,21 @@
 # SPDX-License-Identifier: MPL-2.0
 
 # Stage 1: Build Vue client
-FROM node:24-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03 AS vue-builder
+FROM node:24-slim AS vue-builder
 
 WORKDIR /app/vue_client
+
+ARG PUBLIC_BASE_PATH=
+ENV PUBLIC_BASE_PATH=${PUBLIC_BASE_PATH}
 
 COPY vue_client/package*.json ./
 RUN npm ci
 
 COPY vue_client/ ./
-# Vue and server both import shared/settingsRegistry.js via relative paths,
-# so the shared/ tree has to land at /app/shared regardless of which stage
-# is doing the work.
 COPY shared/ /app/shared/
-# vue_client/tsconfig.json extends ../tsconfig.base.json; Vite reads the
-# resolved tsconfig during build, so the base file has to land at /app too.
 COPY tsconfig.base.json /app/tsconfig.base.json
-RUN npm run build
 
+RUN npm run build
 # Stage 2: Install server dependencies
 #
 # Using debian-slim (glibc) rather than alpine (musl) so better-sqlite3 and
