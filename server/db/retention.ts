@@ -32,9 +32,19 @@ export function takeDirtyBuffers(): number[] {
   return out;
 }
 
-/** Boot seeding: every buffer is suspect until the sweeper has looked once. */
+/** Boot seeding: every buffer is suspect until the sweeper has looked once.
+ *  Also the after-import catch-all — imported rows bypass insertMessage, so
+ *  nothing else would ever mark their buffers. */
 export function seedAllBuffersDirty(): void {
   const rows = db.prepare(`SELECT id FROM buffers`).all() as Array<{ id: number }>;
+  for (const row of rows) dirtyBuffers.add(row.id);
+}
+
+/** Re-examine one user's buffers — their retention setting changed. */
+export function seedUserBuffersDirty(userId: number): void {
+  const rows = db.prepare(`SELECT id FROM buffers WHERE user_id = ?`).all(userId) as Array<{
+    id: number;
+  }>;
   for (const row of rows) dirtyBuffers.add(row.id);
 }
 

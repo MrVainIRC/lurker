@@ -137,7 +137,7 @@ describe('runRetentionTick', () => {
 
     const first = await runRetentionTick({ ...OPTS, maxBatchesPerTick: 2 });
     expect(first.backlog).toBe(true);
-    expect(first.rowsDeleted).toBe(8); // 2 budgeted batches of 4
+    expect(first.rowsDeleted).toBe(4); // the boundary probe spends 1, one batch of 4 spends the other
 
     let guard = 0;
     let backlog = true;
@@ -155,5 +155,40 @@ describe('runRetentionTick', () => {
     // …and takeDirtyBuffers drained it, so a tick now examines nothing.
     const result = await runRetentionTick(OPTS);
     expect(result.buffersExamined).toBe(0);
+  });
+
+  it('lowering the cap in settings prunes without waiting for a new insert', async () => {
+    const { wireRetentionSettingsListener } = await import('./retentionSweeper.js');
+    const settingsService = (await import('./settingsService.js')).default;
+    const { userId, ids, bufferId } = seedBuffer('ret-setting', 12);
+
+    // Drain the seeding inserts and verify the buffer is clean and uncapped.
+    await runRetentionTick(OPTS);
+    expect(rowIds(bufferId)).toHaveLength(12);
+
+    // The settings write alone must re-mark the user's buffers — the copy
+    // promises deletion, not "deletion once the buffer next sees traffic".
+    wireRetentionSettingsListener();
+    const updated = settingsService.update(userId, { 'data.retention.lines': 3 });
+    expect(updated.ok).toBe(true);
+    await runRetentionTick(OPTS);
+    expect(rowIds(bufferId)).toEqual(ids.slice(9));
+  });
+
+  it('an in-flight export pauses the sweep without losing the dirty set', async () => {
+    const { createExportJob, deleteJob } = await import('../db/dataExports.js');
+    const { userId, ids, bufferId } = seedBuffer('ret-export', 12);
+    setUserSetting(userId, 'data.retention.lines', 5);
+
+    const job = createExportJob(userId, true);
+    const paused = await runRetentionTick(OPTS);
+    expect(paused.buffersExamined).toBe(0);
+    expect(paused.rowsDeleted).toBe(0);
+    expect(rowIds(bufferId)).toHaveLength(12);
+
+    // Job gone → the untouched dirty set prunes on the very next tick.
+    deleteJob(job.id);
+    await runRetentionTick(OPTS);
+    expect(rowIds(bufferId)).toEqual(ids.slice(7));
   });
 });

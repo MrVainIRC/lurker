@@ -22,6 +22,7 @@
 
 import { getUserSettings } from '../db/settings.js';
 import { defaultsAsObject } from './settingsRegistry.js';
+import * as systemLog from './systemLog.js';
 
 // Warn once per process, not per sweep tick: a misconfiguration that repeats
 // every minute is noise rather than a signal.
@@ -43,11 +44,14 @@ export function declaredRetentionCeilingLines(): number | null {
   if (!Number.isFinite(lines) || lines < 0) {
     if (!warnedBadCeiling) {
       warnedBadCeiling = true;
-      console.warn(
-        `[lurker] LURKER_MAX_RETENTION_LINES="${raw}" is not a whole number of ` +
-          'lines; ignoring it. History is NOT bounded by an instance ceiling. ' +
-          'Use a bare integer, e.g. LURKER_MAX_RETENTION_LINES=100000.',
-      );
+      const text =
+        `LURKER_MAX_RETENTION_LINES="${raw}" is not a whole number of ` +
+        'lines; ignoring it. History is NOT bounded by an instance ceiling. ' +
+        'Use a bare integer, e.g. LURKER_MAX_RETENTION_LINES=100000.';
+      console.warn(`[lurker] ${text}`);
+      // Also into the system buffer: "the ceiling never took effect" is an
+      // operator-facing condition, and stdout is not an operator surface.
+      systemLog.log({ level: 'warn', scope: 'server', text });
     }
     return null;
   }
