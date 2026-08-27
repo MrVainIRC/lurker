@@ -159,8 +159,9 @@ setInterval(() => void sweepPreviewCache(), 60 * 60 * 1000).unref();
 
 // History retention (lurker-dev/RETENTION_PLAN.md). Self-scheduling rather than a fixed
 // interval — a tick that found a backlog comes back in seconds — and started
-// unconditionally: with no ceiling and no user opt-in every tick is a no-op
-// over an empty dirty set, which costs nothing.
+// unconditionally: with no ceiling and no user opt-in, the boot-seeded first
+// pass is one budgeted, yielding walk of owner/cap lookups that drains to
+// nothing, and every tick after it is a no-op over an empty dirty set.
 startRetentionSweeper();
 
 systemLog.log({ scope: 'server', text: `Lurker server starting up (edition: ${EDITION})` });

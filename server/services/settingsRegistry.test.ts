@@ -65,7 +65,7 @@ describe('validate', () => {
     it('rejects the hole between 0 and the floor', () => {
       const out = validate(KEY, 50);
       expect(out.ok).toBe(false);
-      expect(!out.ok && out.error).toMatch(/0 \(off\) or >= 1000/);
+      expect(!out.ok && out.error).toMatch(/0 or >= 1000/);
     });
   });
 
