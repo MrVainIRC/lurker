@@ -397,6 +397,34 @@ describe('runRetentionTick', () => {
     expect(rowIds(replayed.bufferId)).not.toContain(Number(replayed.id));
   });
 
+  it('the rewind watermark is the LARGEST cursor, not the smallest', async () => {
+    // Two users with different cursors; a replayed row for the high-cursor
+    // user timed BETWEEN them. A min-based watermark early-outs on it (time
+    // >= min) and the row evades the noise clock — the bug Copilot caught.
+    const { setNoiseCursor, getNoiseCursor } = await import('../db/retention.js');
+    const low = createUser('noise-wm-low');
+    const high = createUser('noise-wm-high');
+    const net = createNetwork(high.id, {
+      name: 'noise-wm',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'n',
+    });
+    setNoiseCursor(low.id, '2026-01-01T00:00:00.000Z');
+    setNoiseCursor(high.id, '2026-08-01T00:00:00.000Z');
+    insertMessage({
+      networkId: net!.id,
+      target: '#chan',
+      time: '2026-06-01T00:00:00.000Z',
+      type: 'quit',
+      nick: 'x',
+      text: null,
+      self: false,
+    });
+    expect(getNoiseCursor(high.id)).toBe('2026-06-01T00:00:00.000Z');
+  });
+
   it('pass completion cannot clobber a concurrent cursor rewind', async () => {
     // The pass writes its cutoff via compare-and-advance: if a replayed row
     // rewound the cursor while the pass's deletes were in flight, the window

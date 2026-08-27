@@ -126,12 +126,15 @@ const NOISE_CURSOR_KEY = 'retention_noise_cursors';
 // ONE representation: an in-memory Map hydrated from app_meta on first use,
 // with every write going through persistCursors. All readers — the sweep
 // AND the insert hot path — serve from the Map, so there is no second copy
-// to desync and no JSON re-parse per user per pass. `minCursorIso` is the
-// hot path's early-out watermark: a row time at or above the smallest live
-// cursor can't be below ANY cursor, so the ordinary live insert skips even
-// the owner lookup.
+// to desync and no JSON re-parse per user per pass. `maxCursorIso` is the
+// hot path's early-out watermark, and it must be the LARGEST live cursor:
+// only "at or above every cursor" proves a row can't be below its owner's
+// cursor, whoever the owner turns out to be. (The first version used the
+// minimum — a replayed row timed between two users' cursors sailed past the
+// early-out and evaded the rewind; Copilot caught it.) Live inserts sit at
+// ~now, above every cursor, so the common case still skips the owner lookup.
 let noiseCursors: Map<number, string> | null = null;
-let minCursorIso: string | null = null;
+let maxCursorIso: string | null = null;
 
 function loadNoiseCursors(): Map<number, string> {
   if (noiseCursors !== null) return noiseCursors;
@@ -154,14 +157,14 @@ function loadNoiseCursors(): Map<number, string> {
       /* unparseable = never swept */
     }
   }
-  recomputeMinCursor();
+  recomputeMaxCursor();
   return noiseCursors;
 }
 
-function recomputeMinCursor(): void {
-  minCursorIso = null;
+function recomputeMaxCursor(): void {
+  maxCursorIso = null;
   for (const v of noiseCursors?.values() ?? []) {
-    if (minCursorIso === null || v < minCursorIso) minCursorIso = v;
+    if (maxCursorIso === null || v > maxCursorIso) maxCursorIso = v;
   }
 }
 
@@ -173,7 +176,7 @@ function persistCursors(): void {
     `INSERT INTO app_meta (key, value) VALUES (?, ?)
      ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
   ).run(NOISE_CURSOR_KEY, JSON.stringify(obj));
-  recomputeMinCursor();
+  recomputeMaxCursor();
 }
 
 /** Where this user's last completed noise sweep stopped ('' = never swept —
@@ -220,7 +223,7 @@ export function clearNoiseCursorForUser(userId: number): void {
  */
 export function noteNoiseInsert(bufferId: number, timeIso: string): void {
   loadNoiseCursors();
-  if (minCursorIso === null || timeIso >= minCursorIso) return;
+  if (maxCursorIso === null || timeIso >= maxCursorIso) return;
   const ownerId = bufferOwnerId(bufferId);
   if (ownerId === undefined) return;
   const cursor = getNoiseCursor(ownerId);
