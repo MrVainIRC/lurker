@@ -29,8 +29,11 @@ const menu = useContextMenu();
 const { state } = menu;
 const menuEl = ref<HTMLElement | null>(null);
 // Position the panel from the raw cursor coords first; once mounted, measure
-// actual size and clamp/flip so it stays in the viewport. Without the clamp,
-// a right-click near the right/bottom edges would push the menu off-screen.
+// actual size and clamp so it stays in the viewport. Grid menus are the
+// reaction picker opened from a small action button, so they use that button
+// as an anchor and open to its left. Previously the picker used the click's
+// clientX and was merely clamped to the right edge — inside the viewport, but
+// still opening toward the edge on mobile.
 const clamped = ref({ x: 0, y: 0 });
 
 const positionStyle = computed(() => ({
@@ -48,10 +51,14 @@ watch(
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const pad = 4;
+    const anchor =
+      state.layout === 'grid' && state.triggerEl ? state.triggerEl.getBoundingClientRect() : null;
     const maxX = Math.max(pad, window.innerWidth - rect.width - pad);
     const maxY = Math.max(pad, window.innerHeight - rect.height - pad);
-    const x = Math.min(Math.max(state.x, pad), maxX);
-    const y = Math.min(Math.max(state.y, pad), maxY);
+    const preferredX = anchor ? anchor.left - rect.width - pad : state.x;
+    const preferredY = anchor ? anchor.top : state.y;
+    const x = Math.min(Math.max(preferredX, pad), maxX);
+    const y = Math.min(Math.max(preferredY, pad), maxY);
     clamped.value = { x, y };
   },
 );

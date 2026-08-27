@@ -33,7 +33,13 @@
       >
         <i v-if="item.icon" :class="['icon', item.icon]" aria-hidden="true"></i>
         <span class="label">{{ item.label }}</span>
-        <i class="arrow fa-solid fa-chevron-right" aria-hidden="true"></i>
+        <i
+          class="arrow fa-solid"
+          :class="
+            openIndex === i && submenuSide === 'left' ? 'fa-chevron-left' : 'fa-chevron-right'
+          "
+          aria-hidden="true"
+        ></i>
       </button>
       <div
         v-if="openIndex === i"
@@ -66,15 +72,17 @@ import type { ContextMenuItem } from '../composables/useContextMenu.js';
 
 defineOptions({ name: 'ContextMenuBranch' });
 
-defineProps<{ items: ContextMenuItem[] }>();
+const props = defineProps<{ items: ContextMenuItem[] }>();
 const emit = defineEmits<{ select: [item: ContextMenuItem] }>();
 const openIndex = ref<number | null>(null);
 const submenuEl = ref<HTMLElement | null>(null);
 const submenuStyle = ref<Record<string, string>>({ visibility: 'hidden' });
+const submenuSide = ref<'left' | 'right'>('right');
 
 function openBranch(index: number): void {
   openIndex.value = index;
   submenuEl.value = null;
+  submenuSide.value = 'right';
   submenuStyle.value = { visibility: 'hidden' };
   void nextTick(positionSubmenu);
 }
@@ -82,6 +90,7 @@ function openBranch(index: number): void {
 function toggleBranch(index: number): void {
   openIndex.value = openIndex.value === index ? null : index;
   submenuEl.value = null;
+  submenuSide.value = 'right';
   submenuStyle.value = { visibility: 'hidden' };
   if (openIndex.value !== null) void nextTick(positionSubmenu);
 }
@@ -105,7 +114,25 @@ async function positionSubmenu(): Promise<void> {
   const leftX = branchRect.left + gap - menuRect.width;
   const rightFits = rightX + menuRect.width <= window.innerWidth - pad;
   const leftFits = leftX >= pad;
-  const preferredX = rightFits || !leftFits ? rightX : leftX;
+  const item = props.items[openIndex.value];
+  const forceLeft = item?.layout === 'grid';
+  const leftSpace = branchRect.left - pad;
+  const rightSpace = window.innerWidth - pad - branchRect.right;
+  // Reaction grids must open left from the action menu. For every other
+  // submenu, use the normal right side when it fits; when neither side fits,
+  // choose the side with more room. The old `!leftFits ? rightX` fallback
+  // selected the right side even when both sides overflowed, which put a
+  // mobile reaction menu back against the viewport edge.
+  const preferredX = forceLeft
+    ? leftX
+    : rightFits
+      ? rightX
+      : leftFits
+        ? leftX
+        : leftSpace >= rightSpace
+          ? leftX
+          : rightX;
+  submenuSide.value = preferredX === leftX ? 'left' : 'right';
   const maxX = Math.max(pad, window.innerWidth - menuRect.width - pad);
   const maxY = Math.max(pad, window.innerHeight - menuRect.height - pad);
   const x = Math.min(Math.max(preferredX, pad), maxX);
