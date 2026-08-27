@@ -187,3 +187,40 @@ describe('retention prune paths', () => {
     );
   });
 });
+
+// The noise clock's access path (db/retention.ts deleteNoiseBatch). Two pins:
+// the partial index must drive the time-range scan (SQLite only considers it
+// when the query's type list implies the index predicate — both are generated
+// from shared EARLY_PRUNE_TYPES, so they match by construction), and the LIVE
+// index's DDL must still contain the generated list — someone widening the
+// shared set without migrating the index would otherwise silently stop
+// covering the new type.
+describe('noise-clock paths', () => {
+  let earlyPruneSql: string;
+  beforeAll(async () => {
+    ({ EARLY_PRUNE_TYPES_SQL: earlyPruneSql } = await import('./index.js'));
+  });
+
+  it('the noise delete subselect drives the partial time index', () => {
+    const detail = plan(
+      `SELECT m.id FROM messages m INDEXED BY idx_messages_noise_time
+        JOIN buffers b ON b.id = m.buffer_id
+        WHERE m.type IN (${earlyPruneSql})
+          AND m.time < '2026-01-01T00:00:00.000Z'
+          AND b.user_id = 1
+          AND NOT EXISTS (
+            SELECT 1 FROM user_bookmarks ub
+             WHERE ub.user_id = 1 AND ub.message_id = m.id
+          )
+        LIMIT 500`,
+    );
+    expect(detail).toMatch(/USING (COVERING )?INDEX idx_messages_noise_time \(time<\?\)/);
+  });
+
+  it('the live index predicate matches the shared EARLY_PRUNE_TYPES set', () => {
+    const row = db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`)
+      .get('idx_messages_noise_time') as { sql: string } | undefined;
+    expect(row?.sql).toContain(`(${earlyPruneSql})`);
+  });
+});

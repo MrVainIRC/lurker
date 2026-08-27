@@ -33,9 +33,11 @@ import {
   bufferOwnerId,
   retentionBoundaryId,
   deleteRetentionBatch,
+  listUserIds,
+  deleteNoiseBatch,
 } from '../db/retention.js';
 import { listInflightJobs } from '../db/dataExports.js';
-import { effectiveRetentionLines } from './retentionLimits.js';
+import { effectiveRetentionLines, effectiveEventRetentionHours } from './retentionLimits.js';
 import settingsService from './settingsService.js';
 import * as systemLog from './systemLog.js';
 
@@ -49,6 +51,9 @@ export interface RetentionSweepOptions {
   idleDelayMs: number;
   /** Delay when the tick ran out of budget with work left. */
   busyDelayMs: number;
+  /** How often a tick also runs the noise clock (age-based pruning of
+   *  EARLY_PRUNE_TYPES). Infinity disables it; 0 runs it every tick. */
+  noiseIntervalMs: number;
 }
 
 export const RETENTION_SWEEP_DEFAULTS: RetentionSweepOptions = {
@@ -56,25 +61,41 @@ export const RETENTION_SWEEP_DEFAULTS: RetentionSweepOptions = {
   maxBatchesPerTick: 20,
   idleDelayMs: 60 * 1000,
   busyDelayMs: 5 * 1000,
+  noiseIntervalMs: 60 * 60 * 1000,
 };
 
 export interface RetentionTickResult {
   buffersExamined: number;
   rowsDeleted: number;
+  /** Rows the noise clock deleted (already-aged EARLY_PRUNE_TYPES rows). */
+  noiseRowsDeleted: number;
   /** Work remained when the tick's budget ran out. */
   backlog: boolean;
 }
 
 const yieldToLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+// Noise-clock scheduling state. `lastNoiseSweepMs = 0` makes the first tick
+// after boot run the noise phase (budgeted like everything else); the flag is
+// set when a user's event_hours setting changes so the change acts within a
+// tick instead of within an hour.
+let lastNoiseSweepMs = 0;
+let noiseSweepDue = false;
+
 /**
- * One sweep pass over the currently-dirty buffers. Exported for tests; the
- * production loop below is just this on a timer.
+ * One sweep pass over the currently-dirty buffers, plus — when due — the
+ * noise clock's per-user age sweep. Exported for tests; the production loop
+ * below is just this on a timer.
  */
 export async function runRetentionTick(
   opts: RetentionSweepOptions = RETENTION_SWEEP_DEFAULTS,
 ): Promise<RetentionTickResult> {
-  const result: RetentionTickResult = { buffersExamined: 0, rowsDeleted: 0, backlog: false };
+  const result: RetentionTickResult = {
+    buffersExamined: 0,
+    rowsDeleted: 0,
+    noiseRowsDeleted: 0,
+    backlog: false,
+  };
 
   // A with-history export pages the messages table by ascending id with no
   // snapshot isolation (services/exportService.ts) — deleting rows ahead of
@@ -146,16 +167,60 @@ export async function runRetentionTick(
       throw err;
     }
   }
+
+  // ── The noise clock ──────────────────────────────────────────────────────
+  // Per-user, not per-buffer: the cutoff depends only on the owner's setting,
+  // and the partial index walks all of a user's over-age noise in one shape.
+  // Quiet buffers age out here without ever being dirty — the count sweep
+  // can't see them, which is the whole reason this phase exists. Not losable
+  // on error the way the dirty set is: due-ness re-derives from the interval.
+  if (noiseSweepDue || Date.now() - lastNoiseSweepMs >= opts.noiseIntervalMs) {
+    let finished = true;
+    for (const userId of listUserIds()) {
+      if (batchesSpent >= opts.maxBatchesPerTick) {
+        finished = false;
+        break;
+      }
+      const hours = effectiveEventRetentionHours(userId);
+      if (hours <= 0) continue; // noise clock off for this user
+      const cutoffIso = new Date(Date.now() - hours * 3_600_000).toISOString();
+      let userDone = false;
+      while (batchesSpent < opts.maxBatchesPerTick) {
+        await yieldToLoop();
+        const deleted = deleteNoiseBatch(userId, cutoffIso, opts.batchRows);
+        batchesSpent++;
+        result.noiseRowsDeleted += deleted;
+        if (deleted < opts.batchRows) {
+          userDone = true; // this user's over-age noise is gone (or bookmarked)
+          break;
+        }
+      }
+      if (!userDone) {
+        finished = false;
+        break;
+      }
+    }
+    if (finished) {
+      lastNoiseSweepMs = Date.now();
+      noiseSweepDue = false;
+    } else {
+      noiseSweepDue = true;
+      result.backlog = true;
+    }
+  }
+
   return result;
 }
 
 let settingsListenerWired = false;
 
 /**
- * Re-examine a user's buffers when their retention setting changes. Without
- * this, a lowered cap only takes effect per-buffer on the next insert or the
- * next restart — and the setting's copy promises deletion, not "deletion,
- * eventually, if the buffer stays active". Exported for tests; idempotent.
+ * React to retention settings changes. Without this, a lowered line cap only
+ * takes effect per-buffer on the next insert or the next restart — and the
+ * settings copy promises deletion, not "deletion, eventually, if the buffer
+ * stays active". An event_hours change flags the noise clock due instead:
+ * that sweep is per-user, so there is no per-buffer state to seed. Exported
+ * for tests; idempotent.
  */
 export function wireRetentionSettingsListener(): void {
   if (settingsListenerWired) return;
@@ -163,6 +228,9 @@ export function wireRetentionSettingsListener(): void {
   settingsService.on('event', ({ userId, changes }) => {
     if (Object.prototype.hasOwnProperty.call(changes, 'data.retention.lines')) {
       seedUserBuffersDirty(userId);
+    }
+    if (Object.prototype.hasOwnProperty.call(changes, 'data.retention.event_hours')) {
+      noiseSweepDue = true;
     }
   });
 }

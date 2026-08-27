@@ -40,8 +40,15 @@ afterAll(() => {
 });
 
 // Tiny knobs so the budget/backlog behavior is exercised with dozens of rows,
-// not hundreds of thousands.
-const OPTS = { batchRows: 4, maxBatchesPerTick: 100, idleDelayMs: 0, busyDelayMs: 0 };
+// not hundreds of thousands. noiseIntervalMs Infinity keeps the noise clock
+// out of the count-sweep tests; the noise tests pass 0 to force it.
+const OPTS = {
+  batchRows: 4,
+  maxBatchesPerTick: 100,
+  idleDelayMs: 0,
+  busyDelayMs: 0,
+  noiseIntervalMs: Infinity,
+};
 
 const BASE = Date.parse('2026-08-26T00:00:00Z');
 
@@ -174,6 +181,127 @@ describe('runRetentionTick', () => {
     const updated = settingsService.update(userId, { 'data.retention.lines': 1000 });
     expect(updated.ok).toBe(true);
     expect(takeDirtyBuffers()).toContain(bufferId);
+  });
+
+  it('the noise clock ages out old noise; chat, kicks, recent noise, bookmarks survive', async () => {
+    const user = createUser('noise-mix');
+    const net = createNetwork(user.id, {
+      name: 'noise-mix',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'n',
+    });
+    const old = new Date(Date.now() - 10 * 24 * 3_600_000).toISOString();
+    const recent = new Date().toISOString();
+    const row = (type: string, time: string, text: string) => {
+      const r = insertMessage({
+        networkId: net!.id,
+        target: '#chan',
+        time,
+        type,
+        nick: 'someone',
+        text,
+        self: false,
+      });
+      return { id: Number(r.id), bufferId: r.bufferId };
+    };
+    const oldChat = row('message', old, 'kept chat');
+    const oldKick = row('kick', old, 'kept kick');
+    const oldTopic = row('topic', old, 'kept topic');
+    const doomed = ['join', 'quit', 'motd', 'mode', 'away'].map((t) => row(t, old, `${t} noise`));
+    const savedQuit = row('quit', old, 'bookmarked noise');
+    const recentJoin = row('join', recent, 'recent noise');
+    expect(addBookmark(user.id, savedQuit.id)).toBe(true);
+    setUserSetting(user.id, 'data.retention.event_hours', 24);
+
+    const result = await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+
+    expect(result.noiseRowsDeleted).toBe(doomed.length);
+    expect(rowIds(oldChat.bufferId)).toEqual(
+      [oldChat, oldKick, oldTopic, savedQuit, recentJoin].map((r) => r.id),
+    );
+  });
+
+  it('the noise clock is ON by default: an untouched user loses week-old noise', async () => {
+    const user = createUser('noise-default');
+    const net = createNetwork(user.id, {
+      name: 'noise-default',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'n',
+    });
+    const seed = (time: string) =>
+      insertMessage({
+        networkId: net!.id,
+        target: '#chan',
+        time,
+        type: 'join',
+        nick: 'someone',
+        text: null,
+        self: false,
+      });
+    const oldJoin = seed(new Date(Date.now() - 10 * 24 * 3_600_000).toISOString());
+    const freshJoin = seed(new Date(Date.now() - 3_600_000).toISOString());
+
+    await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+
+    expect(rowIds(oldJoin.bufferId)).toEqual([Number(freshJoin.id)]);
+  });
+
+  it('event_hours 0 turns the noise clock off for that user', async () => {
+    const user = createUser('noise-off');
+    const net = createNetwork(user.id, {
+      name: 'noise-off',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'n',
+    });
+    setUserSetting(user.id, 'data.retention.event_hours', 0);
+    const r = insertMessage({
+      networkId: net!.id,
+      target: '#chan',
+      time: new Date(Date.now() - 30 * 24 * 3_600_000).toISOString(),
+      type: 'quit',
+      nick: 'someone',
+      text: 'ancient',
+      self: false,
+    });
+
+    await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+
+    expect(rowIds(r.bufferId)).toEqual([Number(r.id)]);
+  });
+
+  it('changing event_hours flags the noise clock due without waiting for the interval', async () => {
+    const { wireRetentionSettingsListener } = await import('./retentionSweeper.js');
+    const settingsService = (await import('./settingsService.js')).default;
+    const user = createUser('noise-flag');
+    const net = createNetwork(user.id, {
+      name: 'noise-flag',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'n',
+    });
+    const r = insertMessage({
+      networkId: net!.id,
+      target: '#chan',
+      time: new Date(Date.now() - 10 * 24 * 3_600_000).toISOString(),
+      type: 'part',
+      nick: 'someone',
+      text: null,
+      self: false,
+    });
+
+    // Interval Infinity: only the settings-change flag can trigger the phase.
+    wireRetentionSettingsListener();
+    expect(settingsService.update(user.id, { 'data.retention.event_hours': 24 }).ok).toBe(true);
+    await runRetentionTick(OPTS);
+
+    expect(rowIds(r.bufferId)).toEqual([]);
   });
 
   it('an in-flight export pauses the sweep without losing the dirty set', async () => {

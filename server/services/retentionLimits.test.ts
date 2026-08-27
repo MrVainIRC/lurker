@@ -18,20 +18,23 @@ let setUserSetting: typeof import('../db/settings.js').setUserSetting;
 let deleteUserSetting: typeof import('../db/settings.js').deleteUserSetting;
 let effectiveRetentionLines: typeof import('./retentionLimits.js').effectiveRetentionLines;
 let declaredRetentionCeilingLines: typeof import('./retentionLimits.js').declaredRetentionCeilingLines;
+let effectiveEventRetentionHours: typeof import('./retentionLimits.js').effectiveEventRetentionHours;
 
 let userId: number;
 
 beforeAll(async () => {
   ({ createUser } = await import('../db/users.js'));
   ({ setUserSetting, deleteUserSetting } = await import('../db/settings.js'));
-  ({ effectiveRetentionLines, declaredRetentionCeilingLines } =
+  ({ effectiveRetentionLines, declaredRetentionCeilingLines, effectiveEventRetentionHours } =
     await import('./retentionLimits.js'));
   userId = createUser('retention-alice').id;
 });
 
 afterEach(() => {
   delete process.env.LURKER_MAX_RETENTION_LINES;
+  delete process.env.LURKER_MAX_EVENT_RETENTION_HOURS;
   deleteUserSetting(userId, 'data.retention.lines');
+  deleteUserSetting(userId, 'data.retention.event_hours');
 });
 
 afterAll(() => {
@@ -120,5 +123,27 @@ describe('effectiveRetentionLines', () => {
     // thousands of rows per case.
     setUserSetting(userId, 'data.retention.lines', 50);
     expect(effectiveRetentionLines(userId)).toBe(50);
+  });
+});
+
+describe('effectiveEventRetentionHours', () => {
+  it('an untouched user gets the registry default (168 — the clock is ON)', () => {
+    expect(effectiveEventRetentionHours(userId)).toBe(168);
+  });
+
+  it('a user setting alone governs, and 0 turns the clock off', () => {
+    setUserSetting(userId, 'data.retention.event_hours', 72);
+    expect(effectiveEventRetentionHours(userId)).toBe(72);
+    setUserSetting(userId, 'data.retention.event_hours', 0);
+    expect(effectiveEventRetentionHours(userId)).toBe(0);
+  });
+
+  it('the ceiling clamps: default stays under it, 0 becomes it, above it clamps', () => {
+    process.env.LURKER_MAX_EVENT_RETENTION_HOURS = '336';
+    expect(effectiveEventRetentionHours(userId)).toBe(168);
+    setUserSetting(userId, 'data.retention.event_hours', 0);
+    expect(effectiveEventRetentionHours(userId)).toBe(336);
+    setUserSetting(userId, 'data.retention.event_hours', 500);
+    expect(effectiveEventRetentionHours(userId)).toBe(336);
   });
 });

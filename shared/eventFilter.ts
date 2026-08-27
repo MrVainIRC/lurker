@@ -94,6 +94,32 @@ export function isNoiseType(type: string): boolean {
   return NOISE_TYPES.has(type);
 }
 
+/**
+ * The row types retention's noise clock ages out early
+ * (lurker-dev/RETENTION_PLAN.md §3.3) — a STORAGE set, deliberately separate
+ * from the display sets above: what a reader wants hidden and what is worth
+ * disk forever are different questions with overlapping answers.
+ *
+ * It is NOISE_TYPES plus the server-status row types that never reach the
+ * filters at all: `motd` (re-sent on every connect — 5% of the reference
+ * database by itself), `usermode`, `away`, `back`. `kick` / `topic` /
+ * `invite` stay on the chat clock — not out of principle (see the NOISE_TYPES
+ * caveat above) but arithmetic: they are so rare that early-pruning them
+ * saves nothing, and deleting them buys risk for no bytes.
+ *
+ * ⚠ The partial index idx_messages_noise_time and the noise-sweep statements
+ * (server/db) both generate their type lists from this set. Editing it
+ * changes the statements on next boot but NOT the already-built index — the
+ * drift test in messagesEqp.test.ts fails until the index is migrated.
+ */
+export const EARLY_PRUNE_TYPES: ReadonlySet<string> = new Set([
+  ...NOISE_TYPES,
+  'motd',
+  'usermode',
+  'away',
+  'back',
+]);
+
 // ─── Page sizing ───────────────────────────────────────────────────────────
 
 /**
