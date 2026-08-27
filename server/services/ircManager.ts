@@ -20,11 +20,7 @@ import {
   deleteBuffer,
   listAutojoinChannels,
 } from '../db/buffers.js';
-import {
-  editMessage as updateMessageText,
-  hasMessageForTarget,
-  setMessageReaction,
-} from '../db/messages.js';
+import { hasMessageForTarget } from '../db/messages.js';
 import { DCC_ACTIVE_STATES, getDccTransfer, updateDccTransferState } from '../db/dccTransfers.js';
 import { findUserById } from '../db/users.js';
 import { isNetworkHostAllowed } from './networkPolicy.js';
@@ -620,7 +616,13 @@ class IrcManager extends EventEmitter {
     // The message-modification draft is a TAGMSG carrying the original message
     // id and replacement text. It is deliberately single-line and disabled on E2E channels:
     // neither a split edit nor a cleartext edit inside an encrypted channel has
-    // unambiguous protocol semantics.
+    // unambiguous protocol semantics. Unlike ordinary sends, an edit has no
+    // safe optimistic fallback: if the server rejects it, the original row
+    // must remain unchanged locally and in every other Lurker client. With
+    // echo-message, the server's forwarded TAGMSG is the confirmation point.
+    // Without that capability the safe fallback is still to send the request,
+    // but to wait for a server-forwarded mutation event before changing any
+    // local state. A successful socket ACK is not a mutation confirmation.
     if (editOf) {
       if (
         !conn.supportsDraftEdit() ||
@@ -632,12 +634,7 @@ class IrcManager extends EventEmitter {
       ) {
         return false;
       }
-      const nick = conn.client.user.nick;
-      if (!updateMessageText(networkId, target, editOf, nick, text)) return false;
       if (!conn.sendEdit(target, editOf, text)) return false;
-      if (!conn.echoActive()) {
-        conn.publish({ type: 'message-edit', target, msgid: editOf, text, nick, self: true });
-      }
       return true;
     }
 
@@ -821,12 +818,10 @@ class IrcManager extends EventEmitter {
   ): boolean {
     const conn = this.writableConnection(userId, networkId);
     if (!conn || !msgid || reaction.length > 64) return false;
+    // Without echo-message this is the safe fallback: send the request, but
+    // wait for a server-forwarded mutation event before changing any state.
+    // A successful socket ACK only means the request was written.
     if (!conn.sendReaction(target, msgid, reaction, removed)) return false;
-    const actor = conn.client.user?.nick || 'unknown';
-    if (!conn.echoActive()) {
-      setMessageReaction(networkId, target, msgid, actor, reaction, !removed);
-      conn.publishEphemeral({ type: 'reaction', target, msgid, actor, reaction, removed });
-    }
     return true;
   }
 
@@ -839,6 +834,9 @@ class IrcManager extends EventEmitter {
   ): boolean {
     const conn = this.writableConnection(userId, networkId);
     if (!conn) return false;
+    // A redaction is likewise only visible after the server forwards the
+    // REDACT confirmation. Without echo-message, send and wait for that
+    // forwarded event instead of applying a local optimistic change.
     return conn.sendRedaction(target, msgid, reason);
   }
 

@@ -10,6 +10,7 @@ let insertMessage: typeof import('./messages.js').insertMessage;
 let listMessages: typeof import('./messages.js').listMessages;
 let setMessageReaction: typeof import('./messages.js').setMessageReaction;
 let redactMessage: typeof import('./messages.js').redactMessage;
+let editMessage: typeof import('./messages.js').editMessage;
 let applyIrcMetadata: typeof import('./ircMetadata.js').applyIrcMetadata;
 let listIrcMetadata: typeof import('./ircMetadata.js').listIrcMetadata;
 
@@ -18,7 +19,7 @@ let networkId: number;
 beforeAll(async () => {
   ({ createUser } = await import('./users.js'));
   ({ createNetwork } = await import('./networks.js'));
-  ({ insertMessage, listMessages, setMessageReaction, redactMessage } =
+  ({ insertMessage, listMessages, setMessageReaction, redactMessage, editMessage } =
     await import('./messages.js'));
   ({ applyIrcMetadata, listIrcMetadata } = await import('./ircMetadata.js'));
   const user = createUser('modern-features');
@@ -93,6 +94,27 @@ describe('IRC modern message state', () => {
     expect(row?.redacted).toBe(true);
     expect(row?.redactionReason).toBe('removed by moderator');
     expect(row?.replyTo).toBe('missing-parent');
+  });
+
+  it('round-trips an edited message through the normal history reader', () => {
+    insertMessage({
+      networkId,
+      target: '#chat-edit',
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'alice',
+      text: 'before',
+      msgid: 'edit-1',
+    });
+    expect(editMessage(networkId, '#CHAT-EDIT', 'edit-1', 'ALICE', 'after')).toBe(true);
+    expect(listMessages(networkId, '#chat-edit', { limit: 10 })).toEqual([
+      expect.objectContaining({
+        msgid: 'edit-1',
+        nick: 'alice',
+        text: 'after',
+        redacted: undefined,
+      }),
+    ]);
   });
 });
 

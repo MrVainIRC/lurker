@@ -266,6 +266,38 @@ describe('buildResumeSlice', () => {
     expect(slice.hasMoreOlder).toBe(true);
   });
 
+  it('replays durable mutation markers in the missed gap', () => {
+    const original = insertMessage({
+      networkId,
+      target: '#resumeMutation',
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'alice',
+      text: 'before',
+      msgid: 'resume-mutation-1',
+    });
+    const mutation = insertMessage({
+      networkId,
+      target: '#resumeMutation',
+      time: new Date().toISOString(),
+      type: 'message-edit',
+      nick: 'alice',
+      text: 'after',
+      msgid: 'resume-mutation-1',
+    });
+    const slice = buildResumeSlice(userId, networkId, '#resumeMutation', Number(original.id));
+
+    expect(slice.mode).toBe('append');
+    expect(slice.events).toEqual([
+      expect.objectContaining({
+        id: Number(mutation.id),
+        type: 'message-edit',
+        msgid: 'resume-mutation-1',
+        text: 'after',
+      }),
+    ]);
+  });
+
   it('reports hasMoreOlder for an empty gap so a shell is not stranded', () => {
     // A buffer with history but no rows past the cursor (nothing new since the
     // client last saw it). The resume frame carries events:[], but the buffer

@@ -222,9 +222,8 @@ const NON_PERSISTED_TYPES = new Set([
   // CTCP request/reply notices are transient status, surfaced via
   // publishEphemeral — never persisted (#263).
   'ctcp',
-  'reaction',
-  'redaction',
-  'message-edit',
+  // Message mutations are deliberately absent: publish() stores them as
+  // durable resume markers, while normal history readers filter them out.
   'features',
   'standard-reply',
   'metadata',
@@ -465,6 +464,16 @@ function extractExtras(event: IrcEvent): Record<string, unknown> | null {
       // extended-join account, so the join line still shows it after a reload
       // (#508). Absent on networks without the cap and for logged-out users.
       if (event.account) extras = { account: event.account };
+      break;
+    case 'reaction':
+      extras = {
+        actor: event.actor,
+        reaction: event.reaction,
+        removed: event.removed === true,
+      };
+      break;
+    case 'redaction':
+      extras = { reason: event.reason ?? null };
       break;
   }
   // RPE2E: persist the lock flag for message/action/notice so the indicator
@@ -919,9 +928,12 @@ export class IrcConnection {
       negotiatedFeatures: {
         messageTags: this.supportsCap('message-tags'),
         reply: this.supportsCap('message-tags'),
+        // These operations are sent without a local optimistic mutation. When
+        // echo-message is unavailable, the same handler still accepts a
+        // server-forwarded mutation as confirmation.
         reactions: this.supportsCap('message-tags'),
         redaction: this.supportsCap('draft/message-redaction'),
-        edit: this.supportsCap('draft/editmsg'),
+        edit: this.supportsDraftEdit(),
         metadata: this.supportsCap('draft/metadata-2') && this.supportsCap('batch'),
         labeledResponse:
           this.supportsCap('labeled-response') &&
@@ -1257,8 +1269,8 @@ export class IrcConnection {
         const msgid = msg.params[1];
         const reason = msg.params.length > 2 ? msg.params[2] || null : null;
         if (target && msgid) {
-          redactMessage(this.network.id, target, msgid, reason);
-          this.publishEphemeral({
+          if (!redactMessage(this.network.id, target, msgid, reason)) return;
+          this.publish({
             type: 'redaction',
             target,
             msgid,
@@ -2113,12 +2125,17 @@ export class IrcConnection {
       // the server's msgid + @time (the only way our own sends learn their
       // msgid, #450).
       if (eventNick && me && eventNick.toLowerCase() === me.toLowerCase()) {
-        if (!this.echoActive()) return;
+        // A mutation is also valid confirmation when echo-message is absent:
+        // some servers forward the edit to all clients without advertising
+        // the generic self-message echo capability. Ordinary self messages
+        // still need echo-message here because they have no safe fallback in
+        // this handler.
+        if (!this.echoActive() && !editOf) return;
         if (!eventTarget || typeof eventMessage !== 'string') return;
         if (editOf) {
           const editTarget = targetIsChannel ? eventTarget : this.canonicalDmTarget(eventTarget);
           if (updateMessageText(this.network.id, editTarget, editOf, eventNick, eventMessage)) {
-            this.publishEphemeral({
+            this.publish({
               type: 'message-edit',
               target: editTarget,
               msgid: editOf,
@@ -2213,7 +2230,7 @@ export class IrcConnection {
       // The sender check in updateMessageText is the final authorization gate.
       if (editOf && typeof eventMessage === 'string') {
         if (updateMessageText(this.network.id, target, editOf, nick, eventMessage)) {
-          this.publishEphemeral({
+          this.publish({
             type: 'message-edit',
             target,
             msgid: editOf,
@@ -3423,10 +3440,8 @@ export class IrcConnection {
       const editOf = tags?.['+draft/edit'];
       const editText = tags?.['+draft/edit-text'];
       if (editOf && typeof editText === 'string') {
-        // Without echo-message the manager already applied and fanned out the
-        // local edit; a server that reflects client-only TAGMSGs must not make
-        // every tab process that same edit a second time.
-        if (isSelf && !this.echoActive()) return;
+        // There is no optimistic local edit to duplicate. A TAGMSG forwarded
+        // by the server is confirmation even when echo-message is absent.
         const eventTarget = event.target as string | undefined;
         const targetIsChannel = isChannelTarget(eventTarget);
         const target = targetIsChannel
@@ -3438,7 +3453,7 @@ export class IrcConnection {
           editor &&
           updateMessageText(this.network.id, target, editOf, editor, editText)
         ) {
-          this.publishEphemeral({
+          this.publish({
             type: 'message-edit',
             target,
             msgid: editOf,
@@ -3463,15 +3478,16 @@ export class IrcConnection {
         const value = reaction !== undefined ? reaction : unreaction;
         if (target && actor && typeof value === 'string' && value.length <= 64) {
           const removed = unreaction !== undefined;
-          setMessageReaction(this.network.id, target, replyTo, actor, value, !removed);
-          this.publishEphemeral({
-            type: 'reaction',
-            target,
-            msgid: replyTo,
-            actor,
-            reaction: value,
-            removed,
-          });
+          if (setMessageReaction(this.network.id, target, replyTo, actor, value, !removed)) {
+            this.publish({
+              type: 'reaction',
+              target,
+              msgid: replyTo,
+              actor,
+              reaction: value,
+              removed,
+            });
+          }
         }
         return;
       }
@@ -6625,7 +6641,10 @@ export class IrcConnection {
       reply: this.supportsCap('message-tags'),
       reactions: this.supportsCap('message-tags'),
       redaction: this.supportsCap('draft/message-redaction'),
-      edit: this.supportsCap('draft/editmsg'),
+      // See publishFeatures(): edits never mutate local history optimistically;
+      // echo-message is preferred, but a server-forwarded edit is also a valid
+      // confirmation on networks without that capability.
+      edit: this.supportsDraftEdit(),
       metadata: this.supportsCap('draft/metadata-2') && this.supportsCap('batch'),
       labeledResponse:
         this.supportsCap('labeled-response') &&

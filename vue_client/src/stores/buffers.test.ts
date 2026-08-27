@@ -371,6 +371,52 @@ describe('replaceBacklog empty-seed honors server hasMoreOlder', () => {
   });
 });
 
+describe('replaceBacklog applies durable history mutations', () => {
+  it('updates an already-loaded message without rendering a second row', () => {
+    const store = useBuffersStore();
+    store.replaceBacklog(
+      1,
+      '#mutations',
+      [
+        {
+          networkId: 1,
+          target: '#mutations',
+          id: 1,
+          type: 'message',
+          nick: 'alice',
+          msgid: 'parent-1',
+          text: 'before',
+        },
+      ],
+      undefined,
+      undefined,
+      true,
+    );
+    store.replaceBacklog(
+      1,
+      '#mutations',
+      [
+        {
+          networkId: 1,
+          target: '#mutations',
+          id: 2,
+          type: 'message-edit',
+          nick: 'alice',
+          msgid: 'parent-1',
+          text: 'after',
+        },
+      ],
+      undefined,
+      undefined,
+      true,
+    );
+
+    const messages = store.byKey('1::#mutations')!.messages;
+    expect(messages).toHaveLength(1);
+    expect(messages[0].text).toBe('after');
+  });
+});
+
 // A fresh-connect shell (empty backlog frame + hasMoreOlder) can receive a live
 // line before the user opens it. `unseeded` (not messages.length) must decide
 // hydration so opening still fetches the real backlog and doesn't mark-read the

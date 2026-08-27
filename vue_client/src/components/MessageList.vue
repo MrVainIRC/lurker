@@ -2060,9 +2060,11 @@ watch(
     // yet replaces that tail. Use the surviving tail to tell them apart, so a
     // capped buffer isn't misread as a re-snapshot (and force-scrolled to the
     // bottom) on every single message.
-    // ID-less (ephemeral) rows — /e2e and other server command echoes surfaced
-    // via publishEphemeral — carry `id === undefined`, so the id-presence test
-    // can't anchor on them. Fall back to structural signals around them:
+    // ID-less (ephemeral) rows — /e2e and other transient command status lines
+    // surfaced via publishEphemeral — carry `id === undefined`, so the
+    // id-presence test can't anchor on them. Durable history mutations have an
+    // id and are handled without adding a visible row. Fall back to structural
+    // signals around the remaining ephemeral lines:
     //   • growth that isn't a prepend is an append — covers a new ephemeral tail
     //     AND a real message arriving right after an ephemeral one (the latter
     //     would otherwise match neither branch and fail to stick to bottom); and

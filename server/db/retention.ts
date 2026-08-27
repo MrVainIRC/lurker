@@ -13,6 +13,9 @@
 // pruned row.
 
 import db, { EARLY_PRUNE_TYPES_SQL } from './index.js';
+import { HISTORY_MUTATION_TYPES } from '../../shared/eventFilter.js';
+
+const HISTORY_MUTATION_TYPES_SQL = `('${HISTORY_MUTATION_TYPES.join("','")}')`;
 
 // Buffers that took an insert since the sweeper last looked. In-memory on
 // purpose: a restart just means the next boot seeds every buffer dirty and
@@ -63,7 +66,9 @@ export function bufferOwnerId(bufferId: number): number | undefined {
 // (see hasMoreThan in db/messages.ts). No row at that offset = the buffer is
 // within its cap.
 const boundaryStmt = db.prepare(`
-  SELECT id FROM messages WHERE buffer_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?
+  SELECT id FROM messages
+   WHERE buffer_id = ? AND type NOT IN ${HISTORY_MUTATION_TYPES_SQL}
+   ORDER BY id DESC LIMIT 1 OFFSET ?
 `);
 
 export function retentionBoundaryId(bufferId: number, capLines: number): number | undefined {

@@ -15,7 +15,7 @@ import ircManager from './ircManager.js';
 import { e2eManager } from './e2e/manager.js';
 import { createUser } from '../db/users.js';
 import { createNetwork } from '../db/networks.js';
-import { listMessages } from '../db/messages.js';
+import { insertMessage, listMessages } from '../db/messages.js';
 import { ensureOpen } from '../db/buffers.js';
 
 let userId: number;
@@ -414,6 +414,244 @@ describe('server-time + msgid persistence (real publish)', () => {
     });
     const rows = listMessages(networkId, '#persist6');
     expect(rows[0]).toMatchObject({ type: 'join', time: new Date(1750000000000).toISOString() });
+  });
+});
+
+describe('server-confirmed message edits', () => {
+  it('does not mutate history before the edit echo arrives', () => {
+    const target = '#edit-pending';
+    insertMessage({
+      networkId,
+      target,
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'me',
+      text: 'before',
+      msgid: 'edit-pending-1',
+    });
+    const sendEdit = vi.fn<() => boolean>(() => true);
+    const publish = vi.fn<(event: unknown) => void>();
+    const conn = {
+      state: 'connected',
+      client: { user: { nick: 'me' } },
+      supportsDraftEdit: () => true,
+      echoActive: () => true,
+      sendEdit,
+      publish,
+    } as unknown as IrcConnection;
+    vi.spyOn(ircManager, 'getConnection').mockReturnValue(conn);
+
+    expect(ircManager.send(userId, networkId, target, 'after', undefined, 'edit-pending-1')).toBe(
+      true,
+    );
+    expect(sendEdit).toHaveBeenCalledWith(target, 'edit-pending-1', 'after');
+    expect(listMessages(networkId, target, { limit: 10 })[0]?.text).toBe('before');
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('sends an edit fallback without changing history when echo-message is unavailable', () => {
+    const target = '#edit-no-echo';
+    insertMessage({
+      networkId,
+      target,
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'me',
+      text: 'before',
+      msgid: 'edit-no-echo-1',
+    });
+    const sendEdit = vi.fn<() => boolean>(() => true);
+    const conn = {
+      state: 'connected',
+      client: { user: { nick: 'me' } },
+      supportsDraftEdit: () => true,
+      echoActive: () => false,
+      sendEdit,
+    } as unknown as IrcConnection;
+    vi.spyOn(ircManager, 'getConnection').mockReturnValue(conn);
+
+    expect(ircManager.send(userId, networkId, target, 'after', undefined, 'edit-no-echo-1')).toBe(
+      true,
+    );
+    expect(sendEdit).toHaveBeenCalledWith(target, 'edit-no-echo-1', 'after');
+    expect(listMessages(networkId, target, { limit: 10 })[0]?.text).toBe('before');
+  });
+
+  it('accepts a server-forwarded self edit even without generic echo-message', () => {
+    const target = '#edit-forwarded';
+    insertMessage({
+      networkId,
+      target,
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'me',
+      text: 'before',
+      msgid: 'edit-forwarded-1',
+    });
+    const events: unknown[] = [];
+    const conn = makeConn((event) => events.push(event));
+    conn.client.emit('message', {
+      nick: 'me',
+      target,
+      type: 'privmsg',
+      message: 'after',
+      tags: { '+draft/edit': 'edit-forwarded-1' },
+    });
+
+    expect(listMessages(networkId, target, { limit: 10 })[0]?.text).toBe('after');
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'message-edit', msgid: 'edit-forwarded-1' }),
+    );
+  });
+
+  it('sends reaction and redaction fallbacks without local mutation', () => {
+    const target = '#mutation-fallback';
+    const sendReaction = vi.fn<() => boolean>(() => true);
+    const sendRedaction = vi.fn<() => boolean>(() => true);
+    const conn = {
+      state: 'connected',
+      client: { user: { nick: 'me' } },
+      echoActive: () => false,
+      sendReaction,
+      sendRedaction,
+    } as unknown as IrcConnection;
+    vi.spyOn(ircManager, 'getConnection').mockReturnValue(conn);
+
+    expect(ircManager.reaction(userId, networkId, target, 'parent-1', '🚀', false)).toBe(true);
+    expect(ircManager.redact(userId, networkId, target, 'parent-1')).toBe(true);
+    expect(sendReaction).toHaveBeenCalledWith(target, 'parent-1', '🚀', false);
+    expect(sendRedaction).toHaveBeenCalledWith(target, 'parent-1', undefined);
+  });
+
+  it('persists and publishes the replacement only when the self echo arrives', () => {
+    const target = '#edit-echo';
+    const inserted = insertMessage({
+      networkId,
+      target,
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'me',
+      text: 'before',
+      msgid: 'edit-echo-1',
+    });
+    const events: unknown[] = [];
+    const conn = makeConn((event) => events.push(event));
+    enableEcho(conn);
+    conn.client.emit('tagmsg', {
+      nick: 'me',
+      target,
+      tags: {
+        '+draft/edit': 'edit-echo-1',
+        '+draft/edit-text': 'after',
+      },
+    });
+
+    expect(listMessages(networkId, target, { limit: 10 })[0]?.text).toBe('after');
+    expect(
+      listMessages(networkId, target, {
+        afterId: Number(inserted.id),
+        includeMutations: true,
+      }),
+    ).toEqual([
+      expect.objectContaining({ type: 'message-edit', msgid: 'edit-echo-1', text: 'after' }),
+    ]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'message-edit',
+        target,
+        msgid: 'edit-echo-1',
+        text: 'after',
+      }),
+    );
+  });
+
+  it('accepts an edit from another IRC client and exposes it to Lurker clients', () => {
+    const target = '#edit-peer';
+    insertMessage({
+      networkId,
+      target,
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'alice',
+      text: 'before',
+      msgid: 'edit-peer-1',
+    });
+    const events: unknown[] = [];
+    const conn = makeConn((event) => events.push(event));
+    conn.client.emit('message', {
+      nick: 'alice',
+      target,
+      type: 'privmsg',
+      message: 'after',
+      tags: { '+draft/edit': 'edit-peer-1' },
+    });
+
+    expect(listMessages(networkId, target, { limit: 10 })[0]?.text).toBe('after');
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'message-edit',
+        target,
+        msgid: 'edit-peer-1',
+        text: 'after',
+        nick: 'alice',
+      }),
+    );
+  });
+
+  it('stores confirmed reactions and redactions as replayable markers', () => {
+    const target = '#react-redact';
+    const original = insertMessage({
+      networkId,
+      target,
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'alice',
+      text: 'before',
+      msgid: 'react-redact-1',
+    });
+    const conn = makeConn();
+    enableEcho(conn);
+    conn.client.emit('tagmsg', {
+      nick: 'bob',
+      target,
+      tags: { '+reply': 'react-redact-1', '+draft/react': '👍' },
+    });
+    conn.client.emit('raw', {
+      from_server: true,
+      line: ':moderator!u@h REDACT #react-redact react-redact-1 moderated',
+    });
+
+    const row = listMessages(networkId, target, { limit: 10 })[0];
+    expect(row).toMatchObject({ redacted: true, redactionReason: 'moderated' });
+    expect(row?.reactions).toEqual([{ actor: 'bob', reaction: '👍' }]);
+    expect(
+      listMessages(networkId, target, {
+        afterId: Number(original.id),
+        includeMutations: true,
+        limit: 10,
+      }).map((event) => event.type),
+    ).toEqual(['reaction', 'redaction']);
+  });
+
+  it('advertises editing without echo-message for the server-forwarded fallback', () => {
+    const conn = makeConn();
+    conn.client.user.nick = 'me';
+    (
+      conn.client as unknown as {
+        network: { cap: { enabled: string[]; available: Map<string, string> } };
+        connection: { connected: boolean };
+      }
+    ).network = {
+      cap: { enabled: ['draft/editmsg'], available: new Map() },
+    };
+    (conn.client as unknown as { connection: { connected: boolean } }).connection = {
+      connected: true,
+    };
+    const publish = vi.spyOn(conn, 'publishEphemeral');
+    conn.publishFeatures();
+    expect(publish.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ negotiatedFeatures: expect.objectContaining({ edit: true }) }),
+    );
   });
 });
 

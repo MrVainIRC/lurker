@@ -8,8 +8,11 @@ import {
   resolveOrMintForInsert,
 } from './bufferResolve.js';
 import { markBufferDirty, noteNoiseInsert } from './retention.js';
-import { EARLY_PRUNE_TYPES } from '../../shared/eventFilter.js';
-import { countsTowardPage } from '../../shared/eventFilter.js';
+import {
+  EARLY_PRUNE_TYPES,
+  HISTORY_MUTATION_TYPES,
+  countsTowardPage,
+} from '../../shared/eventFilter.js';
 import type { PageUnit } from '../../shared/eventFilter.js';
 import type { ModeChange } from '../../shared/modes.js';
 
@@ -124,6 +127,9 @@ export interface MessageReaction {
   actor: string;
   reaction: string;
 }
+
+const HISTORY_MUTATION_TYPES_SQL = `('${HISTORY_MUTATION_TYPES.join("','")}')`;
+const RENDERABLE_HISTORY_FILTER = `type NOT IN ${HISTORY_MUTATION_TYPES_SQL}`;
 
 /** Buffer summary row for MCP list_buffers. */
 export interface BufferSummary {
@@ -297,7 +303,7 @@ function rowToEvent(row: MessageRow): MessageEvent {
 export function listMessages(
   networkId: number,
   target: string,
-  opts: { before?: number; afterId?: number; limit?: number } = {},
+  opts: { before?: number; afterId?: number; limit?: number; includeMutations?: boolean } = {},
 ): MessageEvent[] {
   const bufferId = resolveBufferIdByNetwork(networkId, target);
   if (bufferId === undefined) return [];
@@ -306,20 +312,26 @@ export function listMessages(
 
 function listMessagesById(
   bufferId: number,
-  { before, afterId, limit = 50 }: { before?: number; afterId?: number; limit?: number } = {},
+  {
+    before,
+    afterId,
+    limit = 50,
+    includeMutations = false,
+  }: { before?: number; afterId?: number; limit?: number; includeMutations?: boolean } = {},
 ): MessageEvent[] {
+  const mutationFilter = includeMutations ? '' : ` AND ${RENDERABLE_HISTORY_FILTER}`;
   if (afterId) {
     const rows = db
       .prepare(
-        `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE buffer_id = ? AND id > ?
+        `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE buffer_id = ? AND id > ?${mutationFilter}
        ORDER BY id ASC LIMIT ?`,
       )
       .all(bufferId, afterId, limit) as MessageRow[];
     return rows.map(rowToEvent);
   }
   const sql = before
-    ? `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE buffer_id = ? AND id < ? ORDER BY id DESC LIMIT ?`
-    : `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE buffer_id = ? ORDER BY id DESC LIMIT ?`;
+    ? `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE buffer_id = ? AND id < ?${mutationFilter} ORDER BY id DESC LIMIT ?`
+    : `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE buffer_id = ?${mutationFilter} ORDER BY id DESC LIMIT ?`;
   const params = before ? [bufferId, before, limit] : [bufferId, limit];
   const rows = db.prepare(sql).all(...params) as MessageRow[];
   return rows.map(rowToEvent).toReversed();
@@ -420,8 +432,10 @@ function listMessagesCountedById(
   unit: PageUnit,
   { before, afterId, limit = 100, maxScan = RENDERABLE_MAX_SCAN }: PageOptions = {},
 ): MessageEvent[] {
-  // 'event' counts every stored row, which is precisely what the plain cursor
-  // pager already does — no scan pass needed.
+  // 'event' counts every renderable stored row, which is precisely what the
+  // plain cursor pager already does — no scan pass needed. Durable mutation
+  // markers are intentionally omitted by listMessagesById unless the resume
+  // path explicitly asks for them.
   if (unit === 'event') return listMessagesById(bufferId, { before, afterId, limit });
 
   const forward = afterId != null && afterId > 0;
@@ -434,10 +448,10 @@ function listMessagesCountedById(
   // at RENDERABLE_MAX_SCAN for no gain.
   const cols = `id, type, CASE WHEN type = 'mode' THEN extra END AS extra`;
   const scanSql = forward
-    ? `SELECT ${cols} FROM messages WHERE buffer_id = ? AND id > ? ORDER BY id ASC LIMIT ?`
+    ? `SELECT ${cols} FROM messages WHERE buffer_id = ? AND id > ? AND ${RENDERABLE_HISTORY_FILTER} ORDER BY id ASC LIMIT ?`
     : before
-      ? `SELECT ${cols} FROM messages WHERE buffer_id = ? AND id < ? ORDER BY id DESC LIMIT ?`
-      : `SELECT ${cols} FROM messages WHERE buffer_id = ? ORDER BY id DESC LIMIT ?`;
+      ? `SELECT ${cols} FROM messages WHERE buffer_id = ? AND id < ? AND ${RENDERABLE_HISTORY_FILTER} ORDER BY id DESC LIMIT ?`
+      : `SELECT ${cols} FROM messages WHERE buffer_id = ? AND ${RENDERABLE_HISTORY_FILTER} ORDER BY id DESC LIMIT ?`;
   const cursor = forward ? afterId : before;
   const scanParams: Array<number | string> = cursor
     ? [bufferId, cursor, maxScan]
@@ -479,7 +493,8 @@ function listMessagesCountedById(
   }
   const rows = db
     .prepare(
-      `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE ${conds.join(' AND ')} ORDER BY id ASC`,
+      `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages
+       WHERE ${conds.join(' AND ')} AND ${RENDERABLE_HISTORY_FILTER} ORDER BY id ASC`,
     )
     .all(...params) as MessageRow[];
   return rows.map(rowToEvent);
@@ -510,7 +525,8 @@ export function listMessagesAround(
       ? undefined
       : (db
           .prepare(
-            `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages WHERE id = ? AND buffer_id = ?`,
+            `SELECT *, ${BOOKMARKED_COL('messages')} FROM messages
+             WHERE id = ? AND buffer_id = ? AND ${RENDERABLE_HISTORY_FILTER}`,
           )
           .get(anchorId, bufferId) as MessageRow | undefined);
   if (bufferId === undefined || !anchorRow) {
@@ -539,13 +555,17 @@ export function listMessagesAround(
 // regardless of how much history is in the buffer.
 function hasOlderThanById(bufferId: number, id: number): boolean {
   return !!db
-    .prepare(`SELECT 1 FROM messages WHERE buffer_id = ? AND id < ? LIMIT 1`)
+    .prepare(
+      `SELECT 1 FROM messages WHERE buffer_id = ? AND id < ? AND ${RENDERABLE_HISTORY_FILTER} LIMIT 1`,
+    )
     .get(bufferId, id);
 }
 
 function hasNewerThanById(bufferId: number, id: number): boolean {
   return !!db
-    .prepare(`SELECT 1 FROM messages WHERE buffer_id = ? AND id > ? LIMIT 1`)
+    .prepare(
+      `SELECT 1 FROM messages WHERE buffer_id = ? AND id > ? AND ${RENDERABLE_HISTORY_FILTER} LIMIT 1`,
+    )
     .get(bufferId, id);
 }
 
@@ -701,7 +721,10 @@ export function listRecentForBuffers(
 const listBufferTargetsStmt = db.prepare(`
   SELECT target FROM buffers b
   WHERE b.network_id = ?
-    AND EXISTS (SELECT 1 FROM messages m WHERE m.buffer_id = b.id)
+    AND EXISTS (
+      SELECT 1 FROM messages m
+       WHERE m.buffer_id = b.id AND m.type NOT IN ${HISTORY_MUTATION_TYPES_SQL}
+    )
   ORDER BY target
 `);
 export function listBufferTargets(networkId: number): string[] {
@@ -720,6 +743,7 @@ export function listBuffersForNetwork(networkId: number): BufferSummary[] {
          JOIN messages m ON m.buffer_id = b.id
         WHERE b.network_id = ?
           AND b.kind NOT IN ('server', 'system')
+          AND m.type NOT IN ${HISTORY_MUTATION_TYPES_SQL}
         GROUP BY b.id
         ORDER BY lastMessageAt DESC`,
     )
@@ -782,7 +806,9 @@ export function hasMessageForTarget(networkId: number, target: string): boolean 
   if (!networkId || !target) return false;
   const bufferId = resolveBufferIdByNetwork(networkId, target);
   if (bufferId === undefined) return false;
-  return !!db.prepare('SELECT 1 FROM messages WHERE buffer_id = ? LIMIT 1').get(bufferId);
+  return !!db
+    .prepare(`SELECT 1 FROM messages WHERE buffer_id = ? AND ${RENDERABLE_HISTORY_FILTER} LIMIT 1`)
+    .get(bufferId);
 }
 
 // Whether a row with this server-assigned msgid already exists on the network.
@@ -791,7 +817,8 @@ export function hasMessageForTarget(networkId: number, target: string): boolean 
 // again to its successor, and the msgid is the only thing that says so. Index
 // seek on idx_messages_msgid.
 const hasMsgidStmt = db.prepare(
-  'SELECT 1 FROM messages WHERE network_id = ? AND msgid = ? LIMIT 1',
+  `SELECT 1 FROM messages WHERE network_id = ? AND msgid = ?
+   AND type NOT IN ${HISTORY_MUTATION_TYPES_SQL} LIMIT 1`,
 );
 export function hasMessageWithMsgid(networkId: number, msgid: string): boolean {
   if (!networkId || !msgid) return false;
@@ -916,7 +943,10 @@ export function countOlder(networkId: number, target: string, beforeId: number):
   if (bufferId === undefined) return 0;
   return (
     db
-      .prepare(`SELECT COUNT(*) AS n FROM messages WHERE buffer_id = ? AND id < ?`)
+      .prepare(
+        `SELECT COUNT(*) AS n FROM messages
+         WHERE buffer_id = ? AND id < ? AND ${RENDERABLE_HISTORY_FILTER}`,
+      )
       .get(bufferId, beforeId) as { n: number }
   ).n;
 }

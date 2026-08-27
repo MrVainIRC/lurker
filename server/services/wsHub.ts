@@ -1038,7 +1038,15 @@ export function buildResumeSlice(
     // probe. Equivalent by construction: "more than CAP rows exist after the
     // cursor" is exactly what the old length-plus-hasNewerRow pair detected.
     if (!hasMoreThan(networkId, target, sinceId, RESUME_GAP_CAP)) {
-      const gap = listMessages(networkId, target, { afterId: sinceId, limit: RESUME_GAP_CAP });
+      // Mutation markers are durable resume events. They are excluded from
+      // ordinary history, but must be replayed here so a loaded message can
+      // converge after another device edited/reacted/redacted it while this
+      // client was disconnected.
+      const gap = listMessages(networkId, target, {
+        afterId: sinceId,
+        limit: RESUME_GAP_CAP,
+        includeMutations: true,
+      });
       // hasMoreOlder must be accurate even though a LOADED buffer ignores it
       // (gap-fill just appends): a client holding this buffer only as an empty
       // SHELL (the fresh-connect optimization) empty-seeds from this frame, and a

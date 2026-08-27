@@ -8,6 +8,7 @@ import { socketSend } from '../composables/useSocket.js';
 import { SYSTEM_KEY } from '../lib/virtualBuffers.js';
 import { historyCountBy } from '../lib/historyPaging.js';
 import { isChannelTarget } from '../../../shared/channels.js';
+import { HISTORY_MUTATION_TYPE_SET } from '../../../shared/eventFilter.js';
 
 const MAX_PER_BUFFER = 500;
 // The most rows one INCREMENTAL merge (prepend/append) may take from a single
@@ -728,7 +729,10 @@ export const useBuffersStore = defineStore('buffers', {
       // these once self-presence moved to the away-state stream, but rows
       // written before that change linger in the DB and would still render
       // here. They age out naturally as new content arrives.
-      const filtered = events.filter((e) => e.type !== 'away' && e.type !== 'back');
+      const mutationEvents = events.filter((e) => HISTORY_MUTATION_TYPE_SET.has(e.type));
+      const filtered = events.filter(
+        (e) => !HISTORY_MUTATION_TYPE_SET.has(e.type) && e.type !== 'away' && e.type !== 'back',
+      );
       const existingMaxId = buf.messages[buf.messages.length - 1]?.id ?? 0;
       if (existingMaxId === 0) {
         // Initial seed (first connect, or a brand-new buffer we hadn't seen
@@ -784,6 +788,21 @@ export const useBuffersStore = defineStore('buffers', {
       if (filtered.length > 0) buf.unseeded = false;
       else if (existingMaxId === 0 || buf.unseeded) buf.unseeded = buf.hasMoreOlder;
       buf.oldestId = buf.messages[0]?.id ?? null;
+      // Mutation markers are durable resume events, not standalone history
+      // lines. Apply only markers newer than the loaded tail; live handlers
+      // may already have applied an older marker before the backlog arrived.
+      for (const event of mutationEvents) {
+        if (existingMaxId !== 0 && !opts.reset && event.id != null && event.id <= existingMaxId) {
+          continue;
+        }
+        if (event.type === 'reaction') {
+          this.applyReaction(event as unknown as Parameters<typeof this.applyReaction>[0]);
+        } else if (event.type === 'redaction') {
+          this.applyRedaction(event as unknown as Parameters<typeof this.applyRedaction>[0]);
+        } else if (event.type === 'message-edit') {
+          this.applyMessageEdit(event as unknown as Parameters<typeof this.applyMessageEdit>[0]);
+        }
+      }
       if (speakers !== undefined) this.seedSpeakers(networkId, target, speakers);
       if (readState) this.applyReadState(networkId, target, readState);
       if (typeof joined === 'boolean') buf.joined = joined;

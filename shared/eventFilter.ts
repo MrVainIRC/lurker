@@ -19,6 +19,12 @@
 import { CONSOLIDATABLE_TYPES } from './consolidate.js';
 import { isChurnMode, type ModeChange } from './modes.js';
 
+// These events mutate an existing history row. They are stored as durable
+// resume markers so an offline client can converge without reloading a buffer,
+// but they are never rendered as standalone messages.
+export const HISTORY_MUTATION_TYPES = ['reaction', 'redaction', 'message-edit'] as const;
+export const HISTORY_MUTATION_TYPE_SET = new Set<string>(HISTORY_MUTATION_TYPES);
+
 // ─── The tier ──────────────────────────────────────────────────────────────
 
 /**

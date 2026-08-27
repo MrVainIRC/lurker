@@ -10,6 +10,9 @@
 
 import db from './index.js';
 import { resolveBuffer } from './bufferResolve.js';
+import { HISTORY_MUTATION_TYPES } from '../../shared/eventFilter.js';
+
+const HISTORY_MUTATION_TYPES_SQL = `('${HISTORY_MUTATION_TYPES.join("','")}')`;
 
 const getByBufferStmt = db.prepare(`
   SELECT max_lines AS maxLines FROM buffer_retention WHERE user_id = ? AND buffer_id = ?
@@ -75,11 +78,15 @@ export function setBufferRetention(
 // "≈ how long does a given cap last HERE"; null for a buffer with fewer than
 // two rows (no rate to state).
 const newestTimeStmt = db.prepare(`
-  SELECT time FROM messages WHERE buffer_id = ? ORDER BY id DESC LIMIT 1
+  SELECT time FROM messages
+   WHERE buffer_id = ? AND type NOT IN ${HISTORY_MUTATION_TYPES_SQL}
+   ORDER BY id DESC LIMIT 1
 `);
 const rowPairStmt = db.prepare(`
   SELECT COUNT(*) AS n, MIN(time) AS oldest FROM (
-    SELECT time FROM messages WHERE buffer_id = ? ORDER BY id DESC LIMIT 1000
+    SELECT time FROM messages
+     WHERE buffer_id = ? AND type NOT IN ${HISTORY_MUTATION_TYPES_SQL}
+     ORDER BY id DESC LIMIT 1000
   )
 `);
 

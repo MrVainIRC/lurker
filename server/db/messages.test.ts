@@ -1284,6 +1284,80 @@ describe('chathistory window queries', () => {
 // property under test throughout is the one that makes it safe to do at the
 // server: the result is a CONTIGUOUS id range, exactly like a listMessages
 // slice, so it can never open a hole in the client's scrollback.
+describe('durable history mutations', () => {
+  it('keeps mutation markers out of normal history but exposes them to resume reads', () => {
+    const user = createUser('mutation-history');
+    const networkId = createNetwork(user.id, {
+      name: 'mutation-net',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'alice',
+    })!.id;
+    const original = insertMessage({
+      networkId,
+      target: '#mutation-history',
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'alice',
+      text: 'before',
+      msgid: 'mutation-parent-1',
+    });
+    const mutation = insertMessage({
+      networkId,
+      target: '#mutation-history',
+      time: new Date().toISOString(),
+      type: 'message-edit',
+      nick: 'alice',
+      text: 'after',
+      msgid: 'mutation-parent-1',
+    });
+    insertMessage({
+      networkId,
+      target: '#mutation-history',
+      time: new Date().toISOString(),
+      type: 'reaction',
+      nick: 'bob',
+      msgid: 'mutation-parent-1',
+      extra: { actor: 'bob', reaction: '👍', removed: false },
+    });
+    insertMessage({
+      networkId,
+      target: '#mutation-history',
+      time: new Date().toISOString(),
+      type: 'redaction',
+      nick: 'moderator',
+      msgid: 'mutation-parent-1',
+      extra: { reason: 'moderated' },
+    });
+
+    expect(listMessages(networkId, '#mutation-history', { limit: 10 })).toEqual([
+      expect.objectContaining({ id: Number(original.id), text: 'before' }),
+    ]);
+    expect(
+      listMessages(networkId, '#mutation-history', {
+        afterId: Number(original.id),
+        includeMutations: true,
+        limit: 10,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        id: Number(mutation.id),
+        type: 'message-edit',
+        msgid: 'mutation-parent-1',
+        text: 'after',
+      }),
+      expect.objectContaining({
+        type: 'reaction',
+        actor: 'bob',
+        reaction: '👍',
+        removed: false,
+      }),
+      expect.objectContaining({ type: 'redaction', reason: 'moderated' }),
+    ]);
+  });
+});
+
 describe("listMessagesCounted unit: 'renderable'", () => {
   function netFor(name: string): number {
     const user = createUser(name);
