@@ -352,7 +352,7 @@ const ceilingNote = computed(() => {
 // reference database — mental math for the preset labels, not a promise.
 const BYTES_PER_LINE = 281;
 
-const LINE_PRESETS = [0, 1_000, 5_000, 25_000, 100_000];
+const LINE_PRESETS = [0, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000];
 const HOUR_PRESETS = [0, 24, 72, 168, 720];
 
 const linesValue = computed(() => Number(settings.effective('data.retention.lines') ?? 0));
