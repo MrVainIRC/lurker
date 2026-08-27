@@ -1824,13 +1824,17 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     type: 'int',
     min: 0,
     max: 87_600,
+    // Same guardrail rationale as the lines floor, and this knob acts FASTER
+    // (the settings listener flags the sweep due immediately): a typed 1 or
+    // 17 would permanently delete nearly all event history within a tick.
+    minNonzero: 24,
     default: 168,
     description:
       'Presence and server noise — joins, parts, quits, nick and mode ' +
       'changes, MOTDs, away toggles — is deleted permanently once older than ' +
-      'this many hours, regardless of the line limit. 168 = one week. 0 keeps ' +
-      'events as long as regular messages. Bookmarked messages are never ' +
-      'deleted.',
+      'this many hours, regardless of the line limit. 168 = one week; the ' +
+      'smallest nonzero limit is 24. 0 keeps events as long as regular ' +
+      'messages. Bookmarked messages are never deleted.',
   },
 ]);
 

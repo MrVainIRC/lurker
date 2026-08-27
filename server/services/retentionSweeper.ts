@@ -35,6 +35,8 @@ import {
   deleteRetentionBatch,
   listUserIds,
   deleteNoiseBatch,
+  getNoiseCursor,
+  setNoiseCursor,
 } from '../db/retention.js';
 import { listInflightJobs } from '../db/dataExports.js';
 import { effectiveRetentionLines, effectiveEventRetentionHours } from './retentionLimits.js';
@@ -76,11 +78,16 @@ export interface RetentionTickResult {
 const yieldToLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 // Noise-clock scheduling state. `lastNoiseSweepMs = 0` makes the first tick
-// after boot run the noise phase (budgeted like everything else); the flag is
-// set when a user's event_hours setting changes so the change acts within a
-// tick instead of within an hour.
+// after boot start a pass; the settings listener forces one with -Infinity
+// (due under ANY interval, Infinity included). `noisePendingUsers` is the
+// pass's cursor ACROSS ticks: a budget-exhausted tick leaves the unfinished
+// user at the head and the next tick resumes there — without it the pass
+// restarts from the first user every tick, and once noise-enabled users
+// outnumber the budget the tail is never reached and the sweeper busy-loops
+// forever (the same livelock class the count sweep's drained dirty set
+// exists to prevent).
 let lastNoiseSweepMs = 0;
-let noiseSweepDue = false;
+let noisePendingUsers: number[] | null = null;
 
 /**
  * One sweep pass over the currently-dirty buffers, plus — when due — the
@@ -170,42 +177,46 @@ export async function runRetentionTick(
 
   // ── The noise clock ──────────────────────────────────────────────────────
   // Per-user, not per-buffer: the cutoff depends only on the owner's setting,
-  // and the partial index walks all of a user's over-age noise in one shape.
+  // and the partial index walks a user's newly-aged noise in one shape.
   // Quiet buffers age out here without ever being dirty — the count sweep
-  // can't see them, which is the whole reason this phase exists. Not losable
-  // on error the way the dirty set is: due-ness re-derives from the interval.
-  if (noiseSweepDue || Date.now() - lastNoiseSweepMs >= opts.noiseIntervalMs) {
-    let finished = true;
-    for (const userId of listUserIds()) {
-      if (batchesSpent >= opts.maxBatchesPerTick) {
-        finished = false;
-        break;
-      }
+  // can't see them, which is the whole reason this phase exists. Each user's
+  // walk is bounded below by their persisted low-water cursor, so a pass
+  // costs O(rows aged since the last pass), not O(everything ever retained).
+  if (noisePendingUsers !== null || Date.now() - lastNoiseSweepMs >= opts.noiseIntervalMs) {
+    if (noisePendingUsers === null) noisePendingUsers = listUserIds();
+    while (noisePendingUsers.length > 0 && batchesSpent < opts.maxBatchesPerTick) {
+      const userId = noisePendingUsers[0];
       const hours = effectiveEventRetentionHours(userId);
-      if (hours <= 0) continue; // noise clock off for this user
+      if (hours <= 0) {
+        noisePendingUsers.shift(); // noise clock off for this user
+        continue;
+      }
       const cutoffIso = new Date(Date.now() - hours * 3_600_000).toISOString();
+      const sinceIso = getNoiseCursor(userId);
+      if (sinceIso >= cutoffIso) {
+        noisePendingUsers.shift(); // nothing has aged past the cutoff since last pass
+        continue;
+      }
       let userDone = false;
       while (batchesSpent < opts.maxBatchesPerTick) {
         await yieldToLoop();
-        const deleted = deleteNoiseBatch(userId, cutoffIso, opts.batchRows);
+        const deleted = deleteNoiseBatch(userId, sinceIso, cutoffIso, opts.batchRows);
         batchesSpent++;
         result.noiseRowsDeleted += deleted;
         if (deleted < opts.batchRows) {
-          userDone = true; // this user's over-age noise is gone (or bookmarked)
+          userDone = true; // this user's window is clear (survivors are bookmarked)
           break;
         }
       }
-      if (!userDone) {
-        finished = false;
-        break;
-      }
+      if (!userDone) break; // budget died mid-user; they stay at the head for next tick
+      setNoiseCursor(userId, cutoffIso);
+      noisePendingUsers.shift();
     }
-    if (finished) {
+    if (noisePendingUsers.length === 0) {
+      noisePendingUsers = null;
       lastNoiseSweepMs = Date.now();
-      noiseSweepDue = false;
     } else {
-      noiseSweepDue = true;
-      result.backlog = true;
+      result.backlog = true; // the pass resumes from the queue head next tick
     }
   }
 
@@ -230,7 +241,13 @@ export function wireRetentionSettingsListener(): void {
       seedUserBuffersDirty(userId);
     }
     if (Object.prototype.hasOwnProperty.call(changes, 'data.retention.event_hours')) {
-      noiseSweepDue = true;
+      // Force the clock due (-Infinity is due under ANY interval); if a pass
+      // is mid-flight and already past this user, re-queue them so a lowered
+      // cutoff acts now instead of next hour.
+      lastNoiseSweepMs = -Infinity;
+      if (noisePendingUsers !== null && !noisePendingUsers.includes(userId)) {
+        noisePendingUsers.push(userId);
+      }
     }
   });
 }

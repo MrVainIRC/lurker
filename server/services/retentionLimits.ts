@@ -38,16 +38,27 @@ const warnedBadCeiling = new Set<string>();
  * only safe direction for these knobs: a typo that resolved to some small
  * number would quietly mass-delete history that cannot be restored.
  */
-function parseCeilingEnv(name: string, unit: string, example: string): number | null {
+function parseCeilingEnv(
+  name: string,
+  unit: string,
+  example: string,
+  max: number,
+  consequence: string,
+): number | null {
   const raw = (process.env[name] || '').trim();
   if (!raw) return null;
   const value = /^\d+$/.test(raw) ? Number(raw) : NaN;
-  if (!Number.isFinite(value)) {
+  // The upper bound is a sanity rail, not policy: an extra-digit typo that
+  // survived the regex would otherwise flow into date arithmetic downstream
+  // (an hours value past ~275,000 years makes new Date() throw, and the
+  // sweeper's circuit breaker would then stop ALL retention — the exact
+  // blast radius fail-open exists to prevent).
+  if (!Number.isFinite(value) || value > max) {
     if (!warnedBadCeiling.has(name)) {
       warnedBadCeiling.add(name);
       const text =
-        `${name}="${raw}" is not a whole number of ${unit}; ignoring it. ` +
-        `History is NOT bounded by this ceiling. Use a bare integer, e.g. ${example}.`;
+        `${name}="${raw}" is not a whole number of ${unit} (max ${max}); ignoring it. ` +
+        `${consequence} Use a bare integer, e.g. ${example}.`;
       console.warn(`[lurker] ${text}`);
       // Also into the system buffer: "the ceiling never took effect" is an
       // operator-facing condition, and stdout is not an operator surface.
@@ -64,6 +75,10 @@ export function declaredRetentionCeilingLines(): number | null {
     'LURKER_MAX_RETENTION_LINES',
     'lines',
     'LURKER_MAX_RETENTION_LINES=100000',
+    1_000_000_000,
+    // Accurate for THIS var: an untouched user resolves to unlimited, so no
+    // ceiling really does mean nothing is pruned by line count.
+    'History is NOT bounded by an instance ceiling.',
   );
 }
 
@@ -73,6 +88,13 @@ export function declaredEventRetentionCeilingHours(): number | null {
     'LURKER_MAX_EVENT_RETENTION_HOURS',
     'hours',
     'LURKER_MAX_EVENT_RETENTION_HOURS=336',
+    87_600,
+    // Deliberately different from the lines message: ignoring THIS ceiling
+    // does not stop noise pruning — every untouched user still runs the
+    // 168-hour registry default. Saying "not bounded" here misled the
+    // operator into thinking the noise clock was inert.
+    "The noise clock still runs at each user's own setting (default 168 hours); " +
+      'only the operator ceiling is missing.',
   );
 }
 

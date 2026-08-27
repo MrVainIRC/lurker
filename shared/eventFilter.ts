@@ -107,10 +107,11 @@ export function isNoiseType(type: string): boolean {
  * caveat above) but arithmetic: they are so rare that early-pruning them
  * saves nothing, and deleting them buys risk for no bytes.
  *
- * ⚠ The partial index idx_messages_noise_time and the noise-sweep statements
- * (server/db) both generate their type lists from this set. Editing it
- * changes the statements on next boot but NOT the already-built index — the
- * drift test in messagesEqp.test.ts fails until the index is migrated.
+ * The partial index idx_messages_noise_time and the noise-sweep statements
+ * (server/db) both generate their type lists from this set. Editing it is
+ * safe: ensureNoiseIndexCurrent (db/index.ts) compares the live index DDL at
+ * boot and rebuilds on mismatch, so deployed databases self-heal instead of
+ * crash-looping on the statements' INDEXED BY.
  */
 export const EARLY_PRUNE_TYPES: ReadonlySet<string> = new Set([
   ...NOISE_TYPES,

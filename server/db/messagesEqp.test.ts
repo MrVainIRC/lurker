@@ -217,7 +217,19 @@ describe('noise-clock paths', () => {
     expect(detail).toMatch(/USING (COVERING )?INDEX idx_messages_noise_time \(time<\?\)/);
   });
 
-  it('the live index predicate matches the shared EARLY_PRUNE_TYPES set', () => {
+  it('a stale index predicate is rebuilt by the boot self-heal, not left to crash', async () => {
+    // Simulate a deployed DB whose index predates an EARLY_PRUNE_TYPES edit:
+    // without the heal, db/retention.ts's INDEXED BY statements fail to
+    // prepare at module load — a boot crash-loop a fresh-DB CI run can never
+    // reproduce, which is exactly why this exercises the rebuild path
+    // directly instead of asserting the (always-fresh) index matches.
+    const { ensureNoiseIndexCurrent } = await import('./index.js');
+    db.exec(`DROP INDEX idx_messages_noise_time`);
+    db.exec(
+      `CREATE INDEX idx_messages_noise_time ON messages(time, buffer_id)
+        WHERE type IN ('join', 'quit')`,
+    );
+    ensureNoiseIndexCurrent();
     const row = db
       .prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`)
       .get('idx_messages_noise_time') as { sql: string } | undefined;

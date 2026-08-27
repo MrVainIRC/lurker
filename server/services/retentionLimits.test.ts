@@ -19,14 +19,19 @@ let deleteUserSetting: typeof import('../db/settings.js').deleteUserSetting;
 let effectiveRetentionLines: typeof import('./retentionLimits.js').effectiveRetentionLines;
 let declaredRetentionCeilingLines: typeof import('./retentionLimits.js').declaredRetentionCeilingLines;
 let effectiveEventRetentionHours: typeof import('./retentionLimits.js').effectiveEventRetentionHours;
+let declaredEventRetentionCeilingHours: typeof import('./retentionLimits.js').declaredEventRetentionCeilingHours;
 
 let userId: number;
 
 beforeAll(async () => {
   ({ createUser } = await import('../db/users.js'));
   ({ setUserSetting, deleteUserSetting } = await import('../db/settings.js'));
-  ({ effectiveRetentionLines, declaredRetentionCeilingLines, effectiveEventRetentionHours } =
-    await import('./retentionLimits.js'));
+  ({
+    effectiveRetentionLines,
+    declaredRetentionCeilingLines,
+    effectiveEventRetentionHours,
+    declaredEventRetentionCeilingHours,
+  } = await import('./retentionLimits.js'));
   userId = createUser('retention-alice').id;
 });
 
@@ -145,5 +150,13 @@ describe('effectiveEventRetentionHours', () => {
     expect(effectiveEventRetentionHours(userId)).toBe(336);
     setUserSetting(userId, 'data.retention.event_hours', 500);
     expect(effectiveEventRetentionHours(userId)).toBe(336);
+  });
+
+  it('an absurdly large ceiling fails open instead of feeding date math', () => {
+    // 9999999999 hours survives the digits regex but would make
+    // new Date(now - hours*3600e3) throw RangeError in the sweeper — and the
+    // circuit breaker would then stop ALL retention, line cap included.
+    process.env.LURKER_MAX_EVENT_RETENTION_HOURS = '9999999999';
+    expect(declaredEventRetentionCeilingHours()).toBeNull();
   });
 });

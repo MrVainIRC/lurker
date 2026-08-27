@@ -111,6 +111,47 @@ export function listUserIds(): number[] {
   return (db.prepare(`SELECT id FROM users`).all() as Array<{ id: number }>).map((r) => r.id);
 }
 
+// Per-user low-water marks for the noise sweep, persisted in app_meta as one
+// JSON map (userId → the cutoff ISO the last completed sweep reached). The
+// cursor is what keeps the sweep O(newly-aged rows): without it every pass
+// re-walks permanently-retained index entries — bookmarked noise, and the
+// entire backlog of any event_hours=0 user — from the oldest entry up, per
+// user, forever. Persisted (not in-memory) because that re-walk is exactly
+// what a restart must not re-pay. Deliberate edge: un-bookmarking noise that
+// already fell below the owner's cursor never revisits it — the line cap
+// remains its only reaper. Orphaned entries for deleted users are harmless
+// and tiny.
+const NOISE_CURSOR_KEY = 'retention_noise_cursors';
+
+function readNoiseCursors(): Record<string, string> {
+  const row = db.prepare(`SELECT value FROM app_meta WHERE key = ?`).get(NOISE_CURSOR_KEY) as
+    | { value: string }
+    | undefined;
+  if (!row) return {};
+  try {
+    const parsed = JSON.parse(row.value);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Where this user's last completed noise sweep stopped ('' = never swept —
+ *  compares below every ISO timestamp, so the first sweep walks from the
+ *  beginning). */
+export function getNoiseCursor(userId: number): string {
+  return readNoiseCursors()[String(userId)] ?? '';
+}
+
+export function setNoiseCursor(userId: number, cutoffIso: string): void {
+  const cursors = readNoiseCursors();
+  cursors[String(userId)] = cutoffIso;
+  db.prepare(
+    `INSERT INTO app_meta (key, value) VALUES (?, ?)
+     ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+  ).run(NOISE_CURSOR_KEY, JSON.stringify(cursors));
+}
+
 // One bounded bite of a user's over-age noise. INDEXED BY is load-bearing
 // twice over: (1) this schema never runs ANALYZE, and without the hint the
 // planner drives from buffers(user_id) and walks every one of the user's
@@ -129,6 +170,7 @@ const noiseDeleteStmt = db.prepare(`
     SELECT m.id FROM messages m INDEXED BY idx_messages_noise_time
      JOIN buffers b ON b.id = m.buffer_id
      WHERE m.type IN (${EARLY_PRUNE_TYPES_SQL})
+       AND m.time >= ?
        AND m.time < ?
        AND b.user_id = ?
        AND NOT EXISTS (
@@ -139,8 +181,15 @@ const noiseDeleteStmt = db.prepare(`
   )
 `);
 
-/** Delete up to `limit` of this user's noise rows older than `cutoffIso`.
- *  A return below `limit` means this user's over-age noise is done. */
-export function deleteNoiseBatch(userId: number, cutoffIso: string, limit: number): number {
-  return noiseDeleteStmt.run(cutoffIso, userId, userId, limit).changes;
+/** Delete up to `limit` of this user's noise rows in [sinceIso, cutoffIso) —
+ *  the low-water cursor bounds the walk to territory the last completed
+ *  sweep hasn't already cleared. A return below `limit` means this user's
+ *  window is done. */
+export function deleteNoiseBatch(
+  userId: number,
+  sinceIso: string,
+  cutoffIso: string,
+  limit: number,
+): number {
+  return noiseDeleteStmt.run(sinceIso, cutoffIso, userId, userId, limit).changes;
 }

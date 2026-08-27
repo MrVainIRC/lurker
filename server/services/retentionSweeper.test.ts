@@ -304,6 +304,36 @@ describe('runRetentionTick', () => {
     expect(rowIds(r.bufferId)).toEqual([]);
   });
 
+  it('a noise pass under budget resumes where it stopped instead of restarting', async () => {
+    // Three fresh users, one old noise row each. With a budget of 2 the pass
+    // MUST span ticks: the pre-fix code restarted from the first user every
+    // tick, so once users outnumbered the budget the tail was never pruned
+    // and backlog never cleared.
+    const seeded = ['noise-q1', 'noise-q2', 'noise-q3'].map((name) => {
+      const u = createUser(name);
+      const net = createNetwork(u.id, { name, host: 'h', port: 6697, tls: true, nick: 'n' });
+      const r = insertMessage({
+        networkId: net!.id,
+        target: '#chan',
+        time: new Date(Date.now() - 10 * 24 * 3_600_000).toISOString(),
+        type: 'join',
+        nick: 'x',
+        text: null,
+        self: false,
+      });
+      return { bufferId: r.bufferId };
+    });
+
+    let guard = 0;
+    let backlog = true;
+    while (backlog) {
+      if (++guard > 30) throw new Error('noise pass never converged');
+      backlog = (await runRetentionTick({ ...OPTS, noiseIntervalMs: 0, maxBatchesPerTick: 2 }))
+        .backlog;
+    }
+    for (const s of seeded) expect(rowIds(s.bufferId)).toEqual([]);
+  });
+
   it('an in-flight export pauses the sweep without losing the dirty set', async () => {
     const { createExportJob, deleteJob } = await import('../db/dataExports.js');
     const { userId, ids, bufferId } = seedBuffer('ret-export', 12);
