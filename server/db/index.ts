@@ -8,6 +8,7 @@ import { seedFavoritesFromContacts } from './contactsToFavoritesSeed.js';
 import path from 'path';
 import fs from 'fs';
 import { isNodeMode } from '../utils/edition.js';
+import { EARLY_PRUNE_TYPES } from '../../shared/eventFilter.js';
 import { foldBufferCase } from './foldBufferCase.js';
 import {
   normalizeMessagesBufferIds,
@@ -2181,6 +2182,61 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_net
 db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_net_nick
          ON messages(network_id, nick COLLATE NOCASE, id DESC,
                      buffer_id, type, from_ignored, mirrored)`);
+
+// Retention's noise clock (lurker-dev/RETENTION_PLAN.md §3.3): age-based
+// pruning needs a time-ordered access path, and messages.time is otherwise
+// unindexed — count-based retention deliberately never needed one. Partial
+// over exactly the early-prune types (roughly a third of rows), so the b-tree
+// stays small and every entry the sweep walks is a deletion candidate;
+// buffer_id rides along so the per-user ownership join reads index-only.
+// The predicate list is GENERATED from shared EARLY_PRUNE_TYPES — the sweep
+// statements in db/retention.ts generate theirs the same way (and pin the
+// index with INDEXED BY, which refuses to prepare against a predicate the
+// query no longer implies). Sorted so the rendering is deterministic.
+export const EARLY_PRUNE_TYPES_SQL = [...EARLY_PRUNE_TYPES]
+  .sort()
+  // '' → '''' escaping: today's members are internal constants, but this
+  // string becomes DDL and statement text verbatim — cheap to make that safe
+  // against a future type name containing a quote.
+  .map((t) => `'${t.replace(/'/g, "''")}'`)
+  .join(', ');
+
+/**
+ * Build — or REBUILD — the noise-clock index so its predicate always matches
+ * the current EARLY_PRUNE_TYPES. Self-healing on purpose: `CREATE INDEX IF
+ * NOT EXISTS` keys on the name alone, so after an edit to the shared set a
+ * deployed database would keep its stale index and the INDEXED BY statements
+ * in db/retention.ts would fail to prepare AT MODULE LOAD — a boot
+ * crash-loop, on every instance, that a fresh-DB CI run can never see.
+ * Comparing the live DDL and dropping on mismatch turns "the set changed"
+ * into an ordinary one-time rebuild instead. Exported so the rebuild path is
+ * testable against a deliberately-stale index (messagesEqp.test.ts).
+ */
+export function ensureNoiseIndexCurrent(): void {
+  const ddl = `CREATE INDEX IF NOT EXISTS idx_messages_noise_time
+         ON messages(time, buffer_id)
+         WHERE type IN (${EARLY_PRUNE_TYPES_SQL})`;
+  const live = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`)
+    .get('idx_messages_noise_time') as { sql: string } | undefined;
+  if (
+    live &&
+    (!live.sql.includes(`(${EARLY_PRUNE_TYPES_SQL})`) || !live.sql.includes('(time, buffer_id)'))
+  ) {
+    db.exec(`DROP INDEX idx_messages_noise_time`);
+  }
+  if (
+    !indexExists('idx_messages_noise_time') &&
+    db.prepare(`SELECT 1 FROM messages LIMIT 1 OFFSET ?`).get(INDEX_BUILD_WARN_ROWS)
+  ) {
+    console.warn(
+      `[db] building idx_messages_noise_time — one-time, blocks startup, not resumable. ` +
+        `Do not kill the process.`,
+    );
+  }
+  db.exec(ddl);
+}
+ensureNoiseIndexCurrent();
 
 // --- v18: satellite tables onto buffer_id (#695) -----------------------------
 //

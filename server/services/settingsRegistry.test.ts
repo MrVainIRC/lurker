@@ -67,6 +67,11 @@ describe('validate', () => {
       expect(out.ok).toBe(false);
       expect(!out.ok && out.error).toMatch(/0 or >= 1000/);
     });
+    it('the hours knob carries its own floor (24) — it acts even faster', () => {
+      expect(validate('data.retention.event_hours', 23).ok).toBe(false);
+      expect(validate('data.retention.event_hours', 24).ok).toBe(true);
+      expect(validate('data.retention.event_hours', 0).ok).toBe(true);
+    });
   });
 
   describe('string / color', () => {

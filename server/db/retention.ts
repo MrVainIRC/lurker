@@ -12,7 +12,7 @@
 // keeps messages_fts in sync through these deletes, so search never sees a
 // pruned row.
 
-import db from './index.js';
+import db, { EARLY_PRUNE_TYPES_SQL } from './index.js';
 
 // Buffers that took an insert since the sweeper last looked. In-memory on
 // purpose: a restart just means the next boot seeds every buffer dirty and
@@ -101,4 +101,133 @@ export function deleteRetentionBatch(
   limit: number,
 ): number {
   return deleteBatchStmt.run(bufferId, boundaryId, ownerUserId, limit).changes;
+}
+
+// ─── The noise clock ───────────────────────────────────────────────────────
+
+/** Every account, for the per-user noise sweep. Bounded by the user count,
+ *  which is small on every edition. */
+export function listUserIds(): number[] {
+  return (db.prepare(`SELECT id FROM users`).all() as Array<{ id: number }>).map((r) => r.id);
+}
+
+// Per-user low-water marks for the noise sweep, persisted in app_meta as one
+// JSON map (userId → the cutoff ISO the last completed sweep reached). The
+// cursor is what keeps the sweep O(newly-aged rows): without it every pass
+// re-walks permanently-retained index entries — bookmarked noise, and the
+// entire backlog of any event_hours=0 user — from the oldest entry up, per
+// user, forever. Persisted (not in-memory) because that re-walk is exactly
+// what a restart must not re-pay. Deliberate edge: un-bookmarking noise that
+// already fell below the owner's cursor never revisits it — the line cap
+// remains its only reaper. Orphaned entries for deleted users are harmless
+// and tiny.
+const NOISE_CURSOR_KEY = 'retention_noise_cursors';
+
+function readNoiseCursors(): Record<string, string> {
+  const row = db.prepare(`SELECT value FROM app_meta WHERE key = ?`).get(NOISE_CURSOR_KEY) as
+    | { value: string }
+    | undefined;
+  if (!row) return {};
+  try {
+    const parsed = JSON.parse(row.value) as unknown;
+    if (!parsed || typeof parsed !== 'object') return {};
+    // Keep only string values: a corrupted/hand-edited blob must degrade to
+    // "sweep from the beginning", never to a non-string reaching a SQL bind
+    // (which would throw every tick and trip the retention circuit breaker).
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === 'string') out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** Where this user's last completed noise sweep stopped ('' = never swept —
+ *  compares below every ISO timestamp, so the first sweep walks from the
+ *  beginning). */
+export function getNoiseCursor(userId: number): string {
+  return readNoiseCursors()[String(userId)] ?? '';
+}
+
+export function setNoiseCursor(userId: number, cutoffIso: string): void {
+  const cursors = readNoiseCursors();
+  cursors[String(userId)] = cutoffIso;
+  db.prepare(
+    `INSERT INTO app_meta (key, value) VALUES (?, ?)
+     ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+  ).run(NOISE_CURSOR_KEY, JSON.stringify(cursors));
+  noiseCursorCache?.set(userId, cutoffIso);
+}
+
+// In-memory mirror of the cursor map, hydrated on first use, for the one
+// consumer that runs on the message-insert hot path (noteNoiseInsert below)
+// and must not pay an app_meta read per join/quit.
+let noiseCursorCache: Map<number, string> | null = null;
+
+function cachedNoiseCursor(userId: number): string {
+  if (noiseCursorCache === null) {
+    noiseCursorCache = new Map(Object.entries(readNoiseCursors()).map(([k, v]) => [Number(k), v]));
+  }
+  return noiseCursorCache.get(userId) ?? '';
+}
+
+/**
+ * Called by insertMessage for every EARLY_PRUNE_TYPES row: stored times are
+ * allowed to lie in the past (server-time tags, bouncer replay), so a noise
+ * row can land BELOW its owner's low-water cursor — territory the sweep
+ * treats as already cleared and would otherwise never revisit, contradicting
+ * the setting's "deleted once older than N hours" promise. Rewinding the
+ * cursor to the row's own time puts it back in the next pass's window. Cost
+ * on the ordinary path (live event, time ≈ now): one PK owner probe and a
+ * string compare.
+ */
+export function noteNoiseInsert(bufferId: number, timeIso: string): void {
+  const ownerId = bufferOwnerId(bufferId);
+  if (ownerId === undefined) return;
+  const cursor = cachedNoiseCursor(ownerId);
+  if (cursor !== '' && timeIso < cursor) setNoiseCursor(ownerId, timeIso);
+}
+
+// One bounded bite of a user's over-age noise. INDEXED BY is load-bearing
+// twice over: (1) this schema never runs ANALYZE, and without the hint the
+// planner drives from buffers(user_id) and walks every one of the user's
+// buffers row-by-row — the exact shape the search indexes were built to kill;
+// (2) SQLite refuses to prepare an INDEXED BY whose partial-index predicate
+// the query no longer implies, so widening EARLY_PRUNE_TYPES without
+// migrating the index fails the boot loudly instead of silently scanning.
+// `time < ?` is a lexicographic compare on the stored ISO-8601 strings, the
+// same ordering assumption CHATHISTORY's window queries already rely on
+// (db/messages.ts loadHistoryWindow). The NOT EXISTS is the same owner-scoped
+// bookmark exemption as the count sweep — and it must be here in the SELECT,
+// not just "skipped at delete": an exempt row that stayed a candidate would
+// make a batch of survivors read as progress forever.
+const noiseDeleteStmt = db.prepare(`
+  DELETE FROM messages WHERE id IN (
+    SELECT m.id FROM messages m INDEXED BY idx_messages_noise_time
+     JOIN buffers b ON b.id = m.buffer_id
+     WHERE m.type IN (${EARLY_PRUNE_TYPES_SQL})
+       AND m.time >= ?
+       AND m.time < ?
+       AND b.user_id = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM user_bookmarks ub
+          WHERE ub.user_id = ? AND ub.message_id = m.id
+       )
+     LIMIT ?
+  )
+`);
+
+/** Delete up to `limit` of this user's noise rows in [sinceIso, cutoffIso) —
+ *  the low-water cursor bounds the walk to territory the last completed
+ *  sweep hasn't already cleared. A return below `limit` means this user's
+ *  window is done. */
+export function deleteNoiseBatch(
+  userId: number,
+  sinceIso: string,
+  cutoffIso: string,
+  limit: number,
+): number {
+  return noiseDeleteStmt.run(sinceIso, cutoffIso, userId, userId, limit).changes;
 }
