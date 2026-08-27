@@ -1809,6 +1809,55 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
       'the smallest nonzero limit is 1,000. Bookmarked messages are never ' +
       'deleted. Export your data first if you want an archive.',
   },
+  // The noise clock: presence/server churn ages out on its own (shorter)
+  // schedule regardless of the line limit. Default ON at one week — the
+  // operator weighed 72h against 168h and chose the week because these rows
+  // feed search-driven fact-finding ("when did X last quit"). The deletable
+  // set is shared/eventFilter.ts EARLY_PRUNE_TYPES, not something clients
+  // enumerate. Enforced through effectiveEventRetentionHours(), ceiling env
+  // var LURKER_MAX_EVENT_RETENTION_HOURS — same stack as the line cap.
+  {
+    key: 'data.retention.event_hours',
+    label: 'Event history age limit (hours)',
+    category: 'data',
+    group: 'retention',
+    type: 'int',
+    min: 0,
+    max: 87_600,
+    // Same guardrail rationale as the lines floor, and this knob acts FASTER
+    // (the settings listener flags the sweep due immediately): a typed 1 or
+    // 17 would permanently delete nearly all event history within a tick.
+    minNonzero: 24,
+    default: 168,
+    description:
+      'Presence and server noise — joins, parts, quits, nick and mode ' +
+      'changes, MOTDs, away toggles — is deleted permanently once older than ' +
+      'this many hours, regardless of the line limit. 168 = one week; the ' +
+      'smallest nonzero limit is 24. 0 keeps events as long as regular ' +
+      'messages. Bookmarked messages are never deleted.',
+  },
+  // Closed-buffer garbage collection: a buffer closed for longer than this
+  // is deleted ENTIRELY — row and history. Default OFF, deliberately and
+  // unlike the noise clock: closing is sidebar tidiness, not a judgment on
+  // the history (search/highlights reach into closed buffers), and this is
+  // the one knob that deletes chat rather than churn. Hosted can force it
+  // through the ceiling env var LURKER_MAX_CLOSED_BUFFER_DAYS. Buffers still
+  // holding a bookmarked message are always skipped.
+  {
+    key: 'data.retention.closed_buffer_days',
+    label: 'Delete closed buffers after (days)',
+    category: 'data',
+    group: 'retention',
+    type: 'int',
+    min: 0,
+    max: 3650,
+    minNonzero: 7,
+    default: 0,
+    description:
+      'Buffers closed for longer than this many days are deleted entirely, ' +
+      'history included. 0 keeps closed buffers forever; the smallest nonzero ' +
+      'value is 7. Buffers containing a bookmarked message are never deleted.',
+  },
 ]);
 
 const BY_KEY = new Map(REGISTRY.map((opt) => [opt.key, opt] as const));

@@ -18,6 +18,7 @@ import authRouter from './routes/auth.js';
 import networksRouter from './routes/networks.js';
 import networkPresetsRouter from './routes/networkPresets.js';
 import settingsRouter from './routes/settings.js';
+import retentionRouter from './routes/retention.js';
 import highlightRulesRouter from './routes/highlightRules.js';
 import highlightsRouter from './routes/highlights.js';
 import bookmarksRouter from './routes/bookmarks.js';
@@ -79,6 +80,7 @@ export function buildApp(sessionSecret: string): Express {
   apiRouter.use('/networks', networksRouter);
   apiRouter.use('/network-presets', networkPresetsRouter);
   apiRouter.use('/settings', settingsRouter);
+  apiRouter.use('/retention', retentionRouter);
   apiRouter.use('/highlight-rules', highlightRulesRouter);
   apiRouter.use('/highlights', highlightsRouter);
   apiRouter.use('/bookmarks', bookmarksRouter);

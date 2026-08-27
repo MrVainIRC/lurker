@@ -40,8 +40,15 @@ afterAll(() => {
 });
 
 // Tiny knobs so the budget/backlog behavior is exercised with dozens of rows,
-// not hundreds of thousands.
-const OPTS = { batchRows: 4, maxBatchesPerTick: 100, idleDelayMs: 0, busyDelayMs: 0 };
+// not hundreds of thousands. noiseIntervalMs Infinity keeps the noise clock
+// out of the count-sweep tests; the noise tests pass 0 to force it.
+const OPTS = {
+  batchRows: 4,
+  maxBatchesPerTick: 100,
+  idleDelayMs: 0,
+  busyDelayMs: 0,
+  noiseIntervalMs: Infinity,
+};
 
 const BASE = Date.parse('2026-08-26T00:00:00Z');
 
@@ -174,6 +181,426 @@ describe('runRetentionTick', () => {
     const updated = settingsService.update(userId, { 'data.retention.lines': 1000 });
     expect(updated.ok).toBe(true);
     expect(takeDirtyBuffers()).toContain(bufferId);
+  });
+
+  it('a per-buffer override wins over the global — in both directions', async () => {
+    const { setBufferRetentionById } = await import('../db/bufferRetention.js');
+    const { markBufferDirty } = await import('../db/retention.js');
+    const { userId, ids, bufferId } = seedBuffer('ret-override', 12);
+
+    // Tighter than the (unlimited) global.
+    setBufferRetentionById(userId, bufferId, 5);
+    markBufferDirty(bufferId);
+    await runRetentionTick(OPTS);
+    expect(rowIds(bufferId)).toEqual(ids.slice(7));
+
+    // Looser than a tight global: override 0 = explicitly unlimited HERE, so
+    // the global of 3 must not touch this buffer.
+    setUserSetting(userId, 'data.retention.lines', 3);
+    setBufferRetentionById(userId, bufferId, 0);
+    markBufferDirty(bufferId);
+    await runRetentionTick(OPTS);
+    expect(rowIds(bufferId)).toEqual(ids.slice(7));
+
+    // Cleared override → the global governs again.
+    setBufferRetentionById(userId, bufferId, null);
+    markBufferDirty(bufferId);
+    await runRetentionTick(OPTS);
+    expect(rowIds(bufferId)).toEqual(ids.slice(9));
+  });
+
+  it('the noise clock ages out old noise; chat, kicks, recent noise, bookmarks survive', async () => {
+    const user = createUser('noise-mix');
+    const net = createNetwork(user.id, {
+      name: 'noise-mix',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'n',
+    });
+    const old = new Date(Date.now() - 10 * 24 * 3_600_000).toISOString();
+    const recent = new Date().toISOString();
+    const row = (type: string, time: string, text: string) => {
+      const r = insertMessage({
+        networkId: net!.id,
+        target: '#chan',
+        time,
+        type,
+        nick: 'someone',
+        text,
+        self: false,
+      });
+      return { id: Number(r.id), bufferId: r.bufferId };
+    };
+    const oldChat = row('message', old, 'kept chat');
+    const oldKick = row('kick', old, 'kept kick');
+    const oldTopic = row('topic', old, 'kept topic');
+    const doomed = ['join', 'quit', 'motd', 'mode', 'away'].map((t) => row(t, old, `${t} noise`));
+    const savedQuit = row('quit', old, 'bookmarked noise');
+    const recentJoin = row('join', recent, 'recent noise');
+    expect(addBookmark(user.id, savedQuit.id)).toBe(true);
+    setUserSetting(user.id, 'data.retention.event_hours', 24);
+
+    const result = await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+
+    expect(result.noiseRowsDeleted).toBe(doomed.length);
+    expect(rowIds(oldChat.bufferId)).toEqual(
+      [oldChat, oldKick, oldTopic, savedQuit, recentJoin].map((r) => r.id),
+    );
+  });
+
+  it('the noise clock is ON by default: an untouched user loses week-old noise', async () => {
+    const user = createUser('noise-default');
+    const net = createNetwork(user.id, {
+      name: 'noise-default',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'n',
+    });
+    const seed = (time: string) =>
+      insertMessage({
+        networkId: net!.id,
+        target: '#chan',
+        time,
+        type: 'join',
+        nick: 'someone',
+        text: null,
+        self: false,
+      });
+    const oldJoin = seed(new Date(Date.now() - 10 * 24 * 3_600_000).toISOString());
+    const freshJoin = seed(new Date(Date.now() - 3_600_000).toISOString());
+
+    await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+
+    expect(rowIds(oldJoin.bufferId)).toEqual([Number(freshJoin.id)]);
+  });
+
+  it('event_hours 0 turns the noise clock off for that user', async () => {
+    const user = createUser('noise-off');
+    const net = createNetwork(user.id, {
+      name: 'noise-off',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'n',
+    });
+    setUserSetting(user.id, 'data.retention.event_hours', 0);
+    const r = insertMessage({
+      networkId: net!.id,
+      target: '#chan',
+      time: new Date(Date.now() - 30 * 24 * 3_600_000).toISOString(),
+      type: 'quit',
+      nick: 'someone',
+      text: 'ancient',
+      self: false,
+    });
+
+    await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+
+    expect(rowIds(r.bufferId)).toEqual([Number(r.id)]);
+  });
+
+  it('changing event_hours flags the noise clock due without waiting for the interval', async () => {
+    const { wireRetentionSettingsListener } = await import('./retentionSweeper.js');
+    const settingsService = (await import('./settingsService.js')).default;
+    const user = createUser('noise-flag');
+    const net = createNetwork(user.id, {
+      name: 'noise-flag',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'n',
+    });
+    const r = insertMessage({
+      networkId: net!.id,
+      target: '#chan',
+      time: new Date(Date.now() - 10 * 24 * 3_600_000).toISOString(),
+      type: 'part',
+      nick: 'someone',
+      text: null,
+      self: false,
+    });
+
+    // Interval Infinity: only the settings-change flag can trigger the phase.
+    wireRetentionSettingsListener();
+    expect(settingsService.update(user.id, { 'data.retention.event_hours': 24 }).ok).toBe(true);
+    await runRetentionTick(OPTS);
+
+    expect(rowIds(r.bufferId)).toEqual([]);
+  });
+
+  it('a noise pass under budget resumes where it stopped instead of restarting', async () => {
+    // Three fresh users, one old noise row each. With a budget of 2 the pass
+    // MUST span ticks: the pre-fix code restarted from the first user every
+    // tick, so once users outnumbered the budget the tail was never pruned
+    // and backlog never cleared.
+    const seeded = ['noise-q1', 'noise-q2', 'noise-q3'].map((name) => {
+      const u = createUser(name);
+      const net = createNetwork(u.id, { name, host: 'h', port: 6697, tls: true, nick: 'n' });
+      const r = insertMessage({
+        networkId: net!.id,
+        target: '#chan',
+        time: new Date(Date.now() - 10 * 24 * 3_600_000).toISOString(),
+        type: 'join',
+        nick: 'x',
+        text: null,
+        self: false,
+      });
+      return { bufferId: r.bufferId };
+    });
+
+    let guard = 0;
+    let backlog = true;
+    while (backlog) {
+      if (++guard > 30) throw new Error('noise pass never converged');
+      backlog = (await runRetentionTick({ ...OPTS, noiseIntervalMs: 0, maxBatchesPerTick: 2 }))
+        .backlog;
+    }
+    for (const s of seeded) expect(rowIds(s.bufferId)).toEqual([]);
+  });
+
+  it('replayed noise below the cursor rewinds it and still gets swept', async () => {
+    // Stored times may lie in the past (server-time tags, bouncer replay), so
+    // a noise row can be INSERTED below the low-water mark a completed pass
+    // left behind — territory the sweep believes is already clear. The
+    // insert-side rewind is what keeps the "deleted once older than N hours"
+    // promise for those rows.
+    const user = createUser('noise-replay');
+    const net = createNetwork(user.id, {
+      name: 'noise-replay',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'n',
+    });
+    const row = (time: string) =>
+      insertMessage({
+        networkId: net!.id,
+        target: '#chan',
+        time,
+        type: 'quit',
+        nick: 'x',
+        text: null,
+        self: false,
+      });
+    // A completed pass advances this user's cursor to their 168h-default cutoff.
+    const fresh = row(new Date().toISOString());
+    await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+    expect(rowIds(fresh.bufferId)).toEqual([Number(fresh.id)]);
+
+    // Replay lands a rows-old quit BELOW that cursor…
+    const replayed = row(new Date(Date.now() - 30 * 24 * 3_600_000).toISOString());
+    // …and the next pass still deletes it.
+    await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+    expect(rowIds(fresh.bufferId)).toEqual([Number(fresh.id)]);
+    expect(rowIds(replayed.bufferId)).not.toContain(Number(replayed.id));
+  });
+
+  it('the rewind watermark is the LARGEST cursor, not the smallest', async () => {
+    // Two users with different cursors; a replayed row for the high-cursor
+    // user timed BETWEEN them. A min-based watermark early-outs on it (time
+    // >= min) and the row evades the noise clock — the bug Copilot caught.
+    const { setNoiseCursor, getNoiseCursor } = await import('../db/retention.js');
+    const low = createUser('noise-wm-low');
+    const high = createUser('noise-wm-high');
+    const net = createNetwork(high.id, {
+      name: 'noise-wm',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'n',
+    });
+    setNoiseCursor(low.id, '2026-01-01T00:00:00.000Z');
+    setNoiseCursor(high.id, '2026-08-01T00:00:00.000Z');
+    insertMessage({
+      networkId: net!.id,
+      target: '#chan',
+      time: '2026-06-01T00:00:00.000Z',
+      type: 'quit',
+      nick: 'x',
+      text: null,
+      self: false,
+    });
+    expect(getNoiseCursor(high.id)).toBe('2026-06-01T00:00:00.000Z');
+  });
+
+  it('pass completion cannot clobber a concurrent cursor rewind', async () => {
+    // The pass writes its cutoff via compare-and-advance: if a replayed row
+    // rewound the cursor while the pass's deletes were in flight, the window
+    // [since, cutoff) never covered it, and a blind set would re-hide it.
+    const { setNoiseCursor, getNoiseCursor, advanceNoiseCursor, clearNoiseCursorForUser } =
+      await import('../db/retention.js');
+    const user = createUser('noise-cas');
+    setNoiseCursor(user.id, '2026-08-01T00:00:00.000Z');
+    // Cursor moved since the pass read it → the advance must be a no-op.
+    advanceNoiseCursor(user.id, '2026-08-10T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+    expect(getNoiseCursor(user.id)).toBe('2026-08-01T00:00:00.000Z');
+    // Unmoved → advances normally.
+    advanceNoiseCursor(user.id, '2026-08-01T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+    expect(getNoiseCursor(user.id)).toBe('2026-08-20T00:00:00.000Z');
+    clearNoiseCursorForUser(user.id);
+    expect(getNoiseCursor(user.id)).toBe('');
+  });
+
+  // ── Closed-buffer GC ──────────────────────────────────────────────────────
+
+  /** Close a buffer as of `daysAgo` days, in the exact form the close path
+   *  writes (SQLite datetime, not ISO) — the eligibility query must handle it. */
+  function closeBuffer(bufferId: number, daysAgo: number): void {
+    db.prepare(
+      `UPDATE buffers SET state = 'closed', closed_at = datetime('now', ?) WHERE id = ?`,
+    ).run(`-${daysAgo} days`, bufferId);
+  }
+  function bufferExists(bufferId: number): boolean {
+    return !!db.prepare(`SELECT 1 FROM buffers WHERE id = ?`).get(bufferId);
+  }
+
+  it('GC collects a buffer closed past the age — row, rows, and FTS — and nothing else', async () => {
+    const { userId, bufferId: old } = seedBuffer('gc-old', 6);
+    // A second buffer for the same user (its own network): closed too recently.
+    const recentNet = createNetwork(userId, {
+      name: 'gc-r',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'x',
+    });
+    const recent = insertMessage({
+      networkId: recentNet!.id,
+      target: '#recent',
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'x',
+      text: 'gcrecent keep',
+      self: false,
+    });
+    // And one that is simply open — never eligible.
+    const openNet = createNetwork(userId, {
+      name: 'gc-o',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'x',
+    });
+    const open = insertMessage({
+      networkId: openNet!.id,
+      target: '#open',
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'x',
+      text: 'gcopen keep',
+      self: false,
+    });
+    closeBuffer(old, 10);
+    closeBuffer(recent.bufferId, 2);
+    setUserSetting(userId, 'data.retention.closed_buffer_days', 7);
+    expect(ftsHits('gcold3')).toBe(1);
+
+    const r = await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+
+    expect(r.buffersCollected).toBe(1);
+    expect(r.gcRowsDeleted).toBe(6);
+    expect(bufferExists(old)).toBe(false);
+    expect(ftsHits('gcold3')).toBe(0);
+    expect(bufferExists(recent.bufferId)).toBe(true);
+    expect(rowIds(recent.bufferId)).toHaveLength(1);
+    expect(bufferExists(open.bufferId)).toBe(true);
+  });
+
+  it('GC never collects a closed buffer that still holds a bookmark', async () => {
+    const { userId, ids, bufferId } = seedBuffer('gc-saved', 5);
+    expect(addBookmark(userId, ids[1])).toBe(true);
+    closeBuffer(bufferId, 30);
+    setUserSetting(userId, 'data.retention.closed_buffer_days', 7);
+
+    const r = await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+
+    expect(r.buffersCollected).toBe(0);
+    expect(bufferExists(bufferId)).toBe(true);
+    expect(rowIds(bufferId)).toEqual(ids);
+  });
+
+  it('GC is off by default: a closed-for-a-year buffer survives an untouched user', async () => {
+    const { bufferId } = seedBuffer('gc-default', 3);
+    closeBuffer(bufferId, 365);
+    await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+    expect(bufferExists(bufferId)).toBe(true);
+  });
+
+  it('GC protects a bookmark placed MID-drain: drain stops short, row delete refuses', async () => {
+    // Search reaches closed buffers by design, so a user can bookmark a line
+    // while its buffer is being drained. The exemption lives in the drain
+    // statement itself, not just the listing — and the row delete refuses
+    // while rows remain, so the bookmark can never be cascaded away.
+    const { drainBufferBatch, gcDeleteClosedBuffer } = await import('../db/retention.js');
+    const { userId, ids, bufferId } = seedBuffer('gc-middrain', 5);
+    closeBuffer(bufferId, 30);
+    expect(addBookmark(userId, ids[1])).toBe(true);
+    expect(drainBufferBatch(userId, bufferId, 7, 100)).toBe(4);
+    expect(gcDeleteClosedBuffer(userId, bufferId, 7)).toBe(false);
+    expect(bufferExists(bufferId)).toBe(true);
+    expect(rowIds(bufferId)).toEqual([ids[1]]);
+  });
+
+  it('GC stops draining a buffer that was reopened mid-drain', async () => {
+    const { drainBufferBatch, gcDeleteClosedBuffer } = await import('../db/retention.js');
+    const { userId, ids, bufferId } = seedBuffer('gc-reopen', 8);
+    closeBuffer(bufferId, 30);
+    expect(drainBufferBatch(userId, bufferId, 7, 4)).toBe(4);
+    db.prepare(`UPDATE buffers SET state = 'open', closed_at = NULL WHERE id = ?`).run(bufferId);
+    expect(drainBufferBatch(userId, bufferId, 7, 4)).toBe(0);
+    expect(gcDeleteClosedBuffer(userId, bufferId, 7)).toBe(false);
+    expect(rowIds(bufferId)).toHaveLength(4);
+    expect(ids).toHaveLength(8);
+  });
+
+  it('GC makes progress even under a budget of 2 (no busy-cadence livelock)', async () => {
+    // Reviewer's repro: noise probe + listing exhausted a budget of 2 before
+    // any drain ran, so every tick reported backlog and deleted nothing.
+    const { userId, bufferId } = seedBuffer('gc-tiny-budget', 14);
+    closeBuffer(bufferId, 10);
+    setUserSetting(userId, 'data.retention.closed_buffer_days', 7);
+    let guard = 0;
+    let backlog = true;
+    while (backlog) {
+      if (++guard > 60) throw new Error('GC livelocked under a tiny budget');
+      backlog = (await runRetentionTick({ ...OPTS, noiseIntervalMs: 0, maxBatchesPerTick: 2 }))
+        .backlog;
+    }
+    expect(bufferExists(bufferId)).toBe(false);
+  });
+
+  it('an in-flight import pauses the whole tick, like an export', async () => {
+    const { beginImport, endImport } = await import('../db/retention.js');
+    const { userId, bufferId } = seedBuffer('gc-import', 3);
+    closeBuffer(bufferId, 30);
+    setUserSetting(userId, 'data.retention.closed_buffer_days', 7);
+    beginImport();
+    try {
+      const paused = await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+      expect(paused.buffersExamined).toBe(0);
+      expect(bufferExists(bufferId)).toBe(true);
+    } finally {
+      endImport();
+    }
+    await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+    expect(bufferExists(bufferId)).toBe(false);
+  });
+
+  it('GC drains a big buffer across ticks under budget, then drops the row', async () => {
+    const { userId, bufferId } = seedBuffer('gc-budget', 14);
+    closeBuffer(bufferId, 10);
+    setUserSetting(userId, 'data.retention.closed_buffer_days', 7);
+
+    let guard = 0;
+    let backlog = true;
+    while (backlog) {
+      if (++guard > 30) throw new Error('GC never converged');
+      backlog = (await runRetentionTick({ ...OPTS, noiseIntervalMs: 0, maxBatchesPerTick: 3 }))
+        .backlog;
+    }
+    expect(bufferExists(bufferId)).toBe(false);
   });
 
   it('an in-flight export pauses the sweep without losing the dirty set', async () => {

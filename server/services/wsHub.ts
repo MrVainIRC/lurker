@@ -105,7 +105,9 @@ import { getUserAwayState } from '../db/userAwayState.js';
 import { ownsNetwork, listNetworksForUser } from '../db/networks.js';
 import * as chanlistDb from '../db/chanlist.js';
 import { getUserSettings } from '../db/settings.js';
-import { defaultsAsObject } from './settingsRegistry.js';
+import { defaultsAsObject, validate } from './settingsRegistry.js';
+import { setBufferRetentionById } from '../db/bufferRetention.js';
+import { markBufferDirty } from '../db/retention.js';
 import { SESSION_COOKIE, loadBearerSession } from '../middleware/auth.js';
 import { PROTOCOL_VERSION, MIN_PROTOCOL_VERSION } from '../protocol.js';
 import { isAllowedBrowserOrigin } from '../utils/corsOrigins.js';
@@ -3438,6 +3440,41 @@ export function attachWsHub(
           target,
           bufferId: addr?.bufferId ?? resolveBuffer(userId, networkId, target)?.id ?? null,
           ...getChannelFlags(userId, networkId, target),
+        });
+        break;
+      }
+      case 'set-buffer-retention': {
+        // Per-buffer override of data.retention.lines: a number sets it
+        // (0 = explicitly unlimited here, still ceiling-clamped at
+        // enforcement), null/absent clears it back to "inherit". Channels
+        // and DMs both hold prunable history; server pseudo-buffers store
+        // their lines elsewhere (system_messages) and can't carry it.
+        const addr = verbBuffer(userId, msg);
+        if (addr === null) break;
+        const networkId = addr ? Number(addr.networkId) : Number(msg.networkId);
+        const target = addr ? addr.target : typeof msg.target === 'string' ? msg.target : '';
+        if (!networkId || !target) break;
+        const buf = resolveBuffer(userId, networkId, target);
+        if (!buf || (buf.kind !== 'channel' && buf.kind !== 'dm')) break;
+        let maxLines: number | null = null;
+        if (msg.maxLines !== null && msg.maxLines !== undefined) {
+          // The registry knob's own validator — min/max/minNonzero in ONE
+          // place, so this verb can never drift from what PATCH /api/settings
+          // accepts. An invalid value is refused silently, like every other
+          // malformed verb.
+          const v = validate('data.retention.lines', msg.maxLines);
+          if (!v.ok || typeof v.value !== 'number') break;
+          maxLines = v.value;
+        }
+        setBufferRetentionById(userId, buf.id, maxLines);
+        // A lowered cap should act on the next tick, not the next insert.
+        markBufferDirty(buf.id);
+        fanOut(userId, {
+          kind: 'buffer-retention-changed',
+          networkId,
+          target,
+          bufferId: buf.id,
+          maxLines,
         });
         break;
       }

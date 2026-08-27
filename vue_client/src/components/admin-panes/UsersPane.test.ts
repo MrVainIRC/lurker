@@ -45,9 +45,9 @@ describe('UsersPane user settings', () => {
 
     await rows[0]!.find('button').trigger('click');
     expect(rows[0]!.text()).toContain('user settings');
-    expect(
-      (rows[0]!.find('input[type="checkbox"]').element as HTMLInputElement).checked,
-    ).toBe(false);
+    expect((rows[0]!.find('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(
+      false,
+    );
 
     await rows[0]!.find('input[type="checkbox"]').trigger('change');
     expect(setVisibility).toHaveBeenCalledWith(7, []);

@@ -3969,9 +3969,11 @@ describe('IRCv3 draft/metadata-2', () => {
       connect_commands: null,
     })!;
     const conn = new IrcConnection({ network, onEvent: () => {} });
-    (conn.client as unknown as {
-      network: { cap: { enabled: string[]; available: Map<string, string> } };
-    }).network = {
+    (
+      conn.client as unknown as {
+        network: { cap: { enabled: string[]; available: Map<string, string> } };
+      }
+    ).network = {
       cap: {
         enabled: ['draft/metadata-2', 'batch'],
         available: new Map([['draft/metadata-2', 'max-subs=50']]),

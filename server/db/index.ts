@@ -8,6 +8,7 @@ import { seedFavoritesFromContacts } from './contactsToFavoritesSeed.js';
 import path from 'path';
 import fs from 'fs';
 import { isNodeMode } from '../utils/edition.js';
+import { EARLY_PRUNE_TYPES } from '../../shared/eventFilter.js';
 import { foldBufferCase } from './foldBufferCase.js';
 import {
   normalizeMessagesBufferIds,
@@ -484,6 +485,22 @@ function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_favorite_buffers_user
       ON favorite_buffers(user_id, position);
+
+    -- Per-buffer override of data.retention.lines
+    -- (lurker-dev/RETENTION_PLAN.md). Sparse: a row exists only where the
+    -- user set an override; max_lines 0 is an EXPLICIT "unlimited here"
+    -- (still clamped to the operator ceiling at enforcement), absence means
+    -- "inherit the global setting". Born buffer_id-keyed like
+    -- favorite_buffers — never part of the v18 name-key rebuilds.
+    CREATE TABLE IF NOT EXISTS buffer_retention (
+      user_id INTEGER NOT NULL,
+      buffer_id INTEGER NOT NULL,
+      max_lines INTEGER NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, buffer_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (buffer_id) REFERENCES buffers(id) ON DELETE CASCADE
+    );
 
     -- Per-(user, network, channel) override for the desktop nicklist's
     -- collapsed state. Only channels the user has explicitly toggled get a
@@ -2251,6 +2268,61 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_net_nick
          ON messages(network_id, nick COLLATE NOCASE, id DESC,
                      buffer_id, type, from_ignored, mirrored)`);
 
+// Retention's noise clock (lurker-dev/RETENTION_PLAN.md §3.3): age-based
+// pruning needs a time-ordered access path, and messages.time is otherwise
+// unindexed — count-based retention deliberately never needed one. Partial
+// over exactly the early-prune types (roughly a third of rows), so the b-tree
+// stays small and every entry the sweep walks is a deletion candidate;
+// buffer_id rides along so the per-user ownership join reads index-only.
+// The predicate list is GENERATED from shared EARLY_PRUNE_TYPES — the sweep
+// statements in db/retention.ts generate theirs the same way (and pin the
+// index with INDEXED BY, which refuses to prepare against a predicate the
+// query no longer implies). Sorted so the rendering is deterministic.
+export const EARLY_PRUNE_TYPES_SQL = [...EARLY_PRUNE_TYPES]
+  .sort()
+  // '' → '''' escaping: today's members are internal constants, but this
+  // string becomes DDL and statement text verbatim — cheap to make that safe
+  // against a future type name containing a quote.
+  .map((t) => `'${t.replace(/'/g, "''")}'`)
+  .join(', ');
+
+/**
+ * Build — or REBUILD — the noise-clock index so its predicate always matches
+ * the current EARLY_PRUNE_TYPES. Self-healing on purpose: `CREATE INDEX IF
+ * NOT EXISTS` keys on the name alone, so after an edit to the shared set a
+ * deployed database would keep its stale index and the INDEXED BY statements
+ * in db/retention.ts would fail to prepare AT MODULE LOAD — a boot
+ * crash-loop, on every instance, that a fresh-DB CI run can never see.
+ * Comparing the live DDL and dropping on mismatch turns "the set changed"
+ * into an ordinary one-time rebuild instead. Exported so the rebuild path is
+ * testable against a deliberately-stale index (messagesEqp.test.ts).
+ */
+export function ensureNoiseIndexCurrent(): void {
+  const ddl = `CREATE INDEX IF NOT EXISTS idx_messages_noise_time
+         ON messages(time, buffer_id)
+         WHERE type IN (${EARLY_PRUNE_TYPES_SQL})`;
+  const live = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`)
+    .get('idx_messages_noise_time') as { sql: string } | undefined;
+  if (
+    live &&
+    (!live.sql.includes(`(${EARLY_PRUNE_TYPES_SQL})`) || !live.sql.includes('(time, buffer_id)'))
+  ) {
+    db.exec(`DROP INDEX idx_messages_noise_time`);
+  }
+  if (
+    !indexExists('idx_messages_noise_time') &&
+    db.prepare(`SELECT 1 FROM messages LIMIT 1 OFFSET ?`).get(INDEX_BUILD_WARN_ROWS)
+  ) {
+    console.warn(
+      `[db] building idx_messages_noise_time — one-time, blocks startup, not resumable. ` +
+        `Do not kill the process.`,
+    );
+  }
+  db.exec(ddl);
+}
+ensureNoiseIndexCurrent();
+
 // --- v18: satellite tables onto buffer_id (#695) -----------------------------
 //
 // The six per-buffer view-state tables (read pointers, input history, pins,
@@ -2470,6 +2542,17 @@ try {
 } catch (err) {
   console.warn('[db] smart-filter→event-tier migration failed (will retry next boot):', err);
 }
+
+// buffer_id-leading indexes on the two satellite tables that scale with the
+// INSTANCE (not the user): a `DELETE FROM buffers` cascades into eight child
+// tables, and every one of them is keyed (user_id, buffer_id) — without these
+// the cascade full-scans buffer_reads and input_history per deleted buffer.
+// Interactive closes paid that once; closed-buffer GC (retention plan §4.5)
+// deletes buffers in bulk on the shared connection, where a per-delete scan
+// that grows with the instance is the event-loop-starvation class again.
+// After the v18 rebuild on purpose (those tables are recreated there).
+db.exec(`CREATE INDEX IF NOT EXISTS idx_buffer_reads_buffer_id ON buffer_reads(buffer_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_input_history_buffer_id ON input_history(buffer_id)`);
 
 // Gate on uploaderSeedOk: if the uploader seed threw, leave schema_version
 // un-bumped so the seed retries on the next boot instead of being silently
