@@ -40,7 +40,6 @@ import UsersPane from '../components/admin-panes/UsersPane.vue';
 import InvitesPane from '../components/admin-panes/InvitesPane.vue';
 import UploadersPane from '../components/admin-panes/UploadersPane.vue';
 import NetworksPane from '../components/admin-panes/NetworksPane.vue';
-import SettingsVisibilityPane from '../components/admin-panes/SettingsVisibilityPane.vue';
 
 useSocket();
 
@@ -53,7 +52,6 @@ const PANES: Record<string, Component> = {
   invites: InvitesPane,
   uploaders: UploadersPane,
   networks: NetworksPane,
-  settings: SettingsVisibilityPane,
 };
 
 const activeTabId = computed((): string => {

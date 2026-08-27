@@ -4,8 +4,10 @@
 
   Admin panel → Users. Member management (delete / pause / resume) for the
   instance. Split out of the old combined settings-panes/UsersPane so the admin
-  panel can give members and invites their own tabs (#299 milestone). Drives the
-  same `admin` Pinia store; the route/sidebar already gate this to admins.
+  panel can give members and invites their own tabs (#299 milestone). Per-user
+  settings visibility is managed inline with each member instead of a separate
+  admin tab. Drives the same `admin` Pinia store; the route/sidebar already gate
+  this to admins.
 -->
 
 <template>
@@ -99,6 +101,15 @@
 
         <div class="row-actions">
           <button
+            v-if="u.role !== 'admin'"
+            class="link"
+            :disabled="adminBusy || !adminStore.settingsVisibilityLoaded"
+            title="choose which settings this user can see"
+            @click="toggleSettings(u)"
+          >
+            settings
+          </button>
+          <button
             v-if="canAssignIdents"
             class="link"
             :disabled="adminBusy"
@@ -131,6 +142,36 @@
             delete
           </button>
         </div>
+
+        <div v-if="settingsOpenFor === u.id && u.role !== 'admin'" class="user-settings">
+          <template v-if="settingsFor(u)">
+            <div class="user-settings-head">
+              <strong>user settings</strong>
+              <span class="user-settings-actions">
+                <button type="button" class="link" :disabled="adminBusy" @click="showAll(u)">
+                  show all
+                </button>
+                <button type="button" class="link" :disabled="adminBusy" @click="hideAll(u)">
+                  hide all
+                </button>
+              </span>
+            </div>
+            <div v-for="group in settingGroups" :key="group.id" class="setting-group">
+              <h4>{{ group.label }}</h4>
+              <label v-for="option in group.options" :key="option.key" class="setting-option">
+                <input
+                  type="checkbox"
+                  :checked="!settingsFor(u)!.hiddenKeys.includes(option.key)"
+                  :disabled="adminBusy"
+                  @change="toggleSetting(u, option.key)"
+                />
+                <span>{{ option.label }}</span>
+                <code>{{ option.key }}</code>
+              </label>
+            </div>
+          </template>
+          <p v-else class="muted small">Loading user settings…</p>
+        </div>
       </li>
     </ul>
     <p v-else-if="adminStore.usersLoaded" class="muted small">No users.</p>
@@ -144,6 +185,7 @@ import { useAdminStore } from '../../stores/admin.js';
 import { useConfigStore } from '../../stores/config.js';
 import type { AdminUser } from '../../stores/admin.js';
 import { formatRelative } from '../../utils/timestamp.js';
+import { CATEGORIES, REGISTRY } from '../../../../shared/settingsRegistry.js';
 // Same module the server derives and validates idents with, so the input's cap
 // can't drift from what the route accepts.
 import { MAX_IDENT_LENGTH } from '../../../../shared/ident.js';
@@ -156,6 +198,14 @@ const adminStore = useAdminStore();
 const config = useConfigStore();
 
 const users = computed(() => adminStore.users);
+const settingsOpenFor = ref<number | null>(null);
+const settingGroups = computed(() =>
+  CATEGORIES.map((category) => ({
+    id: category.id,
+    label: category.label,
+    options: REGISTRY.filter((option) => option.category === category.id),
+  })).filter((group) => group.options.length),
+);
 
 // Two separate questions, deliberately not collapsed into one flag:
 //   • does anything answer ident lookups? — if not, the idents are inert and the
@@ -180,6 +230,44 @@ function onEditIdent(user: AdminUser) {
   editingIdentFor.value = editingIdentFor.value === user.id ? null : user.id;
 }
 
+function settingsFor(user: AdminUser) {
+  return adminStore.settingsVisibility.find((entry) => entry.id === user.id);
+}
+
+function toggleSettings(user: AdminUser): void {
+  if (user.role === 'admin') return;
+  adminError.value = '';
+  settingsOpenFor.value = settingsOpenFor.value === user.id ? null : user.id;
+}
+
+async function saveSettings(user: AdminUser, hiddenKeys: string[]): Promise<void> {
+  adminBusy.value = true;
+  try {
+    await adminStore.setSettingsVisibility(user.id, hiddenKeys);
+  } catch (e: any) {
+    adminError.value = e.message || 'failed to update user settings';
+  } finally {
+    adminBusy.value = false;
+  }
+}
+
+function toggleSetting(user: AdminUser, key: string): void {
+  const visibility = settingsFor(user);
+  if (!visibility) return;
+  const hidden = new Set(visibility.hiddenKeys);
+  if (hidden.has(key)) hidden.delete(key);
+  else hidden.add(key);
+  void saveSettings(user, [...hidden]);
+}
+
+function showAll(user: AdminUser): void {
+  if (settingsFor(user)) void saveSettings(user, []);
+}
+
+function hideAll(user: AdminUser): void {
+  if (settingsFor(user)) void saveSettings(user, [...adminStore.settingKeys]);
+}
+
 async function onSaveIdent(user: AdminUser) {
   adminError.value = '';
   adminBusy.value = true;
@@ -199,7 +287,7 @@ onMounted(() => {
   // elsewhere — or another admin's change — leaves it stale until a full browser
   // reload. The admin panel route-swaps panes, so re-mount is the natural place
   // to re-sync; the request is cheap and keeps the screen honest (#613).
-  adminStore.fetchUsers().catch((e: any) => {
+  Promise.all([adminStore.fetchUsers(), adminStore.fetchSettingsVisibility()]).catch((e: any) => {
     adminError.value = e.message;
   });
 });
@@ -286,5 +374,38 @@ async function onResumeUser(user: AdminUser) {
   border: 1px solid var(--warn);
   padding: 0 var(--space-2);
   text-transform: uppercase;
+}
+.user-row .user-settings {
+  width: 100%;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.user-settings-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.user-settings-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+.user-settings .setting-group {
+  margin-top: var(--space-4);
+}
+.user-settings .setting-group h4 {
+  margin: 0 0 var(--space-2);
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+.user-settings .setting-option {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  cursor: pointer;
+}
+.user-settings .setting-option code {
+  color: var(--fg-muted);
 }
 </style>

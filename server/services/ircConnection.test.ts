@@ -43,7 +43,7 @@ import {
 } from '../db/buffers.js';
 import { getPeerPresence, writePeerState } from '../db/peerPresence.js';
 import { setUserSetting, deleteUserSetting } from '../db/settings.js';
-import { listIrcMetadataForNetwork } from '../db/ircMetadata.js';
+import { applyIrcMetadata, listIrcMetadataForNetwork } from '../db/ircMetadata.js';
 
 // The bare IrcConnections built below carry user_id: 1, and their join/part
 // handlers write system_messages (FK → users.id). Seed user id 1 in the
@@ -3988,10 +3988,12 @@ describe('IRCv3 draft/metadata-2', () => {
     const { conn, raw, network } = makeConn('metadata-wire');
 
     expect(conn.sendMetadata('*', 'SET', 'avatar', 'https://example.test/avatar.png')).toBe(true);
+    expect(conn.sendMetadata('*', 'SET', 'status', '')).toBe(true);
     expect(conn.sendMetadata('*', 'SET', 'avatar')).toBe(true);
 
     expect(raw.mock.calls).toEqual([
       ['METADATA * SET avatar https://example.test/avatar.png'],
+      ['METADATA * SET status :'],
       ['METADATA * SET avatar'],
     ]);
     expect(listIrcMetadataForNetwork(network.id)).toEqual([]);
@@ -4016,6 +4018,24 @@ describe('IRCv3 draft/metadata-2', () => {
     subscribe.call(conn);
 
     expect(raw).toHaveBeenCalledWith('METADATA * LIST');
+  });
+
+  it('reapplies persisted own metadata after registration without touching other targets', () => {
+    const { conn, raw, network } = makeConn('metadata-reapply');
+    applyIrcMetadata(network.id, '*', 'avatar', 'https://example.test/avatar.png');
+    applyIrcMetadata(network.id, '*', 'pronouns', '');
+    applyIrcMetadata(network.id, 'me', 'status', 'available');
+    applyIrcMetadata(network.id, '#chat', 'topic-url', 'https://example.test/topic');
+    applyIrcMetadata(network.id, 'someone-else', 'avatar', 'https://example.test/other.png');
+    const subscribe = (conn as unknown as { subscribeMetadata: () => void }).subscribeMetadata;
+
+    subscribe.call(conn);
+
+    expect(raw).toHaveBeenCalledWith('METADATA * SET avatar https://example.test/avatar.png');
+    expect(raw).toHaveBeenCalledWith('METADATA * SET pronouns :');
+    expect(raw).toHaveBeenCalledWith('METADATA * SET status available');
+    expect(raw).not.toHaveBeenCalledWith('METADATA * SET topic-url https://example.test/topic');
+    expect(raw).not.toHaveBeenCalledWith('METADATA * SET avatar https://example.test/other.png');
   });
 
   it('stores self metadata under the stable target and accepts server values with spaces', () => {

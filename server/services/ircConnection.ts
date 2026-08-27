@@ -18,7 +18,7 @@ import { refoldNetworkBuffers } from '../db/refoldBuffers.js';
 import { normalizeCasemapping } from '../db/casemapping.js';
 import type { Network } from '../db/networks.js';
 import { updateNetworkIcon } from '../db/networks.js';
-import { applyIrcMetadata, listIrcMetadataForNetwork } from '../db/ircMetadata.js';
+import { applyIrcMetadata, listIrcMetadata, listIrcMetadataForNetwork } from '../db/ircMetadata.js';
 import {
   isClosed as isBufferClosed,
   getBuffer,
@@ -992,6 +992,21 @@ export class IrcConnection {
     });
   }
 
+  private reapplyOwnMetadata(): void {
+    // `*` is the canonical self target. Include the configured/current nick as
+    // a compatibility fallback for rows written by older Lurker versions,
+    // before self metadata was normalized to `*`. Never scan all rows here:
+    // the database also contains metadata belonging to other users/channels.
+    const targets = [...new Set(['*', this.network.nick, this.currentNick].filter(Boolean))];
+    const sentKeys = new Set<string>();
+    for (const target of targets) {
+      for (const row of listIrcMetadata(this.network.id, target)) {
+        if (sentKeys.has(row.key)) continue;
+        if (this.sendMetadata('*', 'SET', row.key, row.value)) sentKeys.add(row.key);
+      }
+    }
+  }
+
   private subscribeMetadata(): void {
     if (this.metadataSubscriptionSent) return;
     if (!this.supportsCap('draft/metadata-2') || !this.supportsCap('batch')) return;
@@ -1001,8 +1016,12 @@ export class IrcConnection {
     const parsedMax = maxSubsToken ? Number(maxSubsToken.slice('max-subs='.length)) : NaN;
     const maxSubs = Number.isFinite(parsedMax) ? Math.max(0, Math.floor(parsedMax)) : 7;
     const keys = ['avatar', 'display-name', 'pronouns', 'status', 'homepage', 'url', 'color'];
-    if (maxSubs === 0) return;
-    this.sendMetadata('*', 'SUB', ...keys.slice(0, maxSubs));
+    if (maxSubs > 0) this.sendMetadata('*', 'SUB', ...keys.slice(0, maxSubs));
+    this.reapplyOwnMetadata();
+    if (maxSubs === 0) {
+      this.metadataSubscriptionSent = true;
+      return;
+    }
     // The server normally sends our own metadata in the registration burst,
     // but SYNC is the specified recovery path and is needed by servers that
     // defer that burst. It also makes the persisted profile converge after a
@@ -4632,7 +4651,7 @@ export class IrcConnection {
     const safe = params.map((param) => String(param).replace(/[\r\n\0]/g, ' '));
     const last = safe.length - 1;
     const rendered = safe.map((param, index) =>
-      index === last && (param.startsWith(':') || /\s/.test(param))
+      index === last && (param === '' || param.startsWith(':') || /\s/.test(param))
         ? `:${param.replace(/^:/, '')}`
         : param,
     );
