@@ -4696,7 +4696,7 @@ export class IrcConnection {
   }
 
   sendSetname(realname: string): boolean {
-    if (!this.supportsCap('setname')) return false;
+    if (!this.supportsCap('setname') || !realname.trim()) return false;
     this.sendCommand('SETNAME', [realname]);
     return true;
   }

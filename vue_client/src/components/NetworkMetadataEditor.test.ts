@@ -49,7 +49,9 @@ describe('NetworkMetadataEditor', () => {
       nick: 'Me',
       channels: [],
       negotiatedFeatures: { metadata: true, setname: false },
-      metadata: {},
+      metadata: {
+        '*': [{ key: 'display-name', value: 'Old name', visibility: '*' }],
+      },
     };
     const wrapper = mount(NetworkMetadataEditor, { props: { networkId: 1 } });
     await wrapper.findAll('input')[1].setValue('New name');
@@ -66,6 +68,32 @@ describe('NetworkMetadataEditor', () => {
     expect(displayNameCalls.at(-1)).toMatchObject({
       command: 'SET',
       params: ['display-name'],
+    });
+    expect(displayNameCalls).toHaveLength(1);
+  });
+
+  it('sends only the independently changed metadata key', async () => {
+    const networks = useNetworksStore();
+    networks.states[1] = {
+      networkId: 1,
+      state: 'connected',
+      nick: 'Me',
+      channels: [],
+      negotiatedFeatures: { metadata: true, setname: false },
+      metadata: {},
+    };
+    const wrapper = mount(NetworkMetadataEditor, { props: { networkId: 1 } });
+    await wrapper.findAll('input')[0].setValue('https://example.test/avatar.png');
+    await wrapper.find('button').trigger('click');
+
+    const metadataCalls = vi
+      .mocked(socketSend)
+      .mock.calls.map(([payload]) => payload)
+      .filter((payload) => payload.type === 'metadata');
+    expect(metadataCalls).toHaveLength(1);
+    expect(metadataCalls[0]).toMatchObject({
+      command: 'SET',
+      params: ['avatar', 'https://example.test/avatar.png'],
     });
   });
 });

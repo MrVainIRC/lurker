@@ -46,6 +46,9 @@ const metadataKeys = ['avatar', 'display-name', 'pronouns', 'status', 'homepage'
 const values = reactive<Record<string, string>>(
   Object.fromEntries(metadataKeys.map((key) => [key, ''])),
 );
+const savedValues = reactive<Record<string, string>>(
+  Object.fromEntries(metadataKeys.map((key) => [key, ''])),
+);
 const realname = ref('');
 const message = ref('');
 const network = computed(() => networks.networkById(props.networkId));
@@ -85,7 +88,11 @@ function metadataValue(key: string): string {
 watch(
   ownMetadata,
   () => {
-    for (const key of metadataKeys) values[key] = metadataValue(key);
+    for (const key of metadataKeys) {
+      const value = metadataValue(key);
+      values[key] = value;
+      savedValues[key] = value;
+    }
   },
   { immediate: true },
 );
@@ -100,10 +107,12 @@ watch(
 
 function save(): void {
   let sent = 0;
-  // Snapshot all values before sending. A server echo can update ownMetadata
-  // between two commands and the watcher would otherwise replace the still
-  // unsent fields with their old values.
-  const pendingMetadata = metadataKeys.map((key) => ({ key, value: values[key].trim() }));
+  // Snapshot only changed values before sending. A server echo can update
+  // ownMetadata between two commands and the watcher would otherwise replace
+  // the still-unsent fields with their old values.
+  const pendingMetadata = metadataKeys
+    .map((key) => ({ key, value: values[key].trim() }))
+    .filter(({ key, value }) => value !== savedValues[key]);
   if (features.value.metadata) {
     for (const { key, value } of pendingMetadata) {
       // draft/metadata-2 uses SET <key> [:value] for both writing and
@@ -119,16 +128,24 @@ function save(): void {
           command,
           params,
         })
-      )
+      ) {
         sent += 1;
+        savedValues[key] = value;
+      }
     }
   }
+  const realnameValue = realname.value.trim();
   if (
     features.value.setname &&
-    socketSend({ type: 'setname', networkId: props.networkId, realname: realname.value })
+    realnameValue &&
+    socketSend({ type: 'setname', networkId: props.networkId, realname: realnameValue })
   )
     sent += 1;
-  message.value = sent ? 'Profile update sent.' : 'This network does not support profile updates.';
+  message.value = sent
+    ? 'Profile update sent.'
+    : features.value.metadata || features.value.setname
+      ? 'No profile changes to send.'
+      : 'This network does not support profile updates.';
 }
 </script>
 

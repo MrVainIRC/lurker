@@ -3996,6 +3996,18 @@ describe('IRCv3 draft/metadata-2', () => {
     ]);
   });
 
+  it('does not send SETNAME without a realname parameter', () => {
+    const { conn, raw } = makeConn('setname-wire');
+    const client = conn.client as unknown as {
+      network: { cap: { enabled: string[]; available: Map<string, string> } };
+    };
+    client.network.cap.enabled.push('setname');
+
+    expect(conn.sendSetname('   ')).toBe(false);
+    expect(conn.sendSetname('New Name')).toBe(true);
+    expect(raw).toHaveBeenCalledWith('SETNAME :New Name');
+  });
+
   it('stores self metadata under the stable target and accepts server values with spaces', () => {
     const { conn, network, published } = makeConn('metadata-receive');
 
