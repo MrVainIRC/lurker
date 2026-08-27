@@ -447,6 +447,22 @@ function migrate() {
     CREATE INDEX IF NOT EXISTS idx_favorite_buffers_user
       ON favorite_buffers(user_id, position);
 
+    -- Per-buffer override of data.retention.lines
+    -- (lurker-dev/RETENTION_PLAN.md). Sparse: a row exists only where the
+    -- user set an override; max_lines 0 is an EXPLICIT "unlimited here"
+    -- (still clamped to the operator ceiling at enforcement), absence means
+    -- "inherit the global setting". Born buffer_id-keyed like
+    -- favorite_buffers — never part of the v18 name-key rebuilds.
+    CREATE TABLE IF NOT EXISTS buffer_retention (
+      user_id INTEGER NOT NULL,
+      buffer_id INTEGER NOT NULL,
+      max_lines INTEGER NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, buffer_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (buffer_id) REFERENCES buffers(id) ON DELETE CASCADE
+    );
+
     -- Per-(user, network, channel) override for the desktop nicklist's
     -- collapsed state. Only channels the user has explicitly toggled get a
     -- row; absent a row the global look.layout.show_member_list default

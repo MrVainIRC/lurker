@@ -168,6 +168,7 @@ import { useThemesStore } from '../stores/themes.js';
 import { foldThemeName, themeNameError } from '../../../shared/themePresets.js';
 import type { ThemePreset } from '../../../shared/themePresets.js';
 import { formatColumns } from '../lib/commands/output.js';
+import { api } from '../api.js';
 import { REGISTRY, getOption, optionVisible, CATEGORIES } from '../utils/settingsRegistry.js';
 import type { SettingOption } from '../../../shared/settingsRegistry.js';
 import { useConfigStore } from '../stores/config.js';
@@ -2397,6 +2398,7 @@ const COMMANDS_LINES = [
   '  /part [#chan] [reason] — leave channel (keeps buffer; aliases: /leave, /p)',
   '  /close                 — close current buffer (parts if channel)',
   '  /clear [off]           — hide buffer up to now (off = undo, show again)',
+  '  /retention [n|off|default] — per-buffer history cap (no arg = show; n >= 1000)',
   '  /away [message]        — set away across every network (no arg clears)',
   '  /back                  — clear away',
   '  /whois <nick>          — query user info (renders in server buffer)',
@@ -3377,6 +3379,75 @@ function handleCommand(line: string, networkId: number | null, target: string): 
         return sendOrToast({ type: 'unclear-buffer', networkId, target }, line);
       }
       return sendOrToast({ type: 'clear-buffer', networkId, target }, line);
+    }
+    case 'retention': {
+      // /retention           — what's kept in THIS buffer, and why
+      // /retention <lines>   — cap this buffer (0 or >= 1000; deletion is permanent)
+      // /retention off       — unlimited here (still under any server ceiling)
+      // /retention default   — drop the override, inherit Settings → Data
+      if (!networkId) {
+        localInfo(networkId, target, 'retention: not available in this buffer');
+        return true;
+      }
+      const arg = argLine.trim().toLowerCase();
+      if (!arg) {
+        void (async () => {
+          try {
+            const info = await api(
+              `/api/retention/buffer?networkId=${networkId}&target=${encodeURIComponent(target)}`,
+            );
+            const cap =
+              info.effectiveLines > 0
+                ? `the last ${info.effectiveLines.toLocaleString()} lines`
+                : 'everything (no line cap)';
+            const src =
+              info.overrideLines === null
+                ? 'inherited from Settings → Data'
+                : info.overrideLines === 0
+                  ? 'override: unlimited here'
+                  : `override: ${info.overrideLines.toLocaleString()}`;
+            localInfo(networkId, target, `retention: keeping ${cap} (${src})`);
+            if (info.effectiveEventHours > 0) {
+              localInfo(
+                networkId,
+                target,
+                `retention: join/part/quit noise is pruned after ${info.effectiveEventHours}h`,
+              );
+            }
+            if (info.recentLinesPerDay > 0 && info.effectiveLines > 0) {
+              const days = info.effectiveLines / info.recentLinesPerDay;
+              localInfo(
+                networkId,
+                target,
+                `retention: recent pace ~${info.recentLinesPerDay.toLocaleString()} lines/day` +
+                  ` — the cap holds ${days >= 1 ? `≈ ${Math.round(days)} day(s)` : 'under a day'} here`,
+              );
+            }
+          } catch {
+            localInfo(networkId, target, 'retention: could not load info for this buffer');
+          }
+        })();
+        return true;
+      }
+      if (arg === 'default' || arg === 'inherit') {
+        return sendOrToast(
+          { type: 'set-buffer-retention', networkId, target, maxLines: null },
+          line,
+        );
+      }
+      if (arg === 'off' || arg === 'unlimited') {
+        return sendOrToast({ type: 'set-buffer-retention', networkId, target, maxLines: 0 }, line);
+      }
+      const n = Number(arg);
+      if (!Number.isInteger(n) || n < 0 || (n !== 0 && n < 1000)) {
+        localInfo(
+          networkId,
+          target,
+          'usage: /retention [lines | off | default] — lines is 0 or >= 1000; deletion is permanent',
+        );
+        return true;
+      }
+      return sendOrToast({ type: 'set-buffer-retention', networkId, target, maxLines: n }, line);
     }
     case 'raw':
     case 'quote':

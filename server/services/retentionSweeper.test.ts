@@ -183,6 +183,32 @@ describe('runRetentionTick', () => {
     expect(takeDirtyBuffers()).toContain(bufferId);
   });
 
+  it('a per-buffer override wins over the global — in both directions', async () => {
+    const { setBufferRetentionById } = await import('../db/bufferRetention.js');
+    const { markBufferDirty } = await import('../db/retention.js');
+    const { userId, ids, bufferId } = seedBuffer('ret-override', 12);
+
+    // Tighter than the (unlimited) global.
+    setBufferRetentionById(userId, bufferId, 5);
+    markBufferDirty(bufferId);
+    await runRetentionTick(OPTS);
+    expect(rowIds(bufferId)).toEqual(ids.slice(7));
+
+    // Looser than a tight global: override 0 = explicitly unlimited HERE, so
+    // the global of 3 must not touch this buffer.
+    setUserSetting(userId, 'data.retention.lines', 3);
+    setBufferRetentionById(userId, bufferId, 0);
+    markBufferDirty(bufferId);
+    await runRetentionTick(OPTS);
+    expect(rowIds(bufferId)).toEqual(ids.slice(7));
+
+    // Cleared override → the global governs again.
+    setBufferRetentionById(userId, bufferId, null);
+    markBufferDirty(bufferId);
+    await runRetentionTick(OPTS);
+    expect(rowIds(bufferId)).toEqual(ids.slice(9));
+  });
+
   it('the noise clock ages out old noise; chat, kicks, recent noise, bookmarks survive', async () => {
     const user = createUser('noise-mix');
     const net = createNetwork(user.id, {

@@ -39,7 +39,11 @@ import {
   setNoiseCursor,
 } from '../db/retention.js';
 import { listInflightJobs } from '../db/dataExports.js';
-import { effectiveRetentionLines, effectiveEventRetentionHours } from './retentionLimits.js';
+import {
+  effectiveRetentionLines,
+  userRetentionLines,
+  effectiveEventRetentionHours,
+} from './retentionLimits.js';
 import settingsService from './settingsService.js';
 import * as systemLog from './systemLog.js';
 
@@ -132,11 +136,14 @@ export async function runRetentionTick(
       await yieldToLoop();
       const ownerId = bufferOwnerId(bufferId);
       if (ownerId === undefined) continue; // buffer deleted; cascade got the rows
-      let cap = capByUser.get(ownerId);
-      if (cap === undefined) {
-        cap = effectiveRetentionLines(ownerId);
-        capByUser.set(ownerId, cap);
+      let globalLines = capByUser.get(ownerId);
+      if (globalLines === undefined) {
+        globalLines = userRetentionLines(ownerId);
+        capByUser.set(ownerId, globalLines);
       }
+      // Per-buffer: the settings read is cached above; only the override
+      // lookup (one PK probe) is paid per buffer.
+      const cap = effectiveRetentionLines(ownerId, bufferId, globalLines);
       result.buffersExamined++;
       if (cap <= 0) continue; // unlimited
 

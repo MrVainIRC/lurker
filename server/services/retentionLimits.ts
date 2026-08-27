@@ -21,6 +21,7 @@
 // so the sweeper and whatever a client is told can never disagree.
 
 import { getUserSettings } from '../db/settings.js';
+import { getBufferRetentionOverride } from '../db/bufferRetention.js';
 import { defaultsAsObject } from './settingsRegistry.js';
 import * as systemLog from './systemLog.js';
 
@@ -99,14 +100,35 @@ export function declaredEventRetentionCeilingHours(): number | null {
 }
 
 /**
- * The effective per-buffer cap for this user, in lines — the number the
- * sweeper actually prunes to. 0 = unlimited. The user's stored value is read
- * with the registry default merged in (the uploadLimits pattern), so a second
- * hardcoded default here can't drift from the registry.
+ * The user's own global line cap, raw: 0 = unlimited, NO ceiling applied.
+ * Split out so the sweeper can resolve it once per user per tick and hand it
+ * back through effectiveRetentionLines for each of that user's buffers,
+ * instead of re-reading settings per buffer.
  */
-export function effectiveRetentionLines(userId: number): number {
+export function userRetentionLines(userId: number): number {
   const settings = { ...defaultsAsObject(), ...getUserSettings(userId) };
-  return clampToCeiling(settings['data.retention.lines'], declaredRetentionCeilingLines());
+  const n = Number(settings['data.retention.lines']);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+/**
+ * The effective cap for one buffer, in lines — the number the sweeper
+ * actually prunes to. 0 = unlimited. Resolution: the buffer's stored
+ * override (which may sit ABOVE the user's global — "keep everything here"
+ * is the point), else the user's global, and the result clamps to the
+ * operator ceiling — the ONE clamp site, per the header contract. Pass
+ * `preResolvedUserLines` (from userRetentionLines) on hot loops; omit it and
+ * this resolves the global itself.
+ */
+export function effectiveRetentionLines(
+  userId: number,
+  bufferId?: number,
+  preResolvedUserLines?: number,
+): number {
+  const globalLines = preResolvedUserLines ?? userRetentionLines(userId);
+  const override = bufferId === undefined ? null : getBufferRetentionOverride(userId, bufferId);
+  const chosen = override ?? globalLines;
+  return clampToCeiling(chosen, declaredRetentionCeilingLines());
 }
 
 /**
