@@ -147,6 +147,31 @@
         </select>
       </div>
     </div>
+
+    <div class="ret-row">
+      <label for="ret-days">Delete closed buffers after</label>
+      <p class="muted small">
+        A buffer closed for longer than this is deleted entirely, history included. Buffers
+        containing a bookmarked message are never deleted.
+      </p>
+      <div class="editor-line">
+        <select
+          id="ret-days"
+          :key="retTick"
+          :value="String(daysValue)"
+          @change="
+            onRetentionChange(
+              'data.retention.closed_buffer_days',
+              ($event.target as HTMLSelectElement).value,
+            )
+          "
+        >
+          <option v-for="p in dayPresets" :key="p.value" :value="String(p.value)">
+            {{ p.label }}
+          </option>
+        </select>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -330,7 +355,11 @@ function formatBytes(n: number): string {
 // ─── Retention ─────────────────────────────────────────────────────────────
 
 const settings = useSettingsStore();
-const limits = ref<{ maxLines: number | null; maxEventHours: number | null } | null>(null);
+const limits = ref<{
+  maxLines: number | null;
+  maxEventHours: number | null;
+  maxClosedBufferDays: number | null;
+} | null>(null);
 onMounted(async () => {
   try {
     limits.value = await api('/api/retention/limits');
@@ -341,11 +370,15 @@ onMounted(async () => {
 
 const ceilingNote = computed(() => {
   const l = limits.value;
-  if (!l || (l.maxLines == null && l.maxEventHours == null)) return '';
+  if (!l) return '';
   const parts: string[] = [];
   if (l.maxLines != null) parts.push(`${l.maxLines.toLocaleString()} lines per buffer`);
   if (l.maxEventHours != null) parts.push(`${l.maxEventHours} hours of event noise`);
-  return `This server keeps at most ${parts.join(' and ')}.`;
+  if (l.maxClosedBufferDays != null) {
+    parts.push(`closed buffers for ${l.maxClosedBufferDays} days`);
+  }
+  if (!parts.length) return '';
+  return `This server keeps at most ${parts.join(', ')}.`;
 });
 
 // ~281 bytes/line all-in (row + indexes + search index), measured on the
@@ -354,9 +387,13 @@ const BYTES_PER_LINE = 281;
 
 const LINE_PRESETS = [0, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000];
 const HOUR_PRESETS = [0, 24, 72, 168, 720];
+const DAY_PRESETS = [0, 7, 30, 90, 365];
 
 const linesValue = computed(() => Number(settings.effective('data.retention.lines') ?? 0));
 const hoursValue = computed(() => Number(settings.effective('data.retention.event_hours') ?? 168));
+const daysValue = computed(() =>
+  Number(settings.effective('data.retention.closed_buffer_days') ?? 0),
+);
 
 // Every label must say what will actually HAPPEN, ceiling included: the
 // server clamps a stored 0 (and any over-ceiling value) TO the ceiling, so
@@ -411,6 +448,26 @@ const hourPresets = computed(() =>
                 ? '30 days'
                 : `${v} hours`,
     (c) => `Server maximum (${c} hours)`,
+  ),
+);
+const dayPresets = computed(() =>
+  presetList(
+    DAY_PRESETS,
+    daysValue.value,
+    limits.value?.maxClosedBufferDays ?? null,
+    (v) =>
+      v === 0
+        ? 'Never'
+        : v === 7
+          ? '1 week'
+          : v === 30
+            ? '30 days'
+            : v === 90
+              ? '90 days'
+              : v === 365
+                ? '1 year'
+                : `${v} days`,
+    (c) => `Server maximum (${c} days)`,
   ),
 );
 

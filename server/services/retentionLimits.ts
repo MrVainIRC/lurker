@@ -138,6 +138,34 @@ export function declaredEventRetentionCeilingHours(): number | null {
   );
 }
 
+/** The operator's closed-buffer GC ceiling in days, or null when none is
+ *  declared. Fail-open on overflow like hours: a rejected ceiling means LESS
+ *  deletion, which is the safe direction for a whole-buffer delete. */
+export function declaredClosedBufferCeilingDays(): number | null {
+  return parseCeilingEnv(
+    'LURKER_MAX_CLOSED_BUFFER_DAYS',
+    'days',
+    'LURKER_MAX_CLOSED_BUFFER_DAYS=90',
+    36_500,
+    'reject',
+    "Closed buffers are collected only per each user's own setting (default: never).",
+  );
+}
+
+/**
+ * The effective closed-buffer GC age for this user, in days. 0 = never (the
+ * registry default). Same min-of-the-nonzero stacking: a user's 0 under an
+ * operator ceiling resolves to the ceiling — that is how hosted forces
+ * collection without touching anyone's settings.
+ */
+export function effectiveClosedBufferDays(userId: number): number {
+  const settings = { ...defaultsAsObject(), ...getUserSettings(userId) };
+  return clampToCeiling(
+    settings['data.retention.closed_buffer_days'],
+    declaredClosedBufferCeilingDays(),
+  );
+}
+
 /**
  * The user's own global line cap, raw: 0 = unlimited, NO ceiling applied.
  * Split out so the sweeper can resolve it once per user per tick and hand it

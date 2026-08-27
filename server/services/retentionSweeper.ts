@@ -37,12 +37,16 @@ import {
   deleteNoiseBatch,
   getNoiseCursor,
   advanceNoiseCursor,
+  listGcEligibleBuffers,
+  drainBufferBatch,
+  gcDeleteClosedBuffer,
 } from '../db/retention.js';
 import { listInflightJobs } from '../db/dataExports.js';
 import {
   effectiveRetentionLines,
   userRetentionLines,
   effectiveEventRetentionHours,
+  effectiveClosedBufferDays,
 } from './retentionLimits.js';
 import settingsService from './settingsService.js';
 import * as systemLog from './systemLog.js';
@@ -75,6 +79,9 @@ export interface RetentionTickResult {
   rowsDeleted: number;
   /** Rows the noise clock deleted (already-aged EARLY_PRUNE_TYPES rows). */
   noiseRowsDeleted: number;
+  /** Closed buffers garbage-collected this tick, and the rows drained doing it. */
+  buffersCollected: number;
+  gcRowsDeleted: number;
   /** Work remained when the tick's budget ran out. */
   backlog: boolean;
 }
@@ -105,6 +112,8 @@ export async function runRetentionTick(
     buffersExamined: 0,
     rowsDeleted: 0,
     noiseRowsDeleted: 0,
+    buffersCollected: 0,
+    gcRowsDeleted: 0,
     backlog: false,
   };
 
@@ -182,43 +191,79 @@ export async function runRetentionTick(
     }
   }
 
-  // ── The noise clock ──────────────────────────────────────────────────────
-  // Per-user, not per-buffer: the cutoff depends only on the owner's setting,
-  // and the partial index walks a user's newly-aged noise in one shape.
-  // Quiet buffers age out here without ever being dirty — the count sweep
-  // can't see them, which is the whole reason this phase exists. Each user's
-  // walk is bounded below by their persisted low-water cursor, so a pass
-  // costs O(rows aged since the last pass), not O(everything ever retained).
+  // ── The hourly per-user pass: noise clock, then closed-buffer GC ────────
+  // Per-user, not per-buffer: both cutoffs depend only on the owner's
+  // settings. Quiet and closed buffers age out here without ever being
+  // dirty — the count sweep can't see them, which is the whole reason this
+  // phase exists. The user queue persists across ticks; a step that runs out
+  // of budget mid-user returns false and the user stays at the head.
+
+  // The noise clock. Each user's walk is bounded below by their persisted
+  // low-water cursor, so a pass costs O(rows aged since the last pass), not
+  // O(everything ever retained).
+  const noiseStep = async (userId: number): Promise<boolean> => {
+    const hours = effectiveEventRetentionHours(userId);
+    if (hours <= 0) return true; // noise clock off for this user
+    const cutoffIso = new Date(Date.now() - hours * 3_600_000).toISOString();
+    const sinceIso = getNoiseCursor(userId);
+    if (sinceIso >= cutoffIso) return true; // nothing has aged past the cutoff since last pass
+    while (batchesSpent < opts.maxBatchesPerTick) {
+      await yieldToLoop();
+      const deleted = deleteNoiseBatch(userId, sinceIso, cutoffIso, opts.batchRows);
+      batchesSpent++;
+      result.noiseRowsDeleted += deleted;
+      if (deleted < opts.batchRows) {
+        // Window clear (survivors are bookmarked). Compare-and-advance, not a
+        // blind set: an insert-side rewind can land during the awaits above,
+        // and this pass's window never covered it.
+        advanceNoiseCursor(userId, sinceIso, cutoffIso);
+        return true;
+      }
+    }
+    return false; // budget died mid-user
+  };
+
+  // Closed-buffer GC (lurker-dev/RETENTION_PLAN.md §4.5). One eligible buffer
+  // at a time: drain its rows in budgeted batches, THEN drop the row — a
+  // single cascading DELETE over a big buffer would fire the FTS trigger
+  // per row synchronously. A buffer reopened mid-drain keeps what's left
+  // (the row delete re-checks state='closed').
+  const gcStep = async (userId: number): Promise<boolean> => {
+    const days = effectiveClosedBufferDays(userId);
+    if (days <= 0) return true; // GC off for this user
+    for (;;) {
+      if (batchesSpent >= opts.maxBatchesPerTick) return false;
+      const [bufferId] = listGcEligibleBuffers(userId, days, 1);
+      batchesSpent++; // the listing + bookmark probe is a real statement
+      if (bufferId === undefined) return true; // nothing (left) to collect
+      let drained = false;
+      while (batchesSpent < opts.maxBatchesPerTick) {
+        await yieldToLoop();
+        const deleted = drainBufferBatch(bufferId, opts.batchRows);
+        batchesSpent++;
+        result.gcRowsDeleted += deleted;
+        if (deleted < opts.batchRows) {
+          drained = true;
+          break;
+        }
+      }
+      if (!drained) return false; // budget died mid-drain; re-listed next pass
+      if (gcDeleteClosedBuffer(userId, bufferId)) {
+        result.buffersCollected++;
+      } else {
+        // Reopened (or otherwise no longer deletable) — don't re-list it in a
+        // tight loop this pass; the next hourly pass re-evaluates from scratch.
+        return true;
+      }
+    }
+  };
+
   if (noisePendingUsers !== null || Date.now() - lastNoiseSweepMs >= opts.noiseIntervalMs) {
     if (noisePendingUsers === null) noisePendingUsers = listUserIds();
     while (noisePendingUsers.length > 0 && batchesSpent < opts.maxBatchesPerTick) {
       const userId = noisePendingUsers[0];
-      const hours = effectiveEventRetentionHours(userId);
-      if (hours <= 0) {
-        noisePendingUsers.shift(); // noise clock off for this user
-        continue;
-      }
-      const cutoffIso = new Date(Date.now() - hours * 3_600_000).toISOString();
-      const sinceIso = getNoiseCursor(userId);
-      if (sinceIso >= cutoffIso) {
-        noisePendingUsers.shift(); // nothing has aged past the cutoff since last pass
-        continue;
-      }
-      let userDone = false;
-      while (batchesSpent < opts.maxBatchesPerTick) {
-        await yieldToLoop();
-        const deleted = deleteNoiseBatch(userId, sinceIso, cutoffIso, opts.batchRows);
-        batchesSpent++;
-        result.noiseRowsDeleted += deleted;
-        if (deleted < opts.batchRows) {
-          userDone = true; // this user's window is clear (survivors are bookmarked)
-          break;
-        }
-      }
-      if (!userDone) break; // budget died mid-user; they stay at the head for next tick
-      // Compare-and-advance, not a blind set: an insert-side rewind can land
-      // during this user's awaits, and the pass's window never covered it.
-      advanceNoiseCursor(userId, sinceIso, cutoffIso);
+      if (!(await noiseStep(userId))) break;
+      if (!(await gcStep(userId))) break;
       noisePendingUsers.shift();
     }
     if (noisePendingUsers.length === 0) {
@@ -249,7 +294,10 @@ export function wireRetentionSettingsListener(): void {
     if (Object.prototype.hasOwnProperty.call(changes, 'data.retention.lines')) {
       seedUserBuffersDirty(userId);
     }
-    if (Object.prototype.hasOwnProperty.call(changes, 'data.retention.event_hours')) {
+    if (
+      Object.prototype.hasOwnProperty.call(changes, 'data.retention.event_hours') ||
+      Object.prototype.hasOwnProperty.call(changes, 'data.retention.closed_buffer_days')
+    ) {
       // Force the clock due (-Infinity is due under ANY interval); if a pass
       // is mid-flight and already past this user, re-queue them so a lowered
       // cutoff acts now instead of next hour.

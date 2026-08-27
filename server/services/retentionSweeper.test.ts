@@ -443,6 +443,106 @@ describe('runRetentionTick', () => {
     expect(getNoiseCursor(user.id)).toBe('');
   });
 
+  // ── Closed-buffer GC ──────────────────────────────────────────────────────
+
+  /** Close a buffer as of `daysAgo` days, in the exact form the close path
+   *  writes (SQLite datetime, not ISO) — the eligibility query must handle it. */
+  function closeBuffer(bufferId: number, daysAgo: number): void {
+    db.prepare(
+      `UPDATE buffers SET state = 'closed', closed_at = datetime('now', ?) WHERE id = ?`,
+    ).run(`-${daysAgo} days`, bufferId);
+  }
+  function bufferExists(bufferId: number): boolean {
+    return !!db.prepare(`SELECT 1 FROM buffers WHERE id = ?`).get(bufferId);
+  }
+
+  it('GC collects a buffer closed past the age — row, rows, and FTS — and nothing else', async () => {
+    const { userId, bufferId: old } = seedBuffer('gc-old', 6);
+    // A second buffer for the same user/network: closed too recently.
+    const recentNet = createNetwork(userId, {
+      name: 'gc-r',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'x',
+    });
+    const recent = insertMessage({
+      networkId: recentNet!.id,
+      target: '#recent',
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'x',
+      text: 'gcrecent keep',
+      self: false,
+    });
+    // And one still open, closed_at long ago but reopened (state wins).
+    const openNet = createNetwork(userId, {
+      name: 'gc-o',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'x',
+    });
+    const open = insertMessage({
+      networkId: openNet!.id,
+      target: '#open',
+      time: new Date().toISOString(),
+      type: 'message',
+      nick: 'x',
+      text: 'gcopen keep',
+      self: false,
+    });
+    closeBuffer(old, 10);
+    closeBuffer(recent.bufferId, 2);
+    setUserSetting(userId, 'data.retention.closed_buffer_days', 7);
+    expect(ftsHits('gcold3')).toBe(1);
+
+    const r = await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+
+    expect(r.buffersCollected).toBe(1);
+    expect(r.gcRowsDeleted).toBe(6);
+    expect(bufferExists(old)).toBe(false);
+    expect(ftsHits('gcold3')).toBe(0);
+    expect(bufferExists(recent.bufferId)).toBe(true);
+    expect(rowIds(recent.bufferId)).toHaveLength(1);
+    expect(bufferExists(open.bufferId)).toBe(true);
+  });
+
+  it('GC never collects a closed buffer that still holds a bookmark', async () => {
+    const { userId, ids, bufferId } = seedBuffer('gc-saved', 5);
+    expect(addBookmark(userId, ids[1])).toBe(true);
+    closeBuffer(bufferId, 30);
+    setUserSetting(userId, 'data.retention.closed_buffer_days', 7);
+
+    const r = await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+
+    expect(r.buffersCollected).toBe(0);
+    expect(bufferExists(bufferId)).toBe(true);
+    expect(rowIds(bufferId)).toEqual(ids);
+  });
+
+  it('GC is off by default: a closed-for-a-year buffer survives an untouched user', async () => {
+    const { bufferId } = seedBuffer('gc-default', 3);
+    closeBuffer(bufferId, 365);
+    await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+    expect(bufferExists(bufferId)).toBe(true);
+  });
+
+  it('GC drains a big buffer across ticks under budget, then drops the row', async () => {
+    const { userId, bufferId } = seedBuffer('gc-budget', 14);
+    closeBuffer(bufferId, 10);
+    setUserSetting(userId, 'data.retention.closed_buffer_days', 7);
+
+    let guard = 0;
+    let backlog = true;
+    while (backlog) {
+      if (++guard > 30) throw new Error('GC never converged');
+      backlog = (await runRetentionTick({ ...OPTS, noiseIntervalMs: 0, maxBatchesPerTick: 3 }))
+        .backlog;
+    }
+    expect(bufferExists(bufferId)).toBe(false);
+  });
+
   it('an in-flight export pauses the sweep without losing the dirty set', async () => {
     const { createExportJob, deleteJob } = await import('../db/dataExports.js');
     const { userId, ids, bufferId } = seedBuffer('ret-export', 12);

@@ -259,6 +259,74 @@ const noiseDeleteStmt = db.prepare(`
   )
 `);
 
+// ─── Closed-buffer garbage collection ──────────────────────────────────────
+//
+// Deleting a whole buffer is the sanctioned policy-driven EXCEPTION to
+// deleteBuffer's "only when no history" contract (db/buffers.ts, the
+// evict/forget guards): the operator or user chose it, per
+// lurker-dev/RETENTION_PLAN.md §4.5. Three rules keep it honest:
+//   1. Eligibility is re-derived every pass from closed_at (julianday, so the
+//      SQLite datetime('now') form close writes and the ISO form imports
+//      stamp compare correctly) — no cursor, the eligible set shrinks to
+//      nothing once collected.
+//   2. A buffer holding ANY bookmarked message is skipped. The probe drives
+//      from the user's bookmarks (few) rather than the buffer's rows (many).
+//   3. Messages are drained in budgeted batches BEFORE the row goes — a
+//      one-statement cascade over a 100k-row buffer would fire the FTS
+//      delete trigger 100k times synchronously on the shared connection.
+//      The final row delete re-checks state = 'closed', so a buffer reopened
+//      mid-drain keeps whatever is left and is never deleted.
+
+const gcEligibleStmt = db.prepare(`
+  SELECT id FROM buffers
+   WHERE user_id = ? AND state = 'closed' AND closed_at IS NOT NULL
+     AND kind IN ('channel', 'dm')
+     AND julianday(closed_at) < julianday('now') - ?
+   ORDER BY closed_at ASC
+   LIMIT ?
+`);
+
+const bookmarkedBuffersStmt = db.prepare(`
+  SELECT DISTINCT m.buffer_id AS bufferId
+    FROM user_bookmarks ub JOIN messages m ON m.id = ub.message_id
+   WHERE ub.user_id = ?
+`);
+
+/** Closed buffers past the user's GC age, oldest-closed first, minus any
+ *  that still hold a bookmarked message. */
+export function listGcEligibleBuffers(userId: number, days: number, limit: number): number[] {
+  const protectedIds = new Set(
+    (bookmarkedBuffersStmt.all(userId) as Array<{ bufferId: number }>).map((r) => r.bufferId),
+  );
+  return (gcEligibleStmt.all(userId, days, limit + protectedIds.size) as Array<{ id: number }>)
+    .map((r) => r.id)
+    .filter((id) => !protectedIds.has(id))
+    .slice(0, limit);
+}
+
+const drainBufferStmt = db.prepare(`
+  DELETE FROM messages WHERE id IN (
+    SELECT id FROM messages WHERE buffer_id = ? LIMIT ?
+  )
+`);
+
+/** Delete up to `limit` rows of a buffer being collected. A return below
+ *  `limit` means the buffer is empty. */
+export function drainBufferBatch(bufferId: number, limit: number): number {
+  return drainBufferStmt.run(bufferId, limit).changes;
+}
+
+const gcDeleteStmt = db.prepare(`
+  DELETE FROM buffers WHERE id = ? AND user_id = ? AND state = 'closed'
+`);
+
+/** Remove the (drained) buffer row; the FK cascade takes its satellite rows.
+ *  Returns false if the buffer was reopened in the meantime — then nothing
+ *  is deleted and the next pass re-evaluates it from scratch. */
+export function gcDeleteClosedBuffer(userId: number, bufferId: number): boolean {
+  return gcDeleteStmt.run(bufferId, userId).changes > 0;
+}
+
 /** Delete up to `limit` of this user's noise rows in [sinceIso, cutoffIso) —
  *  the low-water cursor bounds the walk to territory the last completed
  *  sweep hasn't already cleared. A return below `limit` means this user's

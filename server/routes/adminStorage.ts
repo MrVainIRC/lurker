@@ -21,6 +21,7 @@ import { collectStorageAttribution, reclaimableBytes } from '../db/storageStats.
 import {
   declaredRetentionCeilingLines,
   declaredEventRetentionCeilingHours,
+  declaredClosedBufferCeilingDays,
   ceilingState,
 } from '../services/retentionLimits.js';
 
@@ -48,6 +49,7 @@ async function buildPayload(): Promise<Record<string, unknown>> {
   const dbBytes = fileBytes(DATABASE_FILE);
   const maxLines = declaredRetentionCeilingLines();
   const maxEventHours = declaredEventRetentionCeilingHours();
+  const maxClosedBufferDays = declaredClosedBufferCeilingDays();
   return {
     generatedAt: new Date().toISOString(),
     // Derived from THIS instance's file and row count rather than a baked
@@ -69,6 +71,8 @@ async function buildPayload(): Promise<Record<string, unknown>> {
       maxLinesState: ceilingState('LURKER_MAX_RETENTION_LINES', maxLines),
       maxEventHours,
       maxEventHoursState: ceilingState('LURKER_MAX_EVENT_RETENTION_HOURS', maxEventHours),
+      maxClosedBufferDays,
+      maxClosedBufferDaysState: ceilingState('LURKER_MAX_CLOSED_BUFFER_DAYS', maxClosedBufferDays),
     },
     users,
   };

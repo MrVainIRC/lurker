@@ -1836,6 +1836,28 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
       'smallest nonzero limit is 24. 0 keeps events as long as regular ' +
       'messages. Bookmarked messages are never deleted.',
   },
+  // Closed-buffer garbage collection: a buffer closed for longer than this
+  // is deleted ENTIRELY — row and history. Default OFF, deliberately and
+  // unlike the noise clock: closing is sidebar tidiness, not a judgment on
+  // the history (search/highlights reach into closed buffers), and this is
+  // the one knob that deletes chat rather than churn. Hosted can force it
+  // through the ceiling env var LURKER_MAX_CLOSED_BUFFER_DAYS. Buffers still
+  // holding a bookmarked message are always skipped.
+  {
+    key: 'data.retention.closed_buffer_days',
+    label: 'Delete closed buffers after (days)',
+    category: 'data',
+    group: 'retention',
+    type: 'int',
+    min: 0,
+    max: 3650,
+    minNonzero: 7,
+    default: 0,
+    description:
+      'Buffers closed for longer than this many days are deleted entirely, ' +
+      'history included. 0 keeps closed buffers forever; the smallest nonzero ' +
+      'value is 7. Buffers containing a bookmarked message are never deleted.',
+  },
 ]);
 
 const BY_KEY = new Map(REGISTRY.map((opt) => [opt.key, opt] as const));
