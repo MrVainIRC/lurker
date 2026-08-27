@@ -377,7 +377,7 @@ const ceilingNote = computed(() => {
   const sentences: string[] = [];
   if (parts.length) sentences.push(`This server keeps at most ${parts.join(' and ')}.`);
   if (l.maxClosedBufferDays != null) {
-    sentences.push(`Closed buffers are deleted after ${l.maxClosedBufferDays} days.`);
+    sentences.push(`Closed buffers are deleted after at most ${l.maxClosedBufferDays} days.`);
   }
   return sentences.join(' ');
 });

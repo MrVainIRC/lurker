@@ -159,7 +159,7 @@ export function declaredClosedBufferCeilingDays(): number | null {
     'LURKER_MAX_CLOSED_BUFFER_DAYS=90',
     36_500,
     'reject',
-    "Closed buffers are collected only per each user's own setting (default: never).",
+    "Closed buffers are collected only according to each user's own setting (default: never).",
     7,
   );
 }

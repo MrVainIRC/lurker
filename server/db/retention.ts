@@ -272,10 +272,13 @@ const noiseDeleteStmt = db.prepare(`
 //      SQLite datetime the close path writes and the ISO imports stamp both
 //      compare correctly); autojoin rows are never dead buffers; server/system
 //      pseudo-buffers store their lines elsewhere.
-//   2. A buffer holding ANY bookmarked message is skipped, and the drain
-//      itself carries the owner-scoped bookmark exemption — a bookmark placed
-//      mid-drain (search reaches closed buffers by design) stops the drain
-//      short and the row delete then refuses because rows remain.
+//   2. A buffer holding ANY bookmarked message is skipped at listing, and
+//      the drain itself carries the owner-scoped bookmark exemption — a
+//      bookmark placed mid-drain (search reaches closed buffers by design) is
+//      skipped by the remaining batches while the buffer's other rows still
+//      go, and the row delete then refuses because a row remains. The
+//      bookmark can never be cascaded away; the buffer survives, closed,
+//      holding only its bookmarked line(s).
 //   3. Every drain batch and the final row delete re-check state='closed' AND
 //      the age: a buffer reopened mid-drain stops losing rows on the very next
 //      batch, and a reopen-then-reclose (closed_at re-stamped to now) is no
