@@ -458,7 +458,7 @@ describe('runRetentionTick', () => {
 
   it('GC collects a buffer closed past the age — row, rows, and FTS — and nothing else', async () => {
     const { userId, bufferId: old } = seedBuffer('gc-old', 6);
-    // A second buffer for the same user/network: closed too recently.
+    // A second buffer for the same user (its own network): closed too recently.
     const recentNet = createNetwork(userId, {
       name: 'gc-r',
       host: 'h',
@@ -475,7 +475,7 @@ describe('runRetentionTick', () => {
       text: 'gcrecent keep',
       self: false,
     });
-    // And one still open, closed_at long ago but reopened (state wins).
+    // And one that is simply open — never eligible.
     const openNet = createNetwork(userId, {
       name: 'gc-o',
       host: 'h',
@@ -526,6 +526,66 @@ describe('runRetentionTick', () => {
     closeBuffer(bufferId, 365);
     await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
     expect(bufferExists(bufferId)).toBe(true);
+  });
+
+  it('GC protects a bookmark placed MID-drain: drain stops short, row delete refuses', async () => {
+    // Search reaches closed buffers by design, so a user can bookmark a line
+    // while its buffer is being drained. The exemption lives in the drain
+    // statement itself, not just the listing — and the row delete refuses
+    // while rows remain, so the bookmark can never be cascaded away.
+    const { drainBufferBatch, gcDeleteClosedBuffer } = await import('../db/retention.js');
+    const { userId, ids, bufferId } = seedBuffer('gc-middrain', 5);
+    closeBuffer(bufferId, 30);
+    expect(addBookmark(userId, ids[1])).toBe(true);
+    expect(drainBufferBatch(userId, bufferId, 7, 100)).toBe(4);
+    expect(gcDeleteClosedBuffer(userId, bufferId, 7)).toBe(false);
+    expect(bufferExists(bufferId)).toBe(true);
+    expect(rowIds(bufferId)).toEqual([ids[1]]);
+  });
+
+  it('GC stops draining a buffer that was reopened mid-drain', async () => {
+    const { drainBufferBatch, gcDeleteClosedBuffer } = await import('../db/retention.js');
+    const { userId, ids, bufferId } = seedBuffer('gc-reopen', 8);
+    closeBuffer(bufferId, 30);
+    expect(drainBufferBatch(userId, bufferId, 7, 4)).toBe(4);
+    db.prepare(`UPDATE buffers SET state = 'open', closed_at = NULL WHERE id = ?`).run(bufferId);
+    expect(drainBufferBatch(userId, bufferId, 7, 4)).toBe(0);
+    expect(gcDeleteClosedBuffer(userId, bufferId, 7)).toBe(false);
+    expect(rowIds(bufferId)).toHaveLength(4);
+    expect(ids).toHaveLength(8);
+  });
+
+  it('GC makes progress even under a budget of 2 (no busy-cadence livelock)', async () => {
+    // Reviewer's repro: noise probe + listing exhausted a budget of 2 before
+    // any drain ran, so every tick reported backlog and deleted nothing.
+    const { userId, bufferId } = seedBuffer('gc-tiny-budget', 14);
+    closeBuffer(bufferId, 10);
+    setUserSetting(userId, 'data.retention.closed_buffer_days', 7);
+    let guard = 0;
+    let backlog = true;
+    while (backlog) {
+      if (++guard > 60) throw new Error('GC livelocked under a tiny budget');
+      backlog = (await runRetentionTick({ ...OPTS, noiseIntervalMs: 0, maxBatchesPerTick: 2 }))
+        .backlog;
+    }
+    expect(bufferExists(bufferId)).toBe(false);
+  });
+
+  it('an in-flight import pauses the whole tick, like an export', async () => {
+    const { beginImport, endImport } = await import('../db/retention.js');
+    const { userId, bufferId } = seedBuffer('gc-import', 3);
+    closeBuffer(bufferId, 30);
+    setUserSetting(userId, 'data.retention.closed_buffer_days', 7);
+    beginImport();
+    try {
+      const paused = await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+      expect(paused.buffersExamined).toBe(0);
+      expect(bufferExists(bufferId)).toBe(true);
+    } finally {
+      endImport();
+    }
+    await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+    expect(bufferExists(bufferId)).toBe(false);
   });
 
   it('GC drains a big buffer across ticks under budget, then drops the row', async () => {

@@ -264,67 +264,103 @@ const noiseDeleteStmt = db.prepare(`
 // Deleting a whole buffer is the sanctioned policy-driven EXCEPTION to
 // deleteBuffer's "only when no history" contract (db/buffers.ts, the
 // evict/forget guards): the operator or user chose it, per
-// lurker-dev/RETENTION_PLAN.md §4.5. Three rules keep it honest:
-//   1. Eligibility is re-derived every pass from closed_at (julianday, so the
-//      SQLite datetime('now') form close writes and the ISO form imports
-//      stamp compare correctly) — no cursor, the eligible set shrinks to
-//      nothing once collected.
-//   2. A buffer holding ANY bookmarked message is skipped. The probe drives
-//      from the user's bookmarks (few) rather than the buffer's rows (many).
-//   3. Messages are drained in budgeted batches BEFORE the row goes — a
-//      one-statement cascade over a 100k-row buffer would fire the FTS
-//      delete trigger 100k times synchronously on the shared connection.
-//      The final row delete re-checks state = 'closed', so a buffer reopened
-//      mid-drain keeps whatever is left and is never deleted.
+// lurker-dev/RETENTION_PLAN.md §4.5. The rules that keep it honest — and
+// every one of them is enforced IN the statements, not sampled once at
+// listing time, because the drain yields to the event loop between batches
+// and the world moves while it does:
+//   1. Eligibility re-derives from closed_at each pass (julianday, so the
+//      SQLite datetime the close path writes and the ISO imports stamp both
+//      compare correctly); autojoin rows are never dead buffers; server/system
+//      pseudo-buffers store their lines elsewhere.
+//   2. A buffer holding ANY bookmarked message is skipped, and the drain
+//      itself carries the owner-scoped bookmark exemption — a bookmark placed
+//      mid-drain (search reaches closed buffers by design) stops the drain
+//      short and the row delete then refuses because rows remain.
+//   3. Every drain batch and the final row delete re-check state='closed' AND
+//      the age: a buffer reopened mid-drain stops losing rows on the very next
+//      batch, and a reopen-then-reclose (closed_at re-stamped to now) is no
+//      longer old enough. Messages drain in budgeted batches BEFORE the row
+//      goes — one cascading DELETE over a big buffer would fire the FTS
+//      trigger per row synchronously on the shared connection.
+
+// The bookmark exclusion is a bound, non-correlated subquery (materialized
+// once per statement) driving from the user's bookmarks — few — rather than a
+// correlated probe walking each candidate buffer's rows.
+const GC_AGE = `julianday(closed_at) < julianday('now') - ?`;
+const GC_BOOKMARKED_BUFFERS = `
+  SELECT m.buffer_id FROM user_bookmarks ub JOIN messages m ON m.id = ub.message_id
+   WHERE ub.user_id = ? AND m.buffer_id IS NOT NULL`;
 
 const gcEligibleStmt = db.prepare(`
   SELECT id FROM buffers
    WHERE user_id = ? AND state = 'closed' AND closed_at IS NOT NULL
-     AND kind IN ('channel', 'dm')
-     AND julianday(closed_at) < julianday('now') - ?
-   ORDER BY closed_at ASC
+     AND kind NOT IN ('server', 'system') AND autojoin = 0
+     AND ${GC_AGE}
+     AND id NOT IN (${GC_BOOKMARKED_BUFFERS})
    LIMIT ?
 `);
 
-const bookmarkedBuffersStmt = db.prepare(`
-  SELECT DISTINCT m.buffer_id AS bufferId
-    FROM user_bookmarks ub JOIN messages m ON m.id = ub.message_id
-   WHERE ub.user_id = ?
-`);
-
-/** Closed buffers past the user's GC age, oldest-closed first, minus any
- *  that still hold a bookmarked message. */
+/** Closed buffers past the user's GC age, minus any holding a bookmark. */
 export function listGcEligibleBuffers(userId: number, days: number, limit: number): number[] {
-  const protectedIds = new Set(
-    (bookmarkedBuffersStmt.all(userId) as Array<{ bufferId: number }>).map((r) => r.bufferId),
+  return (gcEligibleStmt.all(userId, days, userId, limit) as Array<{ id: number }>).map(
+    (r) => r.id,
   );
-  return (gcEligibleStmt.all(userId, days, limit + protectedIds.size) as Array<{ id: number }>)
-    .map((r) => r.id)
-    .filter((id) => !protectedIds.has(id))
-    .slice(0, limit);
 }
 
 const drainBufferStmt = db.prepare(`
   DELETE FROM messages WHERE id IN (
-    SELECT id FROM messages WHERE buffer_id = ? LIMIT ?
+    SELECT m.id FROM messages m
+      JOIN buffers b ON b.id = m.buffer_id
+     WHERE m.buffer_id = ? AND b.state = 'closed' AND ${GC_AGE.replace('closed_at', 'b.closed_at')}
+       AND NOT EXISTS (
+         SELECT 1 FROM user_bookmarks ub WHERE ub.user_id = ? AND ub.message_id = m.id
+       )
+     LIMIT ?
   )
 `);
 
-/** Delete up to `limit` rows of a buffer being collected. A return below
- *  `limit` means the buffer is empty. */
-export function drainBufferBatch(bufferId: number, limit: number): number {
-  return drainBufferStmt.run(bufferId, limit).changes;
+/** Delete up to `limit` rows of a buffer being collected, while it is still
+ *  closed and still old enough. A return below `limit` means there is
+ *  nothing more this pass may delete: the buffer is empty, or it was
+ *  reopened, or a bookmark now protects a row. */
+export function drainBufferBatch(
+  userId: number,
+  bufferId: number,
+  days: number,
+  limit: number,
+): number {
+  return drainBufferStmt.run(bufferId, days, userId, limit).changes;
 }
 
 const gcDeleteStmt = db.prepare(`
-  DELETE FROM buffers WHERE id = ? AND user_id = ? AND state = 'closed'
+  DELETE FROM buffers
+   WHERE id = ? AND user_id = ? AND state = 'closed' AND ${GC_AGE}
+     AND NOT EXISTS (SELECT 1 FROM messages WHERE buffer_id = buffers.id)
 `);
 
-/** Remove the (drained) buffer row; the FK cascade takes its satellite rows.
- *  Returns false if the buffer was reopened in the meantime — then nothing
- *  is deleted and the next pass re-evaluates it from scratch. */
-export function gcDeleteClosedBuffer(userId: number, bufferId: number): boolean {
-  return gcDeleteStmt.run(bufferId, userId).changes > 0;
+/** Remove the drained buffer row; the FK cascade takes its satellite rows.
+ *  Refuses — returns false, deletes nothing — if the buffer was reopened,
+ *  re-closed too recently, or still holds rows (a mid-drain bookmark). */
+export function gcDeleteClosedBuffer(userId: number, bufferId: number, days: number): boolean {
+  return gcDeleteStmt.run(bufferId, userId, days).changes > 0;
+}
+
+// ─── Import in flight ──────────────────────────────────────────────────────
+// The sweeper skips whole ticks while an import runs: the import commits
+// buffers (with archive closed_at values, possibly years old) before their
+// messages, one transaction per batch with event-loop yields between — GC
+// would collect a half-imported buffer and the rest of the import would mint
+// it anew as an open row (or fail on the bookmark FK). Same idea as the
+// export gate, sourced from a counter rather than a job table.
+let importsInFlight = 0;
+export function beginImport(): void {
+  importsInFlight++;
+}
+export function endImport(): void {
+  importsInFlight = Math.max(0, importsInFlight - 1);
+}
+export function importInProgress(): boolean {
+  return importsInFlight > 0;
 }
 
 /** Delete up to `limit` of this user's noise rows in [sinceIso, cutoffIso) —

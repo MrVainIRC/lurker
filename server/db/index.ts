@@ -2474,6 +2474,17 @@ try {
   console.warn('[db] smart-filter→event-tier migration failed (will retry next boot):', err);
 }
 
+// buffer_id-leading indexes on the two satellite tables that scale with the
+// INSTANCE (not the user): a `DELETE FROM buffers` cascades into eight child
+// tables, and every one of them is keyed (user_id, buffer_id) — without these
+// the cascade full-scans buffer_reads and input_history per deleted buffer.
+// Interactive closes paid that once; closed-buffer GC (retention plan §4.5)
+// deletes buffers in bulk on the shared connection, where a per-delete scan
+// that grows with the instance is the event-loop-starvation class again.
+// After the v18 rebuild on purpose (those tables are recreated there).
+db.exec(`CREATE INDEX IF NOT EXISTS idx_buffer_reads_buffer_id ON buffer_reads(buffer_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_input_history_buffer_id ON input_history(buffer_id)`);
+
 // Gate on uploaderSeedOk: if the uploader seed threw, leave schema_version
 // un-bumped so the seed retries on the next boot instead of being silently
 // skipped forever (the other version blocks are shape/data-gated, so re-running

@@ -46,6 +46,7 @@ function parseCeilingEnv(
   max: number,
   overflow: 'clamp' | 'reject',
   consequence: string,
+  minNonzero = 0,
 ): number | null {
   const raw = (process.env[name] || '').trim();
   if (!raw) return null;
@@ -75,6 +76,16 @@ function parseCeilingEnv(
     }
     warnCeilingOnce(name, `${name}="${raw}" exceeds the maximum of ${max} ${unit}; using ${max}.`);
     return max;
+  }
+  // The same footgun floor the user knob carries, on the one path that
+  // overrides everyone: a ceiling below it (a units mix-up, a test value left
+  // in cell.env) would force-delete every account's data with no warning.
+  if (value !== 0 && value < minNonzero) {
+    warnCeilingOnce(
+      name,
+      `${name}="${raw}" is below the minimum of ${minNonzero} ${unit}; ignoring it. ${consequence}`,
+    );
+    return null;
   }
   return value === 0 ? null : value;
 }
@@ -149,6 +160,7 @@ export function declaredClosedBufferCeilingDays(): number | null {
     36_500,
     'reject',
     "Closed buffers are collected only per each user's own setting (default: never).",
+    7,
   );
 }
 

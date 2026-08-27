@@ -374,11 +374,12 @@ const ceilingNote = computed(() => {
   const parts: string[] = [];
   if (l.maxLines != null) parts.push(`${l.maxLines.toLocaleString()} lines per buffer`);
   if (l.maxEventHours != null) parts.push(`${l.maxEventHours} hours of event noise`);
+  const sentences: string[] = [];
+  if (parts.length) sentences.push(`This server keeps at most ${parts.join(' and ')}.`);
   if (l.maxClosedBufferDays != null) {
-    parts.push(`closed buffers for ${l.maxClosedBufferDays} days`);
+    sentences.push(`Closed buffers are deleted after ${l.maxClosedBufferDays} days.`);
   }
-  if (!parts.length) return '';
-  return `This server keeps at most ${parts.join(', ')}.`;
+  return sentences.join(' ');
 });
 
 // ~281 bytes/line all-in (row + indexes + search index), measured on the

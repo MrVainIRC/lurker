@@ -178,6 +178,13 @@ describe('effectiveClosedBufferDays', () => {
     expect(effectiveClosedBufferDays(userId)).toBe(0);
   });
 
+  it('the operator ceiling carries the same 7-day floor as the user knob', () => {
+    // A 1-day ceiling would force-delete EVERY account's closed buffers after
+    // 24h — the one path that overrides everyone must not skip the footgun rail.
+    process.env.LURKER_MAX_CLOSED_BUFFER_DAYS = '1';
+    expect(effectiveClosedBufferDays(userId)).toBe(0);
+  });
+
   it('a user setting governs; an operator ceiling forces collection for a 0 user', () => {
     setUserSetting(userId, 'data.retention.closed_buffer_days', 30);
     expect(effectiveClosedBufferDays(userId)).toBe(30);
