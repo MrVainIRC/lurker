@@ -1,5 +1,7 @@
 node_modules/
 .repowise/
+# Local RepoWise/MCP workspace configuration.
+.mcp.json
 .env
 .env.local
 docker-compose.override.yml

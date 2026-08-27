@@ -82,4 +82,25 @@ describe('IRC metadata targets', () => {
     ]);
     expect(networks.states[1]?.metadata?.['@ident@example.test']).toBeUndefined();
   });
+
+  it('prefers stable self metadata over a stale nickname row', () => {
+    setActivePinia(createPinia());
+    const networks = useNetworksStore();
+    networks.applySnapshot([
+      {
+        networkId: 1,
+        state: 'connected',
+        nick: 'NewNick',
+        channels: [],
+        metadata: [
+          { target: 'OldNick', key: 'display-name', value: 'stale', visibility: '*' },
+          { target: '*', key: 'display-name', value: 'current', visibility: '*' },
+        ],
+      },
+    ]);
+
+    expect(networks.states[1]?.metadata?.['*']).toEqual([
+      { key: 'display-name', value: 'current', visibility: '*' },
+    ]);
+  });
 });

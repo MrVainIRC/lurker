@@ -73,8 +73,8 @@ const ownMetadata = computed(() => {
   const nick = state?.nick || '';
   const rows = state?.metadata || {};
   const target =
-    Object.keys(rows).find((key) => key.toLowerCase() === nick.toLowerCase()) ||
-    (rows['*'] ? '*' : undefined);
+    (rows['*'] ? '*' : undefined) ||
+    Object.keys(rows).find((key) => key.toLowerCase() === nick.toLowerCase());
   return target ? rows[target] : [];
 });
 
@@ -106,7 +106,10 @@ function save(): void {
   const pendingMetadata = metadataKeys.map((key) => ({ key, value: values[key].trim() }));
   if (features.value.metadata) {
     for (const { key, value } of pendingMetadata) {
-      const command = value ? 'SET' : 'CLEAR';
+      // draft/metadata-2 uses SET <key> [:value] for both writing and
+      // removing one key. CLEAR has no key parameter and would clear the
+      // entire profile, so it must not be used for an empty field.
+      const command = 'SET';
       const params = value ? [key, value] : [key];
       if (
         socketSend({

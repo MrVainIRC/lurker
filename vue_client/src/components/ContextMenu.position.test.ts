@@ -57,6 +57,25 @@ afterEach(() => {
 });
 
 describe('ContextMenu placement', () => {
+  it('keeps the main mobile menu clamped to the viewport edge', async () => {
+    setViewport(320, 640);
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+      function (this: HTMLElement) {
+        if (this.classList.contains('context-menu')) return rect(0, 0, 160, 120);
+        return rect(0, 0, 0, 0);
+      },
+    );
+
+    const wrapper = mount(ContextMenu, { attachTo: document.body });
+    const menu = useContextMenu();
+    menu.open([{ label: 'Reply', onClick: () => {} }], 300, 100);
+
+    await flushMenu();
+
+    expect(renderedMenu().getAttribute('style')).toContain('left: 156px');
+    wrapper.unmount();
+  });
+
   it('opens a direct reaction grid to the left of its hover action button', async () => {
     setViewport(320, 640);
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(

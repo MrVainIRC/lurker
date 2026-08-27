@@ -964,6 +964,15 @@ export class IrcConnection {
     this.handleMetadataValue(target, key, value, visibility);
   }
 
+  // `*` is the stable self target in draft/metadata-2. Servers may echo the
+  // current nickname instead (for example in the registration burst), but
+  // storing that nickname would make the cached profile disappear after a
+  // nick change. Keep our own rows under `*` so snapshots and every open tab
+  // use the same key.
+  private metadataStorageTarget(target: string): string {
+    return target === '*' || target.toLowerCase() === this.currentNick.toLowerCase() ? '*' : target;
+  }
+
   private handleMetadataValue(
     target: string,
     key: string,
@@ -971,15 +980,16 @@ export class IrcConnection {
     visibility = '*',
   ): void {
     if (!target || !key || !/^[a-z0-9_./-]+$/.test(key)) return;
+    const storageTarget = this.metadataStorageTarget(target);
+    applyIrcMetadata(this.network.id, storageTarget, key, value, visibility);
     this.publishEphemeral({
       type: 'metadata',
       target: isChannelTarget(target) ? target : this.canonicalDmTarget(target),
-      metadataTarget: target,
+      metadataTarget: storageTarget,
       key,
       visibility,
       value,
     });
-    applyIrcMetadata(this.network.id, target, key, value, visibility);
   }
 
   private subscribeMetadata(): void {
@@ -993,6 +1003,11 @@ export class IrcConnection {
     const keys = ['avatar', 'display-name', 'pronouns', 'status', 'homepage', 'url', 'color'];
     if (maxSubs === 0) return;
     this.sendMetadata('*', 'SUB', ...keys.slice(0, maxSubs));
+    // The server normally sends our own metadata in the registration burst,
+    // but SYNC is the specified recovery path and is needed by servers that
+    // defer that burst. It also makes the persisted profile converge after a
+    // reconnect instead of relying only on the local optimistic write.
+    this.sendMetadata('*', 'SYNC');
     for (const channel of this.channels.values()) this.sendMetadata(channel.name, 'SYNC');
     this.metadataSubscriptionSent = true;
   }
@@ -1233,11 +1248,11 @@ export class IrcConnection {
         this.publishEphemeral({ type: 'setname', target: this.serverTarget(), nick, realname });
       } else if (rawCommand === 'METADATA' && msg.params.length >= 3) {
         this.handleMetadataMessage(msg.params);
-      } else if (rawCommand === '761' && msg.params.length >= 4) {
+      } else if (rawCommand === '761' && msg.params.length >= 5) {
         const target = msg.params[1];
         const key = msg.params[2];
         const visibility = msg.params[3] || '*';
-        const value = msg.params.length > 4 ? msg.params[msg.params.length - 1] : null;
+        const value = msg.params[4];
         if (target && key) this.handleMetadataValue(target, key, value, visibility);
       } else if (rawCommand === '766' && msg.params.length >= 3) {
         const target = msg.params[1];
@@ -4648,8 +4663,20 @@ export class IrcConnection {
     if (!['GET', 'LIST', 'SET', 'CLEAR', 'SUB', 'UNSUB', 'SYNC'].includes(normalizedCommand)) {
       return false;
     }
+    const validKey = (key: string | undefined): boolean =>
+      typeof key === 'string' && /^[a-z0-9_./-]+$/.test(key);
+    if (
+      (normalizedCommand === 'SET' &&
+        (params.length < 1 || params.length > 2 || !validKey(params[0]))) ||
+      (normalizedCommand === 'CLEAR' && params.length !== 0) ||
+      (['GET', 'SUB', 'UNSUB'].includes(normalizedCommand) &&
+        (params.length === 0 || params.some((key) => !validKey(key)))) ||
+      (['LIST', 'SYNC'].includes(normalizedCommand) && params.length !== 0)
+    ) {
+      return false;
+    }
     this.sendCommand('METADATA', [target, normalizedCommand, ...params]);
-    // `METADATA * SET/CLEAR` changes our own profile. Some servers do not
+    // `METADATA * SET` changes our own profile. Some servers do not
     // echo that change through METADATA, so update the persisted snapshot and
     // connected clients immediately; an eventual server echo remains
     // idempotent. The settings view can therefore retain values across a
@@ -4660,7 +4687,7 @@ export class IrcConnection {
         this.handleMetadataValue(
           this.currentNick,
           key,
-          normalizedCommand === 'SET' ? (params[1] ?? '') : null,
+          normalizedCommand === 'SET' && params.length > 1 ? params[1] : null,
           '*',
         );
       }

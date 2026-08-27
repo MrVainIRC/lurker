@@ -43,6 +43,7 @@ import {
 } from '../db/buffers.js';
 import { getPeerPresence, writePeerState } from '../db/peerPresence.js';
 import { setUserSetting, deleteUserSetting } from '../db/settings.js';
+import { listIrcMetadataForNetwork } from '../db/ircMetadata.js';
 
 // The bare IrcConnections built below carry user_id: 1, and their join/part
 // handlers write system_messages (FK → users.id). Seed user id 1 in the
@@ -3942,5 +3943,105 @@ describe('probePresence intent gate', () => {
     });
     conn.probePresence('NickServ');
     expect(tracked).toEqual([]);
+  });
+});
+
+describe('IRCv3 draft/metadata-2', () => {
+  function makeConn(name: string): {
+    conn: IrcConnection;
+    raw: ReturnType<typeof vi.fn>;
+    published: ReturnType<typeof vi.fn>;
+    network: NonNullable<ReturnType<typeof createNetwork>>;
+  } {
+    const network = createNetwork(1, {
+      name,
+      host: 'irc.example.test',
+      port: 6697,
+      tls: 1,
+      trusted_certificates: 1,
+      nick: 'me',
+      username: null,
+      realname: null,
+      server_password: null,
+      autoconnect: 0,
+      sasl_account: null,
+      sasl_password: null,
+      connect_commands: null,
+    })!;
+    const conn = new IrcConnection({ network, onEvent: () => {} });
+    (conn.client as unknown as {
+      network: { cap: { enabled: string[]; available: Map<string, string> } };
+    }).network = {
+      cap: {
+        enabled: ['draft/metadata-2', 'batch'],
+        available: new Map([['draft/metadata-2', 'max-subs=50']]),
+      },
+    };
+    const raw = vi.fn<(line: string) => void>();
+    const published = vi.fn<(event: unknown) => void>();
+    conn.client.raw = raw;
+    conn.publishEphemeral = published as typeof conn.publishEphemeral;
+    return { conn, raw, published, network };
+  }
+
+  it('sends the draft SET form and uses SET without a value to remove one key', () => {
+    const { conn, raw } = makeConn('metadata-wire');
+
+    expect(conn.sendMetadata('*', 'SET', 'display-name', 'Me Vain')).toBe(true);
+    expect(conn.sendMetadata('*', 'SET', 'display-name')).toBe(true);
+
+    expect(raw.mock.calls).toEqual([
+      ['METADATA * SET display-name :Me Vain'],
+      ['METADATA * SET display-name'],
+    ]);
+  });
+
+  it('stores self metadata under the stable target and accepts server values with spaces', () => {
+    const { conn, network, published } = makeConn('metadata-receive');
+
+    conn.client.emit('raw', {
+      from_server: true,
+      line: ':irc.example.test METADATA me display-name * :Me Vain',
+    });
+
+    expect(published).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'metadata',
+        metadataTarget: '*',
+        key: 'display-name',
+        value: 'Me Vain',
+        visibility: '*',
+      }),
+    );
+    expect(listIrcMetadataForNetwork(network.id)).toEqual([
+      expect.objectContaining({
+        target: '*',
+        key: 'display-name',
+        value: 'Me Vain',
+        visibility: '*',
+      }),
+    ]);
+  });
+
+  it('applies RPL_KEYVALUE and RPL_KEYNOTSET using the target/key fields', () => {
+    const { conn, network } = makeConn('metadata-numerics');
+
+    conn.client.emit('raw', {
+      from_server: true,
+      line: ':irc.example.test 761 me * avatar * :https://example.test/avatar.png',
+    });
+    expect(listIrcMetadataForNetwork(network.id)).toEqual([
+      expect.objectContaining({
+        target: '*',
+        key: 'avatar',
+        value: 'https://example.test/avatar.png',
+      }),
+    ]);
+
+    conn.client.emit('raw', {
+      from_server: true,
+      line: ':irc.example.test 766 me * avatar :key not set',
+    });
+    expect(listIrcMetadataForNetwork(network.id)).toEqual([]);
   });
 });
