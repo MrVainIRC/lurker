@@ -397,6 +397,24 @@ describe('runRetentionTick', () => {
     expect(rowIds(replayed.bufferId)).not.toContain(Number(replayed.id));
   });
 
+  it('pass completion cannot clobber a concurrent cursor rewind', async () => {
+    // The pass writes its cutoff via compare-and-advance: if a replayed row
+    // rewound the cursor while the pass's deletes were in flight, the window
+    // [since, cutoff) never covered it, and a blind set would re-hide it.
+    const { setNoiseCursor, getNoiseCursor, advanceNoiseCursor, clearNoiseCursorForUser } =
+      await import('../db/retention.js');
+    const user = createUser('noise-cas');
+    setNoiseCursor(user.id, '2026-08-01T00:00:00.000Z');
+    // Cursor moved since the pass read it → the advance must be a no-op.
+    advanceNoiseCursor(user.id, '2026-08-10T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+    expect(getNoiseCursor(user.id)).toBe('2026-08-01T00:00:00.000Z');
+    // Unmoved → advances normally.
+    advanceNoiseCursor(user.id, '2026-08-01T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+    expect(getNoiseCursor(user.id)).toBe('2026-08-20T00:00:00.000Z');
+    clearNoiseCursorForUser(user.id);
+    expect(getNoiseCursor(user.id)).toBe('');
+  });
+
   it('an in-flight export pauses the sweep without losing the dirty set', async () => {
     const { createExportJob, deleteJob } = await import('../db/dataExports.js');
     const { userId, ids, bufferId } = seedBuffer('ret-export', 12);

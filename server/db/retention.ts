@@ -123,54 +123,89 @@ export function listUserIds(): number[] {
 // and tiny.
 const NOISE_CURSOR_KEY = 'retention_noise_cursors';
 
-function readNoiseCursors(): Record<string, string> {
+// ONE representation: an in-memory Map hydrated from app_meta on first use,
+// with every write going through persistCursors. All readers — the sweep
+// AND the insert hot path — serve from the Map, so there is no second copy
+// to desync and no JSON re-parse per user per pass. `minCursorIso` is the
+// hot path's early-out watermark: a row time at or above the smallest live
+// cursor can't be below ANY cursor, so the ordinary live insert skips even
+// the owner lookup.
+let noiseCursors: Map<number, string> | null = null;
+let minCursorIso: string | null = null;
+
+function loadNoiseCursors(): Map<number, string> {
+  if (noiseCursors !== null) return noiseCursors;
+  noiseCursors = new Map();
   const row = db.prepare(`SELECT value FROM app_meta WHERE key = ?`).get(NOISE_CURSOR_KEY) as
     | { value: string }
     | undefined;
-  if (!row) return {};
-  try {
-    const parsed = JSON.parse(row.value) as unknown;
-    if (!parsed || typeof parsed !== 'object') return {};
-    // Keep only string values: a corrupted/hand-edited blob must degrade to
-    // "sweep from the beginning", never to a non-string reaching a SQL bind
-    // (which would throw every tick and trip the retention circuit breaker).
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof v === 'string') out[k] = v;
+  if (row) {
+    try {
+      const parsed = JSON.parse(row.value) as unknown;
+      if (parsed && typeof parsed === 'object') {
+        // Keep only string values: a corrupted/hand-edited blob must degrade
+        // to "sweep from the beginning", never to a non-string reaching a SQL
+        // bind (which would throw every tick and trip the retention breaker).
+        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+          if (typeof v === 'string') noiseCursors.set(Number(k), v);
+        }
+      }
+    } catch {
+      /* unparseable = never swept */
     }
-    return out;
-  } catch {
-    return {};
   }
+  recomputeMinCursor();
+  return noiseCursors;
+}
+
+function recomputeMinCursor(): void {
+  minCursorIso = null;
+  for (const v of noiseCursors?.values() ?? []) {
+    if (minCursorIso === null || v < minCursorIso) minCursorIso = v;
+  }
+}
+
+function persistCursors(): void {
+  const map = loadNoiseCursors();
+  const obj: Record<string, string> = {};
+  for (const [k, v] of map) obj[String(k)] = v;
+  db.prepare(
+    `INSERT INTO app_meta (key, value) VALUES (?, ?)
+     ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+  ).run(NOISE_CURSOR_KEY, JSON.stringify(obj));
+  recomputeMinCursor();
 }
 
 /** Where this user's last completed noise sweep stopped ('' = never swept —
  *  compares below every ISO timestamp, so the first sweep walks from the
  *  beginning). */
 export function getNoiseCursor(userId: number): string {
-  return readNoiseCursors()[String(userId)] ?? '';
+  return loadNoiseCursors().get(userId) ?? '';
 }
 
 export function setNoiseCursor(userId: number, cutoffIso: string): void {
-  const cursors = readNoiseCursors();
-  cursors[String(userId)] = cutoffIso;
-  db.prepare(
-    `INSERT INTO app_meta (key, value) VALUES (?, ?)
-     ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
-  ).run(NOISE_CURSOR_KEY, JSON.stringify(cursors));
-  noiseCursorCache?.set(userId, cutoffIso);
+  loadNoiseCursors().set(userId, cutoffIso);
+  persistCursors();
 }
 
-// In-memory mirror of the cursor map, hydrated on first use, for the one
-// consumer that runs on the message-insert hot path (noteNoiseInsert below)
-// and must not pay an app_meta read per join/quit.
-let noiseCursorCache: Map<number, string> | null = null;
+/**
+ * The pass-completion write, as a compare-and-advance rather than a blind
+ * set: the pass's deletes only covered [fromIso, toIso), and an insert-side
+ * rewind (noteNoiseInsert, below) can land DURING the pass's awaits. If the
+ * cursor moved while the pass ran, blindly writing toIso would re-hide the
+ * exact replayed rows the rewind exists to save — advance only when the
+ * cursor is still where the pass started.
+ */
+export function advanceNoiseCursor(userId: number, fromIso: string, toIso: string): void {
+  if (getNoiseCursor(userId) !== fromIso) return;
+  setNoiseCursor(userId, toIso);
+}
 
-function cachedNoiseCursor(userId: number): string {
-  if (noiseCursorCache === null) {
-    noiseCursorCache = new Map(Object.entries(readNoiseCursors()).map(([k, v]) => [Number(k), v]));
-  }
-  return noiseCursorCache.get(userId) ?? '';
+/** Forget a user's cursor so the next pass walks from the beginning — the
+ *  data-import path, whose bulk inserts bypass insertMessage's rewind. */
+export function clearNoiseCursorForUser(userId: number): void {
+  const map = loadNoiseCursors();
+  if (map.delete(userId)) persistCursors();
 }
 
 /**
@@ -179,14 +214,16 @@ function cachedNoiseCursor(userId: number): string {
  * row can land BELOW its owner's low-water cursor — territory the sweep
  * treats as already cleared and would otherwise never revisit, contradicting
  * the setting's "deleted once older than N hours" promise. Rewinding the
- * cursor to the row's own time puts it back in the next pass's window. Cost
- * on the ordinary path (live event, time ≈ now): one PK owner probe and a
- * string compare.
+ * cursor to the row's own time puts it back in the next pass's window. The
+ * ordinary live insert (time ≈ now, above every cursor) exits on the
+ * watermark compare without touching the database.
  */
 export function noteNoiseInsert(bufferId: number, timeIso: string): void {
+  loadNoiseCursors();
+  if (minCursorIso === null || timeIso >= minCursorIso) return;
   const ownerId = bufferOwnerId(bufferId);
   if (ownerId === undefined) return;
-  const cursor = cachedNoiseCursor(ownerId);
+  const cursor = getNoiseCursor(ownerId);
   if (cursor !== '' && timeIso < cursor) setNoiseCursor(ownerId, timeIso);
 }
 

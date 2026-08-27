@@ -36,7 +36,7 @@ import {
   listUserIds,
   deleteNoiseBatch,
   getNoiseCursor,
-  setNoiseCursor,
+  advanceNoiseCursor,
 } from '../db/retention.js';
 import { listInflightJobs } from '../db/dataExports.js';
 import {
@@ -216,7 +216,9 @@ export async function runRetentionTick(
         }
       }
       if (!userDone) break; // budget died mid-user; they stay at the head for next tick
-      setNoiseCursor(userId, cutoffIso);
+      // Compare-and-advance, not a blind set: an insert-side rewind can land
+      // during this user's awaits, and the pass's window never covered it.
+      advanceNoiseCursor(userId, sinceIso, cutoffIso);
       noisePendingUsers.shift();
     }
     if (noisePendingUsers.length === 0) {

@@ -159,4 +159,12 @@ describe('effectiveEventRetentionHours', () => {
     process.env.LURKER_MAX_EVENT_RETENTION_HOURS = '9999999999';
     expect(declaredEventRetentionCeilingHours()).toBeNull();
   });
+
+  it('an oversized LINES ceiling clamps instead of vanishing', () => {
+    // Different consequence, different behavior: lines have no date math, and
+    // rejecting an oversized-but-working ceiling would silently UNBOUND an
+    // instance that upgraded — clamp to the rail and keep enforcing.
+    process.env.LURKER_MAX_RETENTION_LINES = '2000000000';
+    expect(declaredRetentionCeilingLines()).toBe(1_000_000_000);
+  });
 });

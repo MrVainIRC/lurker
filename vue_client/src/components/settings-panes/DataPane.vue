@@ -98,6 +98,7 @@
          through /set, per-buffer overrides through /retention. -->
     <h3 class="subhead">retention</h3>
     <p v-if="ceilingNote" class="muted small">{{ ceilingNote }}</p>
+    <p v-if="retError" class="error inline">{{ retError }}</p>
 
     <div class="ret-row">
       <label for="ret-lines">History limit (lines per buffer)</label>
@@ -108,6 +109,7 @@
       <div class="editor-line">
         <select
           id="ret-lines"
+          :key="retTick"
           :value="String(linesValue)"
           @change="
             onRetentionChange('data.retention.lines', ($event.target as HTMLSelectElement).value)
@@ -130,6 +132,7 @@
       <div class="editor-line">
         <select
           id="ret-hours"
+          :key="retTick"
           :value="String(hoursValue)"
           @change="
             onRetentionChange(
@@ -355,40 +358,59 @@ const HOUR_PRESETS = [0, 24, 72, 168, 720];
 const linesValue = computed(() => Number(settings.effective('data.retention.lines') ?? 0));
 const hoursValue = computed(() => Number(settings.effective('data.retention.event_hours') ?? 168));
 
+// Every label must say what will actually HAPPEN, ceiling included: the
+// server clamps a stored 0 (and any over-ceiling value) TO the ceiling, so
+// "Unlimited" under a ceiling is a lie — the 0 option relabels to say the
+// ceiling applies, and an over-ceiling custom value says what it's capped to.
 function presetList(
   presets: number[],
   current: number,
   ceiling: number | null,
   label: (v: number) => string,
+  ceilingLabel: (ceiling: number) => string,
 ): Array<{ value: number; label: string }> {
+  const name = (v: number) => {
+    if (ceiling != null && v === 0) return ceilingLabel(ceiling);
+    if (ceiling != null && v > ceiling) return `${label(v)} — capped at ${label(ceiling)}`;
+    return label(v);
+  };
   const list = presets
     .filter((v) => ceiling == null || v <= ceiling)
-    .map((v) => ({ value: v, label: label(v) }));
+    .map((v) => ({ value: v, label: name(v) }));
   if (!list.some((p) => p.value === current)) {
-    list.push({ value: current, label: `${label(current)} (custom)` });
+    list.push({ value: current, label: `${name(current)} (custom)` });
     list.sort((a, b) => (a.value === 0 ? -1 : b.value === 0 ? 1 : a.value - b.value));
   }
   return list;
 }
 
 const linePresets = computed(() =>
-  presetList(LINE_PRESETS, linesValue.value, limits.value?.maxLines ?? null, (v) =>
-    v === 0 ? 'Unlimited' : `${v.toLocaleString()} lines`,
+  presetList(
+    LINE_PRESETS,
+    linesValue.value,
+    limits.value?.maxLines ?? null,
+    (v) => (v === 0 ? 'Unlimited' : `${v.toLocaleString()} lines`),
+    (c) => `Server maximum (${c.toLocaleString()} lines)`,
   ),
 );
 const hourPresets = computed(() =>
-  presetList(HOUR_PRESETS, hoursValue.value, limits.value?.maxEventHours ?? null, (v) =>
-    v === 0
-      ? 'Keep as long as messages'
-      : v === 24
-        ? '1 day'
-        : v === 72
-          ? '3 days'
-          : v === 168
-            ? '1 week'
-            : v === 720
-              ? '30 days'
-              : `${v} hours`,
+  presetList(
+    HOUR_PRESETS,
+    hoursValue.value,
+    limits.value?.maxEventHours ?? null,
+    (v) =>
+      v === 0
+        ? 'Keep as long as messages'
+        : v === 24
+          ? '1 day'
+          : v === 72
+            ? '3 days'
+            : v === 168
+              ? '1 week'
+              : v === 720
+                ? '30 days'
+                : `${v} hours`,
+    (c) => `Server maximum (${c} hours)`,
   ),
 );
 
@@ -398,14 +420,22 @@ const linesHint = computed(() => {
   return `≈ ${mb >= 10 ? Math.round(mb) : mb.toFixed(1)} MB per full buffer`;
 });
 
+const retError = ref('');
+// Bumped on a FAILED write: the bound value never changed, so Vue would skip
+// the DOM patch and the select would keep displaying the unsaved (and
+// destructive-looking) choice. The :key change forces the element to rebuild
+// at the stored value.
+const retTick = ref(0);
+
 async function onRetentionChange(key: string, raw: string) {
   const n = Number(raw);
   if (!Number.isInteger(n)) return;
+  retError.value = '';
   try {
     await settings.setValue(key, n);
-  } catch {
-    /* the pane-level error surface belongs to RegistryPane; a failed preset
-       write simply leaves the select showing the stored value */
+  } catch (e: any) {
+    retError.value = e.message || 'failed to save — the stored value is unchanged';
+    retTick.value++;
   }
 }
 </script>

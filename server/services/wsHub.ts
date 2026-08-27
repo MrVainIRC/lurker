@@ -105,7 +105,7 @@ import { getUserAwayState } from '../db/userAwayState.js';
 import { ownsNetwork, listNetworksForUser } from '../db/networks.js';
 import * as chanlistDb from '../db/chanlist.js';
 import { getUserSettings } from '../db/settings.js';
-import { defaultsAsObject, getOption } from './settingsRegistry.js';
+import { defaultsAsObject, validate } from './settingsRegistry.js';
 import { setBufferRetentionById } from '../db/bufferRetention.js';
 import { markBufferDirty } from '../db/retention.js';
 import { SESSION_COOKIE, loadBearerSession } from '../middleware/auth.js';
@@ -3368,15 +3368,13 @@ export function attachWsHub(httpServer: HttpServer, sessionSecret: string) {
         if (!buf || (buf.kind !== 'channel' && buf.kind !== 'dm')) break;
         let maxLines: number | null = null;
         if (msg.maxLines !== null && msg.maxLines !== undefined) {
-          const n = Number(msg.maxLines);
-          // Mirror the registry knob's validity hole (0 or >= minNonzero,
-          // bounded by its max); an invalid value is refused silently, like
-          // every other malformed verb.
-          const opt = getOption('data.retention.lines');
-          const floor = opt?.type === 'int' ? (opt.minNonzero ?? 0) : 0;
-          const max = opt?.type === 'int' ? opt.max : Number.MAX_SAFE_INTEGER;
-          if (!Number.isInteger(n) || n < 0 || n > max || (n !== 0 && n < floor)) break;
-          maxLines = n;
+          // The registry knob's own validator — min/max/minNonzero in ONE
+          // place, so this verb can never drift from what PATCH /api/settings
+          // accepts. An invalid value is refused silently, like every other
+          // malformed verb.
+          const v = validate('data.retention.lines', msg.maxLines);
+          if (!v.ok || typeof v.value !== 'number') break;
+          maxLines = v.value;
         }
         setBufferRetentionById(userId, buf.id, maxLines);
         // A lowered cap should act on the next tick, not the next insert.
