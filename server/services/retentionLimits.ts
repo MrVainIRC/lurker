@@ -95,7 +95,10 @@ export type CeilingState = 'set' | 'none' | 'invalid';
 export function ceilingState(name: string, resolved: number | null): CeilingState {
   if (resolved != null) return 'set';
   const raw = (process.env[name] || '').trim();
-  return raw === '' || raw === '0' ? 'none' : 'invalid';
+  if (raw === '') return 'none';
+  // Any all-digit zero spelling ("0", "00", …) is the explicit no-ceiling
+  // form parseCeilingEnv accepts — it must not read as "invalid" here.
+  return /^\d+$/.test(raw) && Number(raw) === 0 ? 'none' : 'invalid';
 }
 
 /** The operator's noise-age ceiling in hours, or null when none is declared. */

@@ -16,9 +16,21 @@ let adminAgent: Awaited<ReturnType<typeof createAuthedAgent>>;
 let userAgent: Awaited<ReturnType<typeof createAuthedAgent>>;
 let aliceId: number;
 
+// The ceilings assertions read live env; a deploy-adjacent shell exporting
+// the operator knobs must not fail a correct test — and other files in the
+// same worker share this process env, so the pre-existing values go back.
+const SAVED_ENV = {
+  LURKER_MAX_RETENTION_LINES: process.env.LURKER_MAX_RETENTION_LINES,
+  LURKER_MAX_EVENT_RETENTION_HOURS: process.env.LURKER_MAX_EVENT_RETENTION_HOURS,
+};
+afterAll(() => {
+  for (const [k, v] of Object.entries(SAVED_ENV)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+});
+
 beforeAll(async () => {
-  // The ceilings assertions read live env; a deploy-adjacent shell exporting
-  // the operator knobs must not fail a correct test.
   delete process.env.LURKER_MAX_RETENTION_LINES;
   delete process.env.LURKER_MAX_EVENT_RETENTION_HOURS;
   const { createUser } = await import('../db/users.js');
