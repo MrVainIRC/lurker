@@ -27,6 +27,7 @@ import { isNodeMode } from '../utils/edition.js';
 import { deriveIdent, isValidIdentOverride, MAX_IDENT_LENGTH } from '../../shared/ident.js';
 import adminUploadersRouter from './adminUploaders.js';
 import adminNetworksRouter from './adminNetworks.js';
+import adminStorageRouter from './adminStorage.js';
 
 const router = Router();
 router.use(requireAuth, requireAdmin);
@@ -37,6 +38,9 @@ router.use('/uploaders', adminUploadersRouter);
 
 // Instance network presets + the network lockdown (#298). Same deal.
 router.use('/networks', adminNetworksRouter);
+
+// Storage stats + retention ceilings (lurker-dev/RETENTION_PLAN.md §3.4).
+router.use('/storage', adminStorageRouter);
 
 // invites.ts is still untyped — row shape inferred as any from the JS module
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
