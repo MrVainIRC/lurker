@@ -129,8 +129,16 @@ function readNoiseCursors(): Record<string, string> {
     | undefined;
   if (!row) return {};
   try {
-    const parsed = JSON.parse(row.value);
-    return parsed && typeof parsed === 'object' ? (parsed as Record<string, string>) : {};
+    const parsed = JSON.parse(row.value) as unknown;
+    if (!parsed || typeof parsed !== 'object') return {};
+    // Keep only string values: a corrupted/hand-edited blob must degrade to
+    // "sweep from the beginning", never to a non-string reaching a SQL bind
+    // (which would throw every tick and trip the retention circuit breaker).
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === 'string') out[k] = v;
+    }
+    return out;
   } catch {
     return {};
   }
@@ -150,6 +158,36 @@ export function setNoiseCursor(userId: number, cutoffIso: string): void {
     `INSERT INTO app_meta (key, value) VALUES (?, ?)
      ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
   ).run(NOISE_CURSOR_KEY, JSON.stringify(cursors));
+  noiseCursorCache?.set(userId, cutoffIso);
+}
+
+// In-memory mirror of the cursor map, hydrated on first use, for the one
+// consumer that runs on the message-insert hot path (noteNoiseInsert below)
+// and must not pay an app_meta read per join/quit.
+let noiseCursorCache: Map<number, string> | null = null;
+
+function cachedNoiseCursor(userId: number): string {
+  if (noiseCursorCache === null) {
+    noiseCursorCache = new Map(Object.entries(readNoiseCursors()).map(([k, v]) => [Number(k), v]));
+  }
+  return noiseCursorCache.get(userId) ?? '';
+}
+
+/**
+ * Called by insertMessage for every EARLY_PRUNE_TYPES row: stored times are
+ * allowed to lie in the past (server-time tags, bouncer replay), so a noise
+ * row can land BELOW its owner's low-water cursor — territory the sweep
+ * treats as already cleared and would otherwise never revisit, contradicting
+ * the setting's "deleted once older than N hours" promise. Rewinding the
+ * cursor to the row's own time puts it back in the next pass's window. Cost
+ * on the ordinary path (live event, time ≈ now): one PK owner probe and a
+ * string compare.
+ */
+export function noteNoiseInsert(bufferId: number, timeIso: string): void {
+  const ownerId = bufferOwnerId(bufferId);
+  if (ownerId === undefined) return;
+  const cursor = cachedNoiseCursor(ownerId);
+  if (cursor !== '' && timeIso < cursor) setNoiseCursor(ownerId, timeIso);
 }
 
 // One bounded bite of a user's over-age noise. INDEXED BY is load-bearing

@@ -334,6 +334,43 @@ describe('runRetentionTick', () => {
     for (const s of seeded) expect(rowIds(s.bufferId)).toEqual([]);
   });
 
+  it('replayed noise below the cursor rewinds it and still gets swept', async () => {
+    // Stored times may lie in the past (server-time tags, bouncer replay), so
+    // a noise row can be INSERTED below the low-water mark a completed pass
+    // left behind — territory the sweep believes is already clear. The
+    // insert-side rewind is what keeps the "deleted once older than N hours"
+    // promise for those rows.
+    const user = createUser('noise-replay');
+    const net = createNetwork(user.id, {
+      name: 'noise-replay',
+      host: 'h',
+      port: 6697,
+      tls: true,
+      nick: 'n',
+    });
+    const row = (time: string) =>
+      insertMessage({
+        networkId: net!.id,
+        target: '#chan',
+        time,
+        type: 'quit',
+        nick: 'x',
+        text: null,
+        self: false,
+      });
+    // A completed pass advances this user's cursor to their 168h-default cutoff.
+    const fresh = row(new Date().toISOString());
+    await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+    expect(rowIds(fresh.bufferId)).toEqual([Number(fresh.id)]);
+
+    // Replay lands a rows-old quit BELOW that cursor…
+    const replayed = row(new Date(Date.now() - 30 * 24 * 3_600_000).toISOString());
+    // …and the next pass still deletes it.
+    await runRetentionTick({ ...OPTS, noiseIntervalMs: 0 });
+    expect(rowIds(fresh.bufferId)).toEqual([Number(fresh.id)]);
+    expect(rowIds(replayed.bufferId)).not.toContain(Number(replayed.id));
+  });
+
   it('an in-flight export pauses the sweep without losing the dirty set', async () => {
     const { createExportJob, deleteJob } = await import('../db/dataExports.js');
     const { userId, ids, bufferId } = seedBuffer('ret-export', 12);

@@ -2195,7 +2195,10 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_net_nick
 // query no longer implies). Sorted so the rendering is deterministic.
 export const EARLY_PRUNE_TYPES_SQL = [...EARLY_PRUNE_TYPES]
   .sort()
-  .map((t) => `'${t}'`)
+  // '' → '''' escaping: today's members are internal constants, but this
+  // string becomes DDL and statement text verbatim — cheap to make that safe
+  // against a future type name containing a quote.
+  .map((t) => `'${t.replace(/'/g, "''")}'`)
   .join(', ');
 
 /**

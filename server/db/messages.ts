@@ -7,7 +7,8 @@ import {
   resolveBufferIdByNetwork,
   resolveOrMintForInsert,
 } from './bufferResolve.js';
-import { markBufferDirty } from './retention.js';
+import { markBufferDirty, noteNoiseInsert } from './retention.js';
+import { EARLY_PRUNE_TYPES } from '../../shared/eventFilter.js';
 import { countsTowardPage } from '../../shared/eventFilter.js';
 import type { PageUnit } from '../../shared/eventFilter.js';
 import type { ModeChange } from '../../shared/modes.js';
@@ -183,6 +184,10 @@ export function insertMessage(row: MessageInput): {
   const id = result.lastInsertRowid;
   // Retention prunes lazily: the sweep only ever looks at buffers that grew.
   markBufferDirty(bufferId);
+  // A noise row whose stored time lies in the past (server-time/replay) can
+  // land below the owner's noise-clock cursor; this rewinds it so the row is
+  // still swept. See noteNoiseInsert.
+  if (EARLY_PRUNE_TYPES.has(row.type)) noteNoiseInsert(bufferId, row.time);
   const altRow = altByIdStmt.get(id) as { alt: number } | undefined;
   // bufferId returned so the live publish path can stamp it onto the enriched
   // event without a second resolve — the wire's `irc` frames carry it.
