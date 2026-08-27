@@ -46,6 +46,7 @@ function parseCeilingEnv(
   max: number,
   overflow: 'clamp' | 'reject',
   consequence: string,
+  minNonzero = 0,
 ): number | null {
   const raw = (process.env[name] || '').trim();
   if (!raw) return null;
@@ -75,6 +76,16 @@ function parseCeilingEnv(
     }
     warnCeilingOnce(name, `${name}="${raw}" exceeds the maximum of ${max} ${unit}; using ${max}.`);
     return max;
+  }
+  // The same footgun floor the user knob carries, on the one path that
+  // overrides everyone: a ceiling below it (a units mix-up, a test value left
+  // in cell.env) would force-delete every account's data with no warning.
+  if (value !== 0 && value < minNonzero) {
+    warnCeilingOnce(
+      name,
+      `${name}="${raw}" is below the minimum of ${minNonzero} ${unit}; ignoring it. ${consequence}`,
+    );
+    return null;
   }
   return value === 0 ? null : value;
 }
@@ -135,6 +146,35 @@ export function declaredEventRetentionCeilingHours(): number | null {
     // operator into thinking the noise clock was inert.
     "The noise clock still runs at each user's own setting (default 168 hours); " +
       'only the operator ceiling is missing.',
+  );
+}
+
+/** The operator's closed-buffer GC ceiling in days, or null when none is
+ *  declared. Fail-open on overflow like hours: a rejected ceiling means LESS
+ *  deletion, which is the safe direction for a whole-buffer delete. */
+export function declaredClosedBufferCeilingDays(): number | null {
+  return parseCeilingEnv(
+    'LURKER_MAX_CLOSED_BUFFER_DAYS',
+    'days',
+    'LURKER_MAX_CLOSED_BUFFER_DAYS=90',
+    36_500,
+    'reject',
+    "Closed buffers are collected only according to each user's own setting (default: never).",
+    7,
+  );
+}
+
+/**
+ * The effective closed-buffer GC age for this user, in days. 0 = never (the
+ * registry default). Same min-of-the-nonzero stacking: a user's 0 under an
+ * operator ceiling resolves to the ceiling — that is how hosted forces
+ * collection without touching anyone's settings.
+ */
+export function effectiveClosedBufferDays(userId: number): number {
+  const settings = { ...defaultsAsObject(), ...getUserSettings(userId) };
+  return clampToCeiling(
+    settings['data.retention.closed_buffer_days'],
+    declaredClosedBufferCeilingDays(),
   );
 }
 

@@ -72,6 +72,11 @@ describe('validate', () => {
       expect(validate('data.retention.event_hours', 24).ok).toBe(true);
       expect(validate('data.retention.event_hours', 0).ok).toBe(true);
     });
+    it('closed-buffer GC floors at a week — it deletes whole buffers', () => {
+      expect(validate('data.retention.closed_buffer_days', 6).ok).toBe(false);
+      expect(validate('data.retention.closed_buffer_days', 7).ok).toBe(true);
+      expect(validate('data.retention.closed_buffer_days', 0).ok).toBe(true);
+    });
   });
 
   describe('string / color', () => {

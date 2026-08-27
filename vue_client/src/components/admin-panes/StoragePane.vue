@@ -32,6 +32,7 @@
            someone comes to check a ceiling that isn't taking effect. -->
       <p class="muted small">Line ceiling: {{ linesCeilingText }}</p>
       <p class="muted small">Event-noise ceiling: {{ hoursCeilingText }}</p>
+      <p class="muted small">Closed-buffer ceiling: {{ daysCeilingText }}</p>
 
       <h3 class="subhead">per account</h3>
       <p v-if="stats.approxBytesPerRow != null" class="muted small">
@@ -76,6 +77,8 @@ interface StorageStats {
     maxLinesState: CeilingState;
     maxEventHours: number | null;
     maxEventHoursState: CeilingState;
+    maxClosedBufferDays: number | null;
+    maxClosedBufferDaysState: CeilingState;
   };
   users: Array<{ id: number; username: string; messageRows: number; buffers: number }>;
 }
@@ -120,6 +123,18 @@ const hoursCeilingText = computed(() => {
   }
   // Not "off": the per-user default (168h) keeps pruning without a ceiling.
   return 'none — users default to pruning event noise after a week';
+});
+
+const daysCeilingText = computed(() => {
+  const c = stats.value?.ceilings;
+  if (!c) return '';
+  if (c.maxClosedBufferDaysState === 'set' && c.maxClosedBufferDays != null) {
+    return `${c.maxClosedBufferDays} days (LURKER_MAX_CLOSED_BUFFER_DAYS) — closed buffers are collected for everyone`;
+  }
+  if (c.maxClosedBufferDaysState === 'invalid') {
+    return 'LURKER_MAX_CLOSED_BUFFER_DAYS is set but unparseable — NOT in effect, see the server log';
+  }
+  return 'none — closed buffers are kept unless a user opts in';
 });
 </script>
 

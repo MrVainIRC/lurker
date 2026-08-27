@@ -72,6 +72,8 @@ describe('GET /api/admin/storage', () => {
       maxLinesState: 'none',
       maxEventHours: null,
       maxEventHoursState: 'none',
+      maxClosedBufferDays: null,
+      maxClosedBufferDaysState: 'none',
     });
     // Too few rows for a meaningful per-instance ratio → no ≈ estimates.
     expect(res.body.approxBytesPerRow).toBeNull();

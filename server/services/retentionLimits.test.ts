@@ -20,6 +20,7 @@ let effectiveRetentionLines: typeof import('./retentionLimits.js').effectiveRete
 let declaredRetentionCeilingLines: typeof import('./retentionLimits.js').declaredRetentionCeilingLines;
 let effectiveEventRetentionHours: typeof import('./retentionLimits.js').effectiveEventRetentionHours;
 let declaredEventRetentionCeilingHours: typeof import('./retentionLimits.js').declaredEventRetentionCeilingHours;
+let effectiveClosedBufferDays: typeof import('./retentionLimits.js').effectiveClosedBufferDays;
 
 let userId: number;
 
@@ -31,6 +32,7 @@ beforeAll(async () => {
     declaredRetentionCeilingLines,
     effectiveEventRetentionHours,
     declaredEventRetentionCeilingHours,
+    effectiveClosedBufferDays,
   } = await import('./retentionLimits.js'));
   userId = createUser('retention-alice').id;
 });
@@ -38,8 +40,10 @@ beforeAll(async () => {
 afterEach(() => {
   delete process.env.LURKER_MAX_RETENTION_LINES;
   delete process.env.LURKER_MAX_EVENT_RETENTION_HOURS;
+  delete process.env.LURKER_MAX_CLOSED_BUFFER_DAYS;
   deleteUserSetting(userId, 'data.retention.lines');
   deleteUserSetting(userId, 'data.retention.event_hours');
+  deleteUserSetting(userId, 'data.retention.closed_buffer_days');
 });
 
 afterAll(() => {
@@ -166,5 +170,27 @@ describe('effectiveEventRetentionHours', () => {
     // instance that upgraded — clamp to the rail and keep enforcing.
     process.env.LURKER_MAX_RETENTION_LINES = '2000000000';
     expect(declaredRetentionCeilingLines()).toBe(1_000_000_000);
+  });
+});
+
+describe('effectiveClosedBufferDays', () => {
+  it('defaults to 0 — closed buffers are kept unless the user opts in', () => {
+    expect(effectiveClosedBufferDays(userId)).toBe(0);
+  });
+
+  it('the operator ceiling carries the same 7-day floor as the user knob', () => {
+    // A 1-day ceiling would force-delete EVERY account's closed buffers after
+    // 24h — the one path that overrides everyone must not skip the footgun rail.
+    process.env.LURKER_MAX_CLOSED_BUFFER_DAYS = '1';
+    expect(effectiveClosedBufferDays(userId)).toBe(0);
+  });
+
+  it('a user setting governs; an operator ceiling forces collection for a 0 user', () => {
+    setUserSetting(userId, 'data.retention.closed_buffer_days', 30);
+    expect(effectiveClosedBufferDays(userId)).toBe(30);
+    process.env.LURKER_MAX_CLOSED_BUFFER_DAYS = '14';
+    expect(effectiveClosedBufferDays(userId)).toBe(14);
+    setUserSetting(userId, 'data.retention.closed_buffer_days', 0);
+    expect(effectiveClosedBufferDays(userId)).toBe(14);
   });
 });

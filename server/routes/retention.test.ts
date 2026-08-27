@@ -55,14 +55,14 @@ describe('GET /api/retention/limits', () => {
   it('reports null ceilings when the operator declared none', async () => {
     const res = await agent.get('/api/retention/limits');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ maxLines: null, maxEventHours: null });
+    expect(res.body).toEqual({ maxLines: null, maxEventHours: null, maxClosedBufferDays: null });
   });
 
   it('reports the declared ceilings', async () => {
     process.env.LURKER_MAX_RETENTION_LINES = '10000';
     process.env.LURKER_MAX_EVENT_RETENTION_HOURS = '336';
     const res = await agent.get('/api/retention/limits');
-    expect(res.body).toEqual({ maxLines: 10000, maxEventHours: 336 });
+    expect(res.body).toEqual({ maxLines: 10000, maxEventHours: 336, maxClosedBufferDays: null });
   });
 });
 

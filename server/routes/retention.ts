@@ -14,6 +14,7 @@ import { requireAuth } from '../middleware/auth.js';
 import {
   declaredRetentionCeilingLines,
   declaredEventRetentionCeilingHours,
+  declaredClosedBufferCeilingDays,
   effectiveRetentionLines,
   effectiveEventRetentionHours,
 } from '../services/retentionLimits.js';
@@ -29,6 +30,7 @@ router.get('/limits', (_req: Request, res: Response) => {
   res.json({
     maxLines: declaredRetentionCeilingLines(),
     maxEventHours: declaredEventRetentionCeilingHours(),
+    maxClosedBufferDays: declaredClosedBufferCeilingDays(),
   });
 });
 

@@ -30,7 +30,12 @@ import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import type { Statement, RunResult } from 'better-sqlite3';
 import db from '../db/index.js';
 import { EXPORT_TABLES, EXPORT_FORMAT_VERSION, IMPORT_ORDER } from '../db/exportSchema.js';
-import { seedAllBuffersDirty, clearNoiseCursorForUser } from '../db/retention.js';
+import {
+  seedAllBuffersDirty,
+  clearNoiseCursorForUser,
+  beginImport,
+  endImport,
+} from '../db/retention.js';
 import { getOption } from './settingsRegistry.js';
 import { isBuiltinThemeId, THEME_POINTER_KEYS } from '../../shared/themePresets.js';
 import themesService from './themesService.js';
@@ -605,6 +610,8 @@ export async function importFromZipFile(
   zipPath: string,
 ): Promise<ImportResult> {
   const { zip, entries } = await openZipEntries(zipPath);
+  // Pauses the retention sweeper for the duration — see importInProgress.
+  beginImport();
   try {
     // ---- manifest ----
     const manifestEntry = entries.get('manifest.json');
@@ -783,6 +790,7 @@ export async function importFromZipFile(
 
     return { manifest, counts, thumbnailsAttached };
   } finally {
+    endImport();
     zip.close();
   }
 }
