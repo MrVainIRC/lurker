@@ -856,6 +856,7 @@ function onMessageRowClick(e: MouseEvent, m: ChatMessage | undefined | null): vo
     e.clientX,
     e.clientY,
     e.currentTarget as Element,
+    isMobile.value || !canHover.value ? 'mobile-edge' : null,
   );
 }
 

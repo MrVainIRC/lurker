@@ -40,6 +40,7 @@ export interface ContextMenuInput {
 }
 
 export type ContextMenuLayout = 'grid';
+export type ContextMenuPlacement = 'mobile-edge';
 
 export interface ContextMenuState {
   open: boolean;
@@ -53,6 +54,9 @@ export interface ContextMenuState {
   // own click handler then reopens it on the same gesture, so the menu never
   // toggles closed.
   triggerEl: Element | null;
+  // Optional placement hint for a touch message menu. The hint is intentionally
+  // separate from the grid layout so nested fly-outs keep their own placement.
+  placement: ContextMenuPlacement | null;
 }
 
 export interface ContextMenuAPI {
@@ -63,6 +67,7 @@ export interface ContextMenuAPI {
     y: number,
     triggerEl?: Element | null,
     layout?: ContextMenuLayout | null,
+    placement?: ContextMenuPlacement | null,
   ): void;
   close(): void;
 }
@@ -74,6 +79,7 @@ const state = reactive<ContextMenuState>({
   items: [],
   layout: null,
   triggerEl: null,
+  placement: null,
 });
 
 function closeMenu(): void {
@@ -81,6 +87,7 @@ function closeMenu(): void {
   state.items = [];
   state.layout = null;
   state.triggerEl = null;
+  state.placement = null;
 }
 
 export function useContextMenu(): ContextMenuAPI {
@@ -92,6 +99,7 @@ export function useContextMenu(): ContextMenuAPI {
       y: number,
       triggerEl: Element | null = null,
       layout: ContextMenuLayout | null = null,
+      placement: ContextMenuPlacement | null = null,
     ): void {
       // Toggle: re-invoking open() from the same trigger while its menu is up
       // closes it. The toggle MUST live here, not in the close-on-outside
@@ -109,6 +117,7 @@ export function useContextMenu(): ContextMenuAPI {
       state.y = y;
       state.layout = layout;
       state.triggerEl = triggerEl;
+      state.placement = placement;
       state.open = true;
     },
     close(): void {

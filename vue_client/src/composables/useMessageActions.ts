@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Brad Root
 // SPDX-License-Identifier: MPL-2.0
 
-import type { ContextMenuItem } from './useContextMenu.js';
+import type { ContextMenuItem, ContextMenuPlacement } from './useContextMenu.js';
 import { useBookmarksStore } from '../stores/bookmarks.js';
 import { useBuffersStore } from '../stores/buffers.js';
 import { useContextMenu } from './useContextMenu.js';
@@ -83,6 +83,7 @@ export interface MessageActionsAPI {
     x: number,
     y: number,
     triggerEl?: Element | null,
+    placement?: ContextMenuPlacement | null,
   ): void;
 }
 
@@ -416,11 +417,12 @@ export function useMessageActions(): MessageActionsAPI {
     x: number,
     y: number,
     triggerEl: Element | null = null,
+    placement: ContextMenuPlacement | null = null,
   ): void {
     if (!message) return;
     const items = buildItems(message, ctx);
     if (items.length === 0) return;
-    menu.open(items, x, y, triggerEl);
+    menu.open(items, x, y, triggerEl, null, placement);
   }
 
   return {

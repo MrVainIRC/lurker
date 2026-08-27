@@ -181,6 +181,13 @@ describe('useMessageActions', () => {
       expect(menu.state.items.length).toBe(4);
     });
 
+    it('forwards the mobile edge placement to the shared context menu', () => {
+      const api = useMessageActions();
+      const menu = useContextMenu();
+      api.openMenu(other(), makeCtx(), 12, 34, null, 'mobile-edge');
+      expect(menu.state.placement).toBe('mobile-edge');
+    });
+
     it('no-ops for a null message', () => {
       const api = useMessageActions();
       const menu = useContextMenu();

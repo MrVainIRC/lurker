@@ -31,9 +31,9 @@ const menuEl = ref<HTMLElement | null>(null);
 // Position the panel from the raw cursor coords first; once mounted, measure
 // actual size and clamp so it stays in the viewport. Grid menus are the
 // reaction picker opened from a small action button, so they use that button
-// as an anchor and open to its left. Previously the picker used the click's
-// clientX and was merely clamped to the right edge — inside the viewport, but
-// still opening toward the edge on mobile.
+// as an anchor and open to its left. Message menus on touch use the explicit
+// mobile-edge hint so a tap near the end of a long message does not determine
+// the menu's horizontal position.
 const clamped = ref({ x: 0, y: 0 });
 
 const positionStyle = computed(() => ({
@@ -55,7 +55,11 @@ watch(
       state.layout === 'grid' && state.triggerEl ? state.triggerEl.getBoundingClientRect() : null;
     const maxX = Math.max(pad, window.innerWidth - rect.width - pad);
     const maxY = Math.max(pad, window.innerHeight - rect.height - pad);
-    const preferredX = anchor ? anchor.left - rect.width - pad : state.x;
+    const preferredX = anchor
+      ? anchor.left - rect.width - pad
+      : state.placement === 'mobile-edge'
+        ? window.innerWidth - pad
+        : state.x;
     const preferredY = anchor ? anchor.top : state.y;
     const x = Math.min(Math.max(preferredX, pad), maxX);
     const y = Math.min(Math.max(preferredY, pad), maxY);

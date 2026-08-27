@@ -57,7 +57,7 @@ afterEach(() => {
 });
 
 describe('ContextMenu placement', () => {
-  it('keeps the main mobile menu clamped to the viewport edge', async () => {
+  it('opens the main mobile message menu at the viewport edge', async () => {
     setViewport(320, 640);
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
       function (this: HTMLElement) {
@@ -68,7 +68,9 @@ describe('ContextMenu placement', () => {
 
     const wrapper = mount(ContextMenu, { attachTo: document.body });
     const menu = useContextMenu();
-    menu.open([{ label: 'Reply', onClick: () => {} }], 300, 100);
+    // The tap is in the middle of the message. The placement hint, not the
+    // message end/cursor coordinate, must determine the horizontal position.
+    menu.open([{ label: 'Reply', onClick: () => {} }], 100, 100, null, null, 'mobile-edge');
 
     await flushMenu();
 
