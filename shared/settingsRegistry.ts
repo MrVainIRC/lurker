@@ -438,14 +438,11 @@ export const REGISTRY: readonly SettingOption[] = Object.freeze([
     choices: ['auto', 'standard', 'compact'],
     default: 'auto',
     description:
-      'How message rows are laid out. "auto" (default) uses the standard ' +
-      'three-column grid on desktop and the compact two-line layout on ' +
-      'mobile. "standard" forces the three-column grid everywhere. ' +
-      '"compact" forces the two-line layout (nick + time on top, body ' +
-      'below) everywhere — useful on low-resolution desktop displays ' +
-      'where the columns squeeze the body too far. In compact mode the ' +
-      'author and timestamp collapse settings below are effectively ' +
-      'forced on regardless of their stored value.',
+      'How message rows are laid out. "auto" (default) and "compact" use ' +
+      'the card-oriented two-line layout (nick + time on top, body below) ' +
+      'on every viewport. "standard" forces the dense three-column grid ' +
+      'everywhere. In compact mode the author and timestamp collapse ' +
+      'settings below are effectively forced on regardless of their stored value.',
   },
   {
     key: 'look.message.collapse_authors',

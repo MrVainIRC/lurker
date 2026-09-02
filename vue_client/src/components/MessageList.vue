@@ -1102,13 +1102,14 @@ const collapseTimestampsEnabled = computed(
 
 // look.message.layout: auto / standard / compact. Compact swaps the 3-column
 // subgrid for a two-line stack (head: nick + time, body below) on
-// `type === 'message'` rows; other row types stay single-line. Auto picks
-// compact on mobile-width viewports so phone users get the reflow by default.
+// `type === 'message'` rows; other row types stay single-line. Auto uses the
+// same card-oriented stack on every viewport so desktop and mobile share one
+// readable message presentation.
 const layoutSetting = computed(() => settings.effective('look.message.layout') || 'auto');
 const compactMode = computed(() => {
   if (layoutSetting.value === 'compact') return true;
   if (layoutSetting.value === 'standard') return false;
-  return isMobile.value;
+  return true;
 });
 
 // Compact mode forces author collapsing — the head is the only place the
