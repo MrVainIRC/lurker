@@ -112,7 +112,14 @@
              as one block, but every body row still shows its own time. -->
           <div v-if="!row.continuationAuthor" class="head">
             <span class="prefix" :class="prefixClass(row.m)"
-              ><NickRef
+              ><img
+                v-if="messageAvatar(row.m)"
+                class="message-avatar"
+                :src="messageAvatar(row.m) ?? undefined"
+                alt=""
+                loading="lazy"
+                @error="onAvatarError"
+              /><NickRef
                 :nick="row.m?.nick ?? ''"
                 :modes="authorModes(row.m)"
                 :show-prefix="showModePrefix"
@@ -121,37 +128,39 @@
               /><span v-if="isBot(row.m)" class="bot-badge">bot</span></span
             >
           </div>
-          <span class="body" :class="bodyClass(row.m)">
-            <span
-              v-if="row.m?.relaySource && !row.continuationAuthor"
-              class="relay-via"
-              :title="'Relayed via ' + row.m.relayBot"
-              >[{{ relayLabel(row.m) }}]</span
-            ><span v-if="row.m?.redacted" class="message-redacted">[message redacted]</span
-            ><MessageBody
-              v-else-if="previewBody(row.m)"
-              :text="row.m?.text"
-              :segments="textSegments(row.m)"
-              :self-color="selfColor"
-              :network-id="buffer?.networkId ?? null"
-              interactive-nicks
-              @nick-click="onMentionMenu"
-              @measured="repinAfterPreviewGrowth(true)"
-            /><RenderSegments
-              v-else
-              :segments="textSegments(row.m)"
-              :self-color="selfColor"
-              :network-id="buffer?.networkId ?? null"
-              interactive-nicks
-              @nick-click="onMentionMenu"
-            /><MessageAnnotations
-              v-if="row.m && buffer?.networkId != null"
-              :message="row.m"
-              :network-id="buffer.networkId"
-              :target="buffer.target"
-            />
-          </span>
-          <span class="time">{{ row.continuationTime ? '' : time(row.m?.time) }}</span>
+          <div class="message-card">
+            <span class="body" :class="bodyClass(row.m)">
+              <span
+                v-if="row.m?.relaySource && !row.continuationAuthor"
+                class="relay-via"
+                :title="'Relayed via ' + row.m.relayBot"
+                >[{{ relayLabel(row.m) }}]</span
+              ><span v-if="row.m?.redacted" class="message-redacted">[message redacted]</span
+              ><MessageBody
+                v-else-if="previewBody(row.m)"
+                :text="row.m?.text"
+                :segments="textSegments(row.m)"
+                :self-color="selfColor"
+                :network-id="buffer?.networkId ?? null"
+                interactive-nicks
+                @nick-click="onMentionMenu"
+                @measured="repinAfterPreviewGrowth(true)"
+              /><RenderSegments
+                v-else
+                :segments="textSegments(row.m)"
+                :self-color="selfColor"
+                :network-id="buffer?.networkId ?? null"
+                interactive-nicks
+                @nick-click="onMentionMenu"
+              /><MessageAnnotations
+                v-if="row.m && buffer?.networkId != null"
+                :message="row.m"
+                :network-id="buffer.networkId"
+                :target="buffer.target"
+              />
+            </span>
+            <span class="time">{{ row.continuationTime ? '' : time(row.m?.time) }}</span>
+          </div>
         </template>
         <template v-else>
           <span class="time">{{ row.continuationTime ? '' : time(row.m?.time) }}</span>
@@ -160,7 +169,14 @@
             :class="prefixClass(row.m)"
             :style="row.continuationAuthor || row.m?.type === 'message' ? null : prefixStyle(row.m)"
             ><template v-if="row.m?.type === 'message' && !row.continuationAuthor"
-              ><NickRef
+              ><img
+                v-if="messageAvatar(row.m)"
+                class="message-avatar"
+                :src="messageAvatar(row.m) ?? undefined"
+                alt=""
+                loading="lazy"
+                @error="onAvatarError"
+              /><NickRef
                 :nick="row.m?.nick ?? ''"
                 :modes="authorModes(row.m)"
                 :show-prefix="showModePrefix"
@@ -416,6 +432,7 @@ import {
 } from '../composables/useComposerOverlay.js';
 import { setViewedBuffer } from '../composables/useViewedBuffer.js';
 import { isChannelTarget } from '../../../shared/channels.js';
+import { avatarUrlForMetadata } from '../utils/ircMetadata.js';
 
 // Extended BufferMessage fields accessed in the template and script
 // (beyond the core BufferMessage definition which uses [key: string]: unknown).
@@ -683,6 +700,17 @@ const nickSet = computed((): Set<string> => {
 
 function time(iso: string | undefined): string {
   return formatTimestamp(iso ?? '', (tsFormat.value as string) ?? '');
+}
+
+function messageAvatar(message: ChatMessage | undefined): string | null {
+  if (!message || message.networkId == null) return null;
+  const state = networks.states[message.networkId];
+  return avatarUrlForMetadata(state?.metadata, message.nick, state?.nick);
+}
+
+function onAvatarError(event: Event): void {
+  const image = event.currentTarget;
+  if (image instanceof HTMLImageElement) image.hidden = true;
 }
 
 // Drops the /clear marker for the currently-active buffer. Wired to the
@@ -2841,16 +2869,19 @@ watch(
   justify-self: auto;
   padding-right: 0;
 }
-.message-list.compact .line > .prefix {
+.message-list.compact .line > .prefix,
+.message-list.compact .message-card > .prefix {
   grid-area: prefix;
   justify-self: start;
   padding-right: 0;
 }
-.message-list.compact .line > .body {
+.message-list.compact .line > .body,
+.message-list.compact .message-card > .body {
   grid-area: body;
   padding-left: 0;
 }
-.message-list.compact .line > .time {
+.message-list.compact .line > .time,
+.message-list.compact .message-card > .time {
   grid-area: time;
   color: var(--fg-muted);
   padding-right: 0;
@@ -2860,6 +2891,20 @@ watch(
    3-column standard layout — drop it in compact mode. */
 .message-list.compact .line > .body::before {
   display: none;
+}
+.message-list.compact .message-card {
+  grid-area: card;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: 'body time';
+  align-items: baseline;
+  min-width: 0;
+}
+.message-list.compact .message-card > .body {
+  padding: var(--space-4) 0 var(--space-4) var(--space-5);
+}
+.message-list.compact .message-card > .time {
+  padding: var(--space-4) var(--space-5) var(--space-4) var(--space-3);
 }
 
 /* Cards give every message a clear surface and make wrapped text easier to
@@ -2886,6 +2931,95 @@ watch(
   border-top-left-radius: 0;
   border-top-right-radius: 0;
   box-shadow: none;
+}
+
+/* A message's author is a label for the surface below it, not part of the
+   message copy. Keep the compact head outside the card and use a small gap so
+   consecutive messages remain easy to scan without becoming airy. */
+.message-list.compact .line:has(> .message-card) {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+  margin-top: var(--space-6);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    'head'
+    'card';
+  row-gap: var(--space-2);
+}
+.message-list.compact .line:has(> .message-card) > .head {
+  padding: 0 var(--space-3);
+}
+.message-list.compact .line:has(> .message-card) > .head .prefix {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.message-list.compact .line:has(> .message-card) > .message-card {
+  background: var(--message-card-bg);
+  border: 1px solid var(--message-card-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-message-card);
+}
+
+/* Standard layout keeps its desktop grid, but gives message rows the same
+   author-above-card hierarchy. The pseudo-element occupies only the second
+   grid row, so the timestamp stays inside the card beside the text. */
+.message-list:not(.compact) .line.type-message {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+  margin-top: var(--space-6);
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    'prefix prefix'
+    'body time';
+  row-gap: var(--space-2);
+}
+.message-list:not(.compact) .line.type-message:hover,
+.message-list:not(.compact) .line.type-message.selected {
+  background: transparent;
+}
+.message-list:not(.compact) .line.type-message::before {
+  content: '';
+  grid-area: 2 / 1 / 3 / -1;
+  background: var(--message-card-bg);
+  border: 1px solid var(--message-card-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-message-card);
+}
+.message-list:not(.compact) .line.type-message > .prefix {
+  grid-area: prefix;
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  z-index: 1;
+}
+.message-list:not(.compact) .line.type-message > .body {
+  grid-area: body;
+  padding: var(--space-4) 0 var(--space-4) var(--space-5);
+  z-index: 1;
+}
+.message-list:not(.compact) .line.type-message > .time {
+  grid-area: time;
+  padding: var(--space-4) var(--space-5) var(--space-4) var(--space-3);
+  z-index: 1;
+}
+.message-avatar {
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: 0 0 1.5rem;
+  object-fit: cover;
+  background: var(--bg-soft);
+  border: 1px solid var(--message-card-border);
+  border-radius: 50%;
+  vertical-align: middle;
 }
 
 .notice {

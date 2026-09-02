@@ -54,6 +54,7 @@ import { useBuffersStore, type BufferMember } from '../stores/buffers.js';
 import { useNickColors } from '../composables/useNickColors.js';
 import { useMemberActions } from '../composables/useMemberActions.js';
 import { useIgnoresStore } from '../stores/ignores.js';
+import { avatarUrlForMetadata } from '../utils/ircMetadata.js';
 import {
   PREFIX_ORDER,
   prefixOf as modePrefixOf,
@@ -115,21 +116,7 @@ function avatarOf(m: BufferMember): string | null {
   const networkId = buffer.value?.networkId;
   if (networkId == null) return null;
   const state = networks.states[networkId];
-  const rows = state?.metadata || {};
-  // Own metadata is persisted under `*`, not the current nickname, so prefer
-  // that stable row for the current user and keep normal nick lookup for peers.
-  const isOwnNick = !!state?.nick && state.nick.toLowerCase() === m.nick.toLowerCase();
-  const target =
-    (isOwnNick && rows['*'] ? '*' : undefined) ||
-    Object.keys(rows).find((key) => key.toLowerCase() === m.nick.toLowerCase());
-  const value = target ? rows[target].find((entry) => entry.key === 'avatar')?.value : '';
-  if (!value) return null;
-  try {
-    const url = new URL(value.replace(/\{size\}/g, '64'));
-    return url.protocol === 'https:' ? url.toString() : null;
-  } catch {
-    return null;
-  }
+  return avatarUrlForMetadata(state?.metadata, m.nick, state?.nick);
 }
 
 function onAvatarError(event: Event): void {
