@@ -2963,6 +2963,16 @@ watch(
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-message-card);
 }
+.message-list.compact .line.cont-author:has(> .message-card) {
+  margin-top: 0;
+  row-gap: 0;
+  grid-template-areas: 'card';
+}
+.message-list.compact .line.cont-author:has(> .message-card) > .message-card {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  box-shadow: none;
+}
 
 /* Standard layout keeps its desktop grid, but gives message rows the same
    author-above-card hierarchy. The pseudo-element occupies only the second
@@ -2984,6 +2994,11 @@ watch(
 .message-list:not(.compact) .line.type-message.selected {
   background: transparent;
 }
+.message-list:not(.compact) .line.type-message.cont-author {
+  margin-top: 0;
+  grid-template-areas: 'body time';
+  row-gap: 0;
+}
 .message-list:not(.compact) .line.type-message::before {
   content: '';
   grid-area: 2 / 1 / 3 / -1;
@@ -3000,6 +3015,15 @@ watch(
   gap: var(--space-2);
   padding: 0 var(--space-3);
   z-index: 1;
+}
+.message-list:not(.compact) .line.type-message.cont-author::before {
+  grid-area: 1 / 1 / 2 / -1;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  box-shadow: none;
+}
+.message-list:not(.compact) .line.type-message.cont-author > .prefix {
+  display: none;
 }
 .message-list:not(.compact) .line.type-message > .body {
   grid-area: body;
