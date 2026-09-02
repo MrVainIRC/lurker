@@ -111,6 +111,12 @@
      with a hovered row on screen to check it against. */
   --embed-bg: color-mix(in srgb, var(--fg) 3%, var(--bg-soft));
 
+  /* Message surfaces. Keep these derived from the active theme rather
+     than adding another user-facing colour setting: cards should remain
+     legible when a saved theme changes the base palette. */
+  --message-card-bg: color-mix(in srgb, var(--bg-soft) 72%, var(--bg));
+  --message-card-border: color-mix(in srgb, var(--border) 72%, var(--fg) 28%);
+
   /* How far a coloured mIRC background bleeds above and below its own text.
 
      An inline span paints its background over the font's content area, not the
@@ -158,6 +164,7 @@
      and z-index); not in the settings registry. */
   --shadow-popover: 0 4px 14px rgba(0, 0, 0, 0.45);
   --shadow-popover-up: 0 -4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-message-card: 0 2px 8px rgba(0, 0, 0, 0.14);
 }
 
 /* Mobile bumps the base size to 16px. Two reasons: iOS Safari auto-zooms

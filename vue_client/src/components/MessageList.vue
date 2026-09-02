@@ -2862,6 +2862,32 @@ watch(
   display: none;
 }
 
+/* Cards give every message a clear surface and make wrapped text easier to
+   scan on both phone and desktop. The colours are derived tokens, so this
+   presentation follows the active user theme automatically. */
+.message-list .line {
+  background: var(--message-card-bg);
+  border: 1px solid var(--message-card-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-message-card);
+  padding: var(--space-4) var(--space-5);
+  margin-top: var(--space-5);
+}
+
+.message-list .line:hover,
+.message-list .line.selected {
+  background: color-mix(in srgb, var(--message-card-bg) 78%, var(--bg-soft));
+}
+
+/* Continuations stay visually attached to the preceding message cluster
+   instead of becoming a second, widely separated card. */
+.message-list.compact .line.cont-author {
+  margin-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  box-shadow: none;
+}
+
 .notice {
   grid-column: 1 / -1;
   text-align: center;
